@@ -390,7 +390,7 @@ cargo test --lib
 
 ---
 
-### [x] W4 — MCP Server 接线 — 完成于 <SHA4>
+### [x] W4 — MCP Server 接线 — 完成于 6d82be3
 
 **目标**：`vectordb serve --mcp`（或独立 bin）能被 Claude Desktop / Cline 之类的客户端连上。
 
