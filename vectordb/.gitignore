@@ -1,0 +1,116 @@
+# Rust build artifacts
+target/
+*.hdf5
+*.wal
+datasets/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.backup.*
+
+# Logs
+*.log
+logs/
+
+# VectorDB specific files
+/cache/
+/data/
+/storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# Test artifacts
+/test-results/
+/coverage/
+*.profraw
+
+# Documentation builds
+/book/
+/docs/site/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Configuration files (keep templates)
+config.toml
+config.yaml
+config.json
+!config.example.*
+!.env.example
+!.env.development
+!.env.production
+!.env.testing
+
+# Binary releases
+/dist/
+/release/
+*.tar.gz
+*.zip
+
+# Benchmarking results
+/benches/results/
+criterion/
+
+# Memory dumps
+*.dmp
+core.*
+
+# Performance profiling
+flamegraph.svg
+perf.data*
+
+# Docker build context
+.dockerignore
+
+# Node.js (for documentation tools)
+node_modules/
+npm-debug.log*
+
+# Python (for scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Backup files
+*.bak
+*.backup
+venv/
+archive/
+logs/
+dev-cache/
+wal/
+*.egg-info/
+
+# Local agent/editor settings
+.claude/settings.local.json
+
+# Demo corpora — third-party documents, supply your own (see examples/pdf_rag_demo.py)
+pdf/
+
+# Never commit credentials or exported customer data
+*credentials*.json
+*service-account*.json
+*.pem
+*.key
+gcp_bucket.config

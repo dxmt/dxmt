@@ -1,0 +1,164 @@
+# Phase 3 Monitoring Configuration
+# Configure observability and metrics collection for Phase 3 components
+
+[metrics]
+# Enable metrics collection
+enabled = true
+
+# Metrics collection interval (seconds)
+collection_interval = 10
+
+# Metrics retention period (hours)
+retention_hours = 24
+
+# Export metrics to Prometheus
+prometheus_enabled = true
+prometheus_port = 9090
+
+[performance]
+# Track operation latencies
+track_latencies = true
+
+# Operation latency buckets (milliseconds)
+latency_buckets = [1, 5, 10, 50, 100, 500, 1000, 5000]
+
+# Track operation success rate
+track_success_rate = true
+
+# Track concurrency levels
+track_concurrency = true
+
+[health_checks]
+# Enable health checks
+enabled = true
+
+# Health check interval (seconds)
+check_interval = 5
+
+# Readiness probe endpoint
+readiness_probe_enabled = true
+readiness_probe_port = 8080
+readiness_probe_path = "/ready"
+
+# Liveness probe endpoint
+liveness_probe_enabled = true
+liveness_probe_port = 8080
+liveness_probe_path = "/health"
+
+[resource_monitoring]
+# Monitor memory usage
+memory_tracking_enabled = true
+memory_alert_threshold_mb = 400
+
+# Monitor CPU usage
+cpu_tracking_enabled = true
+cpu_alert_threshold_percent = 80
+
+# Monitor lock contention
+lock_tracking_enabled = true
+lock_wait_alert_threshold_ms = 10
+
+# Monitor disk usage
+disk_tracking_enabled = true
+disk_alert_threshold_percent = 85
+
+[logging]
+# Log level (debug, info, warn, error)
+level = "info"
+
+# Log format (json or text)
+format = "json"
+
+# Log output destinations
+stdout = true
+file = "/var/log/dxmt/index-manager.log"
+
+# Log file rotation
+file_rotation_enabled = true
+max_log_file_size_mb = 100
+max_log_backups = 10
+
+# Log specific components
+log_factory = true
+log_manager = true
+log_migrator = true
+log_transaction_log = true
+
+[alerting]
+# Enable alerting
+enabled = true
+
+# Alert rules
+[[alerting.rules]]
+name = "high_error_rate"
+condition = "error_rate > 0.05"  # 5% error rate
+severity = "high"
+action = "page_oncall"
+
+[[alerting.rules]]
+name = "migration_timeout"
+condition = "operation_duration > 300000"  # 300 seconds
+severity = "high"
+action = "escalate"
+
+[[alerting.rules]]
+name = "high_lock_contention"
+condition = "lock_wait_time_ms > 50"
+severity = "medium"
+action = "notify"
+
+[[alerting.rules]]
+name = "memory_usage_high"
+condition = "memory_usage_mb > 350"
+severity = "medium"
+action = "notify"
+
+[[alerting.rules]]
+name = "disk_space_low"
+condition = "disk_free_percent < 15"
+severity = "high"
+action = "page_oncall"
+
+[tracing]
+# Enable distributed tracing
+enabled = true
+
+# Tracing sample rate (0.0 to 1.0)
+sample_rate = 0.1
+
+# Tracing backend
+backend = "jaeger"
+jaeger_endpoint = "http://localhost:6831"
+
+# Trace specific operations
+trace_factory_operations = true
+trace_manager_operations = true
+trace_migration_operations = true
+
+[dashboards]
+# Enable dashboard endpoints
+enabled = true
+
+# Dashboard port
+port = 3000
+
+# Available dashboards
+dashboards = [
+    "operations",
+    "performance",
+    "resources",
+    "health"
+]
+
+[snapshots]
+# Enable periodic snapshots of metrics
+enabled = true
+
+# Snapshot interval (minutes)
+interval = 60
+
+# Snapshot storage
+storage_path = "/var/lib/dxmt/metrics"
+
+# Keep snapshots for (days)
+retention_days = 7

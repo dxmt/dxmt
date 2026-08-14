@@ -1,0 +1,443 @@
+"""Integration tests for DXMT SDK.
+
+These tests require a running DXMT server at localhost:9999.
+
+Run with:
+    pytest tests/test_integration.py -v
+
+Or skip if no server:
+    pytest tests/test_integration.py -v -m "not integration"
+"""
+
+import asyncio
+import random
+from typing import Generator
+
+import pytest
+
+from dxmt import Client
+from dxmt.exceptions import DXMTTableError
+
+# Mark all tests in this module as integration tests
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module")
+def test_table_name() -> str:
+    """Generate a unique table name for testing."""
+    return f"test_table_{random.randint(1000, 9999)}"
+
+
+@pytest.fixture(scope="module")
+def client() -> Generator[Client, None, None]:
+    """Create a client for testing."""
+    client = Client(host="localhost", port=9999)
+    yield client
+    client.close()
+
+
+@pytest.fixture(scope="module")
+def setup_table(client: Client, test_table_name: str) -> Generator[str, None, None]:
+    """Create a test table and clean up after tests."""
+    # Delete table if it already exists (from previous test)
+    try:
+        client.delete_table(test_table_name)
+    except Exception:
+        pass  # Ignore if table doesn't exist
+
+    # Create table
+    try:
+        client.create_table(
+            name=test_table_name,
+            dimension=128,
+            distance_metric="cosine",
+            index_type="hnsw",
+        )
+    except Exception as e:
+        pytest.skip(f"Cannot create table, DXMT server may not be running: {e}")
+
+    yield test_table_name
+
+    # Cleanup
+    try:
+        client.delete_table(test_table_name)
+    except Exception:
+        pass  # Ignore cleanup errors
+
+
+@pytest.fixture(scope="module")
+def setup_hybrid_table(client: Client) -> Generator[str, None, None]:
+    """Create table with full-text search enabled for hybrid tests."""
+    table_name = f"hybrid_test_{random.randint(1000, 9999)}"
+
+    # Delete table if it already exists
+    try:
+        client.delete_table(table_name)
+    except Exception:
+        pass  # Ignore if table doesn't exist
+
+    try:
+        client.create_table(
+            name=table_name,
+            dimension=128,
+            distance_metric="cosine",
+            enable_full_text_search=True,
+        )
+    except Exception as e:
+        pytest.skip(f"Cannot create hybrid search table: {e}")
+
+    # Insert test data with text
+    records = [
+        {
+            "id": f"hybrid_{i}",
+            "vector": [float(i) / 10] * 128,
+            "metadata": {
+                "text": f"This is document {i} about machine learning",
+                "category": "AI",
+            },
+        }
+        for i in range(10)
+    ]
+    try:
+        client.insert_records(table_name=table_name, records=records)
+    except Exception as e:
+        pytest.skip(f"Cannot insert records into hybrid table: {e}")
+
+    yield table_name
+
+    # Cleanup
+    try:
+        client.delete_table(table_name)
+    except Exception:
+        pass
+
+
+class TestServerConnection:
+    """Test server connectivity."""
+
+    def test_server_available(self, client: Client) -> None:
+        """Test that server is available."""
+        tables = client.list_tables()
+        assert isinstance(tables, list)
+
+
+class TestTableManagement:
+    """Test table management operations."""
+
+    def test_create_table(self, client: Client, test_table_name: str) -> None:
+        """Test table creation."""
+        result = client.create_table(
+            name=test_table_name,
+            dimension=128,
+            distance_metric="cosine",
+            index_type="hnsw",
+        )
+        assert result["success"] is True
+
+    def test_list_tables(self, client: Client, setup_table: str) -> None:
+        """Test listing tables."""
+        tables = client.list_tables()
+        assert isinstance(tables, list)
+        table_names = [t["name"] for t in tables]
+        assert setup_table in table_names
+
+    def test_get_table(self, client: Client, setup_table: str) -> None:
+        """Test getting table info."""
+        table_info = client.get_table(setup_table)
+        assert table_info["name"] == setup_table
+        assert table_info["dimension"] == 128
+
+    def test_delete_table(self, client: Client) -> None:
+        """Test table deletion."""
+        temp_table = f"temp_table_{random.randint(1000, 9999)}"
+        client.create_table(name=temp_table, dimension=64)
+        result = client.delete_table(temp_table)
+        assert result["success"] is True
+
+    def test_create_duplicate_table_error(
+        self, client: Client, setup_table: str
+    ) -> None:
+        """Test creating duplicate table raises error."""
+        with pytest.raises(DXMTTableError):
+            client.create_table(name=setup_table, dimension=128)
+
+
+class TestRecordOperations:
+    """Test record insertion and retrieval."""
+
+    def test_insert_single_record(self, client: Client, setup_table: str) -> None:
+        """Test inserting a single record."""
+        records = [
+            {
+                "id": "test_1",
+                "vector": [0.1] * 128,
+                "metadata": {"text": "Test document 1"},
+            }
+        ]
+        result = client.insert_records(table_name=setup_table, records=records)
+        assert result["success"] is True
+
+    def test_insert_multiple_records(self, client: Client, setup_table: str) -> None:
+        """Test inserting multiple records."""
+        records = [
+            {
+                "id": f"doc_{i}",
+                "vector": [float(i) / 10] * 128,
+                "metadata": {"index": i, "text": f"Document {i}"},
+            }
+            for i in range(10)
+        ]
+        result = client.insert_records(table_name=setup_table, records=records)
+        assert result["success"] is True
+
+    def test_get_records_by_ids(self, client: Client, setup_table: str) -> None:
+        """Test retrieving records by IDs."""
+        # Insert test records
+        records = [
+            {"id": "get_1", "vector": [0.5] * 128, "metadata": {"type": "test"}},
+            {"id": "get_2", "vector": [0.6] * 128, "metadata": {"type": "test"}},
+        ]
+        client.insert_records(table_name=setup_table, records=records)
+
+        # Retrieve records
+        retrieved = client.get_records(table_name=setup_table, ids=["get_1", "get_2"])
+        assert len(retrieved) == 2
+        ids = [r["id"] for r in retrieved]
+        assert "get_1" in ids
+        assert "get_2" in ids
+
+    def test_delete_records(self, client: Client, setup_table: str) -> None:
+        """Test deleting records."""
+        # Insert test record
+        records = [
+            {"id": "delete_1", "vector": [0.7] * 128, "metadata": {}},
+        ]
+        client.insert_records(table_name=setup_table, records=records)
+
+        # Delete record
+        result = client.delete_records(table_name=setup_table, ids=["delete_1"])
+        assert result["success"] is True
+
+
+class TestVectorSearch:
+    """Test vector search operations."""
+
+    @pytest.fixture(autouse=True)
+    def setup_search_data(self, client: Client, setup_table: str) -> None:
+        """Insert test data for search."""
+        records = [
+            {
+                "id": f"search_{i}",
+                "vector": [float(i) / 100] * 128,
+                "metadata": {"index": i, "category": "test"},
+            }
+            for i in range(20)
+        ]
+        client.insert_records(table_name=setup_table, records=records)
+
+    def test_basic_search(self, client: Client, setup_table: str) -> None:
+        """Test basic vector search."""
+        query_vector = [0.05] * 128
+        results = client.search(table_name=setup_table, vector=query_vector, k=5)
+
+        assert len(results) <= 5
+        assert all("id" in r for r in results)
+        assert all("score" in r for r in results)
+
+    def test_search_with_k(self, client: Client, setup_table: str) -> None:
+        """Test search with different k values."""
+        query_vector = [0.1] * 128
+
+        # Test k=1
+        results = client.search(table_name=setup_table, vector=query_vector, k=1)
+        assert len(results) <= 1
+
+        # Test k=10
+        results = client.search(table_name=setup_table, vector=query_vector, k=10)
+        assert len(results) <= 10
+
+    def test_search_results_sorted(self, client: Client, setup_table: str) -> None:
+        """Test that search results are sorted by score."""
+        query_vector = [0.05] * 128
+        results = client.search(table_name=setup_table, vector=query_vector, k=10)
+
+        if len(results) > 1:
+            scores = [r["score"] for r in results]
+            # Scores should be in descending order (higher is better)
+            assert scores == sorted(scores, reverse=True)
+
+
+class TestAsyncOperations:
+    """Test async operations."""
+
+    @pytest.mark.asyncio
+    async def test_async_table_operations(self, test_table_name: str) -> None:
+        """Test async table operations."""
+        async with Client(host="localhost", port=9999) as client:
+            # Create table
+            async_table = f"{test_table_name}_async"
+            result = await client.acreate_table(
+                name=async_table, dimension=64, distance_metric="cosine"
+            )
+            assert result["success"] is True
+
+            # List tables
+            tables = await client.alist_tables()
+            assert isinstance(tables, list)
+
+            # Get table
+            table_info = await client.aget_table(async_table)
+            assert table_info["name"] == async_table
+
+            # Delete table
+            await client.adelete_table(async_table)
+
+    @pytest.mark.asyncio
+    async def test_async_record_operations(self, setup_table: str) -> None:
+        """Test async record operations."""
+        async with Client(host="localhost", port=9999) as client:
+            # Insert records
+            records = [
+                {"id": "async_1", "vector": [0.8] * 128, "metadata": {}},
+                {"id": "async_2", "vector": [0.9] * 128, "metadata": {}},
+            ]
+            result = await client.ainsert_records(
+                table_name=setup_table, records=records
+            )
+            assert result["success"] is True
+
+            # Get records
+            retrieved = await client.aget_records(
+                table_name=setup_table, ids=["async_1", "async_2"]
+            )
+            assert len(retrieved) == 2
+
+            # Delete records
+            await client.adelete_records(table_name=setup_table, ids=["async_1"])
+
+    @pytest.mark.asyncio
+    async def test_async_search(self, setup_table: str) -> None:
+        """Test async search."""
+        async with Client(host="localhost", port=9999) as client:
+            # Insert test data
+            records = [
+                {"id": f"async_search_{i}", "vector": [float(i) / 10] * 128, "metadata": {}}
+                for i in range(5)
+            ]
+            await client.ainsert_records(table_name=setup_table, records=records)
+
+            # Search
+            query_vector = [0.25] * 128
+            results = await client.asearch(
+                table_name=setup_table, vector=query_vector, k=3
+            )
+            assert len(results) <= 3
+
+    @pytest.mark.asyncio
+    async def test_concurrent_searches(self, setup_table: str) -> None:
+        """Test concurrent async searches."""
+        async with Client(host="localhost", port=9999) as client:
+            # Perform multiple searches concurrently
+            queries = [[float(i) / 100] * 128 for i in range(5)]
+            tasks = [
+                client.asearch(table_name=setup_table, vector=q, k=3) for q in queries
+            ]
+            results_list = await asyncio.gather(*tasks)
+
+            assert len(results_list) == 5
+            for results in results_list:
+                assert isinstance(results, list)
+                assert len(results) <= 3
+
+
+class TestHybridSearch:
+    """Test hybrid search (vector + text)."""
+
+    def test_hybrid_search_balanced(
+        self, client: Client, setup_hybrid_table: str
+    ) -> None:
+        """Test hybrid search with balanced weights."""
+        query_vector = [0.5] * 128
+        results = client.hybrid_search(
+            table_name=setup_hybrid_table,
+            vector=query_vector,
+            text="machine learning",
+            vector_weight=0.5,  # Balanced
+            k=5,
+        )
+
+        assert len(results) <= 5
+        assert all("id" in r for r in results)
+        assert all("score" in r for r in results)
+
+    def test_hybrid_search_text_only(
+        self, client: Client, setup_hybrid_table: str
+    ) -> None:
+        """Test hybrid search with text-only (vector_weight=0)."""
+        query_vector = [0.5] * 128
+        results = client.hybrid_search(
+            table_name=setup_hybrid_table,
+            vector=query_vector,
+            text="machine learning",
+            vector_weight=0.0,  # Text only
+            k=5,
+        )
+
+        assert len(results) <= 5
+
+    def test_hybrid_search_vector_only(
+        self, client: Client, setup_hybrid_table: str
+    ) -> None:
+        """Test hybrid search with vector-only (vector_weight=1)."""
+        query_vector = [0.5] * 128
+        results = client.hybrid_search(
+            table_name=setup_hybrid_table,
+            vector=query_vector,
+            text="machine learning",
+            vector_weight=1.0,  # Vector only
+            k=5,
+        )
+
+        assert len(results) <= 5
+
+
+class TestFullTextSearch:
+    """Test full-text search."""
+
+    def test_full_text_search(self, client: Client, setup_hybrid_table: str) -> None:
+        """Test pure full-text search."""
+        results = client.full_text_search(
+            table_name=setup_hybrid_table, query="machine learning", k=5
+        )
+
+        assert isinstance(results, list)
+        assert len(results) <= 5
+
+
+class TestEdgeCases:
+    """Test edge cases and error conditions."""
+
+    def test_empty_record_list(self, client: Client, setup_table: str) -> None:
+        """Test inserting empty record list."""
+        from dxmt.exceptions import DXMTError
+
+        # Server should reject empty record list with 400 Bad Request
+        with pytest.raises(DXMTError):
+            client.insert_records(table_name=setup_table, records=[])
+
+    def test_search_non_existent_table(self, client: Client) -> None:
+        """Test searching in non-existent table."""
+        from dxmt.exceptions import DXMTError
+
+        with pytest.raises(DXMTError):
+            client.search(
+                table_name="non_existent_table_123456", vector=[0.1] * 128, k=5
+            )
+
+    def test_large_k_value(self, client: Client, setup_table: str) -> None:
+        """Test search with very large k value."""
+        query_vector = [0.1] * 128
+        results = client.search(table_name=setup_table, vector=query_vector, k=1000)
+
+        # Should return all available records (likely < 1000)
+        assert isinstance(results, list)

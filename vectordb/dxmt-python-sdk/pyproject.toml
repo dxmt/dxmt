@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dxmt-python-sdk"
+version = "0.1.0"
+description = "Official Python SDK for DXMT VectorDB"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "DXMT Team", email = "contact@dxmt.io"}
+]
+keywords = [
+    "vector-database",
+    "vector-search",
+    "embeddings",
+    "similarity-search",
+    "dxmt",
+    "vectordb",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "httpx>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.11.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dxmt/vectordb"
+Documentation = "https://docs.dxmt.io"
+Repository = "https://github.com/dxmt/vectordb"
+Issues = "https://github.com/dxmt/vectordb/issues"
+
+[tool.setuptools.packages.find]
+include = ["dxmt*"]
+
+[tool.setuptools.package-data]
+dxmt = ["py.typed"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+
+ignore = [
+    "E501",   # line too long
+    "UP007",  # use X | Y for union types (not available in 3.9)
+    "UP045",  # use X | None instead of Optional[X] (not available in 3.9)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+warn_no_return = true
+strict_equality = true
+pretty = true
+show_error_codes = true
+show_error_context = true
+show_column_numbers = true
+
+[[tool.mypy.overrides]]
+module = "httpx.*"
+ignore_missing_imports = true
+
+# Pytest configuration moved to pytest.ini

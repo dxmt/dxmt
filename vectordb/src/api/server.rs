@@ -1,0 +1,224 @@
+use axum::{
+	extract::DefaultBodyLimit,
+	routing::{delete, get, post},
+	Router,
+};
+
+use std::sync::Arc;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+
+use crate::{
+	api::{
+		// batch_handlers::batch_search_vectors,  // Removed
+		// bulk_handlers::bulk_insert_records,  // Removed
+		handlers::{
+			create_full_backup,
+			create_incremental_backup,
+			create_manual_backup,
+			alter_table,
+			create_table,
+			delete_backup,
+			delete_records,
+			delete_table,
+			branch_table,
+			drop_index,
+			rebuild_index,
+			execute_dxql,
+			get_backup_status,
+			get_record,
+			get_status,
+			get_table,
+			health_check,
+			health_metrics,
+			insert_records,
+			insert_records_optimized,
+			list_backups,
+			list_records,
+			list_tables,
+			restore_backup,
+			search_vectors,
+			hybrid_search,
+			full_text_search,
+			hybrid_search_combined,
+			update_record,
+			AppState,
+		},
+		multimodal::{
+			create_multimodal_record, cross_modal_search, generate_embedding,
+			validate_multimodal_content,
+			MultimodalAppState,
+		},
+		swagger,
+		graphql,
+		websocket,
+	},
+	config::AppConfig,
+	embeddings::EmbeddingManager,
+	storage::IntelligentIndexedStorage,
+	error::Result,
+};
+
+/// 创建应用程序路由器
+pub async fn create_app() -> Result<Router> {
+	create_app_with_features(false, false, false).await
+}
+
+/// 创建带有功能开关的应用程序路由器
+pub async fn create_app_with_features(
+	enable_swagger: bool,
+	enable_graphql: bool, 
+	enable_websocket: bool
+) -> Result<Router> {
+	// 加载配置
+	let config = AppConfig::load()?;
+
+	// 创建优化的存储实例
+	let storage = Arc::new(IntelligentIndexedStorage::new(&config.storage).await?);
+
+	// 创建嵌入管理器
+	let embedding_manager = Arc::new(EmbeddingManager::new());
+
+	// 应用状态
+	// Initialize server health monitor
+	let server_health = Arc::new(crate::api::server_health::ServerHealth::default());
+
+	let base_state = AppState {
+		storage: storage.clone(),
+		backup_manager: None, // wire up in production when a StorageBackupManager config is provided
+		server_health,
+	};
+
+	// 多模态应用状态
+	let multimodal_state = MultimodalAppState {
+		basestate: base_state.clone(),
+		embeddingmanager: embedding_manager,
+	};
+
+	// 创建API v1路由
+	let api_v1_routes = Router::new()
+		// 表管理API
+		.route("/tables", post(create_table).get(list_tables))
+		.route("/tables/:table_name", get(get_table).delete(delete_table).patch(alter_table))
+		// 记录操作API
+		.route("/tables/:table_name/records", post(insert_records))
+		.route(
+			"/tables/:table_name/records/:record_id",
+			get(get_record).put(update_record),
+		)
+		.route("/tables/:table_name/records", delete(delete_records))
+		.route("/tables/:table_name/records/list", post(list_records))
+		// 批量操作API
+		// .route("/tables/:table_name/bulk_insert", post(bulk_insert_records))  // Removed
+		.route(
+			"/tables/:table_name/records/bulk",
+			post(insert_records_optimized),
+		)
+		// 搜索API
+		.route("/tables/:table_name/search", post(search_vectors))
+		.route("/tables/:table_name/hybrid_search", post(hybrid_search))
+		.route(
+			"/tables/:table_name/batch_search",
+			post(search_vectors),  // Use standard search
+		)
+		// 索引管理API
+		.route("/tables/:table_name/index", delete(drop_index))
+		.route("/tables/:table_name/index/rebuild", post(rebuild_index))
+		// 表分支API
+		.route("/tables/:table_name/branch", post(branch_table))
+		// DXQL query API
+		.route("/query", post(execute_dxql))
+		// 全文搜索API
+		.route("/tables/:table_name/search/text", post(full_text_search))
+		.route("/tables/:table_name/search/hybrid", post(hybrid_search_combined))
+		// 备份恢复API
+		.route("/backup/full", post(create_full_backup))
+		.route("/backup/incremental", post(create_incremental_backup))
+		.route("/backup/manual", post(create_manual_backup))
+		.route("/backup/status", get(get_backup_status))
+		.route("/backup/list", get(list_backups))
+		.route("/backup/restore", post(restore_backup))
+		.route("/backup/:backup_id", delete(delete_backup))
+		.with_state(base_state.clone());
+	
+	// 创建系统路由（在根路径）
+	let system_routes = Router::new()
+		.route("/status", get(get_status))
+		.route("/health", get(health_check))
+		.route("/health/metrics", get(health_metrics))
+		.with_state(base_state.clone());
+
+	// 创建多模态路由（使用多模态状态）
+	let multimodal_routes = Router::new()
+		// .route("/embeddings/functions", get(list_embedding_functions))
+		// .route("/embeddings/functions/:name", post(load_embedding_function))
+		.route("/embeddings/embed", post(generate_embedding))
+		.route(
+			"/tables/:table_name/records/multimodal",
+			post(create_multimodal_record),
+		)
+		.route(
+			"/tables/:table_name/search/cross-modal",
+			post(cross_modal_search),
+		)
+		.route("/multimodal/validate", post(validate_multimodal_content))
+		.with_state(multimodal_state);
+
+	// 合并路由
+	let mut app = Router::new()
+		.merge(system_routes)
+		.nest("/api/v1", api_v1_routes)
+		.nest("/api/v1", multimodal_routes);
+
+	// 条件性添加 GraphQL 路由
+	if enable_graphql {
+		let graphql_routes = graphql::create_graphql_router();
+		app = app.merge(graphql_routes);
+	}
+
+	// 条件性添加 WebSocket 路由
+	if enable_websocket {
+		let websocket_routes = websocket::create_websocket_router();
+		app = app.merge(websocket_routes);
+	}
+
+	let app = app
+		// 增加请求体大小限制到500MB
+		.layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+		// 添加安全中间件
+		.layer(
+			CorsLayer::new()
+				.allow_origin(
+					"http://localhost:3000"
+						.parse::<axum::http::HeaderValue>()
+						.map_err(|_| crate::Error::Internal("Operation failed".to_string()))?)
+				.allow_origin(
+					"http://127.0.0.1:3000"
+						.parse::<axum::http::HeaderValue>()
+						.map_err(|_| crate::Error::Internal("Operation failed".to_string()))?)
+				.allow_methods([
+					axum::http::Method::GET,
+					axum::http::Method::POST,
+					axum::http::Method::PUT,
+					axum::http::Method::DELETE,
+				])
+				.allow_headers([
+					axum::http::header::CONTENT_TYPE,
+					axum::http::header::AUTHORIZATION,
+				])
+				.max_age(std::time::Duration::from_secs(3600))
+		)
+		.layer(TraceLayer::new_for_http());
+
+	// 条件性添加 Swagger UI 路由
+	let app = if enable_swagger {
+		app.merge(swagger::create_swagger_ui())
+	} else {
+		app
+	};
+
+	let app = app.with_state(base_state);
+
+	Ok(app)
+}
+
+// integration tests live in tests/
