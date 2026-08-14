@@ -6,7 +6,6 @@ pub mod enhanced_pq;
 pub mod hybrid;
 pub mod product;
 pub mod product_quantization;
-pub mod product_quantizer;
 pub mod rabitq; // New: RaBitQ binary quantization
 pub mod scalar;
 pub mod storage;

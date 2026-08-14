@@ -428,6 +428,21 @@ async fn insertion_processor(
     info!("Insertion processor stopped");
 }
 
+/// Map the algorithm the selector chose onto the type the table advertises.
+fn index_type_of(algorithm: &IndexAlgorithm) -> crate::types::table::IndexType {
+    use crate::types::table::IndexType;
+    match algorithm {
+        IndexAlgorithm::BruteForce { .. } => IndexType::BruteForce,
+        IndexAlgorithm::HNSW { .. } => IndexType::Hnsw,
+        IndexAlgorithm::HnswPQ { .. } => IndexType::HnswPq,
+        IndexAlgorithm::EnhancedDiskANN { .. } => IndexType::EnhancedDiskAnn,
+        IndexAlgorithm::QuantizedIVF { .. } => IndexType::IvfPq,
+        // Unreachable in practice: create_index_instance rejects these before a table exists.
+        IndexAlgorithm::DiskANN { .. } => IndexType::EnhancedDiskAnn,
+        IndexAlgorithm::ScaNN { .. } => IndexType::BruteForce,
+    }
+}
+
 impl IntelligentIndexedStorage {
     /// 创建新的智能索引存储实例（**不持久化**）。
     ///
@@ -905,7 +920,7 @@ impl IntelligentIndexedStorage {
         }
 
         // 创建表元数据
-        let table = Table::new(config.clone())?;
+        let mut table = Table::new(config.clone())?;
 
         // ✨ 配置层级决策：表级配置覆盖全局配置
         let memory_optimization = config
@@ -955,6 +970,11 @@ impl IntelligentIndexedStorage {
             table.name,
             index_decision.confidence
         );
+
+        // The table's advertised index_type came from the caller's config and defaulted to
+        // BruteForce, so a table running HNSW reported "brute_force" over the API forever.
+        // Make the metadata say what was actually chosen.
+        table.index_type = index_type_of(&index_decision.selected_algorithm);
 
         // 创建索引实例
         let index_impl = self.create_index_instance(
@@ -1848,34 +1868,14 @@ impl IntelligentIndexedStorage {
                 dataset_size: record_count,
                 dimension,
                 distance_metric,
-                memory_budget_mb: 512,
-                performance_requirements: PerformanceRequirements {
-                    target_recall: 0.95,
-                    max_latency_ms: 100.0,
-                    min_throughput_qps: 100.0,
-                    max_query_latency_ms: 100.0,
-                    min_recall_rate: 0.95,
-                    target_qps: 100.0,
-                    min_insert_throughput: 100.0,
-                },
-                cost_constraints: CostConstraints {
-                    max_memory_gb: 4.0,
-                    max_cpu_cores: 4,
-                    max_cost_per_month: 0.0,
-                    max_storage_cost_per_tb: 0.0,
-                    max_compute_cost_per_hour: 0.0,
-                    total_budget_limit: 0.0,
-                },
-                hardware_capabilities: HardwareCapabilities {
-                    cpu_cores: 4,
-                    available_memory_gb: 4.0,
-                    has_avx2: false,
-                    has_gpu: false,
-                    ssd_storage_gb: 100.0,
-                    network_bandwidth_gbps: 1.0,
-                    supports_simd: false,
-                    supports_gpu: false,
-                },
+                // These used to be hardcoded — 512 MB of budget, no AVX2, no SIMD — which
+                // meant a rebuild could pick a different algorithm than table creation did on
+                // the very same machine. Use what was actually detected, and the same
+                // requirements the storage was constructed with.
+                memory_budget_mb: (self.hardware_capabilities.available_memory_gb as usize) * 512,
+                performance_requirements: self.performance_requirements.clone(),
+                cost_constraints: self.cost_constraints.clone(),
+                hardware_capabilities: self.hardware_capabilities.clone(),
             };
 
             let selector = IntelligentIndexSelector::new();
@@ -2033,7 +2033,7 @@ impl IntelligentIndexedStorage {
         let (selected_algorithm, recall, latency_p95_ms, throughput_qps, memory_usage_mb) =
             if config.dataset_size < 10_000 {
                 // 小数据集 (<10K): 使用 HNSW（高精度，速度快）
-                info!("Small dataset detected (<10K), using HNSW for best quality");
+                info!("Small dataset (<10K): HNSW");
                 (
                     IndexAlgorithm::HNSW {
                         m: 16,
@@ -2047,7 +2047,9 @@ impl IntelligentIndexedStorage {
                 )
             } else if config.dataset_size < 100_000 {
                 // 中数据集 (10K-100K): 使用 Hierarchical Clustering (Phase 3)
-                info!("Medium dataset detected (10K-100K), using Hierarchical Clustering");
+                info!(
+                    "Medium dataset (10K-100K): HNSW (HierarchicalClustering is not implemented)"
+                );
                 (
                     IndexAlgorithm::HNSW {
                         // HierarchicalClustering not yet available; using HNSW
@@ -2062,7 +2064,7 @@ impl IntelligentIndexedStorage {
                 )
             } else {
                 // 大数据集 (>100K): 使用 Hybrid RaBitQ + Clustering (Phase 4)
-                info!("Large dataset detected (>100K), using Hybrid RaBitQ + Clustering");
+                info!("Large dataset (>100K): HNSW-PQ (HybridRaBitQClustering is not implemented)");
                 (
                     IndexAlgorithm::HnswPQ {
                         // HybridRaBitQClustering not yet available; using HnswPQ
@@ -2168,10 +2170,13 @@ impl IntelligentIndexedStorage {
                 )?))
             }
 
-            IndexAlgorithm::DiskANN { .. } => {
-                // DiskANN not implemented, using BruteForce fallback
-                Ok(Box::new(BruteForceIndex::new(distance_metric)))
-            }
+            // These three have no implementation behind them. They used to fall through to
+            // BruteForceIndex, which is the worst of both: the caller believes it asked for an
+            // ANN index and gets an exact scan, so recall looks perfect and latency looks
+            // inexplicable at scale. Fail instead, and name the alternative.
+            IndexAlgorithm::DiskANN { .. } => Err(crate::Error::InvalidInput(
+                "DiskANN is not implemented; use EnhancedDiskANN, which is".to_string(),
+            )),
 
             IndexAlgorithm::EnhancedDiskANN {
                 max_degree,
@@ -2183,12 +2188,24 @@ impl IntelligentIndexedStorage {
                 use crate::search::diskann_enhanced::{
                     EnhancedDiskANNConfig, EnhancedDiskANNIndex,
                 };
-                use tempfile::TempDir;
-
-                // Create temporary directory for index storage
-                // In production, this would use a persistent directory
-                let temp_dir = TempDir::new().map_err(crate::Error::Io)?;
-                let index_dir = temp_dir.keep();
+                // The index needs a directory it can keep. This used to be
+                // `TempDir::new()...keep()`, which deliberately leaks the temp directory so it
+                // survives the handle — every restart orphaned another copy of the index under
+                // /tmp, and nothing ever cleaned them up. Put it beside the WAL instead, where
+                // it belongs and where the operator can find it.
+                let index_dir = match self.wal_dir {
+                    Some(ref dir) => {
+                        let path = dir.join("diskann").join(uuid::Uuid::new_v4().to_string());
+                        std::fs::create_dir_all(&path).map_err(crate::Error::Io)?;
+                        path
+                    }
+                    None => {
+                        // No WAL means no durable state anywhere, so a temp directory is
+                        // consistent with the rest of this configuration.
+                        let temp_dir = tempfile::TempDir::new().map_err(crate::Error::Io)?;
+                        temp_dir.keep()
+                    }
+                };
 
                 let config = EnhancedDiskANNConfig {
                     max_degree: *max_degree,
@@ -2211,15 +2228,15 @@ impl IntelligentIndexedStorage {
                 )?))
             }
 
-            IndexAlgorithm::ScaNN { .. } => {
-                // ScaNN not implemented, using BruteForce fallback
-                Ok(Box::new(BruteForceIndex::new(distance_metric)))
-            }
+            IndexAlgorithm::ScaNN { .. } => Err(crate::Error::InvalidInput(
+                "ScaNN is not implemented; src/search/scann.rs does not match the index trait \
+                 and its tests are commented out. Use HNSW or HnswPQ."
+                    .to_string(),
+            )),
 
-            IndexAlgorithm::QuantizedIVF { .. } => {
-                // QuantizedIVF not implemented, using BruteForce fallback
-                Ok(Box::new(BruteForceIndex::new(distance_metric)))
-            }
+            IndexAlgorithm::QuantizedIVF { .. } => Err(crate::Error::InvalidInput(
+                "QuantizedIVF is not implemented; use HnswPQ for a quantized index.".to_string(),
+            )),
         }
     }
     //

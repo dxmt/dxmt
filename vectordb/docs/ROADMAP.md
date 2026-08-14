@@ -484,31 +484,35 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [ ] W6 — 修掉 §5 里的名实不符
+### [~] W6 — 修掉 §5 里的名实不符（大部分完成）
 
 **目标**：让函数名不撒谎。每一条都很小，可以分批做。
 
-- [ ] `search/auto_tuned.rs` 四个函数全部直接调 `brute_force_search`——要么真的实现，
-      要么删掉这个文件（它没有任何调用者）。
-- [ ] `search/quantization/product_quantizer.rs` 52 行的假 PQ（`encode_batch` 返回全 0 码字）
-      与 `product_quantization.rs` 的真实现同名并存。删掉假的，把 `fastscan/` 指向真的。
-- [ ] `create_index_instance` 里 `DiskANN` / `ScaNN` / `QuantizedIVF` 三个分支静默退化成
-      `BruteForceIndex`（`:1553` / `:1595` / `:1600`）——改成显式报错，或从
-      `IndexAlgorithm` 枚举里去掉。静默退化最坏：用户以为在用 DiskANN。
-- [ ] 建表日志三处自相矛盾：0 条记录的表打印 "Medium dataset detected (10K-100K)"，
-      紧接着打印 "Selected HNSW"，而 API 返回的元数据是 `"index_type":"bruteforce"`。
-      表元数据要反映真实选中的算法。
-- [ ] `rebuild_index`（`:1260`）写死 `memory_budget_mb: 512` / `has_avx2: false` /
-      `supports_simd: false`，没用构造时已检测好的 `self.hardware_capabilities`。
-- [ ] `EnhancedDiskANN` 用 `TempDir::new()...keep()`（`:1570`）建索引目录，重启即孤儿。
-- [ ] `POST /tables/{n}/hybrid_search` 静默丢弃 sparse 和 text 分量，只返回 dense 结果，
-      却照收 `alpha`/`beta`/`gamma` 权重（`api/handlers.rs:961-966`）。要么实现，要么对
-      带 sparse/text 的请求直接报 400。
-- [ ] **批量写入期间整个库对读不可用。** `insertion_processor` 取一次
+- [x] `search/auto_tuned.rs` 四个函数全部直接调 `brute_force_search`。**已删除**——零调用者，
+      459 行，带 3 个测试（掉的 3 个测试即出自此处）。
+- [x] 假 PQ **已删除**，连同它唯一的使用者 `search/fastscan/`。原计划是把 fastscan 指向真
+      实现，但真 PQ 的 API 完全不同（`encode` vs `encode_batch`、没有 `get_centroid`），
+      而且 `fastscan` 的 `search_simd` 里**一条 SIMD 指令都没有**（`_mm*` 出现 0 次），
+      只是个标了 `#[target_feature(enable = "avx2")]` 的标量循环。这不是修 lint，是重写一个
+      特性——记进 W3，FastScan 对对象存储上的扫描确实有价值。
+- [x] 三个分支**改成显式报错**并指明替代品。`index_management/factory.rs` 里同样的
+      `Lsh`/`IvfPq` 静默退化也一并改了。
+- [x] 日志改成陈述实际选中的算法并注明未实现的回退；`IndexType` 补了 `HnswPq` 和
+      `EnhancedDiskAnn` 两个变体，建表时按选中的算法回填 `table.index_type`——此前它一律来自
+      调用方配置、默认 `BruteForce`，所以跑着 HNSW 的表对外永远自称 brute_force。
+- [x] `rebuild_index` **改用真实检测到的硬件能力**和构造时的性能/成本约束。原先写死的值
+      会让同一台机器上"建表"和"重建"选出不同的算法。
+- [x] `EnhancedDiskANN` 的索引目录移到 `<wal_dir>/diskann/<uuid>`。原来的
+      `TempDir::new()...keep()` 是**故意**泄漏临时目录好让它活过 handle，于是每次重启都在
+      /tmp 下多一份索引，且无人回收。没有 WAL 时仍退回临时目录——那种配置下本来就没有持久状态。
+- [x] `POST /tables/{n}/hybrid_search` 带 sparse/text 时**直接返回 NOT_IMPLEMENTED** 并指明
+      `/search/text` 和 `/search/hybrid` 两个能用的端点。此前它跑完 dense 搜索就把另外两路
+      丢掉、当作融合完成返回，调用方的 alpha/beta/gamma 权重不影响任何东西。
+- [ ] **批量写入期间整个库对读不可用**（尚未修，已写进 README 和 CLAUDE.md 提醒）。 `insertion_processor` 取一次
       `tables.write().await`，然后在锁内把整批记录逐条插进 HNSW。一次 5000 条的请求会把
       写锁攥到全部插完，期间连 `GET /tables` 都阻塞——debug 构建下实测好几分钟。
       改法：分片持锁，或者把索引插入挪到锁外（记录 map 和索引分两阶段）。
-- [ ] `/tables/{n}/records` 有 10000 条的批次上限，超了返回
+- [x] `/tables/{n}/records` 的 10000 条批次上限已写进 README。原文：超了返回
       `{"error":"Validation failed","details":"Batch size 20000 exceeds maximum of 10000"}`，
       README 和 SDK 文档都没写。
 

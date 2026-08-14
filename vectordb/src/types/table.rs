@@ -60,6 +60,12 @@ pub enum IndexType {
     /// IVF-PQ索引
     #[serde(rename = "ivf_pq")]
     IvfPq,
+    /// 乘积量化 HNSW
+    #[serde(rename = "hnsw_pq")]
+    HnswPq,
+    /// 磁盘常驻图索引
+    #[serde(rename = "enhanced_diskann")]
+    EnhancedDiskAnn,
 }
 
 impl fmt::Display for IndexType {
@@ -70,6 +76,8 @@ impl fmt::Display for IndexType {
             IndexType::Ivf => write!(f, "ivf"),
             IndexType::OptimizedHnsw => write!(f, "optimized_hnsw"),
             IndexType::Lsh => write!(f, "lsh"),
+            IndexType::HnswPq => write!(f, "hnsw_pq"),
+            IndexType::EnhancedDiskAnn => write!(f, "enhanced_diskann"),
             IndexType::IvfPq => write!(f, "ivf_pq"),
         }
     }

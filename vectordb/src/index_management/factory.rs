@@ -41,14 +41,21 @@ impl IndexFactory {
             IndexType::Ivf => self.create_ivf_index(),
             IndexType::BruteForce => self.create_bruteforce_index(),
             IndexType::OptimizedHnsw => self.create_hnsw_index(), // Use regular HNSW for now
-            IndexType::Lsh => {
-                // LSH not yet implemented, fallback to BruteForce
-                self.create_bruteforce_index()
-            }
-            IndexType::IvfPq => {
-                // IVF-PQ not yet implemented, fallback to IVF
-                self.create_ivf_index()
-            }
+            // Silently substituting a different algorithm makes recall and latency
+            // inexplicable to the caller, so say no instead.
+            IndexType::Lsh => Err(crate::Error::InvalidInput(
+                "LSH is not available from this factory; use Hnsw or BruteForce".to_string(),
+            )),
+            IndexType::IvfPq => Err(crate::Error::InvalidInput(
+                "IVF-PQ is not available from this factory; use Ivf or HnswPq".to_string(),
+            )),
+            IndexType::HnswPq => Err(crate::Error::InvalidInput(
+                "HNSW-PQ is built by IntelligentIndexedStorage, not this factory".to_string(),
+            )),
+            IndexType::EnhancedDiskAnn => Err(crate::Error::InvalidInput(
+                "Enhanced DiskANN is built by IntelligentIndexedStorage, not this factory"
+                    .to_string(),
+            )),
         }
     }
 

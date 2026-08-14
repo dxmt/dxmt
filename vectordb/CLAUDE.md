@@ -186,7 +186,10 @@ Full-text search endpoints (requires `text-bm25` feature):
 pub struct IndexWrapper(pub Arc<RwLock<Box<dyn VectorIndex>>>);
 ```
 
-**Channel-based insertion** (eliminates lock contention):
+**Channel-based insertion.** Named for eliminating lock contention between *callers*, which it
+does — but the background task still takes `tables.write()` once per request and holds it for
+every record in that request, so a large batch blocks all readers for its duration. Roadmap W6.
+
 ```rust
 // src/storage/intelligent_indexed_storage.rs
 struct InsertRequest {

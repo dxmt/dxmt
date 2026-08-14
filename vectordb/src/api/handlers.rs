@@ -20,7 +20,6 @@ use crate::{
         record::CreateRecordRequest,
         record::HybridSearchQuery,
         record::SearchQuery,
-        record::SearchResult,
         record::{FullTextSearchRequest, HybridSearchRequest},
         table::IndexType,
         table::{TableAlterRequest, TableConfig},
@@ -995,60 +994,17 @@ pub async fn hybrid_search(
             Err(e) => error_response(e),
         }
     } else {
-        // Full hybrid search with text and sparse vector support
-        // Implementation: Perform multiple searches and combine results
-        let search_start = std::time::Instant::now();
-
-        // 1. Dense vector search (if provided)
-        let mut dense_results = Vec::new();
-        if let Some(dense_vec) = &query.dense_vector {
-            let dense_query = SearchQuery {
-                vector: dense_vec.clone(),
-                top_k: query.top_k * 2, // Get more results for merging
-                filter: query.filter.clone(),
-                with_payload: query.with_payload,
-                with_vector: query.with_vector,
-                limit: query.top_k * 2,
-                include_metadata: query.with_payload,
-                ..Default::default()
-            };
-
-            if let Ok(result) = state.storage.search(&table_name, dense_query).await {
-                dense_results = result.hits;
-            }
-        }
-
-        // 2. Sparse vector search — not yet implemented (requires sparse index backend)
-        let _sparse_results: Vec<crate::types::record::SearchHit> = Vec::new();
-
-        // 3. Text search — not yet implemented via generic Storage trait;
-        //    use POST /tables/:name/search/text for BM25 full-text search
-        let _text_results: Vec<crate::types::record::SearchHit> = Vec::new();
-
-        // 4. Combine results with weighted scores
-        let (alpha, beta, gamma) = (query.alpha, query.beta, query.gamma);
-        let weight_sum = alpha + beta + gamma;
-
-        // Normalize weights
-        let (_alpha_n, _beta_n, _gamma_n) = if weight_sum > 0.0 {
-            (alpha / weight_sum, beta / weight_sum, gamma / weight_sum)
-        } else {
-            (0.33, 0.33, 0.34)
-        };
-
-        // Apply limiting and return combined results
-        let mut combined_results = dense_results;
-        combined_results.truncate(query.top_k);
-        let total = combined_results.len(); // Calculate length before move
-
-        let search_result = SearchResult {
-            hits: combined_results,
-            total,
-            tookms: search_start.elapsed().as_millis() as u64,
-        };
-
-        let value = serde_json::to_value(search_result).unwrap_or(serde_json::Value::Null);
-        ApiResponse::success(value).into_response()
+        // Anything beyond a lone dense vector cannot be served here. This branch used to run
+        // the dense search, drop the sparse and text components on the floor, and return the
+        // result as if the requested fusion had happened — the caller's alpha/beta/gamma
+        // weights changed nothing. Refuse, and name the endpoints that do work.
+        ApiResponse::error(crate::api::response::ApiError::new(
+            "NOT_IMPLEMENTED",
+            "This endpoint only serves a lone dense_vector; it fuses nothing. For BM25 use \
+             POST /tables/{table}/search/text, for vector+text fusion use \
+             POST /tables/{table}/search/hybrid. Sparse-vector fusion is not implemented.",
+        ))
+        .into_response()
     }
 }
 

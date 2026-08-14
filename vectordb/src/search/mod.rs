@@ -1,7 +1,6 @@
 pub mod index_persistence;
 pub mod index_traits;
 // Core search modules
-pub mod auto_tuned;
 pub mod batch_operations;
 pub mod binary_hnsw; // NEW: Binary HNSW with RaBitQ quantization
 pub mod bm25;
@@ -9,7 +8,6 @@ pub mod brute_force;
 pub mod cluster_aware_search; // NEW: Cluster-aware search strategy
 pub mod diskann;
 pub mod diskann_enhanced;
-pub mod fastscan;
 pub mod full_text;
 pub mod hierarchical_clustering; // NEW: Hierarchical clustering for large-scale search
 pub mod hnsw;

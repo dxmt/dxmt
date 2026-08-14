@@ -28,9 +28,22 @@ mod integration_tests {
         let bruteforce = factory.create_index(IndexType::BruteForce);
         assert!(bruteforce.is_ok(), "BruteForce creation failed");
 
-        // DiskAnn variant removed, using IvfPq instead
-        let ivf_pq = factory.create_index(IndexType::IvfPq);
-        assert!(ivf_pq.is_ok(), "IvfPq creation failed");
+        // IvfPq used to "succeed" here only because the factory quietly handed back an IVF
+        // index instead. This assertion encoded that substitution as working behaviour. The
+        // factory now refuses, so assert the refusal — the same for Lsh, HnswPq and
+        // EnhancedDiskAnn, none of which this factory builds.
+        for unsupported in [
+            IndexType::IvfPq,
+            IndexType::Lsh,
+            IndexType::HnswPq,
+            IndexType::EnhancedDiskAnn,
+        ] {
+            assert!(
+                factory.create_index(unsupported).is_err(),
+                "{:?} should be refused, not silently substituted",
+                unsupported
+            );
+        }
     }
 
     /// Test 2: Factory validates configuration parameters
