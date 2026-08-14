@@ -66,9 +66,15 @@ pub struct IntelligentIndexedStorage {
     /// 表数据
     tables: Arc<RwLock<HashMap<String, IntelligentTableData>>>,
 
-    /// 分层存储
-    #[allow(dead_code)]
+    /// 分层存储：内存 → SSD → 对象存储。快照段以它为持久归宿。
     storage: Arc<TieredStorage>,
+
+    /// 是否真的配置了对象存储。
+    ///
+    /// `TieredStorage::new_from_config` 在没有对象存储配置时会退回到临时目录下的
+    /// FilesystemStorage——把快照传到临时目录比不传更糟（看着像有异地副本，其实没有），
+    /// 所以只有真配了才启用卸载。
+    object_storage_enabled: bool,
 
     /// 智能索引选择器
     index_selector: Arc<IntelligentIndexSelector>,
@@ -566,6 +572,7 @@ impl IntelligentIndexedStorage {
         Ok(Self {
             tables: tables_arc,
             storage: Arc::new(storage),
+            object_storage_enabled: config.object_storage.is_some(),
             index_selector: Arc::new(index_selector),
             hardware_capabilities,
             performance_requirements,
@@ -750,6 +757,16 @@ impl IntelligentIndexedStorage {
         std::fs::rename(&staging, &dir)?;
         let _ = std::fs::remove_dir_all(&previous);
 
+        // Push the segments to object storage before trimming the log. If the upload fails the
+        // local snapshot is still there and still verified, so compaction stays safe — but the
+        // remote copy is the one that survives losing this machine, so say so loudly.
+        if self.object_storage_enabled {
+            match self.offload_snapshot(&dir, written).await {
+                Ok(bytes) => info!("Snapshot offloaded to object storage: {} bytes", bytes),
+                Err(e) => warn!("Snapshot is local-only, upload failed: {}", e),
+            }
+        }
+
         // Only now is it safe to drop the log this snapshot covers. Compacting any earlier
         // leaves a window where neither the previous snapshot nor the log can reconstruct
         // those writes.
@@ -773,6 +790,94 @@ impl IntelligentIndexedStorage {
             written, seq
         );
         Ok(written)
+    }
+
+    /// 快照段在对象存储里的键。
+    fn snapshot_key(name: &str) -> String {
+        format!("snapshot/{}", name)
+    }
+
+    /// 列出一个快照目录下需要随身携带的段文件。
+    fn snapshot_segments(dir: &std::path::Path, tables: usize) -> Vec<String> {
+        let mut names = vec!["manifest".to_string()];
+        for i in 0..tables {
+            names.push(format!("t{}.meta", i));
+            let idx = format!("t{}.idx", i);
+            if dir.join(&idx).exists() {
+                names.push(idx);
+            }
+        }
+        names
+    }
+
+    /// 把快照段推到对象存储。
+    ///
+    /// 这是分层存储在写路径上的落点：本地磁盘是缓存，对象存储才是持久归宿。段文件是不可变的
+    /// ——一次快照写一组新的键——所以不需要读改写，也没有并发覆盖问题。
+    async fn offload_snapshot(&self, dir: &std::path::Path, tables: usize) -> crate::Result<u64> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let mut bytes = 0u64;
+        for name in Self::snapshot_segments(dir, tables) {
+            let data = std::fs::read(dir.join(&name))?;
+            bytes += data.len() as u64;
+            self.storage
+                .put_object(
+                    &Self::snapshot_key(&name),
+                    bytes::Bytes::from(data),
+                    Some("application/octet-stream"),
+                )
+                .await
+                .map_err(|e| {
+                    crate::Error::Internal(format!("uploading snapshot segment {}: {}", name, e))
+                })?;
+        }
+        Ok(bytes)
+    }
+
+    /// 从对象存储把快照取回本地，供恢复使用。返回是否取到。
+    async fn fetch_snapshot(&self, dir: &std::path::Path) -> crate::Result<bool> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let manifest_bytes = match self
+            .storage
+            .get_object(&Self::snapshot_key("manifest"))
+            .await
+        {
+            Ok(b) => b,
+            // 对象存储里没有快照是正常情况（首次启动），不是错误。
+            Err(_) => return Ok(false),
+        };
+
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("manifest"), &manifest_bytes)?;
+
+        let manifest: SnapshotManifest = crate::search::index_persistence::read_index(
+            &dir.join("manifest"),
+            "snapshot-manifest",
+        )?;
+
+        for i in 0..manifest.tables {
+            for name in [format!("t{}.meta", i), format!("t{}.idx", i)] {
+                match self.storage.get_object(&Self::snapshot_key(&name)).await {
+                    Ok(data) => std::fs::write(dir.join(&name), data)?,
+                    // `.idx` 是可选的：BruteForce 之类的索引没有磁盘格式，`has_index` 为 false。
+                    Err(_) if name.ends_with(".idx") => {}
+                    Err(e) => {
+                        return Err(crate::Error::Internal(format!(
+                            "downloading snapshot segment {}: {}",
+                            name, e
+                        )))
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Snapshot fetched from object storage: {} tables",
+            manifest.tables
+        );
+        Ok(true)
     }
 
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
@@ -812,7 +917,20 @@ impl IntelligentIndexedStorage {
     async fn load_snapshot(&self, wal_dir: &std::path::Path) -> crate::Result<u64> {
         let dir = Self::snapshot_dir(wal_dir);
         if !dir.exists() {
-            return Ok(0);
+            // Local disk is a cache; object storage is where the snapshot lives. A fresh machine
+            // — a new container, a replaced node — has an empty cache and must pull it back.
+            if self.object_storage_enabled {
+                match self.fetch_snapshot(&dir).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(0),
+                    Err(e) => {
+                        warn!("Could not fetch snapshot from object storage: {}", e);
+                        return Ok(0);
+                    }
+                }
+            } else {
+                return Ok(0);
+            }
         }
 
         // From here on a failure is fatal rather than a fallback. The WAL is compacted once a

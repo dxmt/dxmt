@@ -358,7 +358,7 @@ cargo test --lib
 
 ---
 
-### [ ] W3 — TieredStorage 接线（已定：对标 Turbopuffer）
+### [~] W3 — TieredStorage 接线（已定：对标 Turbopuffer）— 第一阶段完成于 <SHA3>
 
 **目标**：消除全仓库最大的一处名实不符。**二选一，不允许继续放着。**
 
@@ -371,6 +371,38 @@ cargo test --lib
 **选项 A — 接上**：读路径按 `tier_promotion` 的 `hotness_score` 决定从内存/SSD/对象存储取，
 写路径异步下沉到对象存储。这样 README 的 "object storage as the source of truth" 才成立。
 工作量大，但这是产品差异化所在。
+
+> **第一阶段已完成：快照段以对象存储为持久归宿。**
+>
+> `storage: Arc<TieredStorage>` 上的 `#[allow(dead_code)]` 去掉了——它现在真的在用。
+> 快照校验通过后，`manifest` / `tN.meta` / `tN.idx` 逐个 `put_object` 到 `snapshot/` 前缀；
+> 启动时若本地快照目录不存在，就先从对象存储拉回来再走原有的恢复流程。
+>
+> 验收测试 `a_fresh_machine_recovers_from_object_storage_alone`：A 机写数据+快照，
+> B 机用**另一个空的 WAL 目录**启动，只共享对象存储 —— 表、记录数、索引全部恢复，
+> 搜索结果正确。测试还直接断言 `<root>/<bucket>/snapshot/manifest` 和 `t0.meta`
+> 确实落在了对象存储的文件布局里，免得靠某个共享的本地缓存蒙混过关。
+>
+> 几个设计点：
+> - **只有真配了 `object_storage` 才启用卸载**。`TieredStorage::new_from_config` 在没配时会
+>   退回到临时目录下的 FilesystemStorage——往临时目录传快照比不传更糟，看着像有异地副本，
+>   其实没有。
+> - **段文件不可变**：一次快照写一组新键，没有读改写，也没有并发覆盖问题。这正是
+>   W2 的快照格式能直接当段格式用的原因。
+> - **上传在截断日志之前**。上传失败只告警：本地快照仍在且已校验，压缩依然安全，
+>   但"能扛住这台机器没了"的副本是远端那份，所以要说出来。
+> - `.idx` 是可选的（BruteForce 没有磁盘格式），下载时缺失不算错误。
+>
+> **已知的坑（`new_from_config` 的设计问题）**：`provider = "filesystem"` 时，对象存储的根路径
+> 直接复用了 `ssd_cache_dir`，于是 SSD 缓存层和对象存储层落在同一棵目录树下（靠 bucket
+> 子目录区分）。S3 provider 没这个问题。要修的话得给 filesystem provider 单独一个路径配置。
+>
+> **剩下的（第二、三阶段）**：
+> - 读路径按 `hotness_score` 分层取数——现在记录仍然全在内存，对象存储只承载快照。
+>   真正的 Turbopuffer 模型要求冷数据只在对象存储、按需拉取。
+> - 写路径的增量下沉：目前只有快照粒度（默认 300 秒一次），不是连续下沉。
+> - FastScan：W6 删掉的那个实现是假的（PQ 编码全 0、`search_simd` 里没有一条 SIMD 指令），
+>   但对象存储上的扫描确实需要它，要重写。
 
 **选项 B — 删掉**：删 `storage/object/`、`storage/tier_promotion.rs`、`storage/factory.rs`，
 把 README / CLAUDE.md 的架构描述改成"单节点内存 + WAL 持久化"。诚实，但放弃了定位。

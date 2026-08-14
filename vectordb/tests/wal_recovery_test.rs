@@ -470,3 +470,98 @@ async fn a_snapshot_that_cannot_be_read_back_does_not_compact_the_log() {
     let recovered = open(&wal_dir).await;
     assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
 }
+
+/// Storage config with a filesystem-backed object store, standing in for S3.
+fn storage_config_with_object_store(base: &Path) -> StorageConfig {
+    StorageConfig {
+        r#type: "tiered".to_string(),
+        memory: Some(MemoryConfig {
+            max_size_mb: 64,
+            eviction_policy: "lru".to_string(),
+        }),
+        ssd: Some(dxmt_vectordb::config::SsdConfig {
+            enabled: true,
+            cache_dir: base.join("ssd").to_string_lossy().into_owned(),
+            max_size_gb: 1,
+            compression: "none".to_string(),
+        }),
+        object_storage: Some(dxmt_vectordb::config::ObjectStorageConfig {
+            provider: "filesystem".to_string(),
+            bucket: "test-bucket".to_string(),
+            region: None,
+            endpoint: None,
+            access_key_id: None,
+            secret_access_key: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_machine_recovers_from_object_storage_alone() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+
+    // First machine: write data, snapshot, which uploads the segments.
+    {
+        let wal = tmp.path().join("machine-a");
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("b", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+    }
+
+    // Prove the segments actually reached the object store rather than the test passing on some
+    // shared local cache. FilesystemStorage lays objects out at <root>/<bucket>/<key>.
+    let bucket = shared.join("ssd").join("test-bucket").join("snapshot");
+    assert!(
+        bucket.join("manifest").exists(),
+        "manifest was never uploaded; looked in {}",
+        bucket.display()
+    );
+    assert!(
+        bucket.join("t0.meta").exists(),
+        "table segment was never uploaded"
+    );
+
+    // Second machine: a different WAL directory, so its local cache is empty. Everything it
+    // knows has to come from the object store — which is the whole point of treating local disk
+    // as a cache rather than the source of truth.
+    let wal_b = tmp.path().join("machine-b");
+    assert!(
+        !wal_b.exists(),
+        "the second machine must start with nothing local"
+    );
+
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_b))
+        .await
+        .unwrap();
+
+    let tables = recovered.list_tables().await.unwrap();
+    assert_eq!(
+        tables.len(),
+        1,
+        "table did not come back from object storage"
+    );
+    assert_eq!(tables[0].record_count, 2);
+
+    let hits = recovered
+        .search("t", query(vec![1.0, 0.0, 0.0, 0.0], 2))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits[0].id, "a", "the index came back unusable");
+}
