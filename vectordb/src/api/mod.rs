@@ -3,7 +3,6 @@ pub mod cluster;
 pub mod cross_modal_batch;
 pub mod graphql;
 pub mod handlers;
-pub mod monitoring;
 pub mod multimodal;
 pub mod rate_limiter;
 pub mod response;

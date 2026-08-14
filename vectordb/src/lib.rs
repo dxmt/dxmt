@@ -12,11 +12,7 @@ pub mod utils;
 
 // Stub modules (minimal implementation for compilation)
 pub mod cluster;
-pub mod distributed;
 pub mod embeddings;
-pub mod index;
-pub mod integrations;
-pub mod monitoring;
 pub mod multimodal;
 
 // Hardware acceleration (GPU, SIMD, parallel)
@@ -26,7 +22,6 @@ pub mod acceleration;
 pub mod mcp;
 
 // VectorQL - SQL-like query language
-pub mod vectorql;
 
 // DXQL - DXMT Query Language (SQL-like)
 pub mod dxql;
@@ -36,7 +31,6 @@ pub mod dxql;
 pub mod python;
 
 // Schema version management
-pub mod schema;
 
 // Optimized worker pool
 pub mod worker_pool;
