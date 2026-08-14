@@ -289,7 +289,7 @@ curl -sX POST localhost:19999/api/v1/tables/t/search -H 'Content-Type: applicati
 
 ---
 
-### [x] W2 — 索引持久化（HNSW / HNSW-PQ 的 save / load）— 完成于 <SHA2>
+### [x] W2 — 索引持久化（HNSW / HNSW-PQ 的 save / load）— 完成于 77c43db
 
 **目标**：重启不需要把所有向量重新插一遍索引。
 
