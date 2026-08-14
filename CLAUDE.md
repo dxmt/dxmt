@@ -47,7 +47,9 @@ cd vectordb/langchain-dxmt && pytest tests/unit_tests
 ```
 
 Tests marked `integration` (Python) and most SDK suites expect a server already listening on
-`localhost:9999` — start one with `cargo run -- serve --simple --memory-limit 1024` first.
+`localhost:9999`. Start **standard** mode — `cargo run -- serve` — not `--simple`. The SDKs set
+`base_url` to `{host}:{port}/api/v1`, whereas simple mode serves `/collections/*` at the root
+and has no `/api/v1` at all, so nothing will connect.
 
 ## Traps worth knowing before you trust a green result
 
@@ -59,10 +61,15 @@ Tests marked `integration` (Python) and most SDK suites expect a server already 
   checkout root with no `working-directory:`, and GitHub Actions only reads `.github/` at the
   true repo root — so they neither trigger nor would pass now that the crate is nested. Do not
   assume a change was validated by CI; run `make verify` locally.
-- **Two TODO lists, different purposes.** `vectordb/TODO.md` is the forward-looking
-  competitive roadmap (Chinese, P0/P1/P2, benchmarked against Chroma/Qdrant/LanceDB/Weaviate).
-  `vectordb/docs/TODO_PRIORITY.md` is the backward-looking tracker of what is resolved,
-  blocked on external crates, or deliberately out of scope.
+- **Half the module names do not describe what runs.** `vectordb/docs/ROADMAP.md` is the
+  authority on which code the server actually reaches; read it before trusting a module name,
+  a doc claim, or a passing test as evidence that a feature works. The headline: records live
+  in a process-local `HashMap` and a restart loses everything, even though a WAL and a tiered
+  object-storage backend are both implemented in the tree.
+- **Two forward-looking lists, different axes.** `vectordb/TODO.md` is the competitive
+  algorithm roadmap (Chinese, P0/P1/P2, benchmarked against Chroma/Qdrant/LanceDB/Weaviate).
+  `vectordb/docs/ROADMAP.md` is the architecture/wiring plan. `docs/TODO_PRIORITY.md` was
+  deleted — several of its "implemented" entries pointed at files that never compiled.
 
 ## Standing rules
 

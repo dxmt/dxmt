@@ -1,11 +1,15 @@
 # DXMT VectorDB
 
-A lightweight vector database written in Rust, with object storage as the source of truth and
-memory/SSD as cache tiers. A single binary runs from embedded use up to a single-node server.
+A vector database written in Rust. HNSW, HNSW-PQ and product quantization with runtime SIMD
+dispatch, full-text search via Tantivy, hybrid retrieval, and a query language — behind REST,
+GraphQL and WebSocket, plus a Chroma-compatible zero-config mode.
 
-> **Status: pre-1.0, single-node.** The current focus is polishing the core search, storage, and
-> API layers. Distributed/cluster code exists in the tree but is not production-ready — see
-> [Known Limitations](#known-limitations) before depending on anything outside single-node use.
+> **Status: pre-1.0. Data is held in memory and is not persisted across restarts.**
+> The write path keeps records in process memory; the write-ahead log and the tiered
+> object-storage backend both exist in the tree but are not yet wired into it. Back up
+> explicitly via `POST /api/v1/backup/full` if you need your data to survive a restart.
+> Distributed/cluster code exists but is not production-ready. See
+> [Known Limitations](#known-limitations) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick Start
 
@@ -32,17 +36,23 @@ With the default features, Swagger UI is available for browsing the REST API.
 
 ## Architecture
 
-Storage is tiered, with object storage as the durable source of truth:
+Both server modes converge on one storage implementation, `IntelligentIndexedStorage`:
 
 ```
-Memory (hot)  →  LRU cache
-     ↓
-SSD (warm)    →  filesystem cache
-     ↓
-S3/MinIO/GCS (cold)  →  source of truth
+serve --simple  →  /collections/*   (Chroma-compatible, at the root)
+serve           →  /api/v1/*
+                        ↓
+             IntelligentIndexedStorage
+               ├─ records: in-process HashMap      ← all data lives here today
+               └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
-Index selection adapts at runtime to dataset size:
+A three-tier design (memory → SSD → object storage) is implemented in
+`src/storage/object/tiered.rs` with access-frequency-driven promotion in
+`src/storage/tier_promotion.rs`, but the live write path does not call into it yet.
+Wiring it up is tracked in [docs/ROADMAP.md](docs/ROADMAP.md) §2.3.
+
+Index selection runs once, when the table is created:
 
 | Dataset size | Algorithm         |
 | ------------ | ----------------- |
@@ -51,8 +61,14 @@ Index selection adapts at runtime to dataset size:
 | 100K–1M      | HNSW-PQ           |
 | ≥ 1M         | DiskANN Enhanced  |
 
+Two caveats. This table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`)
+takes a separate path that yields HNSW below 100K and HNSW-PQ above it. And the size fed to
+the selector at `CREATE TABLE` time is a fixed estimate, not the eventual row count — call
+`POST /api/v1/tables/{name}/index/rebuild` to re-select against the real count.
+
 Interfaces: REST (`src/api/handlers.rs`), a Chroma-compatible simple mode
-(`src/api/simple_core.rs`), GraphQL, gRPC, and WebSocket.
+(`src/api/simple_core.rs`), GraphQL, and WebSocket. Standard-mode REST routes are served
+under `/api/v1`; only `/health` and `/status` sit at the root.
 
 ## Configuration
 
@@ -61,12 +77,16 @@ Configuration is read from the environment. Copy `.env.example` and adjust:
 ```bash
 DB_HOST=0.0.0.0
 DB_PORT=9999
-DB_STORAGE_TYPE=tiered      # memory | indexed | object | tiered | lmdb
+DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```
 
-Object storage credentials come from the environment only — never commit them:
+`DB_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
+`IntelligentIndexedStorage` unconditionally (`src/api/server.rs:76`).
+
+Object storage credentials come from the environment only — never commit them. They are read
+into the configuration but, as above, the object-storage path is not yet on the write path:
 
 ```bash
 export DB_OBJECT_STORAGE_PROVIDER=s3
@@ -120,16 +140,30 @@ DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
 
 These are real gaps, not roadmap aspirations:
 
-- **DXQL executor** (`src/dxql/executor.rs`) — the parser works, execution is stubbed and
-  returns empty results.
-- **LMDB / RocksDB backends** — do not yet fully implement the `Storage` trait.
-- **Hybrid search** — the sparse-vector component is not implemented.
+- **No durability.** Records live in a process-local map. A restart loses every table. The
+  write-ahead log (`src/wal.rs`) works and is tested, but nothing on the write path calls it,
+  and no index implements `SerializableIndex` except `src/search/ivf.rs`.
+- **Object-storage tier not on the write path.** `IntelligentIndexedStorage` holds a
+  `TieredStorage` in an `#[allow(dead_code)]` field and never reads or writes through it.
+- **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It accepts `alpha`/`beta`/
+  `gamma` weights and a sparse vector, then silently ignores the sparse and text components
+  (`src/api/handlers.rs:961-966`). For BM25 use `/search/text`; for real fusion use
+  `/search/hybrid`.
+- **Two implementations behind one name.** `search/quantization/product_quantizer.rs` is a
+  52-line stand-in whose `encode_batch` returns zeroed codes; the working one is
+  `product_quantization.rs`. Only the latter is reachable from the live path.
+- **`DiskANN`, `ScaNN` and `QuantizedIVF`** fall back to brute force in
+  `create_index_instance`.
 - **Multimodal** (`src/multimodal/`) — returns placeholder embeddings, pending a stable
   `ort` 2.0 release.
-- **Stub modules**, present but not functional: `cluster`, `consensus`, `distributed`,
-  `monitoring`, and the Rust-side `embeddings` and `integrations`.
+- **No gRPC.** It is not built; `api/grpc.rs` was never declared by `api/mod.rs` and has been
+  removed.
+- **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
+  `embeddings`.
+- **CI does not run.** The workflows live under `vectordb/.github/`, which GitHub Actions
+  does not read. Run `make verify` locally.
 
-See `docs/TODO_PRIORITY.md` for the tracked list.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what is being done about these and in what order.
 
 ## License
 
