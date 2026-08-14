@@ -4,7 +4,8 @@
 //! each trigram to the set of record IDs that contain it. A `contains(pattern)` query
 //! computes the intersection of posting lists for all trigrams in the pattern — giving
 //! O(|trigrams|) lookup with a small false-positive rate verified by a final string
-//! match. Inspired by LanceDB's `contains()` filter and PostgreSQL's pg_trgm extension.
+//! match. Trigram decomposition is chosen over suffix arrays here because the posting
+//! lists stay compact enough to hold in the same memory tier as the vector index.
 //!
 //! Limitations: case-sensitive; patterns shorter than 3 chars fall back to a full scan.
 

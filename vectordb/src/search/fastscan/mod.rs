@@ -1,5 +1,6 @@
-// FastScan implementation inspired by FAISS
-// Provides SIMD-optimized batch distance computation for Product Quantization
+// FastScan: SIMD-optimized batch distance computation for Product Quantization.
+// Distance tables are held in registers across a block of codes so that a batch
+// amortizes table setup over many candidates instead of paying it per vector.
 
 use crate::types::vector::DenseVector;
 

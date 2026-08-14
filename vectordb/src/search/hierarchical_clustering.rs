@@ -1,6 +1,8 @@
 //! Hierarchical Clustering for Large-Scale Vector Search
 //!
-//! This module implements multi-level clustering inspired by turbopuffer's architecture.
+//! This module implements multi-level clustering so that a query touches only the
+//! centroids of one coarse partition before descending into its fine partitions,
+//! bounding the candidate set independently of total collection size.
 //!
 //! Key features:
 //! - Two-level clustering: coarse (L1) + fine (L2)

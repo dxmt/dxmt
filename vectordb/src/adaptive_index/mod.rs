@@ -1,6 +1,8 @@
 //! Adaptive Indexing System - Automatically switches between index types based on workload
 //!
-//! Inspired by Weaviate's adaptive indexing, this module provides:
+//! The system observes live workload and rebuilds the index under a different
+//! algorithm when the observed access pattern no longer suits the current one.
+//! This module provides:
 //! - Query pattern monitoring
 //! - Data distribution analysis
 //! - Automatic index type switching

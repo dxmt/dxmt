@@ -42,9 +42,12 @@ make audit              # Security audit
 cargo bench --bench filter_performance_bench --features text-bm25
 ```
 
+All commands run from `vectordb/` — there is no `Cargo.toml` at the repository root.
+
 Integration tests live in `tests/*.rs` (Rust) and `tests/*.py` (Python, require a running
-server). `make test` runs `cargo test` then a Python API script, and both are `|| true`-guarded
-in the Makefile — check the actual output rather than trusting the exit code.
+server). `make test`, `make test-integ`, and `make bench` each append a `python3 scripts/...`
+step whose script no longer exists in the tree; the steps are `|| true`-guarded and no-op
+silently, so these targets are effectively plain `cargo test` / `cargo bench`.
 
 ### Running the Server
 
@@ -177,10 +180,15 @@ python            # PyO3 Python bindings
 
 See `docs/TODO_PRIORITY.md` for the full tracking list. Current blockers for single-node production readiness:
 
-1. **DXQL Executor** (`src/dxql/executor.rs`) — query execution is stubbed; returns empty results
-2. **LMDB/RocksDB Storage Trait** — backends need full `Storage` trait implementation
-3. **Hybrid Search** — sparse vector component not yet implemented
-4. **Multimodal ONNX** — `src/multimodal/` returns placeholder embeddings pending ort 2.0
+1. **DXQL — two executors, only one real.** `Executor` in `src/dxql/executor.rs` is a
+   storage-free shell that returns empty results for every plan type by design. Real execution
+   lives in `StorageAwareExecutor` (`src/dxql/executor_impl.rs`), re-exported from
+   `executor.rs`. Wire new call sites to `StorageAwareExecutor`.
+2. **Hybrid Search** — sparse vector component not yet implemented
+3. **Multimodal ONNX** — `src/multimodal/` returns placeholder embeddings pending ort 2.0
+4. **ScaNN** (`src/search/scann.rs`) — API mismatch with `BruteForceIndex`; its tests are
+   commented out
+5. **RaBitQ** (`src/search/quantization/rabitq.rs`) — scalar fallback only, no SIMD path
 
 Several modules are minimal stubs and should not be relied upon: `cluster`, `distributed`, `embeddings` (Rust-side), `monitoring`, `consensus`.
 

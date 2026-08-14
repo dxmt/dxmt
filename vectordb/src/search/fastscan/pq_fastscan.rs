@@ -1,5 +1,6 @@
-// PQFastScan - Fast Product Quantization with SIMD optimization
-// Inspired by FAISS IndexPQFastScan
+// PQFastScan - Fast Product Quantization with SIMD optimization.
+// Codes are stored transposed within each block so that one SIMD lane maps to one
+// candidate, letting a single shuffle resolve a sub-quantizer for the whole block.
 
 use super::{AlignedVec, FastScanIndex, FASTSCAN_BLOCK_SIZE};
 use crate::search::quantization::product_quantizer::ProductQuantizer;

@@ -1211,7 +1211,8 @@ impl IntelligentIndexedStorage {
     /// while preserving all records. Subsequent searches fall back to exact brute-force
     /// scan until the index is rebuilt (e.g. via re-insertion or a future rebuild API).
     ///
-    /// Inspired by Weaviate's schema alter "drop vector index" operation.
+    /// Exposed as an explicit operation rather than an automatic eviction so that
+    /// callers control when the memory is released relative to their query load.
     pub async fn drop_index(&self, table_name: &str) -> crate::Result<()> {
         // Phase 1: snapshot records and create new brute-force wrapper under the write lock
         let (new_wrapper, records_snapshot) = {
@@ -1344,7 +1345,8 @@ impl IntelligentIndexedStorage {
     /// the source at the moment of branching. Subsequent writes to either table do
     /// not affect the other — this is a snapshot, not copy-on-write.
     ///
-    /// Inspired by LanceDB's table versioning / branching feature.
+    /// Snapshot semantics are chosen over copy-on-write because branches here are
+    /// short-lived experiment targets, where write isolation matters more than space.
     pub async fn branch_table(&self, source_table: &str, branch_name: &str) -> crate::Result<Table> {
         // Snapshot source records under the read lock
         let (source_config, records_snapshot) = {
