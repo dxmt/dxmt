@@ -358,7 +358,7 @@ cargo test --lib
 
 ---
 
-### [~] W3 — TieredStorage 接线（已定：对标 Turbopuffer）— 第一阶段完成于 <SHA3>
+### [~] W3 — TieredStorage 接线（已定：对标 Turbopuffer）— 第一阶段完成于 2eeba00
 
 **目标**：消除全仓库最大的一处名实不符。**二选一，不允许继续放着。**
 
