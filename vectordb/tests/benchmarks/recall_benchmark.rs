@@ -1,6 +1,6 @@
-/// Recall benchmark test
-///
-/// Demonstrates usage of RecallEvaluator with actual vector search
+// Recall benchmark test
+//
+// Demonstrates usage of RecallEvaluator with actual vector search
 
 use dxmt_vectordb::{
     benchmarks::metrics::RecallEvaluator,

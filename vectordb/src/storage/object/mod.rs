@@ -134,10 +134,12 @@ mod tests {
             .expect("Failed to create base storage");
 
         // 创建三层存储配置
-        let mut config = TieredStorageConfig::default();
-        config.ssd_cache_dir = cache_dir.path().to_path_buf();
-        config.memory_cache_size = 1024; // 1KB
-        config.memory_cache_capacity = 100;
+        let config = TieredStorageConfig {
+            ssd_cache_dir: cache_dir.path().to_path_buf(),
+            memory_cache_size: 1024, // 1KB
+            memory_cache_capacity: 100,
+            ..TieredStorageConfig::default()
+        };
 
         // 创建三层存储
         let tiered_storage = TieredStorage::new(config, Box::new(base_storage))

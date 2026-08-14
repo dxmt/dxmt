@@ -1,6 +1,6 @@
-/// Property-based tests for search operations
-///
-/// Verifies search correctness properties across random inputs
+// Property-based tests for search operations
+//
+// Verifies search correctness properties across random inputs
 
 use proptest::prelude::*;
 use dxmt_vectordb::{

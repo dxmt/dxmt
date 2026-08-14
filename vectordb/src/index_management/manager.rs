@@ -192,9 +192,10 @@ mod tests {
     
 
     #[tokio::test]
+    #[ignore = "needs a live IndexFactory + IndexWrapper; can_switch() is unconditional today"]
     async fn test_manager_can_switch() {
-        // IndexManager requires a live IndexFactory + IndexWrapper — skip full integration here.
-        // can_switch() always returns true until resource-check logic is added.
-        assert!(true);
+        // IndexManager requires a live IndexFactory + IndexWrapper, so there is no integration
+        // to run here yet, and can_switch() returns true unconditionally until the
+        // resource-check logic exists. Marked ignored rather than asserting a tautology.
     }
 }

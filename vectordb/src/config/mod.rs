@@ -630,7 +630,7 @@ mod tests {
 
         // 测试默认值（应该为 true）
         let config = AppConfig::default();
-        assert_eq!(config.tables.default_memory_optimization, true);
+        assert!(config.tables.default_memory_optimization);
 
         // 清理环境变量
         clear_all_env_vars()
@@ -647,7 +647,7 @@ mod tests {
         std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
 
         let config = AppConfig::default();
-        assert_eq!(config.tables.default_memory_optimization, false);
+        assert!(!config.tables.default_memory_optimization);
 
         // 清理环境变量
         clear_all_env_vars()
@@ -664,7 +664,7 @@ mod tests {
         std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
 
         let config = AppConfig::default();
-        assert_eq!(config.tables.default_memory_optimization, true);
+        assert!(config.tables.default_memory_optimization);
 
         // 清理环境变量
         clear_all_env_vars()

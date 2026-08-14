@@ -1,10 +1,10 @@
-/// End-to-end recall test for IntelligentIndexedStorage.
-///
-/// Inserts a known vector set, computes brute-force ground truth, then runs
-/// the storage's search() and verifies that recall@10 ≥ 0.9.
-///
-/// This test catches regressions where index wiring, quantization, or
-/// distance computation silently degrades search quality.
+// End-to-end recall test for IntelligentIndexedStorage.
+//
+// Inserts a known vector set, computes brute-force ground truth, then runs
+// the storage's search() and verifies that recall@10 ≥ 0.9.
+//
+// This test catches regressions where index wiring, quantization, or
+// distance computation silently degrades search quality.
 
 use dxmt_vectordb::{
     storage::IntelligentIndexedStorage,

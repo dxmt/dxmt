@@ -33,6 +33,12 @@ pub struct BM25Index {
     b: f32,
 }
 
+impl Default for BM25Index {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BM25Index {
     pub fn new() -> Self {
         Self::with_params(K1, B)

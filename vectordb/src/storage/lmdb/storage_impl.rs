@@ -414,7 +414,7 @@ mod tests {
 
         // Insert record
         let request = CreateRecordRequest {
-            id: "test_record_1".to_string().into(),
+            id: "test_record_1".to_string(),
             vector: vec![0.1; 128],
             sparse_vector: None,
             payload: Some(serde_json::json!({"name": "test"})),
@@ -456,7 +456,7 @@ mod tests {
         storage.create_table(config).await.unwrap();
 
         let request = CreateRecordRequest {
-            id: "test_record_2".to_string().into(),
+            id: "test_record_2".to_string(),
             vector: vec![0.1; 128],
             sparse_vector: None,
             payload: None,

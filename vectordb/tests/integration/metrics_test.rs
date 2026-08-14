@@ -1,6 +1,6 @@
-/// Integration tests for advanced quality metrics
-///
-/// Tests Precision@k, NDCG@k, MAP@k, and MetricsEvaluator
+// Integration tests for advanced quality metrics
+//
+// Tests Precision@k, NDCG@k, MAP@k, and MetricsEvaluator
 
 use dxmt_vectordb::benchmarks::metrics::{
     PrecisionEvaluator, NdcgEvaluator, MapEvaluator, MetricsEvaluator,
@@ -10,21 +10,21 @@ use dxmt_vectordb::benchmarks::metrics::{
 fn test_precision_integration() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
         (
-            vec!["1", "6", "2", "7", "3"]
+            ["1", "6", "2", "7", "3"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -44,21 +44,21 @@ fn test_precision_integration() {
 fn test_ndcg_integration() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
         (
-            vec!["1", "6", "2", "7", "3"]
+            ["1", "6", "2", "7", "3"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -79,21 +79,21 @@ fn test_ndcg_integration() {
 fn test_map_integration() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
         (
-            vec!["1", "6", "2", "7", "3"]
+            ["1", "6", "2", "7", "3"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -115,31 +115,31 @@ fn test_map_integration() {
 fn test_metrics_evaluator_comprehensive() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        ),
-        (
-            vec!["1", "6", "2", "7", "3"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
         (
-            vec!["6", "7", "8", "9", "10"]
+            ["1", "6", "2", "7", "3"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
+        (
+            ["6", "7", "8", "9", "10"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -175,11 +175,11 @@ fn test_metrics_evaluator_comprehensive() {
 fn test_metrics_evaluator_multi_k() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -205,11 +205,11 @@ fn test_metrics_evaluator_multi_k() {
 fn test_generate_report_format() {
     let results = vec![
         (
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -236,8 +236,8 @@ fn test_all_metrics_consistency() {
     // Perfect results should give 1.0 for all metrics
     let perfect_results = vec![
         (
-            vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-            vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
         ),
     ];
 
@@ -249,8 +249,8 @@ fn test_all_metrics_consistency() {
     // Zero results should give 0.0 for all metrics
     let zero_results = vec![
         (
-            vec!["6", "7", "8"].iter().map(|s| s.to_string()).collect(),
-            vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["6", "7", "8"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
         ),
     ];
 
@@ -267,11 +267,11 @@ fn test_ranking_importance() {
     // Early relevant results
     let early = vec![
         (
-            vec!["1", "2", "3", "6", "7"]
+            ["1", "2", "3", "6", "7"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -281,11 +281,11 @@ fn test_ranking_importance() {
     // Late relevant results
     let late = vec![
         (
-            vec!["6", "7", "1", "2", "3"]
+            ["6", "7", "1", "2", "3"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            vec!["1", "2", "3", "4", "5"]
+            ["1", "2", "3", "4", "5"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),

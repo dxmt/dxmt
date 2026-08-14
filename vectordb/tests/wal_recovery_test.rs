@@ -19,7 +19,7 @@ use dxmt_vectordb::{
         vector::DistanceMetric,
     },
 };
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::TempDir;
 
 fn storage_config() -> StorageConfig {
@@ -34,8 +34,8 @@ fn storage_config() -> StorageConfig {
     }
 }
 
-async fn open(wal_dir: &PathBuf) -> IntelligentIndexedStorage {
-    IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal_dir.clone()))
+async fn open(wal_dir: &Path) -> IntelligentIndexedStorage {
+    IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal_dir.to_path_buf()))
         .await
         .expect("failed to open storage")
 }

@@ -1,6 +1,6 @@
-/// Standalone recall metrics test
-///
-/// Tests the RecallEvaluator and RecallStatistics functionality
+// Standalone recall metrics test
+//
+// Tests the RecallEvaluator and RecallStatistics functionality
 
 mod fixtures;
 

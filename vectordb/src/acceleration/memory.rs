@@ -131,6 +131,12 @@ pub struct MemoryPool {
     max_size: usize,
 }
 
+impl Default for MemoryPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryPool {
     pub fn new() -> Self {
         Self {
@@ -232,6 +238,12 @@ impl<T> OptimizedBuffer<T> {
 /// Prefetcher for improving cache hit rates
 pub struct Prefetcher;
 
+impl Default for Prefetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Prefetcher {
     pub fn new() -> Self {
         Self
@@ -274,6 +286,12 @@ impl Prefetcher {
 pub struct NumaAllocator {
     node_count: usize,
     preferred_node: usize,
+}
+
+impl Default for NumaAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NumaAllocator {
@@ -385,6 +403,12 @@ impl<T: Clone> ColumnStore<T> {
 pub struct AccessPatternOptimizer {
     access_history: Vec<usize>,
     pattern_cache: HashMap<Vec<usize>, Vec<usize>>,
+}
+
+impl Default for AccessPatternOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AccessPatternOptimizer {

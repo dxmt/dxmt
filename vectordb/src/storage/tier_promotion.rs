@@ -260,7 +260,7 @@ impl TierPromotionPolicy {
         let patterns = self.access_patterns.read().unwrap();
         let mut promotions = Vec::new();
 
-        for (vector_id, _) in patterns.iter() {
+        for vector_id in patterns.keys() {
             if self.should_promote_to_hot(vector_id) {
                 promotions.push((vector_id.clone(), Tier::Hot));
             } else if self.should_promote_to_warm(vector_id) {
@@ -276,7 +276,7 @@ impl TierPromotionPolicy {
         let patterns = self.access_patterns.read().unwrap();
         let mut demotions = Vec::new();
 
-        for (vector_id, _) in patterns.iter() {
+        for vector_id in patterns.keys() {
             if self.should_demote_to_cold(vector_id) {
                 demotions.push((vector_id.clone(), Tier::Cold));
             } else if self.should_demote_to_warm(vector_id) {

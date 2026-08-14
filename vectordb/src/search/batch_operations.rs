@@ -337,10 +337,7 @@ impl BatchOperationEngine {
                         let mut index_write = index_clone.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
                         index_write.add(request.id.clone(), request.vector.clone()).await
                     }.await;
-                    match result {
-                        Ok(_) => { batch_successful += 1; }
-                        Err(_) => {}
-                    }
+                    if result.is_ok() { batch_successful += 1; }
                 }
                 Ok(batch_successful)
             };

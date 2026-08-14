@@ -32,6 +32,9 @@ pub struct BatchS3Storage {
 }
 
 impl BatchS3Storage {
+    // Nine S3 connection knobs, each independently optional. Bundling them into a config
+    // struct is worth doing, but it is a change to every caller, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         bucket: String,
         prefix: String,

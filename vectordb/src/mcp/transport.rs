@@ -22,10 +22,14 @@ pub trait McpTransport: Send + Sync {
     async fn close(&mut self) -> Result<(), Box<dyn std::error::Error>>;
 }
 
+type WsSink = Box<dyn Sink<axum::extract::ws::Message, Error = axum::Error> + Send + Sync + Unpin>;
+type WsStream =
+    Box<dyn Stream<Item = Result<axum::extract::ws::Message, axum::Error>> + Send + Sync + Unpin>;
+
 /// WebSocket transport implementation
 pub struct WebSocketTransport {
-    sender: Option<Arc<Mutex<Box<dyn Sink<axum::extract::ws::Message, Error = axum::Error> + Send + Sync + Unpin>>>>,
-    receiver: Option<Arc<Mutex<Box<dyn Stream<Item = Result<axum::extract::ws::Message, axum::Error>> + Send + Sync + Unpin>>>>,
+    sender: Option<Arc<Mutex<WsSink>>>,
+    receiver: Option<Arc<Mutex<WsStream>>>,
     connected: bool,
 }
 
@@ -92,6 +96,12 @@ impl McpTransport for WebSocketTransport {
 /// Standard I/O transport for CLI integration
 pub struct StdioTransport {
     connected: bool,
+}
+
+impl Default for StdioTransport {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StdioTransport {

@@ -320,7 +320,7 @@ mod tests {
         let pool = OptimizedWorkerPool::new(WorkerPoolConfig::default());
 
         let task = HybridTask::<std::future::Ready<i32>, i32>::CpuBound(Box::new(|| {
-            vec![1, 2, 3, 4, 5].iter().sum::<i32>()
+            [1, 2, 3, 4, 5].iter().sum::<i32>()
         }));
 
         let result = pool.execute_hybrid_task(task).await.unwrap();

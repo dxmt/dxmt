@@ -379,7 +379,7 @@ impl TombstoneTracker {
         let deleted_flags = self.are_deleted_batch(&ids).await;
         
         results.into_iter()
-            .zip(deleted_flags.into_iter())
+            .zip(deleted_flags)
             .filter_map(|(result, is_deleted)| {
                 if !is_deleted {
                     Some(result)

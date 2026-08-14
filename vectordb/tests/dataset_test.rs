@@ -1,4 +1,4 @@
-/// Dataset infrastructure tests
+// Dataset infrastructure tests
 
 mod fixtures;
 

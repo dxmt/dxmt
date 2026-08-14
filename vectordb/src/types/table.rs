@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(stats.tablename, "stats_table");
         assert_eq!(stats.dimension, 256);
         assert_eq!(stats.record_count, 0);
-        assert_eq!(stats.enable_full_text_search, false);
+        assert!(!stats.enable_full_text_search);
         assert_eq!(stats.text_fields_count, 0);
         Ok(())
     }

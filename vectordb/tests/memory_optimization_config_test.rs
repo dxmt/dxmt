@@ -20,8 +20,8 @@ fn test_global_config_default_memory_optimization() {
 
     // 测试默认值（应该为 true）
     let config = AppConfig::default();
-    assert_eq!(
-        config.tables.default_memory_optimization, true,
+    assert!(
+        config.tables.default_memory_optimization,
         "Default memory_optimization should be true"
     );
 
@@ -37,8 +37,8 @@ fn test_global_config_memory_optimization_true() {
     std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
 
     let config = AppConfig::default();
-    assert_eq!(
-        config.tables.default_memory_optimization, true,
+    assert!(
+        config.tables.default_memory_optimization,
         "memory_optimization should be true when DB_MEMORY_OPTIMIZATION=true"
     );
 
@@ -54,8 +54,8 @@ fn test_global_config_memory_optimization_false() {
     std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
 
     let config = AppConfig::default();
-    assert_eq!(
-        config.tables.default_memory_optimization, false,
+    assert!(
+        !config.tables.default_memory_optimization,
         "memory_optimization should be false when DB_MEMORY_OPTIMIZATION=false"
     );
 
@@ -141,7 +141,7 @@ fn test_config_hierarchy_table_overrides_global() {
     // 设置全局配置为 true
     std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
     let global_config = AppConfig::default();
-    assert_eq!(global_config.tables.default_memory_optimization, true);
+    assert!(global_config.tables.default_memory_optimization);
 
     // 表级配置覆盖为 false
     let table_config = TableConfig {
@@ -162,8 +162,8 @@ fn test_config_hierarchy_table_overrides_global() {
     let effective_config = table_config.memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
-    assert_eq!(
-        effective_config, false,
+    assert!(
+        !effective_config,
         "Table-level config should override global config"
     );
 
@@ -178,7 +178,7 @@ fn test_config_hierarchy_uses_global_when_none() {
     // 设置全局配置为 false
     std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
     let global_config = AppConfig::default();
-    assert_eq!(global_config.tables.default_memory_optimization, false);
+    assert!(!global_config.tables.default_memory_optimization);
 
     // 表级配置为 None（使用全局配置）
     let table_config = TableConfig {
@@ -199,8 +199,8 @@ fn test_config_hierarchy_uses_global_when_none() {
     let effective_config = table_config.memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
-    assert_eq!(
-        effective_config, false,
+    assert!(
+        !effective_config,
         "Should use global config when table-level config is None"
     );
 
@@ -269,9 +269,9 @@ fn test_mixed_table_configurations() {
     let config3 = table3.memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
-    assert_eq!(config1, true, "Table1 should use global config (true)");
-    assert_eq!(config2, false, "Table2 should override to false");
-    assert_eq!(config3, true, "Table3 should explicitly use true");
+    assert!(config1, "Table1 should use global config (true)");
+    assert!(!config2, "Table2 should override to false");
+    assert!(config3, "Table3 should explicitly use true");
 
     clear_env_vars();
 }

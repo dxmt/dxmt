@@ -1,8 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use vectordb::storage::{IntelligentIndexedStorage, StorageConfig, StorageType};
-use vectordb::types::record::{CreateRecordRequest, SearchQuery, Filter, Condition, FilterOperation};
-use vectordb::types::table::TableConfig;
-use vectordb::types::vector::{DenseVector, DistanceMetric};
+use dxmt_vectordb::config::{MemoryConfig, StorageConfig};
+use dxmt_vectordb::storage::IntelligentIndexedStorage;
+use dxmt_vectordb::types::record::{CreateRecordRequest, SearchQuery, Filter, Condition, FilterOperation};
+use dxmt_vectordb::types::table::TableConfig;
+use dxmt_vectordb::types::vector::{DenseVector, DistanceMetric};
 use tokio::runtime::Runtime;
 
 /// Generate random vector with given dimension
@@ -22,8 +23,14 @@ async fn create_test_table(
         name: table_name.to_string(),
         dimension,
         distance_metric: DistanceMetric::Cosine,
-        enable_full_text_search: false,
+        description: None,
+        index_type: None,
         text_fields: None,
+        enable_full_text_search: false,
+        memory_optimization: None,
+        payload_schema: None,
+        schema_version: 1,
+        named_vectors: None,
     };
     storage.create_table(config).await?;
 
@@ -48,9 +55,10 @@ async fn create_test_table(
             };
 
             let record = CreateRecordRequest {
-                id: Some(format!("record_{}", i)),
+                id: format!("record_{}", i),
                 vector: random_vector(dimension),
                 sparse_vector: None,
+                named_vectors: None,
                 payload: Some(serde_json::json!({
                     "category": category,
                     "index": i,
@@ -72,13 +80,13 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
 
     // Setup storage
     let config = StorageConfig {
-        storage_type: StorageType::Memory,
-        data_dir: None,
-        memory_cache_size_mb: 512,
-        compression: None,
-        s3_config: None,
-        enable_wal: false,
-        wal_dir: None,
+        r#type: "memory".to_string(),
+        memory: Some(MemoryConfig {
+            max_size_mb: 512,
+            eviction_policy: "lru".to_string(),
+        }),
+        ssd: None,
+        object_storage: None,
     };
 
     let storage = rt.block_on(async {
@@ -114,6 +122,9 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
                             vector: random_vector(*dimension),
                             top_k: 10,
                             limit: 10,
+                            include_metadata: false,
+                            search_mode: Default::default(),
+                            vector_name: None,
                             filter: Some(Filter {
                                 must: Some(vec![Condition {
                                     key: "category".to_string(),
@@ -142,13 +153,13 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     let config = StorageConfig {
-        storage_type: StorageType::Memory,
-        data_dir: None,
-        memory_cache_size_mb: 512,
-        compression: None,
-        s3_config: None,
-        enable_wal: false,
-        wal_dir: None,
+        r#type: "memory".to_string(),
+        memory: Some(MemoryConfig {
+            max_size_mb: 512,
+            eviction_policy: "lru".to_string(),
+        }),
+        ssd: None,
+        object_storage: None,
     };
 
     let storage = rt.block_on(async {
@@ -169,6 +180,9 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
                 vector: random_vector(dimension),
                 top_k: 10,
                 limit: 10,
+                include_metadata: false,
+                search_mode: Default::default(),
+                vector_name: None,
                 filter: None,
                 with_payload: true,
                 with_vector: false,

@@ -8,6 +8,12 @@ pub struct ToolRegistry {
     tools: Vec<Tool>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self { tools: Vec::new() };

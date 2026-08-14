@@ -18,6 +18,12 @@ use crate::types::record::CreateRecordRequest;
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, Hash, PartialEq)]
 pub struct TransactionId(pub uuid::Uuid);
 
+impl Default for TransactionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())

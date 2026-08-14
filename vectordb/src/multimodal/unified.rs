@@ -395,7 +395,7 @@ pub(crate) enum TransformOp {
 pub(crate) enum EnrichmentSource {
     Transcription,
     Caption,
-    OCR,
+    Ocr,
 }
 
 #[derive(Debug, Clone)]

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::types::{RecordId, DenseVector};
 use crate::storage::lmdb::{LmdbStorage, VectorRecord};
 
+/// A raw key/value pair as returned by a prefix scan.
+type KeyValue = (Vec<u8>, Vec<u8>);
+
 /// 混合存储引擎：结合 LMDB 的读性能和 RocksDB 的写性能
 ///
 /// 架构设计：
@@ -118,7 +121,7 @@ impl RocksDbStorage {
         Ok(None)
     }
 
-    pub fn scan_prefix(&self, _prefix: &[u8], _limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>> {
+    pub fn scan_prefix(&self, _prefix: &[u8], _limit: usize) -> Result<Vec<KeyValue>, Box<dyn std::error::Error>> {
         Ok(Vec::new())
     }
 
@@ -149,6 +152,12 @@ pub struct WriteBuffer {
     operations: Vec<WriteOp>,
     size_bytes: usize,
     last_flush: Instant,
+}
+
+impl Default for WriteBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WriteBuffer {

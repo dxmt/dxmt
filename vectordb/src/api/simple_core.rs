@@ -757,11 +757,9 @@ mod tests {
         }).await.unwrap();
 
         let mut enc = CollectionBm25::new(128);
-        let docs = vec![
-            ("d1", "Rust is a systems programming language"),
+        let docs = [("d1", "Rust is a systems programming language"),
             ("d2", "Python is great for machine learning"),
-            ("d3", "Rust achieves memory safety without garbage collection"),
-        ];
+            ("d3", "Rust achieves memory safety without garbage collection")];
 
         let records: Vec<CreateRecordRequest> = docs.iter().map(|(id, text)| {
             let (dense, sparse) = enc.encode_document(id, text);

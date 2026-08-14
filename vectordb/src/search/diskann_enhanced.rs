@@ -694,9 +694,11 @@ mod tests {
     #[test]
     fn test_enhanced_diskann_creation() {
         let dir = tempdir().unwrap();
-        let mut config = EnhancedDiskANNConfig::default();
         // For 128 dimensions, use 64 subvectors (128/64 = 2)
-        config.num_pq_subvectors = 64;
+        let config = EnhancedDiskANNConfig {
+            num_pq_subvectors: 64,
+            ..EnhancedDiskANNConfig::default()
+        };
 
         let index = EnhancedDiskANNIndex::new(
             128,

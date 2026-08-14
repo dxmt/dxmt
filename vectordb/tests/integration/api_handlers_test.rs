@@ -1,10 +1,10 @@
-/// API Handlers Integration Tests
-///
-/// Tests core REST API functionality including:
-/// - Table creation and management
-/// - Record insertion with validation
-/// - Search operations
-/// - Error handling
+// API Handlers Integration Tests
+//
+// Tests core REST API functionality including:
+// - Table creation and management
+// - Record insertion with validation
+// - Search operations
+// - Error handling
 
 use dxmt_vectordb::{
     api::handlers::AppState,

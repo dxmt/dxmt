@@ -1110,12 +1110,11 @@ impl IntelligentIndexedStorage {
                 // POST-FILTERING: apply payload filter on results that weren't in-graph filtered
                 if post_filter {
                     if let Some(ref filter) = query.filter {
-                        if let Some(record) = table_data.records.get(&id) {
+                        {
+                            let record = table_data.records.get(&id)?;
                             if !record.matches_filter(filter) {
                                 return None;
                             }
-                        } else {
-                            return None;
                         }
                     }
                 }
@@ -1239,12 +1238,11 @@ impl IntelligentIndexedStorage {
             .filter_map(|result| {
                 // Apply filters if specified
                 if let Some(ref filter) = request.filter {
-                    if let Some(record) = table_data.records.get(&result.id) {
+                    {
+                        let record = table_data.records.get(&result.id)?;
                         if !record.matches_filter(filter) {
                             return None;
                         }
-                    } else {
-                        return None;
                     }
                 }
 
@@ -1258,8 +1256,7 @@ impl IntelligentIndexedStorage {
                     highlights: if request.highlight {
                         // Flatten HashMap<String, Vec<String>> to Vec<String>
                         result.highlights.map(|h| {
-                            h.into_iter()
-                                .flat_map(|(_, highlights)| highlights)
+                            h.into_values().flatten()
                                 .collect()
                         })
                     } else {
@@ -1545,7 +1542,7 @@ impl IntelligentIndexedStorage {
 
         // 6. Build search hits with payload if requested
         let hits: Vec<SearchHit> = scored_results.into_iter()
-            .filter_map(|(id, score)| {
+            .map(|(id, score)| {
                 let (payload, vector) = if request.with_payload || request.with_vector {
                     table_data.records.get(&id).map(|r| {
                         (
@@ -1557,12 +1554,12 @@ impl IntelligentIndexedStorage {
                     (None, None)
                 };
 
-                Some(SearchHit {
+                SearchHit {
                     id,
                     score,
                     payload,
                     vector,
-                })
+                }
             })
             .collect();
 
@@ -2449,7 +2446,7 @@ impl IntelligentIndexedStorage {
         };
 
         // Sort by created_at (newest first)
-        matching_records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        matching_records.sort_by_key(|r| std::cmp::Reverse(r.created_at));
 
         let total_matching = matching_records.len();
         let start = offset.min(total_matching);
@@ -2858,7 +2855,7 @@ use crate::RecordId;
 
         // Insert a few records
         let requests: Vec<_> = (0..5).map(|i| CreateRecordRequest {
-            id: format!("rec-{}", i).into(),
+            id: format!("rec-{}", i),
             vector: vec![i as f32, 0.0, 0.0, 0.0],
             sparse_vector: None,
             payload: None,

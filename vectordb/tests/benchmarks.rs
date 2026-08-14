@@ -20,7 +20,6 @@ mod hnsw_performance_benchmark {
     use dxmt_vectordb::{
         search::hnsw::{HnswIndex, HnswConfig},
         search::brute_force::BruteForceIndex,
-        search::index_traits::VectorIndex,
         types::vector::DistanceMetric,
     };
     use std::time::Instant;

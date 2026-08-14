@@ -100,7 +100,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
              result.hits.len(), result.tookms, result.total);
 
     // Should find results (up to 5, but only 10 total match)
-    assert!(result.hits.len() > 0, "Should find some results with rare category. Got {} results.", result.hits.len());
+    assert!(!result.hits.is_empty(), "Should find some results with rare category. Got {} results.", result.hits.len());
     assert!(result.hits.len() <= 5, "Should not exceed top_k");
 
     // Verify all results have the correct category

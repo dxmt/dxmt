@@ -6,6 +6,12 @@ pub struct Compiler {
     _private: (),
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self { _private: () }

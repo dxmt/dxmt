@@ -40,6 +40,9 @@ impl Default for LSHConfig {
     }
 }
 
+/// One LSH hash table: hash value -> ids of the vectors that landed in that bucket.
+type HashBucket = Arc<RwLock<HashMap<u64, Vec<usize>>>>;
+
 /// LSH index for approximate nearest neighbor search
 pub struct LSHIndex {
     /// Configuration
@@ -50,7 +53,7 @@ pub struct LSHIndex {
     dimension: usize,
 
     /// Hash tables: table_id -> (hash_value -> vector_ids)
-    hash_tables: Vec<Arc<RwLock<HashMap<u64, Vec<usize>>>>>,
+    hash_tables: Vec<HashBucket>,
 
     /// Random projections for each table
     projections: Vec<Array2<f32>>,

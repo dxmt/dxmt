@@ -466,7 +466,7 @@ impl MultimodalConfig {
             .collect();
 
         // Sort by priority (higher priority first)
-        models.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+        models.sort_by_key(|m| std::cmp::Reverse(m.1.priority));
         models
     }
 

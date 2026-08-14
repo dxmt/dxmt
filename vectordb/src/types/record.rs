@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn test_record_creation() -> Result<(), Box<dyn std::error::Error>> {
         let request = CreateRecordRequest {
-            id: "test_record".to_string().into(),
+            id: "test_record".to_string(),
             vector: vec![0.1, 0.2, 0.3],
             sparse_vector: None,
             payload: Some(serde_json::json!({"category": "test"})),
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn test_filter_matching() -> Result<(), Box<dyn std::error::Error>> {
         let request = CreateRecordRequest {
-            id: "filter_test".to_string().into(),
+            id: "filter_test".to_string(),
             vector: vec![1.0, 2.0],
             sparse_vector: None,
             payload: Some(serde_json::json!({
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn test_filter_matching_by_id() -> Result<(), Box<dyn std::error::Error>> {
         let record = Record::new(CreateRecordRequest {
-            id: "rec-42".to_string().into(),
+            id: "rec-42".to_string(),
             vector: vec![1.0, 0.0],
             sparse_vector: None,
             payload: Some(serde_json::json!({"x": 1})),
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn test_filter_must_not_and_should() -> Result<(), Box<dyn std::error::Error>> {
         let record = Record::new(CreateRecordRequest {
-            id: "r1".to_string().into(),
+            id: "r1".to_string(),
             vector: vec![1.0, 0.0],
             sparse_vector: None,
             payload: Some(serde_json::json!({"category": "food", "price": 5.0})),

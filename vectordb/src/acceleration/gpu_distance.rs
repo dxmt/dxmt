@@ -418,11 +418,8 @@ mod tests {
         // When gpu feature is not enabled, try_new should return None
         // When gpu feature IS enabled but no GPU hardware, also returns None
         let config = GpuDistanceConfig::default();
-        let calc = GpuDistanceCalculator::try_new(config);
-        // Result depends on hardware; just check it doesn't panic
-        if calc.is_none() {
-            // Expected on machines without GPU
-            assert!(true);
-        }
+        // Nothing to assert about the outcome: no GPU is a valid result and so is a GPU. The
+        // test exists to prove try_new does not panic on either path.
+        let _ = GpuDistanceCalculator::try_new(config);
     }
 }

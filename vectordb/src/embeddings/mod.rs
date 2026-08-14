@@ -333,12 +333,11 @@ impl MultimodalUtils {
                     return Err(crate::Error::InvalidInput("Invalid PNG: incorrect signature".to_string()));
                 }
             },
-            [0x47, 0x49, 0x46, 0x38] => {
+            [0x47, 0x49, 0x46, 0x38]
                 // GIF validation
-                if content.len() < 6 || (content[4] != b'7' && content[4] != b'9') || content[5] != b'a' {
+                if (content.len() < 6 || (content[4] != b'7' && content[4] != b'9') || content[5] != b'a') => {
                     return Err(crate::Error::InvalidInput("Invalid GIF: incorrect version".to_string()));
-                }
-            },
+                },
             _ => {} // Other formats pass through
         }
         Ok(())
@@ -362,12 +361,11 @@ impl MultimodalUtils {
                     return Err(crate::Error::InvalidInput("Invalid MP3: ID3 tag too short".to_string()));
                 }
             },
-            [0x66, 0x4C, 0x61, 0x43] => {
+            [0x66, 0x4C, 0x61, 0x43]
                 // FLAC validation - should have streaminfo block
-                if content.len() < 8 {
+                if content.len() < 8 => {
                     return Err(crate::Error::InvalidInput("Invalid FLAC: too short".to_string()));
-                }
-            },
+                },
             _ => {} // Other formats pass through
         }
         Ok(())

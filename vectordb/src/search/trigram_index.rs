@@ -181,7 +181,7 @@ mod tests {
     fn test_trigram_memory_usage() {
         let mut idx = TrigramIndex::new();
         for i in 0..100 {
-            idx.insert(format!("doc{i}").into(), &format!("text number {i} with some words"));
+            idx.insert(format!("doc{i}"), &format!("text number {i} with some words"));
         }
         assert!(idx.memory_usage() > 0);
         assert_eq!(idx.len(), 100);

@@ -36,7 +36,7 @@ fn test_wal_entry_creation() {
 #[test]
 fn test_wal_entry_serialization() {
     let record = CreateRecordRequest {
-        id: "test_1".to_string().into(),
+        id: "test_1".to_string(),
         vector: vec![0.1, 0.2, 0.3],
         sparse_vector: None,
         payload: None,
@@ -166,14 +166,14 @@ fn test_repair_report_failure() {
 fn test_batch_wal_operations() {
     let records = vec![
         CreateRecordRequest {
-            id: "batch_1".to_string().into(),
+            id: "batch_1".to_string(),
             vector: vec![0.1; 128],
             sparse_vector: None,
             payload: None,
             named_vectors: None,
         },
         CreateRecordRequest {
-            id: "batch_2".to_string().into(),
+            id: "batch_2".to_string(),
             vector: vec![0.2; 128],
             sparse_vector: None,
             payload: None,

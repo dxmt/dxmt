@@ -7,6 +7,10 @@
 //!
 //! Run with: cargo test --features gpu --test gist_gpu_benchmark -- --nocapture
 
+// Every test in here is behind `#[cfg(feature = "gpu")]`, so without that feature the helpers
+// below have no callers. They are not dead — they are gated.
+#![allow(dead_code)]
+
 
 #[cfg(feature = "gpu")]
 use dxmt_vectordb::acceleration::{GpuDistanceCalculator, GpuDistanceConfig};

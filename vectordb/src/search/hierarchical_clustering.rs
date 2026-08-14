@@ -1035,7 +1035,7 @@ mod tests {
         let result = index.train(&training_data);
         assert!(result.is_ok());
         assert!(index.is_trained);
-        assert!(index.coarse_clusters.len() > 0);
+        assert!(!index.coarse_clusters.is_empty());
 
         println!("\nHierarchical Clustering Training Stats:");
         let stats = index.get_stats();
@@ -1252,7 +1252,7 @@ mod tests {
         }
 
         // Should detect 3 clusters or nearby
-        assert!(optimal_k >= 2 && optimal_k <= 5, "Should find reasonable K");
+        assert!((2..=5).contains(&optimal_k), "Should find reasonable K");
         assert_eq!(wcss_values.len(), 6, "Should have 6 K values tested");
 
         // WCSS should decrease monotonically

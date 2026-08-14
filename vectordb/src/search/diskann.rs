@@ -373,7 +373,7 @@ impl DiskANNIndex {
         }
 
         // Remove from all neighbor lists
-        for (_, edges) in graph.iter_mut() {
+        for edges in graph.values_mut() {
             edges.retain(|nid| nid != id);
         }
 

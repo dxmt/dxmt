@@ -1,7 +1,9 @@
-/// Shared test fixtures and utilities
-///
-/// This module provides common test data, mock storage instances,
-/// and helper functions to reduce code duplication across tests.
+#![allow(dead_code)] // shared across test binaries; each uses a subset
+
+// Shared test fixtures and utilities
+//
+// Common test data, mock storage instances, and helper functions, shared to keep the test
+// binaries from each rebuilding the same scaffolding.
 
 use dxmt_vectordb::{
     storage::IntelligentIndexedStorage,

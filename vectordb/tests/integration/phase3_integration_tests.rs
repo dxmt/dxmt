@@ -36,21 +36,29 @@ mod integration_tests {
     /// Test 2: Factory validates configuration parameters
     #[tokio::test]
     async fn test_factory_validates_configuration() {
-        let mut config = AdaptiveConfig::default();
-
         // Invalid M value
-        config.hnsw_m = 2;
-        let factory = IndexFactory::new(config.clone());
+        let config = AdaptiveConfig {
+            hnsw_m: 2,
+            ..AdaptiveConfig::default()
+        };
+        let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
 
         // Invalid ef_construction
-        config.hnsw_m = 16;
-        config.hnsw_ef_construction = 50;
-        let factory = IndexFactory::new(config.clone());
+        let config = AdaptiveConfig {
+            hnsw_m: 16,
+            hnsw_ef_construction: 50,
+            ..AdaptiveConfig::default()
+        };
+        let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
 
         // Valid configuration
-        config.hnsw_ef_construction = 200;
+        let config = AdaptiveConfig {
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_ok());
     }
@@ -145,7 +153,7 @@ mod integration_tests {
         // Verify measurements
         let profile = profiler.get_profile("test_operation").unwrap();
         assert!(profile.avg_duration_ms >= 10.0, "Should measure at least 10ms");
-        assert!(profile.snapshots.len() >= 1);
+        assert!(!profile.snapshots.is_empty());
         // Throughput is calculated as ops/sec, so 100 ops in ~10ms = ~10000 ops/sec
         assert!(profile.snapshots[0].throughput_ops_per_sec > 1000.0,
                 "Throughput should be > 1000 ops/sec, got {}",
@@ -179,28 +187,18 @@ mod integration_tests {
     /// Test 9: Factory parameter boundaries
     #[tokio::test]
     async fn test_factory_parameter_boundaries() {
-        let mut config = AdaptiveConfig::default();
-
-        // Test HNSW M boundaries
-        // Minimum valid (4)
-        config.hnsw_m = 4;
-        let factory = IndexFactory::new(config.clone());
-        assert!(factory.validate_config().is_ok());
-
-        // Maximum valid (64)
-        config.hnsw_m = 64;
-        let factory = IndexFactory::new(config.clone());
-        assert!(factory.validate_config().is_ok());
-
-        // Just below minimum (3)
-        config.hnsw_m = 3;
-        let factory = IndexFactory::new(config.clone());
-        assert!(factory.validate_config().is_err());
-
-        // Just above maximum (65)
-        config.hnsw_m = 65;
-        let factory = IndexFactory::new(config);
-        assert!(factory.validate_config().is_err());
+        // HNSW M boundaries: 4 and 64 are the ends of the valid range.
+        for (m, valid) in [(4, true), (64, true), (3, false), (65, false)] {
+            let config = AdaptiveConfig { hnsw_m: m, ..AdaptiveConfig::default() };
+            let factory = IndexFactory::new(config);
+            assert_eq!(
+                factory.validate_config().is_ok(),
+                valid,
+                "hnsw_m = {} should be {}",
+                m,
+                if valid { "accepted" } else { "rejected" }
+            );
+        }
     }
 
     /// Test 10: Full index creation and switching workflow
@@ -253,10 +251,11 @@ mod integration_tests {
     /// Test 12: Error handling in invalid configuration
     #[tokio::test]
     async fn test_error_handling_invalid_config() {
-        let mut config = AdaptiveConfig::default();
-
         // IVF nlist too small
-        config.ivf_n_lists = 50;
+        let config = AdaptiveConfig {
+            ivf_n_lists: 50,
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
 
         let result = factory.create_index(IndexType::Ivf);

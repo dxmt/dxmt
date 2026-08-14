@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_pointer_validation() {
-        let data = vec![1.0f32, 2.0, 3.0];
+        let data = [1.0f32, 2.0, 3.0];
         let ptr = data.as_ptr();
 
         // Should pass
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_memory_validation() {
-        let src = vec![1u8, 2, 3, 4];
+        let src = [1u8, 2, 3, 4];
         let mut dst = vec![0u8; 4];
 
         // Non-overlapping should pass

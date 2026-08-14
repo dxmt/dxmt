@@ -416,7 +416,7 @@ mod tests {
         let norm = dbsf_normalize(&scores);
 
         // All normalised values must be in [0, 1]
-        for (_, v) in &norm {
+        for v in norm.values() {
             assert!(*v >= 0.0 && *v <= 1.0, "value {v} out of [0,1]");
         }
 
@@ -434,7 +434,7 @@ mod tests {
             ("c".to_string(), 5.0),
         ];
         let norm = dbsf_normalize(&scores);
-        for (_, v) in &norm {
+        for v in norm.values() {
             assert!(v.is_finite());
         }
     }

@@ -361,36 +361,6 @@ impl HybridIndexBackend for IvfIndexBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Commented out - test doesn't return Result and uses undefined types
-    // #[test]
-    // fn test_hybrid_quantization() {
-    //     let base_config = QuantizationType::Scalar(ScalarQuantizationConfig::default());
-    //     let config = HybridQuantizationConfig {
-    //         base_quantization: _Box::new(base_config),
-    //         index_type: _HybridIndexType::Hnsw,
-    //     };
-    //
-    //     let mut quantizer = HybridQuantizer::new(config, DistanceMetric::Euclidean)?;
-    //
-    //     let training_vectors = vec![
-    //         vec![1.0, 2.0, 3.0],
-    //         vec![4.0, 5.0, 6.0],
-    //         vec![7.0, 8.0, 9.0],
-    //     ];
-    //
-    //     quantizer.train(&training_vectors)?;
-    //
-    //     let test_vector = vec![2.0, 3.0, 4.0];
-    //     let quantized = quantizer.quantize(&test_vector)?;
-    //
-    //     assert_eq!(quantized.payload.original_dim, 3);
-    // }
-}
-
 // Missing backend structs
 struct BruteForceIndexBackend {
     quantized_vectors: std::collections::HashMap<String, Vec<u8>>,
@@ -428,3 +398,33 @@ struct HnswIndexBackend {
 }
 
 type IvfIndex = crate::search::brute_force::BruteForceIndex;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Commented out - test doesn't return Result and uses undefined types
+    // #[test]
+    // fn test_hybrid_quantization() {
+    //     let base_config = QuantizationType::Scalar(ScalarQuantizationConfig::default());
+    //     let config = HybridQuantizationConfig {
+    //         base_quantization: _Box::new(base_config),
+    //         index_type: _HybridIndexType::Hnsw,
+    //     };
+    //
+    //     let mut quantizer = HybridQuantizer::new(config, DistanceMetric::Euclidean)?;
+    //
+    //     let training_vectors = vec![
+    //         vec![1.0, 2.0, 3.0],
+    //         vec![4.0, 5.0, 6.0],
+    //         vec![7.0, 8.0, 9.0],
+    //     ];
+    //
+    //     quantizer.train(&training_vectors)?;
+    //
+    //     let test_vector = vec![2.0, 3.0, 4.0];
+    //     let quantized = quantizer.quantize(&test_vector)?;
+    //
+    //     assert_eq!(quantized.payload.original_dim, 3);
+    // }
+}

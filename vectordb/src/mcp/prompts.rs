@@ -7,6 +7,12 @@ pub struct PromptRegistry {
     prompts: Vec<Prompt>,
 }
 
+impl Default for PromptRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PromptRegistry {
     pub fn new() -> Self {
         let mut registry = Self {

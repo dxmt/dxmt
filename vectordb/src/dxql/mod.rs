@@ -17,6 +17,12 @@ pub struct DxqlEngine {
     executor: executor::Executor,
 }
 
+impl Default for DxqlEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DxqlEngine {
     pub fn new() -> Self {
         Self {

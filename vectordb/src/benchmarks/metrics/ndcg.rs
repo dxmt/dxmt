@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_ndcg_perfect() {
-        let retrieved = vec!["1", "2", "3", "4", "5"]
+        let retrieved = ["1", "2", "3", "4", "5"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -117,11 +117,11 @@ mod tests {
 
     #[test]
     fn test_ndcg_partial() {
-        let retrieved = vec!["1", "6", "2", "7", "3"]
+        let retrieved = ["1", "6", "2", "7", "3"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
-        let ground_truth = vec!["1", "2", "3", "4", "5"]
+        let ground_truth = ["1", "2", "3", "4", "5"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -140,11 +140,11 @@ mod tests {
 
     #[test]
     fn test_ndcg_zero() {
-        let retrieved = vec!["6", "7", "8", "9", "10"]
+        let retrieved = ["6", "7", "8", "9", "10"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
-        let ground_truth = vec!["1", "2", "3", "4", "5"]
+        let ground_truth = ["1", "2", "3", "4", "5"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -156,18 +156,18 @@ mod tests {
     #[test]
     fn test_ndcg_position_matters() {
         // Better ranking (relevant results earlier)
-        let retrieved1 = vec!["1", "2", "6", "7", "8"]
+        let retrieved1 = ["1", "2", "6", "7", "8"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
         // Worse ranking (relevant results later)
-        let retrieved2 = vec!["6", "7", "8", "1", "2"]
+        let retrieved2 = ["6", "7", "8", "1", "2"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        let ground_truth = vec!["1", "2", "3", "4", "5"]
+        let ground_truth = ["1", "2", "3", "4", "5"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -181,11 +181,11 @@ mod tests {
 
     #[test]
     fn test_ndcg_multi_k() {
-        let retrieved = vec!["1", "6", "2", "7", "3"]
+        let retrieved = ["1", "6", "2", "7", "3"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
-        let ground_truth = vec!["1", "2", "3", "4", "5"]
+        let ground_truth = ["1", "2", "3", "4", "5"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -203,12 +203,12 @@ mod tests {
     fn test_evaluate_multiple_queries() {
         let results = vec![
             (
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
             ),
             (
-                vec!["1", "6", "2"].iter().map(|s| s.to_string()).collect(),
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "6", "2"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
             ),
         ];
 
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_empty_results() {
         let retrieved: Vec<String> = vec![];
-        let ground_truth = vec!["1", "2", "3"]
+        let ground_truth = ["1", "2", "3"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();

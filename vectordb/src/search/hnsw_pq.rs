@@ -345,15 +345,49 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
     }
 }
 
+impl crate::search::index_traits::SerializableIndex for HnswPqIndex {
+    fn save(&self, path: &std::path::Path) -> crate::Result<()> {
+        // The codebooks travel with the codes. Without them the stored PQ codes are just
+        // centroid indices into a table that no longer exists, and every distance computed
+        // after a load would be wrong while still looking like a number.
+        crate::search::index_persistence::write_index(path, "hnsw-pq", self)
+    }
+
+    fn load(path: &std::path::Path) -> crate::Result<Self> {
+        crate::search::index_persistence::read_index(path, "hnsw-pq")
+    }
+
+    fn stats(&self) -> crate::search::index_traits::IndexStats {
+        let codes_bytes = self.compressed_vectors.len() * self.config.num_subvectors;
+        let codebook_bytes = self.config.num_subvectors
+            * self.config.num_centroids
+            * (self.dimension / self.config.num_subvectors.max(1))
+            * std::mem::size_of::<f32>();
+        let originals_bytes = self
+            .original_vectors
+            .as_ref()
+            .map(|m| m.len() * self.dimension * std::mem::size_of::<f32>())
+            .unwrap_or(0);
+
+        crate::search::index_traits::IndexStats {
+            total_vectors: self.compressed_vectors.len(),
+            index_size_bytes: codes_bytes + codebook_bytes + originals_bytes,
+            build_time_ms: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_hnsw_pq_creation() {
-        let mut config = HnswPqConfig::default();
         // For 128 dimensions, use 64 subvectors (128/64 = 2)
-        config.num_subvectors = 64;
+        let config = HnswPqConfig {
+            num_subvectors: 64,
+            ..HnswPqConfig::default()
+        };
         let index = HnswPqIndex::new(128, DistanceMetric::Euclidean, Some(config)).unwrap();
         assert_eq!(index.len(), 0);
         assert!(index.is_empty());
@@ -361,9 +395,11 @@ mod tests {
 
     #[test]
     fn test_hnsw_pq_insert_search() {
-        let mut config = HnswPqConfig::default();
         // For 64 dimensions, use 32 subvectors (64/32 = 2)
-        config.num_subvectors = 32;
+        let config = HnswPqConfig {
+            num_subvectors: 32,
+            ..HnswPqConfig::default()
+        };
         let mut index = HnswPqIndex::new(64, DistanceMetric::Euclidean, Some(config)).unwrap();
 
         // Generate training data
@@ -411,37 +447,5 @@ mod tests {
         // Should have significant compression
         assert!(stats.compression_ratio > 1.0);
         assert!(stats.total_mb() < 10.0); // 100 vectors should be < 10MB with PQ
-    }
-}
-
-impl crate::search::index_traits::SerializableIndex for HnswPqIndex {
-    fn save(&self, path: &std::path::Path) -> crate::Result<()> {
-        // The codebooks travel with the codes. Without them the stored PQ codes are just
-        // centroid indices into a table that no longer exists, and every distance computed
-        // after a load would be wrong while still looking like a number.
-        crate::search::index_persistence::write_index(path, "hnsw-pq", self)
-    }
-
-    fn load(path: &std::path::Path) -> crate::Result<Self> {
-        crate::search::index_persistence::read_index(path, "hnsw-pq")
-    }
-
-    fn stats(&self) -> crate::search::index_traits::IndexStats {
-        let codes_bytes = self.compressed_vectors.len() * self.config.num_subvectors;
-        let codebook_bytes = self.config.num_subvectors
-            * self.config.num_centroids
-            * (self.dimension / self.config.num_subvectors.max(1))
-            * std::mem::size_of::<f32>();
-        let originals_bytes = self
-            .original_vectors
-            .as_ref()
-            .map(|m| m.len() * self.dimension * std::mem::size_of::<f32>())
-            .unwrap_or(0);
-
-        crate::search::index_traits::IndexStats {
-            total_vectors: self.compressed_vectors.len(),
-            index_size_bytes: codes_bytes + codebook_bytes + originals_bytes,
-            build_time_ms: 0,
-        }
     }
 }

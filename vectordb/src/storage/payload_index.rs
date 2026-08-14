@@ -914,8 +914,8 @@ mod tests {
 
         let matching_ids = index.get_matching_ids(&filter);
         assert_eq!(matching_ids.len(), 5);
-        assert!(matching_ids.contains(&"rec_0".to_string()));
-        assert!(matching_ids.contains(&"rec_4".to_string()));
-        assert!(!matching_ids.contains(&"rec_5".to_string()));
+        assert!(matching_ids.contains("rec_0"));
+        assert!(matching_ids.contains("rec_4"));
+        assert!(!matching_ids.contains("rec_5"));
     }
 }

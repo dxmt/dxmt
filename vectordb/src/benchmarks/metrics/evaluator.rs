@@ -157,21 +157,21 @@ mod tests {
     fn test_evaluate_comprehensive() {
         let results = vec![
             (
-                vec!["1", "2", "3", "4", "5"]
+                ["1", "2", "3", "4", "5"]
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
-                vec!["1", "2", "3", "4", "5"]
+                ["1", "2", "3", "4", "5"]
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
             ),
             (
-                vec!["1", "6", "2", "7", "3"]
+                ["1", "6", "2", "7", "3"]
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
-                vec!["1", "2", "3", "4", "5"]
+                ["1", "2", "3", "4", "5"]
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
@@ -190,8 +190,8 @@ mod tests {
     fn test_evaluate_multi() {
         let results = vec![
             (
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
             ),
         ];
 
@@ -207,8 +207,8 @@ mod tests {
     fn test_generate_report() {
         let results = vec![
             (
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
             ),
         ];
 
@@ -224,8 +224,8 @@ mod tests {
     fn test_print_report() {
         let results = vec![
             (
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                vec!["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
             ),
         ];
 

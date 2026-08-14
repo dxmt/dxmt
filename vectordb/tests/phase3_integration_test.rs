@@ -277,7 +277,7 @@ fn test_phase3_elbow_method() {
         println!("    K={}: WCSS={:.2}", k, wcss);
     }
 
-    assert!(optimal_k >= 2 && optimal_k <= 7, "K should be in tested range");
+    assert!((2..=7).contains(&optimal_k), "K should be in tested range");
 
     // WCSS should decrease monotonically
     for i in 1..wcss_values.len() {

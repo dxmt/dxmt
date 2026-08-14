@@ -28,48 +28,54 @@ mod factory_tests {
 
     #[test]
     fn test_factory_invalid_hnsw_m_too_small() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_m = 2; // Invalid: too small
+        let config = AdaptiveConfig {
+            hnsw_m: 2, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
     }
 
     #[test]
     fn test_factory_invalid_hnsw_m_too_large() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_m = 128; // Invalid: too large
+        let config = AdaptiveConfig {
+            hnsw_m: 128, // Invalid: too large
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
     }
 
     #[test]
     fn test_factory_invalid_ef_construction() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_ef_construction = 50; // Invalid: too small
+        let config = AdaptiveConfig {
+            hnsw_ef_construction: 50, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
     }
 
     #[test]
     fn test_factory_valid_hnsw_params() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_m = 16; // Valid
-        config.hnsw_ef_construction = 200; // Valid
+        let config = AdaptiveConfig {
+            hnsw_m: 16,                 // Valid
+            hnsw_ef_construction: 200,  // Valid
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_ok());
     }
 
     #[test]
     fn test_factory_boundary_m_values() {
-        let mut config = AdaptiveConfig::default();
-
         // Test lower boundary
-        config.hnsw_m = 4;
+        let config = AdaptiveConfig { hnsw_m: 4, ..AdaptiveConfig::default() };
         let factory = IndexFactory::new(config.clone());
         assert!(factory.validate_config().is_ok());
 
         // Test upper boundary
-        config.hnsw_m = 64;
+        let config = AdaptiveConfig { hnsw_m: 64, ..AdaptiveConfig::default() };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_ok());
     }
@@ -112,8 +118,10 @@ mod factory_tests {
     #[test]
     fn test_factory_invalid_hnsw_m_creation() {
         use crate::types::table::IndexType;
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_m = 2; // Invalid: too small
+        let config = AdaptiveConfig {
+            hnsw_m: 2, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
 
         // Should fail with invalid M value
@@ -124,8 +132,10 @@ mod factory_tests {
     #[test]
     fn test_factory_invalid_ivf_nlist_creation() {
         use crate::types::table::IndexType;
-        let mut config = AdaptiveConfig::default();
-        config.ivf_n_lists = 50; // Invalid: too small
+        let config = AdaptiveConfig {
+            ivf_n_lists: 50, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
 
         // Should fail with invalid nlist value

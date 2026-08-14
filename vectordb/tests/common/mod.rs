@@ -1,32 +1,34 @@
-/// Common test utilities and markers
-///
-/// This module provides test categorization macros and shared utilities
-/// to make it easy to run specific subsets of tests.
+#![allow(dead_code)] // shared across test binaries; each uses a subset
 
-/// Test category markers
+// Common test utilities and markers
+//
+// This module provides test categorization macros and shared utilities
+// to make it easy to run specific subsets of tests.
+
+// Test category markers
 pub mod markers {
-    /// Marker for fast unit tests (< 100ms)
+    // Marker for fast unit tests (< 100ms)
     pub const FAST: &str = "fast";
 
-    /// Marker for unit tests
+    // Marker for unit tests
     pub const UNIT: &str = "unit";
 
-    /// Marker for integration tests
+    // Marker for integration tests
     pub const INTEGRATION: &str = "integration";
 
-    /// Marker for benchmark tests
+    // Marker for benchmark tests
     pub const BENCHMARK: &str = "benchmark";
 
-    /// Marker for property-based tests
+    // Marker for property-based tests
     pub const PROPERTY: &str = "property";
 
-    /// Marker for slow tests (> 1s)
+    // Marker for slow tests (> 1s)
     pub const SLOW: &str = "slow";
 }
 
-/// Assert helpers for floating point comparisons
+// Assert helpers for floating point comparisons
 pub mod assertions {
-    /// Assert two floats are approximately equal (within epsilon)
+    // Assert two floats are approximately equal (within epsilon)
     pub fn assert_float_eq(a: f32, b: f32, epsilon: f32) {
         assert!(
             (a - b).abs() < epsilon,
@@ -37,7 +39,7 @@ pub mod assertions {
         );
     }
 
-    /// Assert two vectors are approximately equal (within epsilon)
+    // Assert two vectors are approximately equal (within epsilon)
     pub fn assert_vec_eq(a: &[f32], b: &[f32], epsilon: f32) {
         assert_eq!(
             a.len(),
@@ -59,7 +61,7 @@ pub mod assertions {
         }
     }
 
-    /// Assert recall is above threshold
+    // Assert recall is above threshold
     pub fn assert_recall(recall: f64, min_threshold: f64) {
         assert!(
             recall >= min_threshold,
@@ -70,11 +72,11 @@ pub mod assertions {
     }
 }
 
-/// Performance measurement helpers
+// Performance measurement helpers
 pub mod perf {
     use std::time::{Duration, Instant};
 
-    /// Measure execution time of a function
+    // Measure execution time of a function
     pub fn measure<F, R>(f: F) -> (R, Duration)
     where
         F: FnOnce() -> R,
@@ -85,7 +87,7 @@ pub mod perf {
         (result, duration)
     }
 
-    /// Measure async execution time
+    // Measure async execution time
     pub async fn measure_async<F, Fut, R>(f: F) -> (R, Duration)
     where
         F: FnOnce() -> Fut,
@@ -97,12 +99,12 @@ pub mod perf {
         (result, duration)
     }
 
-    /// Calculate QPS from operations and duration
+    // Calculate QPS from operations and duration
     pub fn calculate_qps(operations: usize, duration: Duration) -> f64 {
         operations as f64 / duration.as_secs_f64()
     }
 
-    /// Format duration in human-readable format
+    // Format duration in human-readable format
     pub fn format_duration(duration: Duration) -> String {
         let micros = duration.as_micros();
         if micros < 1_000 {
@@ -115,9 +117,9 @@ pub mod perf {
     }
 }
 
-/// Statistics helpers
+// Statistics helpers
 pub mod stats {
-    /// Calculate mean of a slice
+    // Calculate mean of a slice
     pub fn mean(values: &[f64]) -> f64 {
         if values.is_empty() {
             0.0
@@ -126,7 +128,7 @@ pub mod stats {
         }
     }
 
-    /// Calculate median of a slice (requires sorted input)
+    // Calculate median of a slice (requires sorted input)
     pub fn median(values: &mut [f64]) -> f64 {
         if values.is_empty() {
             return 0.0;
@@ -135,14 +137,14 @@ pub mod stats {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mid = values.len() / 2;
 
-        if values.len() % 2 == 0 {
+        if values.len().is_multiple_of(2) {
             (values[mid - 1] + values[mid]) / 2.0
         } else {
             values[mid]
         }
     }
 
-    /// Calculate percentile (requires sorted input)
+    // Calculate percentile (requires sorted input)
     pub fn percentile(values: &[f64], p: f64) -> f64 {
         if values.is_empty() {
             return 0.0;
@@ -152,7 +154,7 @@ pub mod stats {
         values[idx.min(values.len() - 1)]
     }
 
-    /// Calculate standard deviation
+    // Calculate standard deviation
     pub fn stddev(values: &[f64]) -> f64 {
         let m = mean(values);
         let variance = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / values.len() as f64;

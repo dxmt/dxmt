@@ -100,6 +100,12 @@ pub struct ExpectedPerformance {
 
 pub struct IntelligentIndexSelector;
 
+impl Default for IntelligentIndexSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntelligentIndexSelector {
     pub fn new() -> Self {
         Self

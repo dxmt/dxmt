@@ -117,6 +117,12 @@ pub struct QueryPatternMonitor {
     window_size: usize,
 }
 
+impl Default for QueryPatternMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueryPatternMonitor {
     pub fn new() -> Self {
         Self {
@@ -199,6 +205,12 @@ impl QueryPatternMonitor {
 pub struct IndexOptimizer {
     cost_model: CostModel,
     performance_history: HashMap<IndexType, PerformanceMetrics>,
+}
+
+impl Default for IndexOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IndexOptimizer {
@@ -353,6 +365,12 @@ impl IndexOptimizer {
 /// Data distribution analyzer
 pub struct DataDistributionAnalyzer {
     samples: Vec<Vec<f32>>,
+}
+
+impl Default for DataDistributionAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DataDistributionAnalyzer {

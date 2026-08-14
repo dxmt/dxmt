@@ -45,7 +45,7 @@ fn detect_cpu() -> CpuInfo {
         let vendor = get_cpu_vendor();
 
         // 获取CPU家族、型号、步进
-        let cpuid_result = unsafe { __cpuid(1) };
+        let cpuid_result = __cpuid(1);
         let family = ((cpuid_result.eax >> 8) & 0xf) + ((cpuid_result.eax >> 20) & 0xff);
         let model = ((cpuid_result.eax >> 4) & 0xf) + ((cpuid_result.eax >> 12) & 0xf0);
         let stepping = cpuid_result.eax & 0xf;
@@ -102,7 +102,7 @@ fn detect_cpu() -> CpuInfo {
 fn get_cpu_vendor() -> String {
     use std::arch::x86_64::__cpuid;
 
-    let result = unsafe { __cpuid(0) };
+    let result = __cpuid(0);
     let mut vendor = [0u8; 12];
 
     vendor[0..4].copy_from_slice(&result.ebx.to_le_bytes());

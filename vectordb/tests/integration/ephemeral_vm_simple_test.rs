@@ -1,7 +1,7 @@
-/// Simplified Ephemeral VM Lifecycle Testing
-///
-/// Tests basic VM lifecycle scenarios with current API
-/// Note: Full recovery and snapshot tests require additional infrastructure
+// Simplified Ephemeral VM Lifecycle Testing
+//
+// Tests basic VM lifecycle scenarios with current API
+// Note: Full recovery and snapshot tests require additional infrastructure
 
 use dxmt_vectordb::{
     config::{StorageConfig, MemoryConfig},
@@ -204,7 +204,7 @@ async fn test_fast_data_loading() {
 
     let results = storage.search("recovery_test", query).await.unwrap();
 
-    assert!(results.hits.len() > 0, "Should return results after loading");
+    assert!(!results.hits.is_empty(), "Should return results after loading");
 
     // Load should be reasonably fast (< 120 seconds for 1K vectors in debug builds)
     // Note: This includes both insertion and index building time
@@ -255,7 +255,7 @@ async fn test_index_consistency_after_rebuild() {
 
         // Query multiple test vectors
         let mut all_results = Vec::new();
-        for i in vec![0, 50, 100, 150] {
+        for i in [0, 50, 100, 150] {
             let query = SearchQuery {
                 vector: vectors[i].clone(),
                 top_k: 10,
@@ -293,7 +293,7 @@ async fn test_index_consistency_after_rebuild() {
 
         // Same queries
         let mut all_results = Vec::new();
-        for i in vec![0, 50, 100, 150] {
+        for i in [0, 50, 100, 150] {
             let query = SearchQuery {
                 vector: vectors[i].clone(),
                 top_k: 10,

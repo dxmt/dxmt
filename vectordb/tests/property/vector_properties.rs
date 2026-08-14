@@ -1,6 +1,6 @@
-/// Property-based tests for vector operations
-///
-/// Uses proptest to verify mathematical properties hold across random inputs
+// Property-based tests for vector operations
+//
+// Uses proptest to verify mathematical properties hold across random inputs
 
 use proptest::prelude::*;
 use dxmt_vectordb::types::{

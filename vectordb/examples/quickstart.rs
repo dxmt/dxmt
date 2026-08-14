@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Similarity search
     println!("4. Performing similarity search...");
-    let query_vec = normalize(&vec![0.15, 0.25, 0.35, 0.45]);
+    let query_vec = normalize(&[0.15, 0.25, 0.35, 0.45]);
     let results = storage.search(
         "quickstart_embeddings",
         SearchQuery {
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Unfiltered search (filters require Filter type from record module)
     println!("5. Performing another search...");
-    let query_vec2 = normalize(&vec![0.35, 0.15, 0.45, 0.25]);
+    let query_vec2 = normalize(&[0.35, 0.15, 0.45, 0.25]);
     let filtered = storage.search(
         "quickstart_embeddings",
         SearchQuery {

@@ -1,22 +1,22 @@
-/// Comprehensive search quality and correctness tests for DXMT VectorDB.
-///
-/// Test design inspired by:
-/// - Qdrant's filterable_hnsw_test.rs (filtered recall with varying selectivity)
-/// - Qdrant's exact_search_test.rs (brute-force vs HNSW regression guard)
-/// - Chroma's test_multithreaded.py (concurrent add/query interleaving)
-/// - Chroma's test_api.py (CRUD lifecycle correctness)
-///
-/// Coverage areas not in e2e_recall_test.rs:
-/// 1. HNSW vs brute-force exact regression (same data, results must match)
-/// 2. Filtered recall at varying selectivity (correctness + recall)
-/// 3. Filter correctness (every result satisfies the filter)
-/// 4. Concurrent inserts + queries (data-race detection)
-/// 5. Edge cases: empty table, top_k=0, top_k > N, exact-match self-retrieval
-/// 6. Distance metric ordering (Cosine vs Euclidean rank different vectors differently)
-/// 7. CRUD lifecycle: insert → search → delete → re-insert with different vector
-/// 8. Higher ef_search yields equal-or-better recall (monotonicity)
-/// 9. Batch insert: all records immediately visible after the await
-/// 10. Multi-condition AND filter
+// Comprehensive search quality and correctness tests for DXMT VectorDB.
+//
+// Test design inspired by:
+// - Qdrant's filterable_hnsw_test.rs (filtered recall with varying selectivity)
+// - Qdrant's exact_search_test.rs (brute-force vs HNSW regression guard)
+// - Chroma's test_multithreaded.py (concurrent add/query interleaving)
+// - Chroma's test_api.py (CRUD lifecycle correctness)
+//
+// Coverage areas not in e2e_recall_test.rs:
+// 1. HNSW vs brute-force exact regression (same data, results must match)
+// 2. Filtered recall at varying selectivity (correctness + recall)
+// 3. Filter correctness (every result satisfies the filter)
+// 4. Concurrent inserts + queries (data-race detection)
+// 5. Edge cases: empty table, top_k=0, top_k > N, exact-match self-retrieval
+// 6. Distance metric ordering (Cosine vs Euclidean rank different vectors differently)
+// 7. CRUD lifecycle: insert → search → delete → re-insert with different vector
+// 8. Higher ef_search yields equal-or-better recall (monotonicity)
+// 9. Batch insert: all records immediately visible after the await
+// 10. Multi-condition AND filter
 
 use std::collections::HashSet;
 use std::sync::Arc;

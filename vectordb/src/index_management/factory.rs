@@ -181,16 +181,20 @@ mod tests {
 
     #[test]
     fn test_invalid_hnsw_m() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_m = 2; // Invalid: too small
+        let config = AdaptiveConfig {
+            hnsw_m: 2, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
     }
 
     #[test]
     fn test_invalid_ef_construction() {
-        let mut config = AdaptiveConfig::default();
-        config.hnsw_ef_construction = 50; // Invalid: too small
+        let config = AdaptiveConfig {
+            hnsw_ef_construction: 50, // Invalid: too small
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_err());
     }

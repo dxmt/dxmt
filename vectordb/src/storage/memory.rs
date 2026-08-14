@@ -327,130 +327,6 @@ impl Default for MemoryStorage {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{table::TableConfig};
-use crate::SearchQuery;
-use crate::CreateRecordRequest;
-use crate::types::{DistanceMetric, table::IndexType};
-
-
-    fn create_test_table_config() -> TableConfig {
-        TableConfig {
-            name: "test_table".to_string(),
-            dimension: 3,
-            distance_metric: DistanceMetric::Cosine,
-            description: Some("Test table".to_string()),
-            index_type: Some(IndexType::BruteForce),
-            text_fields: None,
-            enable_full_text_search: false,
-            memory_optimization: None,
-            payload_schema: None,
-            schema_version: 1,
-            named_vectors: None,
-        }
-    }
-
-    #[test]
-    fn test_table_creation() -> Result<(), Box<dyn std::error::Error>> {
-        let storage = MemoryStorage::new();
-        let config = create_test_table_config();
-
-        let table = storage.create_table(config)?;
-        assert_eq!(table.name, "test_table");
-        assert_eq!(table.dimension, 3);
-        Ok(())
-    }
-
-    #[test]
-    fn test_duplicate_table_creation() -> Result<(), Box<dyn std::error::Error>> {
-        let storage = MemoryStorage::new();
-        let config = create_test_table_config();
-
-        storage.create_table(config.clone())?;
-        let result = storage.create_table(config);
-
-        assert!(matches!(result, Err(crate::Error::TableAlreadyExists(_))));
-        Ok(())
-    }
-
-    #[test]
-    fn test_record_operations() -> Result<(), Box<dyn std::error::Error>> {
-        let storage = MemoryStorage::new();
-        let config = create_test_table_config();
-
-        storage.create_table(config)?;
-
-        let request = CreateRecordRequest {
-            id: "test_record".to_string().into(),
-            vector: vec![0.1, 0.2, 0.3],
-            sparse_vector: None,
-            payload: Some(serde_json::json!({"category": "test"})),
-            named_vectors: None,
-        };
-
-        // 插入记录
-        let ids = storage.insert_records("test_table", vec![request])?;
-        assert_eq!(ids.len(), 1);
-
-        // 获取记录
-        let record = storage.get_record("test_table", &ids[0])?;
-        assert_eq!(record.id.to_string(), "test_record");
-        assert_eq!(record.vector, vec![0.1, 0.2, 0.3]);
-
-        // 删除记录
-        let deleted = storage.delete_records("test_table", &ids)?;
-        assert_eq!(deleted, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn test_vector_search() -> Result<(), Box<dyn std::error::Error>> {
-        let storage = MemoryStorage::new();
-        let config = create_test_table_config();
-
-        storage.create_table(config)?;
-
-        // 插入测试数据
-        let requests = vec![
-            CreateRecordRequest {
-                id: "record1".to_string().into(),
-                vector: vec![1.0, 0.0, 0.0],
-                sparse_vector: None,
-                payload: Some(serde_json::json!({"category": "A"})),
-                named_vectors: None,
-            },
-            CreateRecordRequest {
-                id: "record2".to_string().into(),
-                vector: vec![0.0, 1.0, 0.0],
-                sparse_vector: None,
-                payload: Some(serde_json::json!({"category": "B"})),
-                named_vectors: None,
-            },
-        ];
-
-        storage.insert_records("test_table", requests)?;
-
-        // 搜索
-        let query = SearchQuery {
-            vector: vec![1.0, 0.0, 0.0],
-            top_k: 1,
-            filter: None,
-            with_payload: true,
-            with_vector: false,
-            limit: 1,
-            include_metadata: true,
-            ..Default::default()
-        };
-
-        let result = storage.search("test_table", query)?;
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].id.to_string(), "record1");
-        Ok(())
-    }
-}
-
 // Implement the _Storage trait for MemoryStorage
 #[async_trait]
 impl _Storage for MemoryStorage {
@@ -565,6 +441,130 @@ impl _Storage for MemoryStorage {
             table: snapshot.table,
             records: record_map,
         });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{table::TableConfig};
+use crate::SearchQuery;
+use crate::CreateRecordRequest;
+use crate::types::{DistanceMetric, table::IndexType};
+
+
+    fn create_test_table_config() -> TableConfig {
+        TableConfig {
+            name: "test_table".to_string(),
+            dimension: 3,
+            distance_metric: DistanceMetric::Cosine,
+            description: Some("Test table".to_string()),
+            index_type: Some(IndexType::BruteForce),
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        }
+    }
+
+    #[test]
+    fn test_table_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = MemoryStorage::new();
+        let config = create_test_table_config();
+
+        let table = storage.create_table(config)?;
+        assert_eq!(table.name, "test_table");
+        assert_eq!(table.dimension, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_table_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = MemoryStorage::new();
+        let config = create_test_table_config();
+
+        storage.create_table(config.clone())?;
+        let result = storage.create_table(config);
+
+        assert!(matches!(result, Err(crate::Error::TableAlreadyExists(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_record_operations() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = MemoryStorage::new();
+        let config = create_test_table_config();
+
+        storage.create_table(config)?;
+
+        let request = CreateRecordRequest {
+            id: "test_record".to_string(),
+            vector: vec![0.1, 0.2, 0.3],
+            sparse_vector: None,
+            payload: Some(serde_json::json!({"category": "test"})),
+            named_vectors: None,
+        };
+
+        // 插入记录
+        let ids = storage.insert_records("test_table", vec![request])?;
+        assert_eq!(ids.len(), 1);
+
+        // 获取记录
+        let record = storage.get_record("test_table", &ids[0])?;
+        assert_eq!(record.id.to_string(), "test_record");
+        assert_eq!(record.vector, vec![0.1, 0.2, 0.3]);
+
+        // 删除记录
+        let deleted = storage.delete_records("test_table", &ids)?;
+        assert_eq!(deleted, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_search() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = MemoryStorage::new();
+        let config = create_test_table_config();
+
+        storage.create_table(config)?;
+
+        // 插入测试数据
+        let requests = vec![
+            CreateRecordRequest {
+                id: "record1".to_string(),
+                vector: vec![1.0, 0.0, 0.0],
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"category": "A"})),
+                named_vectors: None,
+            },
+            CreateRecordRequest {
+                id: "record2".to_string(),
+                vector: vec![0.0, 1.0, 0.0],
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"category": "B"})),
+                named_vectors: None,
+            },
+        ];
+
+        storage.insert_records("test_table", requests)?;
+
+        // 搜索
+        let query = SearchQuery {
+            vector: vec![1.0, 0.0, 0.0],
+            top_k: 1,
+            filter: None,
+            with_payload: true,
+            with_vector: false,
+            limit: 1,
+            include_metadata: true,
+            ..Default::default()
+        };
+
+        let result = storage.search("test_table", query)?;
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].id.to_string(), "record1");
         Ok(())
     }
 }

@@ -1,12 +1,12 @@
-/// Demonstration of Chinese word segmentation using Jieba tokenizer with Tantivy
-///
-/// This example shows how to:
-/// 1. Create a custom Jieba tokenizer
-/// 2. Register it with Tantivy
-/// 3. Index Chinese text
-/// 4. Search Chinese text with proper word segmentation
-///
-/// Run with: cargo run --example chinese_tokenizer_demo --features text-bm25
+// Demonstration of Chinese word segmentation using Jieba tokenizer with Tantivy
+//
+// This example shows how to:
+// 1. Create a custom Jieba tokenizer
+// 2. Register it with Tantivy
+// 3. Index Chinese text
+// 4. Search Chinese text with proper word segmentation
+//
+// Run with: cargo run --example chinese_tokenizer_demo --features text-bm25
 
 use tantivy::schema::{Schema, TextFieldIndexing, TextOptions, IndexRecordOption, Value};
 use tantivy::{doc, Index, IndexWriter, TantivyDocument};

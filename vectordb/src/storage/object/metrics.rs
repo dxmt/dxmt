@@ -183,8 +183,8 @@ impl TierMetrics {
     }
 
     pub fn update_avg_object_size(&mut self) {
-        if self.objects_stored > 0 {
-            self.avg_object_size = self.total_storagebytes / self.objects_stored
+        if let Some(avg) = self.total_storagebytes.checked_div(self.objects_stored) {
+            self.avg_object_size = avg
         }
     }
 }

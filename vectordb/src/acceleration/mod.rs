@@ -101,6 +101,12 @@ pub struct PerformanceOptimizer {
     memory_optimizer: Arc<MemoryOptimizer>,
 }
 
+impl Default for PerformanceOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceOptimizer {
     pub fn new() -> Self {
         let capabilities = HardwareCapabilities::detect();

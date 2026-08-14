@@ -5,6 +5,12 @@ pub struct Optimizer {
     _private: (),
 }
 
+impl Default for Optimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Optimizer {
     pub fn new() -> Self {
         Self { _private: () }

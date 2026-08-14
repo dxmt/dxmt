@@ -224,7 +224,7 @@ async fn test_tier_promotion_policy() {
     for hit in result.hits.iter().take(3) {
         let hotness = policy.get_hotness_score(&hit.id);
         println!("Vector {} hotness: {:.3}", hit.id, hotness);
-        assert!(hotness >= 0.0 && hotness <= 1.0);
+        assert!((0.0..=1.0).contains(&hotness));
     }
 }
 

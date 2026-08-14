@@ -91,12 +91,12 @@ impl PooledVector {
     }
 
     /// Get a reference to the vector
-    pub fn as_ref(&self) -> &Vec<f32> {
+    pub fn vector(&self) -> &Vec<f32> {
         self.vector.as_ref().unwrap()
     }
 
     /// Get a mutable reference to the vector
-    pub fn as_mut(&mut self) -> &mut Vec<f32> {
+    pub fn vector_mut(&mut self) -> &mut Vec<f32> {
         self.vector.as_mut().unwrap()
     }
 

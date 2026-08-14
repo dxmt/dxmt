@@ -1,7 +1,7 @@
-/// Simplified Tiered Storage QA Tests
-///
-/// Tests basic storage functionality for Memory tier
-/// Note: Full tiered storage tests require API updates for new SearchQuery interface
+// Simplified Tiered Storage QA Tests
+//
+// Tests basic storage functionality for Memory tier
+// Note: Full tiered storage tests require API updates for new SearchQuery interface
 
 use dxmt_vectordb::{
     config::{StorageConfig, MemoryConfig},
@@ -100,7 +100,7 @@ async fn test_basic_insert_and_search() {
 
     // Verify
     assert!(
-        results.hits.len() > 0,
+        !results.hits.is_empty(),
         "Should return results"
     );
 
@@ -259,7 +259,7 @@ async fn test_data_persistence() {
         let results = storage.search("persist_test", query).await.unwrap();
 
         assert!(
-            results.hits.len() > 0,
+            !results.hits.is_empty(),
             "Iteration {}: Should return results",
             iteration
         );

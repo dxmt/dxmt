@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_wal_operation_insert() {
         let record = CreateRecordRequest {
-            id: "test_1".to_string().into(),
+            id: "test_1".to_string(),
             vector: vec![0.1; 128],
             sparse_vector: None,
             payload: None,
