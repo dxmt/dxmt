@@ -120,6 +120,19 @@ load 失败再从 WAL 重建。
 
 体量小、有测试、无使用者。接线成本低，等有实测瓶颈再接。
 
+### 3.6 已接线（2026-08-14）：Swagger / GraphQL / WebSocket
+
+原先 `create_app()` 写死 `create_app_with_features(false, false, false)`，而
+`create_app_with_features` 在全仓库没有任何传 `true` 的调用者——三个 API 层都编译进了二进制
+但运行时 404（curl 实测）。`api-swagger` / `api-graphql` 这两个 cargo feature 只控制编译，
+不控制暴露，README 里"默认可用 Swagger UI"是错的。
+
+现在 `main.rs` 加了 `--swagger` / `--graphql` / `--websocket` 三个开关，**默认仍为关闭**：
+每一个都扩大暴露面，要不要默认打开是产品决定，不该由这次清理顺手改掉。
+
+实测路径：Swagger `GET /api/docs`（spec 在 `/api/docs/openapi.json`）、GraphQL
+`POST /graphql`、WebSocket `GET /ws`。
+
 ---
 
 ## 4. 从已删代码中回收的设计

@@ -32,7 +32,18 @@ Verify it's up:
 curl http://localhost:9999/health
 ```
 
-With the default features, Swagger UI is available for browsing the REST API.
+Swagger, GraphQL and WebSocket are compiled in by default but not served unless asked for —
+each one widens the exposed surface, so opt in per process:
+
+```bash
+./target/release/vectordb serve --swagger --graphql --websocket
+```
+
+| Flag          | Endpoint                                            |
+| ------------- | --------------------------------------------------- |
+| `--swagger`   | `GET /api/docs`, spec at `/api/docs/openapi.json`    |
+| `--graphql`   | `POST /graphql`                                      |
+| `--websocket` | `GET /ws` (upgrade)                                  |
 
 ## Architecture
 

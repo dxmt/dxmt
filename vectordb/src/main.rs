@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tracing::info;
 
 use dxmt_vectordb::{
-	api::{create_app, create_app_with_cluster, simple_core::create_simple_app},
+	api::{create_app_with_cluster, create_app_with_features, simple_core::create_simple_app},
 	config::AppConfig,
 	Result,
 };
@@ -33,6 +33,15 @@ enum Commands {
 		/// Memory limit for simple mode in MB
 		#[arg(long, default_value = "1024", help = "Memory limit for caching in simple mode")]
 		memory_limit: usize,
+		/// Serve the Swagger UI (standard mode only; requires the `api-swagger` feature)
+		#[arg(long)]
+		swagger: bool,
+		/// Serve the GraphQL endpoint at /graphql (standard mode only)
+		#[arg(long)]
+		graphql: bool,
+		/// Serve the WebSocket endpoint (standard mode only)
+		#[arg(long)]
+		websocket: bool,
 	},
 }
 
@@ -43,7 +52,7 @@ async fn main() -> Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::Serve { host, port, simple, memory_limit } => {
+		Commands::Serve { host, port, simple, memory_limit, swagger, graphql, websocket } => {
 			let bind_addr: SocketAddr = format!("{}:{}", host, port)
 				.parse()
 				.expect("Invalid bind address");
@@ -75,8 +84,21 @@ async fn main() -> Result<()> {
 				let app = if config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false) {
 					create_app_with_cluster(&config).await?
 				} else {
-					create_app().await?
+					// These are off unless asked for: each one widens the exposed
+					// surface, and `create_app()` has always passed false for all three.
+					create_app_with_features(swagger, graphql, websocket).await?
 				};
+
+				info!("REST API mounted under /api/v1; /health and /status are at the root");
+				if swagger {
+					info!("  Swagger UI     GET  /api/docs  (spec at /api/docs/openapi.json)");
+				}
+				if graphql {
+					info!("  GraphQL        POST /graphql");
+				}
+				if websocket {
+					info!("  WebSocket      GET  /ws  (upgrade)");
+				}
 
 				info!("VectorDB server listening on {}", bind_addr);
 

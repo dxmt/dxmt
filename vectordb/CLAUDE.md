@@ -153,9 +153,15 @@ Tests: `tests/wal_persistence_test.rs`, plus `scripts/run_wal_tests.sh`
 2. **Standard REST** (`src/api/handlers.rs`) — full table/record/search API, mounted under
    `/api/v1`. Only `/health`, `/health/metrics` and `/status` are at the root. The Python SDK
    sets `base_url` to `{host}:{port}/api/v1`, so it talks to standard mode, **not** simple mode.
-3. **GraphQL** (`src/api/graphql.rs`, feature: `api-graphql`)
-4. **WebSocket** (`src/api/websocket.rs`)
-5. **Swagger** — available with feature `api-swagger` (enabled by default)
+3. **GraphQL** (`src/api/graphql.rs`, feature: `api-graphql`) — `POST /graphql`
+4. **WebSocket** (`src/api/websocket.rs`) — `GET /ws`
+5. **Swagger** (feature: `api-swagger`) — `GET /api/docs`, spec at `/api/docs/openapi.json`
+
+The `api-swagger` / `api-graphql` cargo features control **compilation only**. Serving them is
+a separate, runtime decision: `create_app()` used to hardcode
+`create_app_with_features(false, false, false)`, so all three were compiled into the binary and
+unreachable — verified by curl returning 404. `main.rs` now passes `--swagger` / `--graphql` /
+`--websocket` through. They stay off by default; each widens the exposed surface.
 
 There is no gRPC. `api/grpc.rs` was never declared by `api/mod.rs`, so it never compiled;
 it has been removed. `api/{batch_operations,streaming_search,cross_modal_batch,rate_limiter}.rs`
