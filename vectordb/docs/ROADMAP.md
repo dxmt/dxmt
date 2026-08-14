@@ -518,7 +518,7 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [x] W7 — 快照的运维缺口 — 完成于 <SHA7>
+### [x] W7 — 快照的运维缺口 — 完成于 474a986
 
 **前置**：W2（已完成）。这几条是 W2 交付后剩下的口子，不做的话快照在生产里不好用。
 
