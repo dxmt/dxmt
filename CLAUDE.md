@@ -59,8 +59,12 @@ and has no `/api/v1` at all, so nothing will connect.
   no-op silently. Treat these targets as plain `cargo test` / `cargo bench`.
 - **CI does not run.** The workflows in `vectordb/.github/workflows/` invoke `cargo` at the
   checkout root with no `working-directory:`, and GitHub Actions only reads `.github/` at the
-  true repo root — so they neither trigger nor would pass now that the crate is nested. Do not
-  assume a change was validated by CI; run `make verify` locally.
+  true repo root — so they neither trigger nor would pass now that the crate is nested.
+- **`make verify` does not pass, and never has.** It is fmt + `clippy -D warnings` + test, and
+  clippy reports 154 errors on the current tree (161 on the original import commit `1668a8b`).
+  The working gate is `cargo test --lib`. Worse, its first step is `cargo fmt` — which writes,
+  not `--check` — and the repo has never been fmt-clean, so running it reformats 208 files and
+  buries whatever you actually changed. Check with `cargo fmt -- --check` instead.
 - **Half the module names do not describe what runs.** `vectordb/docs/ROADMAP.md` is the
   authority on which code the server actually reaches; read it before trusting a module name,
   a doc claim, or a passing test as evidence that a feature works. The headline: records live

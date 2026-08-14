@@ -162,8 +162,16 @@ commit 的说明。
 
 ## 6. 构建与验证的注意事项
 
+- **`make verify` 通不过，从来没通过过。** 它是 fmt + `clippy -D warnings` + test，而
+  `cargo clippy --all-targets -- -D warnings` 在原始导入 commit `1668a8b` 上报 **161 个错误**，
+  当前是 **154 个**。所以它不能当门禁用。目前实际可用的门禁是 `cargo test --lib`
+  （413 passed / 0 failed）。把 clippy 清零是一件独立的机械工作，值得单独做一个 commit。
+- **`make verify` 会改你的文件。** 它的第一步是 `make fmt`，跑的是 `cargo fmt`（写入，不是
+  `--check`）。仓库从未 fmt 干净过，所以这一步会一次性重排 **208 个文件**
+  （+10,530 / −7,333），把任何真实改动淹掉。审阅前先 `cargo fmt -- --check` 看一眼，
+  或者单独提一个纯格式化 commit。
 - `.github/workflows/` 在 `vectordb/` 下，而 GitHub Actions 只读真实仓库根的 `.github/`，
-  **CI 不会触发**。合并前必须本地 `make verify`。
+  **CI 不会触发**。所以上面两条不会有任何自动化替你发现。
 - `make test` / `make test-integ` / `make bench` 各自追加了一个 `python3 scripts/...` 步骤，
   脚本已不在树里，且被 `|| true` 吞掉，静默 no-op。等同于 `cargo test` / `cargo bench`。
 - 唯一注册的 bench 目标是 `cargo bench --bench filter_performance_bench --features text-bm25`。
