@@ -186,9 +186,12 @@ Full-text search endpoints (requires `text-bm25` feature):
 pub struct IndexWrapper(pub Arc<RwLock<Box<dyn VectorIndex>>>);
 ```
 
-**Channel-based insertion.** Named for eliminating lock contention between *callers*, which it
-does — but the background task still takes `tables.write()` once per request and holds it for
-every record in that request, so a large batch blocks all readers for its duration. Roadmap W6.
+**Channel-based insertion, in two phases.** The background task holds `tables.write()` only
+long enough to update the record map and the payload/sparse indexes, then releases it and does
+the expensive vector-index insertion through `IndexWrapper`'s own lock. Holding it across the
+whole batch used to block every reader — 277s for a 5,000-record request, measured. Requests are
+still serialised against each other, so ordering and visibility are unchanged: a record becomes
+searchable when its index insert lands, because search goes through the index.
 
 ```rust
 // src/storage/intelligent_indexed_storage.rs

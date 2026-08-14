@@ -184,10 +184,6 @@ These are real gaps, not roadmap aspirations:
   come up empty — but back up `data/wal/snapshot/` like the data it is.
 - **One fsync per write batch.** Durability is paid for synchronously; there is no group
   commit yet.
-- **A batch insert blocks every reader for its whole duration.** The insertion task takes the
-  tables write lock once and inserts the entire request into the index under it, so a
-  5,000-record call makes even `GET /api/v1/tables` wait until it finishes — minutes, on a debug
-  build. Keep batches small until this is fixed (roadmap W6).
 - **`POST /api/v1/tables/{name}/records` caps a request at 10,000 records** and returns
   `Validation failed` above that.
 - **Object-storage tier not on the write path.** `IntelligentIndexedStorage` holds a

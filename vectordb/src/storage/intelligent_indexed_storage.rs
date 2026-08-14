@@ -54,6 +54,11 @@ struct TableSnapshot {
     has_index: bool,
 }
 
+/// 一条待写入索引的记录：id、稠密向量，以及可选的命名向量。
+///
+/// 索引写入在 `tables` 写锁之外进行，所以要先把这些从表数据里摘出来。
+type PendingIndexInsert = (RecordId, DenseVector, Option<HashMap<String, DenseVector>>);
+
 /// 插入请求（用于 channel-based 架构）
 struct InsertRequest {
     table_name: String,
@@ -269,157 +274,167 @@ async fn insertion_processor(
     while let Some(req) = rx.recv().await {
         let start_time = std::time::Instant::now();
 
-        // 处理插入请求（单线程，无锁竞争）
+        // Two phases, and the split is the point. Phase one holds the tables write lock just
+        // long enough to update the record map and the payload/sparse indexes — cheap, bounded
+        // work. Phase two does the expensive part, inserting into the vector index, with the
+        // lock released.
+        //
+        // Holding the lock across the whole batch is what this replaces: a 5,000-record request
+        // blocked every reader, `GET /tables` included, until the last vector was in the graph.
+        // Requests are still serialised against each other — this task processes one at a time —
+        // so nothing about ordering or visibility changes. Records only become searchable once
+        // the index insert lands, exactly as before, because search goes through the index.
         let result = async {
-            let mut tables = tables.write().await;
+            let (index, named_indexes, table_meta, to_remove, to_insert, records) = {
+                let mut tables = tables.write().await;
 
-            let table_data = tables
-                .get_mut(&req.table_name)
-                .ok_or_else(|| crate::Error::TableNotFound(req.table_name.clone()))?;
+                let table_data = tables
+                    .get_mut(&req.table_name)
+                    .ok_or_else(|| crate::Error::TableNotFound(req.table_name.clone()))?;
 
-            let expected_dim = table_data.table.dimension;
-            let mut records = Vec::new();
-            let mut new_records_count = 0; // Track actual new records for count update
+                let expected_dim = table_data.table.dimension;
+                let mut records = Vec::new();
+                let mut to_remove: Vec<RecordId> = Vec::new();
+                let mut to_insert: Vec<PendingIndexInsert> = Vec::new();
+                let mut new_records_count = 0;
 
-            for request in req.records {
-                let record_id = request.id.clone();
+                for request in req.records {
+                    let record_id = request.id.clone();
 
-                // Validate vector dimension
-                if !request.vector.is_empty() && request.vector.len() != expected_dim {
-                    return Err(crate::Error::DimensionMismatch {
-                        expected: expected_dim,
-                        actual: request.vector.len(),
-                    });
-                }
+                    if !request.vector.is_empty() && request.vector.len() != expected_dim {
+                        return Err(crate::Error::DimensionMismatch {
+                            expected: expected_dim,
+                            actual: request.vector.len(),
+                        });
+                    }
 
-                // 🔄 UPSERT Logic: Check if record exists and remove old vector first
-                let (is_update, existing_created_at, existing_version) =
-                    if let Some(existing) = table_data.records.get(&record_id) {
-                        (true, existing.created_at, existing.version + 1)
+                    // UPSERT: an existing id keeps its created_at and bumps its version, and its
+                    // old vector has to leave the index before the new one arrives.
+                    let (is_update, existing_created_at, existing_version) =
+                        if let Some(existing) = table_data.records.get(&record_id) {
+                            (true, existing.created_at, existing.version + 1)
+                        } else {
+                            (false, chrono::Utc::now(), 1)
+                        };
+
+                    if is_update {
+                        to_remove.push(record_id.clone());
                     } else {
-                        (false, chrono::Utc::now(), 1)
+                        new_records_count += 1;
+                    }
+
+                    let record = Record {
+                        id: record_id.clone(),
+                        vector: request.vector.clone(),
+                        sparse_vector: request.sparse_vector.clone(),
+                        named_vectors: request.named_vectors.clone(),
+                        payload: request.payload.unwrap_or_else(|| serde_json::json!({})),
+                        created_at: existing_created_at,
+                        updated_at: chrono::Utc::now(),
+                        version: existing_version,
+                        status: crate::types::RecordStatus::Active,
                     };
 
-                if is_update {
-                    // Delete old vector from index before adding new one
-                    if let Err(e) = table_data.index.remove(&record_id).await {
-                        warn!("Failed to remove old vector for {}: {}", record_id, e);
-                    }
-
-                    // Delete old full-text document if full-text search is enabled
-                    #[cfg(feature = "text-bm25")]
-                    if let Some(engine) = &table_data.full_text_engine {
-                        if let Err(e) = engine.delete_document(&record_id).await {
-                            warn!(
-                                "Failed to remove old full-text document for {}: {}",
-                                record_id, e
-                            );
+                    if let Some(sv) = &record.sparse_vector {
+                        if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
+                            warn!("Failed to index sparse vector for {}: {}", record_id, e);
                         }
                     }
-                } else {
-                    // This is a new record, increment counter
-                    new_records_count += 1;
+
+                    table_data
+                        .payload_index
+                        .insert_record(&record_id, &record.payload);
+                    table_data.records.insert(record_id.clone(), record.clone());
+
+                    to_insert.push((record_id, request.vector, request.named_vectors));
+                    records.push(record);
                 }
 
-                // 插入到稠密向量索引
-                table_data
-                    .index
-                    .insert(record_id.clone(), request.vector.clone())
-                    .await?;
+                table_data.table.record_count += new_records_count;
+                table_data.table.updated_at = chrono::Utc::now();
 
-                // Insert into named vector indexes if present
-                if let (Some(ref named_indexes), Some(ref named_vecs)) =
-                    (&table_data.named_indexes, &request.named_vectors)
-                {
+                let insert_time = start_time.elapsed();
+                let throughput = records.len() as f64 / insert_time.as_secs_f64();
+                if let Ok(mut stats) = table_data.performance_stats.lock() {
+                    stats.insert_throughput = (stats.insert_throughput * 0.9) + (throughput * 0.1);
+                }
+
+                (
+                    table_data.index.clone(),
+                    table_data.named_indexes.clone(),
+                    table_data.table.clone(),
+                    to_remove,
+                    to_insert,
+                    records,
+                )
+            };
+
+            // ── lock released ──
+
+            for id in &to_remove {
+                if let Err(e) = index.remove(id).await {
+                    warn!("Failed to remove old vector for {}: {}", id, e);
+                }
+            }
+
+            for (id, vector, named) in to_insert {
+                index.insert(id.clone(), vector).await?;
+
+                if let (Some(ref collection), Some(named_vecs)) = (&named_indexes, named) {
                     for (vec_name, vec_data) in named_vecs {
-                        if let Some(named_idx) = named_indexes.get_index(vec_name).await {
-                            if let Err(e) =
-                                named_idx.insert(record_id.clone(), vec_data.clone()).await
-                            {
+                        if let Some(named_idx) = collection.get_index(&vec_name).await {
+                            if let Err(e) = named_idx.insert(id.clone(), vec_data).await {
                                 warn!(
                                     "Failed to insert into named index '{}' for {}: {}",
-                                    vec_name, record_id, e
+                                    vec_name, id, e
                                 );
                             }
                         }
                     }
                 }
+            }
 
-                // 创建记录
-                let record = Record {
-                    id: record_id.clone(),
-                    vector: request.vector,
-                    sparse_vector: request.sparse_vector.clone(),
-                    named_vectors: request.named_vectors.clone(),
-                    payload: request.payload.unwrap_or_else(|| serde_json::json!({})),
-                    created_at: existing_created_at,
-                    updated_at: chrono::Utc::now(),
-                    version: existing_version,
-                    status: crate::types::RecordStatus::Active,
+            #[cfg(feature = "text-bm25")]
+            {
+                let engine = {
+                    let tables = tables.read().await;
+                    tables
+                        .get(&req.table_name)
+                        .and_then(|d| d.full_text_engine.clone())
                 };
-
-                // 插入到稀疏向量索引（如有）
-                if let Some(sv) = &record.sparse_vector {
-                    if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
-                        warn!("Failed to index sparse vector for {}: {}", record_id, e);
-                    }
-                }
-
-                // 索引文本内容（如果启用全文搜索）
-                #[cfg(feature = "text-bm25")]
-                if let Some(engine) = &table_data.full_text_engine {
-                    if let Some(text_content) = extract_text_from_record(&table_data.table, &record)
-                    {
-                        // Create a FullTextDocument
-                        let doc = FullTextDocument {
-                            id: record.id.clone(),
-                            title: text_content.get("title").cloned(),
-                            content: text_content.get("content").cloned().unwrap_or_default(),
-                            description: text_content.get("description").cloned(),
-                            tags: text_content
-                                .get("tags")
-                                .map(|s| vec![s.clone()])
-                                .unwrap_or_default(),
-                            payload: Some(record.payload.clone()),
-                            timestamp: chrono::Utc::now().timestamp(),
-                        };
-
-                        // Add document to full-text engine (ignore errors to not block inserts)
-                        if let Err(e) = engine.add_document(doc).await {
-                            warn!("Failed to index text for record {}: {}", record.id, e);
+                if let Some(engine) = engine {
+                    for id in &to_remove {
+                        if let Err(e) = engine.delete_document(id).await {
+                            warn!("Failed to remove old full-text document for {}: {}", id, e);
                         }
                     }
+                    for record in &records {
+                        if let Some(text_content) = extract_text_from_record(&table_meta, record) {
+                            let doc = FullTextDocument {
+                                id: record.id.clone(),
+                                title: text_content.get("title").cloned(),
+                                content: text_content.get("content").cloned().unwrap_or_default(),
+                                description: text_content.get("description").cloned(),
+                                tags: text_content
+                                    .get("tags")
+                                    .map(|s| vec![s.clone()])
+                                    .unwrap_or_default(),
+                                payload: Some(record.payload.clone()),
+                                timestamp: chrono::Utc::now().timestamp(),
+                            };
+                            // Text indexing must not fail an insert that already landed.
+                            if let Err(e) = engine.add_document(doc).await {
+                                warn!("Failed to index text for record {}: {}", record.id, e);
+                            }
+                        }
+                    }
+                    if let Err(e) = engine.commit().await {
+                        warn!("Failed to commit full-text index: {}", e);
+                    }
                 }
-
-                // 存储记录到 HashMap
-                table_data.records.insert(record_id.clone(), record.clone());
-
-                // 更新 PayloadIndex
-                table_data
-                    .payload_index
-                    .insert_record(&record_id, &record.payload);
-
-                records.push(record);
             }
-
-            // Commit full-text index changes (if any)
-            #[cfg(feature = "text-bm25")]
-            if let Some(engine) = &table_data.full_text_engine {
-                if let Err(e) = engine.commit().await {
-                    warn!("Failed to commit full-text index: {}", e);
-                }
-            }
-
-            // 更新表统计 (只增加新记录的数量，不包括更新的记录)
-            table_data.table.record_count += new_records_count;
-            table_data.table.updated_at = chrono::Utc::now();
-
-            // 更新性能统计（通过 Mutex 确保并发安全）
-            let insert_time = start_time.elapsed();
-            let throughput = records.len() as f64 / insert_time.as_secs_f64();
-            if let Ok(mut stats) = table_data.performance_stats.lock() {
-                stats.insert_throughput = (stats.insert_throughput * 0.9) + (throughput * 0.1);
-            }
+            #[cfg(not(feature = "text-bm25"))]
+            let _ = &table_meta;
 
             Ok(records)
         }
