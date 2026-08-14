@@ -42,6 +42,12 @@ use crate::search::full_text::{
 struct SnapshotManifest {
     wal_next_sequence: u64,
     tables: usize,
+    /// 每个段对应的表名，下标即段号。
+    ///
+    /// 段文件按序号命名（`t0`、`t1`……）而不是表名，因为表名来自用户输入、不能直接当文件名。
+    /// 但按需回填必须能从表名找到段，所以这里留一份映射。
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
@@ -73,6 +79,10 @@ pub struct IntelligentIndexedStorage {
 
     /// 分层存储：内存 → SSD → 对象存储。快照段以它为持久归宿。
     storage: Arc<TieredStorage>,
+
+    /// 表级冷热判定。key 用表名——策略本身只按字符串 key 记访问，用向量 id 还是表名都行，
+    /// 而 Turbopuffer 式的分层是整个命名空间进出内存，不是单条向量。
+    tier_policy: Arc<crate::storage::tier_promotion::TierPromotionPolicy>,
 
     /// 是否真的配置了对象存储。
     ///
@@ -587,6 +597,9 @@ impl IntelligentIndexedStorage {
         Ok(Self {
             tables: tables_arc,
             storage: Arc::new(storage),
+            tier_policy: Arc::new(crate::storage::tier_promotion::TierPromotionPolicy::new(
+                crate::storage::tier_promotion::TierPromotionConfig::default(),
+            )),
             object_storage_enabled: config.object_storage.is_some(),
             index_selector: Arc::new(index_selector),
             hardware_capabilities,
@@ -756,6 +769,7 @@ impl IntelligentIndexedStorage {
             &SnapshotManifest {
                 wal_next_sequence: seq,
                 tables: written,
+                names: names.clone(),
             },
         )?;
 
@@ -893,6 +907,116 @@ impl IntelligentIndexedStorage {
             manifest.tables
         );
         Ok(true)
+    }
+
+    /// 确保 `table_name` 在内存里；被驱逐过的表从对象存储回填。
+    ///
+    /// 驱逐只发生在快照覆盖了该表之后，所以段文件一定存在——找不到就说明这张表真的不存在，
+    /// 交给调用方的 TableNotFound 去报。
+    async fn ensure_resident(&self, table_name: &str) -> crate::Result<()> {
+        use crate::storage::tier_promotion::Tier;
+
+        self.tier_policy.record_access(table_name);
+
+        if self.tables.read().await.contains_key(table_name) {
+            // Resident tables sit in Warm so the policy's demote_to_cold rule applies to them;
+            // it only demotes out of Warm.
+            self.tier_policy.set_current_tier(table_name, Tier::Warm);
+            return Ok(());
+        }
+        let Some(ref wal_dir) = self.wal_dir else {
+            return Ok(());
+        };
+
+        let dir = Self::snapshot_dir(wal_dir);
+        let manifest: SnapshotManifest = match crate::search::index_persistence::read_index(
+            &dir.join("manifest"),
+            "snapshot-manifest",
+        ) {
+            Ok(m) => m,
+            Err(_) => return Ok(()),
+        };
+
+        let Some(i) = manifest.names.iter().position(|n| n == table_name) else {
+            return Ok(());
+        };
+
+        let stem = format!("t{}", i);
+        let meta: TableSnapshot = crate::search::index_persistence::read_index(
+            &dir.join(format!("{}.meta", stem)),
+            "table-snapshot",
+        )?;
+
+        // Two concurrent readers can both find the table missing and both start restoring. The
+        // second one finds it present by the time it takes the write lock, and restore_table's
+        // create_table would fail on the duplicate — so check again and let the loser bail.
+        if self.tables.read().await.contains_key(table_name) {
+            return Ok(());
+        }
+
+        info!("Rehydrating evicted table '{}' from snapshot", table_name);
+        self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
+            .await?;
+        self.tier_policy.set_current_tier(table_name, Tier::Warm);
+        Ok(())
+    }
+
+    /// 直接把一张表移出内存，不看热度。仅供测试构造"已驱逐"状态。
+    ///
+    /// 生产路径请用 [`Self::evict_cold_tables`]——它会先快照，这一步不会。
+    pub async fn evict_table_for_test(&self, name: &str) {
+        self.tables.write().await.remove(name);
+    }
+
+    /// 把冷表从内存里放掉。返回被驱逐的表名。
+    ///
+    /// **先快照再驱逐**，而且只驱逐这次快照确实覆盖到的表。反过来会丢数据：一张表若有
+    /// 快照之后的写入，驱逐就等于把那些写入扔了——WAL 里虽然还有，但驱逐后的表在内存里
+    /// 不存在，回填只会读到快照那一份。
+    pub async fn evict_cold_tables(&self) -> crate::Result<Vec<String>> {
+        use crate::storage::tier_promotion::Tier;
+
+        if self.wal.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let covered: Vec<String> = {
+            let tables = self.tables.read().await;
+            tables.keys().cloned().collect()
+        };
+        if covered.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.snapshot().await?;
+
+        let mut evicted = Vec::new();
+        for name in covered {
+            // `should_demote_to_cold` is the right predicate here, not
+            // `get_recommended_tier`: the latter calls anything below the *warm* threshold
+            // Cold, and a table written to seconds ago scores about 0.31 — the frequency term
+            // is normalised against 100 accesses, so a handful of touches barely registers and
+            // recency contributes at most 0.3. Demotion instead compares against
+            // demote_to_cold_threshold (0.2), which a Warm table only falls below after roughly
+            // a third of the window with nothing touching it.
+            if !self.tier_policy.should_demote_to_cold(&name) {
+                continue;
+            }
+            let mut tables = self.tables.write().await;
+            if tables.remove(&name).is_some() {
+                evicted.push(name.clone());
+            }
+            drop(tables);
+            self.tier_policy.set_current_tier(&name, Tier::Cold);
+        }
+
+        if !evicted.is_empty() {
+            info!(
+                "Evicted {} cold table(s) from memory: {:?}",
+                evicted.len(),
+                evicted
+            );
+        }
+        Ok(evicted)
     }
 
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
@@ -1241,6 +1365,9 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        // Writing to an evicted table has to bring it back first, or the insert lands in a
+        // fresh empty table and the snapshot's records vanish on the next snapshot.
+        self.ensure_resident(tablename).await?;
         // 创建响应 channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -1278,6 +1405,7 @@ impl IntelligentIndexedStorage {
 
     /// 搜索向量
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        self.ensure_resident(tablename).await?;
         let start_time = std::time::Instant::now();
         let tables = self.tables.read().await;
 
@@ -1955,6 +2083,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
+        self.ensure_resident(name).await?;
         let tables = self.tables.read().await;
 
         tables
@@ -1963,10 +2092,44 @@ impl IntelligentIndexedStorage {
             .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))
     }
 
-    /// 列出所有表
+    /// 列出所有表，含被驱逐到对象存储的。
+    ///
+    /// 只看内存的话，一张表会因为没人访问而从列表里消失——对调用方来说和被删掉没有区别。
+    /// 驱逐是内存管理，不是删除，列表必须照旧。
     pub async fn list_tables(&self) -> crate::Result<Vec<Table>> {
-        let tables = self.tables.read().await;
-        Ok(tables.values().map(|data| data.table.clone()).collect())
+        let mut out: Vec<Table> = {
+            let tables = self.tables.read().await;
+            tables.values().map(|data| data.table.clone()).collect()
+        };
+
+        let Some(ref wal_dir) = self.wal_dir else {
+            return Ok(out);
+        };
+        let dir = Self::snapshot_dir(wal_dir);
+        let Ok(manifest) = crate::search::index_persistence::read_index::<SnapshotManifest>(
+            &dir.join("manifest"),
+            "snapshot-manifest",
+        ) else {
+            return Ok(out);
+        };
+
+        let resident: std::collections::HashSet<String> =
+            out.iter().map(|t| t.name.clone()).collect();
+        for (i, name) in manifest.names.iter().enumerate() {
+            if resident.contains(name) {
+                continue;
+            }
+            // Read only the metadata; the point of eviction is not to pull the records back in
+            // just to answer a listing.
+            if let Ok(meta) = crate::search::index_persistence::read_index::<TableSnapshot>(
+                &dir.join(format!("t{}.meta", i)),
+                "table-snapshot",
+            ) {
+                out.push(meta.table);
+            }
+        }
+
+        Ok(out)
     }
 
     /// 删除表
@@ -2567,6 +2730,7 @@ impl IntelligentIndexedStorage {
 
     /// Get a single record
     pub async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
+        self.ensure_resident(tablename).await?;
         let tables = self.tables.read().await;
         let table = tables
             .get(tablename)
@@ -2942,6 +3106,7 @@ impl IntelligentIndexedStorage {
         limit: usize,
         offset: usize,
     ) -> crate::Result<(Vec<Record>, usize)> {
+        self.ensure_resident(tablename).await?;
         let tables = self.tables.read().await;
         let table_data = tables
             .get(tablename)

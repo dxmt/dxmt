@@ -565,3 +565,135 @@ async fn a_fresh_machine_recovers_from_object_storage_alone() {
         .unwrap();
     assert_eq!(hits.hits[0].id, "a", "the index came back unusable");
 }
+
+#[tokio::test]
+async fn an_evicted_table_comes_back_on_the_next_query() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records(
+            "t",
+            vec![
+                record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                record("b", vec![0.0, 1.0, 0.0, 0.0]),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // A freshly written table is hot, so the policy must leave it alone. Evicting on every
+    // sweep would turn eviction into a way to reload the same data forever.
+    assert!(
+        storage.evict_cold_tables().await.unwrap().is_empty(),
+        "a table touched moments ago must not be evicted"
+    );
+
+    // Now force the evicted state — waiting out a real hotness window would take twenty
+    // minutes — and confirm a plain search brings it back. The caller cannot be expected to
+    // know that memory management happened.
+    storage.snapshot().await.unwrap();
+    storage.evict_table_for_test("t").await;
+
+    let hits = storage
+        .search("t", query(vec![1.0, 0.0, 0.0, 0.0], 2))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits.len(), 2, "search did not rehydrate the table");
+    assert_eq!(
+        hits.hits[0].id, "a",
+        "the rehydrated index answers differently"
+    );
+
+    // And it is genuinely back in memory, not re-read per query.
+    let record = storage.get_record("t", &"b".to_string()).await.unwrap();
+    assert_eq!(record.id, "b");
+}
+
+#[tokio::test]
+async fn eviction_never_drops_writes_made_after_the_last_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("old", vec![1.0, 0.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+    storage.snapshot().await.unwrap();
+
+    // This write exists only in the WAL and in memory, not in the snapshot on disk.
+    storage
+        .insert_records("t", vec![record("new", vec![0.0, 1.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+
+    // Eviction snapshots first for exactly this reason. Dropping the table without doing so
+    // would lose "new": the in-memory copy goes, and rehydration reads the stale snapshot.
+    storage.evict_cold_tables().await.unwrap();
+
+    let hits = storage
+        .search("t", query(vec![0.0, 1.0, 0.0, 0.0], 5))
+        .await
+        .unwrap();
+    let ids: std::collections::HashSet<_> = hits.hits.iter().map(|h| h.id.as_str()).collect();
+    assert!(
+        ids.contains("new"),
+        "a post-snapshot write was lost: {:?}",
+        ids
+    );
+    assert!(
+        ids.contains("old"),
+        "a pre-snapshot record was lost: {:?}",
+        ids
+    );
+}
+
+#[tokio::test]
+async fn an_evicted_table_still_appears_in_listings() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+    storage.snapshot().await.unwrap();
+
+    // Simulate the table having gone cold by evicting it directly through the map. From a
+    // caller's point of view eviction is invisible bookkeeping — a table that stops being
+    // listed is indistinguishable from one that was dropped.
+    storage.evict_table_for_test("t").await;
+
+    let listed = storage.list_tables().await.unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "an evicted table vanished from list_tables"
+    );
+    assert_eq!(listed[0].name, "t");
+    assert_eq!(listed[0].record_count, 1, "listing lost the row count");
+}

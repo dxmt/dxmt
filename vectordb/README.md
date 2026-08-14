@@ -83,10 +83,13 @@ serve           →  /api/v1/*
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
-A three-tier design (memory → SSD → object storage) is implemented in
-`src/storage/object/tiered.rs` with access-frequency-driven promotion in
-`src/storage/tier_promotion.rs`, but the live write path does not call into it yet.
-Wiring it up is tracked in [docs/ROADMAP.md](docs/ROADMAP.md) §2.3.
+Snapshots are uploaded to object storage, and a table nothing has queried for a while is
+dropped from memory entirely — records and index — leaving only its segments in the object
+store. The next query on it rehydrates transparently, so memory tracks the working set rather
+than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.
+
+Records still live in memory while a table is resident; per-vector tiering within a table is
+not implemented. See [docs/ROADMAP.md](docs/ROADMAP.md) §W3.
 
 Index selection runs once, when the table is created:
 
@@ -116,6 +119,7 @@ DB_PORT=9999
 DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables persistence
 DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
+DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```

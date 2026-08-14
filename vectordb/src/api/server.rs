@@ -65,6 +65,43 @@ fn snapshot_interval_from_env() -> u64 {
         .unwrap_or(300)
 }
 
+/// Eviction sweep interval in seconds; 0 disables. Default 600.
+fn eviction_interval_from_env() -> u64 {
+    std::env::var("DB_EVICTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600)
+}
+
+/// Drop cold tables from memory on a timer, leaving them in object storage.
+///
+/// This is what bounds memory to the working set rather than the whole dataset. A query on an
+/// evicted table rehydrates it transparently, so the only cost of being wrong is a slow first
+/// query.
+fn spawn_eviction_sweep(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
+    if interval == 0 {
+        tracing::info!("Cold-table eviction disabled (DB_EVICTION_INTERVAL_SECS=0)");
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match storage.evict_cold_tables().await {
+                Ok(evicted) if !evicted.is_empty() => {
+                    tracing::info!("Evicted {} cold table(s)", evicted.len())
+                }
+                Ok(_) => {}
+                // Eviction snapshots first, so a failure here means the snapshot failed and
+                // nothing was dropped. Data is intact either way.
+                Err(e) => tracing::warn!("Eviction sweep failed: {}", e),
+            }
+        }
+    });
+    tracing::info!("Cold-table eviction sweep every {}s", interval);
+}
+
 /// Snapshot every `interval` seconds for as long as the process runs.
 fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
@@ -272,6 +309,7 @@ pub async fn create_app_with_storage(
     let app = app.with_state(base_state);
 
     spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+    spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
 
     Ok((app, storage))
 }

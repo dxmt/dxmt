@@ -358,7 +358,7 @@ cargo test --lib
 
 ---
 
-### [~] W3 — TieredStorage 接线（已定：对标 Turbopuffer）— 第一阶段完成于 2eeba00
+### [~] W3 — TieredStorage 接线（已定：对标 Turbopuffer）— 一/二阶段完成于 2eeba00 + <SHA3b>
 
 **目标**：消除全仓库最大的一处名实不符。**二选一，不允许继续放着。**
 
@@ -397,9 +397,27 @@ cargo test --lib
 > 直接复用了 `ssd_cache_dir`，于是 SSD 缓存层和对象存储层落在同一棵目录树下（靠 bucket
 > 子目录区分）。S3 provider 没这个问题。要修的话得给 filesystem provider 单独一个路径配置。
 >
-> **剩下的（第二、三阶段）**：
-> - 读路径按 `hotness_score` 分层取数——现在记录仍然全在内存，对象存储只承载快照。
->   真正的 Turbopuffer 模型要求冷数据只在对象存储、按需拉取。
+> **第二阶段已完成：冷表整体驱逐 + 查询时回填。**
+>
+> Turbopuffer 的分层单位是命名空间，不是单条向量——所以这里做的是表级：一张表长时间没人
+> 访问就整个放出内存（记录 + 索引），只留对象存储里的快照；下一次查询自动拉回来。
+> 内存占用从此由**工作集**决定，而不是数据总量。
+>
+> - `ensure_resident()` 挂在 `search` / `get_table` / `get_record` / `list_records` /
+>   `insert_records` 五个入口。回填对调用方完全透明。
+> - `evict_cold_tables()` **先快照再驱逐，且只驱逐这次快照覆盖到的表**。反过来会丢数据：
+>   一张表若有快照之后的写入，驱逐等于把它们扔了——WAL 里虽然还在，但回填只读快照那份。
+>   有测试 `eviction_never_drops_writes_made_after_the_last_snapshot` 专门盯这条。
+> - `list_tables()` 会把被驱逐的表从快照元数据里补回来。只看内存的话，一张表会因为没人访问
+>   而从列表里消失，对调用方来说和被删掉没区别。补的时候只读 `.meta` 不读记录——
+>   驱逐的意义就是别为了列个表把数据全拉回来。
+> - 后台扫描：`DB_EVICTION_INTERVAL_SECS`，默认 600 秒，设 0 关闭。
+>
+> **判定用的是 `should_demote_to_cold` 而不是 `get_recommended_tier`。** 后者把任何低于
+> *warm* 阈值（0.4）的都叫 Cold，而刚写完的表只有约 0.31 分——频率项是按 100 次访问归一化的，
+> 几次访问几乎不计分，近期性最多贡献 0.3。第一版用了 `get_recommended_tier`，测试立刻抓到
+> "刚写完的表被驱逐"。改用降级判定（阈值 0.2）后，语义变成"约三分之一个窗口没人碰"。
+> 常驻表会被标为 Warm，因为降级规则只对 Warm 生效。
 > - 写路径的增量下沉：目前只有快照粒度（默认 300 秒一次），不是连续下沉。
 > - FastScan：W6 删掉的那个实现是假的（PQ 编码全 0、`search_simd` 里没有一条 SIMD 指令），
 >   但对象存储上的扫描确实需要它，要重写。
