@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// Example memory savings for 1M vectors × 960 dims:
 /// - Without PQ: ~3.7 GB
 /// - With PQ8: ~120 MB (32x compression)
+#[derive(Serialize, Deserialize)]
 pub struct HnswPqIndex {
     /// HNSW index structure (stores graph topology)
     hnsw: HnswIndex,
@@ -405,5 +406,37 @@ mod tests {
         // Should have significant compression
         assert!(stats.compression_ratio > 1.0);
         assert!(stats.total_mb() < 10.0); // 100 vectors should be < 10MB with PQ
+    }
+}
+
+impl crate::search::index_traits::SerializableIndex for HnswPqIndex {
+    fn save(&self, path: &std::path::Path) -> crate::Result<()> {
+        // The codebooks travel with the codes. Without them the stored PQ codes are just
+        // centroid indices into a table that no longer exists, and every distance computed
+        // after a load would be wrong while still looking like a number.
+        crate::search::index_persistence::write_index(path, "hnsw-pq", self)
+    }
+
+    fn load(path: &std::path::Path) -> crate::Result<Self> {
+        crate::search::index_persistence::read_index(path, "hnsw-pq")
+    }
+
+    fn stats(&self) -> crate::search::index_traits::IndexStats {
+        let codes_bytes = self.compressed_vectors.len() * self.config.num_subvectors;
+        let codebook_bytes = self.config.num_subvectors
+            * self.config.num_centroids
+            * (self.dimension / self.config.num_subvectors.max(1))
+            * std::mem::size_of::<f32>();
+        let originals_bytes = self
+            .original_vectors
+            .as_ref()
+            .map(|m| m.len() * self.dimension * std::mem::size_of::<f32>())
+            .unwrap_or(0);
+
+        crate::search::index_traits::IndexStats {
+            total_vectors: self.compressed_vectors.len(),
+            index_size_bytes: codes_bytes + codebook_bytes + originals_bytes,
+            build_time_ms: 0,
+        }
     }
 }

@@ -272,14 +272,11 @@ impl IvfIndex {
 
 impl SerializableIndex for IvfIndex {
     fn save(&self, path: &std::path::Path) -> crate::Result<()> {
-        let encoded = bincode::serialize(self).map_err(|e| crate::Error::Serialization(e.to_string()))?;
-        std::fs::write(path, encoded)?;
-        Ok(())
+        crate::search::index_persistence::write_index(path, "ivf", self)
     }
 
     fn load(path: &std::path::Path) -> crate::Result<Self> {
-        let data = std::fs::read(path)?;
-        bincode::deserialize(&data).map_err(|e| crate::Error::Serialization(e.to_string()))
+        crate::search::index_persistence::read_index(path, "ivf")
     }
 
     fn stats(&self) -> IndexStats {

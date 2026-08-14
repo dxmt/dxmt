@@ -825,3 +825,35 @@ impl HnswIndex {
         self.entry_point = best_idx;
     }
 }
+
+impl crate::search::index_traits::SerializableIndex for HnswIndex {
+    fn save(&self, path: &std::path::Path) -> crate::Result<()> {
+        crate::search::index_persistence::write_index(path, "hnsw", self)
+    }
+
+    fn load(path: &std::path::Path) -> crate::Result<Self> {
+        // The RNG is `#[serde(skip)]` and comes back seeded from `default_rng`, not from
+        // `config.seed`. Level assignment for vectors inserted after a load therefore follows a
+        // different sequence than it would have without the restart. That changes the graph
+        // shape, not its correctness — HNSW makes no guarantee about which levels a node lands
+        // on, only that search respects the levels it finds.
+        crate::search::index_persistence::read_index(path, "hnsw")
+    }
+
+    fn stats(&self) -> crate::search::index_traits::IndexStats {
+        let dimension = self.nodes.first().map(|n| n.vector.len()).unwrap_or(0);
+        let vectors_bytes = self.nodes.len() * dimension * std::mem::size_of::<f32>();
+        let graph_bytes: usize = self
+            .nodes
+            .iter()
+            .map(|n| n.neighbors.iter().map(|l| l.len()).sum::<usize>() * std::mem::size_of::<usize>())
+            .sum();
+
+        crate::search::index_traits::IndexStats {
+            // `nodes` keeps tombstoned entries, so this counts live vectors rather than slots.
+            total_vectors: self.nodes.iter().filter(|n| !n.deleted).count(),
+            index_size_bytes: vectors_bytes + graph_bytes,
+            build_time_ms: 0,
+        }
+    }
+}

@@ -1,4 +1,5 @@
 pub mod index_traits;
+pub mod index_persistence;
 // Core search modules
 pub mod auto_tuned;
 pub mod batch_operations;
