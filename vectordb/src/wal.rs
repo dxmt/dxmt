@@ -26,6 +26,16 @@ pub enum WalEntry {
         table: String,
         dimension: usize,
     },
+    /// Table creation carrying the whole config.
+    ///
+    /// `CreateTable` above keeps only the name and dimension, which is not enough to rebuild a
+    /// table on replay — `distance_metric`, `named_vectors`, `payload_schema`,
+    /// `memory_optimization` and `enable_full_text_search` are all lost, and a table restored
+    /// without its distance metric answers queries wrongly rather than failing. New writers
+    /// should emit this variant; the old one is still read so existing logs replay.
+    CreateTableWithConfig {
+        config: crate::types::table::TableConfig,
+    },
     DeleteTable {
         table: String,
     },
@@ -157,7 +167,11 @@ impl WalManager {
         if let Some(ref mut file) = self.current_file {
             file.write_all(&self.write_buffer)
                 .map_err(Error::Io)?;
-            file.flush()
+            // `Write::flush` on a File is a no-op — it only drains a userspace buffer, and File
+            // has none. Without sync_data the entries sit in the page cache, which survives
+            // `kill -9` but not power loss. A write-ahead log that loses acknowledged writes on
+            // power loss is not doing its job, so pay for the fsync here.
+            file.sync_data()
                 .map_err(Error::Io)?;
         }
 

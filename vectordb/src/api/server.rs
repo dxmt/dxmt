@@ -58,6 +58,21 @@ use crate::{
 	error::Result,
 };
 
+/// WAL 目录：`DB_WAL_DIR` 覆盖，默认 `./data/wal`，显式设为空串关闭持久化。
+///
+/// 只在服务端入口读环境变量，不放进 `IntelligentIndexedStorage::new`——那个构造函数有
+/// 四十多个调用点（单测、bench、example），让它们各自往磁盘写日志会互相回放污染。
+pub(crate) fn wal_dir_from_env() -> Option<std::path::PathBuf> {
+	match std::env::var("DB_WAL_DIR") {
+		Ok(dir) if dir.trim().is_empty() => {
+			tracing::warn!("DB_WAL_DIR is empty: WAL disabled, data will not survive a restart");
+			None
+		}
+		Ok(dir) => Some(std::path::PathBuf::from(dir)),
+		Err(_) => Some(std::path::PathBuf::from("./data/wal")),
+	}
+}
+
 /// 创建应用程序路由器
 pub async fn create_app() -> Result<Router> {
 	create_app_with_features(false, false, false).await
@@ -72,8 +87,11 @@ pub async fn create_app_with_features(
 	// 加载配置
 	let config = AppConfig::load()?;
 
-	// 创建优化的存储实例
-	let storage = Arc::new(IntelligentIndexedStorage::new(&config.storage).await?);
+	// 创建优化的存储实例。带 WAL：进程重启后要能恢复。
+	// DB_WAL_DIR 可覆盖目录；设成空串则彻底关掉持久化（只建议用于压测对比）。
+	let storage = Arc::new(
+		IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?,
+	);
 
 	// 创建嵌入管理器
 	let embedding_manager = Arc::new(EmbeddingManager::new());

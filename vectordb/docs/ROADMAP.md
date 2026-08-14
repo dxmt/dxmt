@@ -27,10 +27,13 @@ main.rs
 
 必须知道的三件事：
 
-1. **没有持久化。** `IntelligentIndexedStorage` 全文没有一次 `self.storage` 调用，也没有任何
-   `wal` 引用。实测：建表 → 插入 → 重启，表列表返回空，记录 404，不生成 `./cache` 或 `./data`。
-   唯一的落盘路径是手工调用 `backup()`（`storage/intelligent_indexed_storage.rs:2189`）写一个
-   JSON 快照。
+1. **持久化靠 WAL，不靠分层存储（W1 之后）。** 服务端走
+   `new_with_wal`，日志默认写 `./data/wal`（`DB_WAL_DIR` 可覆盖），启动时全量回放。
+   `IntelligentIndexedStorage` 仍然没有一次 `self.storage` 调用——分层存储依旧未接线，
+   数据在内存 + WAL，不在对象存储。另有一个手工 `backup()`
+   （`storage/intelligent_indexed_storage.rs`）写 JSON 快照。
+   注意 `IntelligentIndexedStorage::new()`（不带 WAL 的那个构造函数）不持久化，
+   库使用者要自己选 `new_with_wal`。
 2. **`DB_STORAGE_TYPE` 无效。** 它在 `config/mod.rs:221` 被读入配置，但服务端在
    `api/server.rs:76` 写死 `IntelligentIndexedStorage`，`StorageFactory` 从不被调用。
 3. **索引选择在建表时不看数据量。** `intelligent_indexed_storage.rs:474` 写死
@@ -205,11 +208,34 @@ commit 的说明。
 
 ---
 
-### [ ] W1 — WAL 接入主写路径 + 启动恢复
+### [x] W1 — WAL 接入主写路径 + 启动恢复 — 完成于 32a6bfc
 
 **目标**：建表 → 插入 N 条 → `kill -9` → 重启 → N 条全部可查。这是当前唯一缺失的核心能力。
 
 **前置**：无。这是 P0 的第一项，后面几项都依赖它。
+
+> **已完成。** 实测：3 条记录 + euclidean 距离的表，`kill -9` 后重启，表元数据、
+> `record_count`、payload 全部恢复，三个 score 与重启前逐位相同，日志打出
+> `WAL replay finished: 4 entries -> 1 tables, 3 records, 0 skipped`。
+>
+> 实现要点，与原计划的出入：
+> - **没有改 `StorageConfig`**。它有 36 处字面量构造点，加字段要全改。改成
+>   `IntelligentIndexedStorage::new_with_wal(config, Option<PathBuf>)`，`new()` 行为不变
+>   （不持久化），只有 `api/server.rs` 走新构造函数，WAL 目录由 `DB_WAL_DIR` 决定，
+>   默认 `./data/wal`。这样 46 处 `::new` 调用点一个没动，单测也不会互相回放污染。
+> - **日志写在应用之后、返回之前**，不是严格的 write-ahead。因为内存状态本来就是从日志
+>   重建的，"先应用后记录再确认"同样满足"已确认的写入不丢"，而且避免了处理器失败
+>   （例如维度不符）时在日志里留下永远重放不成功的幽灵条目。
+> - **`wal.rs` 的两个持久性缺陷一并修了**：`write_entry` 原本攒够 256KB 才落盘，
+>   `kill -9` 会丢缓冲区；`flush_buffer` 用的 `Write::flush` 对 `File` 是空操作，
+>   数据只到 page cache。现在每次 `wal_append` 都 `force_flush`，且 `flush_buffer`
+>   改用 `sync_data()`。代价是每批一次 fsync，性能优化留给以后的组提交。
+> - **`tests/integration/wal_recovery_test.rs` 无法复活**：它对着的 `StorageConfig` 有
+>   `enable_wal` / `wal_dir` / `wal_batch_size` / `wal_sync_interval_ms` /
+>   `wal_consistency_mode` 五个字段和一个 `WalConsistencyMode` 类型，现在一个都不存在。
+>   已删除，改写为 `tests/wal_recovery_test.rs`（7 个测试全绿），其中
+>   `replay_is_idempotent` 专门盯着"回放把读到的条目又写回日志"这个会让启动时间
+>   逐次累积到永远起不来的坑。
 
 **要改的文件**
 - `src/storage/intelligent_indexed_storage.rs` — 主要工作量

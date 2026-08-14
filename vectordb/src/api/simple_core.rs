@@ -224,7 +224,16 @@ pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
         object_storage: None,
     };
 
-    let storage = Arc::new(IntelligentIndexedStorage::new(&storage_config).await?);
+    // Simple mode gets the same durability as standard mode, but in its own directory: both
+    // modes name tables from user input, so sharing one log would let a collection here collide
+    // with a table there and replay into the wrong shape.
+    let storage = Arc::new(
+        IntelligentIndexedStorage::new_with_wal(
+            &storage_config,
+            crate::api::server::wal_dir_from_env().map(|d| d.join("simple")),
+        )
+        .await?,
+    );
     let server_health = Arc::new(crate::api::server_health::ServerHealth::default());
 
     let app_state = Arc::new(AppState {

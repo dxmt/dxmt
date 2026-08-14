@@ -4,11 +4,11 @@ A vector database written in Rust. HNSW, HNSW-PQ and product quantization with r
 dispatch, full-text search via Tantivy, hybrid retrieval, and a query language — behind REST,
 GraphQL and WebSocket, plus a Chroma-compatible zero-config mode.
 
-> **Status: pre-1.0. Data is held in memory and is not persisted across restarts.**
-> The write path keeps records in process memory; the write-ahead log and the tiered
-> object-storage backend both exist in the tree but are not yet wired into it. Back up
-> explicitly via `POST /api/v1/backup/full` if you need your data to survive a restart.
-> Distributed/cluster code exists but is not production-ready. See
+> **Status: pre-1.0.** Records are held in memory and made durable by a write-ahead log,
+> replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
+> `./data/wal`; set `DB_WAL_DIR` to move it. The tiered object-storage backend exists in the
+> tree but is still not on the write path, so "object storage as the source of truth" is not
+> yet true. Distributed/cluster code exists but is not production-ready. See
 > [Known Limitations](#known-limitations) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick Start
@@ -54,7 +54,8 @@ serve --simple  →  /collections/*   (Chroma-compatible, at the root)
 serve           →  /api/v1/*
                         ↓
              IntelligentIndexedStorage
-               ├─ records: in-process HashMap      ← all data lives here today
+               ├─ records: in-process HashMap      ← all data lives here
+               ├─ wal:     ./data/wal              ← durability; replayed on startup
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
@@ -94,7 +95,7 @@ DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```
 
 `DB_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
-`IntelligentIndexedStorage` unconditionally (`src/api/server.rs:76`).
+`IntelligentIndexedStorage` unconditionally.
 
 Object storage credentials come from the environment only — never commit them. They are read
 into the configuration but, as above, the object-storage path is not yet on the write path:
@@ -151,9 +152,12 @@ DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
 
 These are real gaps, not roadmap aspirations:
 
-- **No durability.** Records live in a process-local map. A restart loses every table. The
-  write-ahead log (`src/wal.rs`) works and is tested, but nothing on the write path calls it,
-  and no index implements `SerializableIndex` except `src/search/ivf.rs`.
+- **Startup replays the whole log.** Recovery reconstructs every table by re-inserting each
+  record, so boot time grows with the dataset — no index implements `SerializableIndex` except
+  `src/search/ivf.rs`, and there is no checkpoint/compaction yet. Fine for thousands of
+  records, painful for millions.
+- **One fsync per write batch.** Durability is paid for synchronously; there is no group
+  commit yet.
 - **Object-storage tier not on the write path.** `IntelligentIndexedStorage` holds a
   `TieredStorage` in an `#[allow(dead_code)]` field and never reads or writes through it.
 - **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It accepts `alpha`/`beta`/
@@ -172,7 +176,8 @@ These are real gaps, not roadmap aspirations:
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
 - **CI does not run.** The workflows live under `vectordb/.github/`, which GitHub Actions
-  does not read. Run `make verify` locally.
+  does not read — and `make verify` fails on 154 pre-existing clippy errors, so it cannot serve
+  as a gate either. Use `cargo test --lib`.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what is being done about these and in what order.
 

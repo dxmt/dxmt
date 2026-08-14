@@ -249,6 +249,9 @@ impl AtomicStorageManager {
             WalEntry::CreateTable { table, .. } => {
                 self.validate_create_table(table).await
             }
+            WalEntry::CreateTableWithConfig { config } => {
+                self.validate_create_table(&config.name).await
+            }
             WalEntry::DeleteTable { table } => {
                 self.validate_delete_table(table).await
             }
@@ -321,6 +324,21 @@ impl AtomicStorageManager {
                 
                 Ok(())
             }
+            WalEntry::CreateTableWithConfig { config } => {
+                // Unlike the legacy variant above, this entry carries the real config, so the
+                // table comes back with its own distance metric rather than a guessed one.
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    lmdb.create_table(config.clone()).await?;
+                }
+
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    rocksdb.create_table(config.clone()).await?;
+                }
+
+                Ok(())
+            }
             WalEntry::DeleteTable { table } => {
                 #[cfg(feature = "storage-lmdb")]
                 if let Some(lmdb) = &self.storage_backends.lmdb {
@@ -366,6 +384,16 @@ impl AtomicStorageManager {
                 #[cfg(feature = "storage-rocksdb")]
                 if let Some(rocksdb) = &self.storage_backends.rocksdb {
                     let _ = rocksdb.delete_table(table).await;
+                }
+            }
+            WalEntry::CreateTableWithConfig { config } => {
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    let _ = lmdb.delete_table(&config.name).await;
+                }
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    let _ = rocksdb.delete_table(&config.name).await;
                 }
             }
             WalEntry::DeleteTable { .. } => {

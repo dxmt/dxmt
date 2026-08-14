@@ -18,10 +18,12 @@ that matter, and the differences are easy to miss from the module names alone.
 - Distributed/cluster features exist but are not the current priority
 
 **What the server actually does today:** both `serve` and `serve --simple` construct
-`IntelligentIndexedStorage` (`src/api/server.rs:76`), which holds every record in an in-process
-`HashMap`. There is no WAL on that path and no persistence; a restart loses all data. Its
-`TieredStorage` field is `#[allow(dead_code)]`. Index algorithm is chosen once at
-`CREATE TABLE` from a fixed size estimate, not from the eventual row count.
+`IntelligentIndexedStorage`, which holds every record in an in-process `HashMap`. Standard mode
+opens it through `new_with_wal` (`src/api/server.rs`), so writes are logged to `./data/wal`
+(`DB_WAL_DIR` overrides) and replayed at startup — a restart no longer loses data. Its
+`TieredStorage` field is still `#[allow(dead_code)]`: durability comes from the WAL, not from
+object storage. Index algorithm is chosen once at `CREATE TABLE` from a fixed size estimate,
+not from the eventual row count.
 
 ## Build and Test Commands
 
@@ -134,17 +136,22 @@ Key files:
 
 ### WAL (Write-Ahead Log)
 
-Two implementations, **neither of which is on the live write path**:
+1. **Sync** (`src/wal.rs`) — MessagePack, optional zstd, **on the live write path**.
+   `IntelligentIndexedStorage::new_with_wal` opens it; `wal_append` writes and fsyncs after each
+   batch, and the constructor replays the log before returning.
+2. **Async** (`src/async_wal.rs`) — background writer via mpsc channel; still no callers, and no
+   replay. Worth adopting when the per-batch fsync becomes the bottleneck (roadmap §3.3).
 
-1. **Sync** (`src/wal.rs`) — bincode serialization, optional zstd compression, 256KB batch flush
-2. **Async** (`src/async_wal.rs`) — background writer via mpsc channel; no callers at all
+Writes are logged *after* being applied and *before* the caller is acknowledged. That is not
+literal write-ahead ordering, but the in-memory state is rebuilt from the log anyway, so it
+still guarantees no acknowledged write is lost — and it avoids logging operations that the
+insertion processor then rejects.
 
-`wal.rs` is used only by `src/storage/atomic_ops.rs`, whose only consumer is the
-`cluster/shard_router.rs` stub. `IntelligentIndexedStorage` contains no reference to `wal`.
-`tests/integration/wal_recovery_test.rs` still exists but its registration in
-`tests/integration.rs` is commented out. Wiring this up is roadmap item §2.1.
+`src/storage/atomic_ops.rs` also uses `wal.rs`, on a separate path reachable only from the
+`cluster/shard_router.rs` stub. Do not confuse the two.
 
-Tests: `tests/wal_persistence_test.rs`, plus `scripts/run_wal_tests.sh`
+Tests: `tests/wal_recovery_test.rs` (7 crash-recovery tests), `tests/wal_persistence_test.rs`,
+plus `scripts/run_wal_tests.sh`
 
 ### API Layers
 
@@ -230,8 +237,8 @@ python            # PyO3 Python bindings
 See `docs/ROADMAP.md` for the ordered plan. Current blockers for single-node production
 readiness, in dependency order:
 
-1. **No durability** — the WAL is not on the write path and there is no restart recovery. A
-   restart loses every table. Roadmap §2.1.
+1. **Startup replays the entire log** — recovery re-inserts every record, so boot time scales
+   with the dataset. No checkpoint or log compaction yet.
 2. **No index persistence** — only `src/search/ivf.rs` implements `SerializableIndex`; HNSW
    and HNSW-PQ have no save/load, so even with §2.1 a restart means a full index rebuild.
    Roadmap §2.2.

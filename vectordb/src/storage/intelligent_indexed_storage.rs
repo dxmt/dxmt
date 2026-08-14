@@ -4,8 +4,12 @@
 use crate::search::index_traits::VectorIndex;
 use crate::search::brute_force::BruteForceIndex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Mutex as StdMutex};
 use tokio::sync::{RwLock, mpsc, oneshot};
+
+use crate::wal::{WalEntry, WalManager};
 use tracing::{info, error, warn, debug};
 
 pub use crate::storage::index_selector::{
@@ -60,6 +64,15 @@ pub struct IntelligentIndexedStorage {
 
     /// Channel-based 插入：发送端（消除锁竞争）
     insert_tx: mpsc::UnboundedSender<InsertRequest>,
+
+    /// 预写日志。`None` 表示不持久化——`new()` 保持这个行为，只有
+    /// `new_with_wal()` 会打开它，见该函数的说明。
+    wal: Option<Arc<StdMutex<WalManager>>>,
+
+    /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
+    /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
+    /// 把刚读出来的条目又写回日志。
+    replaying: Arc<AtomicBool>,
 
     /// GPU distance calculator (None if no GPU available or feature not enabled)
     #[cfg(feature = "gpu")]
@@ -364,8 +377,40 @@ async fn insertion_processor(
 }
 
 impl IntelligentIndexedStorage {
-    /// 创建新的智能索引存储实例
+    /// 创建新的智能索引存储实例（**不持久化**）。
+    ///
+    /// 保留这个签名是为了不动 40 多个已有调用点——单测、bench、example 都不需要 WAL，
+    /// 让它们各自往磁盘写日志还会互相回放污染。要持久化用 [`Self::new_with_wal`]。
     pub async fn new(config: &StorageConfig) -> crate::Result<Self> {
+        Self::new_with_wal(config, None).await
+    }
+
+    /// 带 WAL 的实例：`wal_dir` 为 `Some` 时开启预写日志，并在返回前把已有日志回放完。
+    ///
+    /// 回放走 `create_table` / `insert_records` 这些正常入口，而不是直接往 `tables` 里塞——
+    /// 直接塞的话记录会在 map 里但不在索引里，搜索返回空，且这种错法测不出来。
+    pub async fn new_with_wal(
+        config: &StorageConfig,
+        wal_dir: Option<PathBuf>,
+    ) -> crate::Result<Self> {
+        let mut storage = Self::build(config).await?;
+
+        if let Some(dir) = wal_dir {
+            let manager = WalManager::new(&dir)?;
+            let pending = manager.replay_from(0)?;
+            storage.wal = Some(Arc::new(StdMutex::new(manager)));
+
+            if pending.is_empty() {
+                info!("WAL at {} is empty; starting with no tables", dir.display());
+            } else {
+                storage.replay(pending).await?;
+            }
+        }
+
+        Ok(storage)
+    }
+
+    async fn build(config: &StorageConfig) -> crate::Result<Self> {
         let storage = TieredStorage::new_from_config(config).await?;
         let index_selector = IntelligentIndexSelector::new();
         
@@ -404,6 +449,7 @@ impl IntelligentIndexedStorage {
         // 创建 channel-based 插入架构（消除锁竞争）
         let (insert_tx, insert_rx) = mpsc::unbounded_channel();
         let tables_arc = Arc::new(RwLock::new(HashMap::new()));
+        let replaying_flag = Arc::new(AtomicBool::new(false));
 
         // 启动后台插入处理器（单线程，无锁竞争）
         let tables_clone = tables_arc.clone();
@@ -438,9 +484,103 @@ impl IntelligentIndexedStorage {
             cost_constraints,
             default_memory_optimization,
             insert_tx,
+            wal: None,
+            replaying: replaying_flag,
             #[cfg(feature = "gpu")]
             gpu_calculator,
         })
+    }
+
+    /// 按序号顺序重放日志。
+    ///
+    /// `Insert` 直接交给 `insert_records`，UPSERT 语义让重复的 id 自然收敛到最后一次写入，
+    /// 所以不需要单独的 Update 条目。`CreateTable`（旧变体）只有名字和维度，缺 distance_metric，
+    /// 只能按 cosine 兜底并告警——真正的修复是让写入方改用 `CreateTableWithConfig`。
+    async fn replay(&self, entries: Vec<(u64, WalEntry)>) -> crate::Result<()> {
+        let total = entries.len();
+        self.replaying.store(true, Ordering::SeqCst);
+
+        let mut tables = 0usize;
+        let mut records = 0usize;
+        let mut skipped = 0usize;
+
+        for (seq, entry) in entries {
+            let outcome = match entry {
+                WalEntry::CreateTableWithConfig { config } => {
+                    self.create_table(config).await.map(|_| { tables += 1; })
+                }
+                WalEntry::CreateTable { table, dimension } => {
+                    warn!(
+                        "WAL seq {}: legacy CreateTable entry for '{}' carries no distance \
+                         metric; assuming cosine. Search results may differ from before the \
+                         restart.",
+                        seq, table
+                    );
+                    let config = TableConfig {
+                        name: table,
+                        dimension,
+                        distance_metric: DistanceMetric::Cosine,
+                        description: None,
+                        index_type: None,
+                        text_fields: None,
+                        enable_full_text_search: false,
+                        memory_optimization: None,
+                        payload_schema: None,
+                        schema_version: 1,
+                        named_vectors: None,
+                    };
+                    self.create_table(config).await.map(|_| { tables += 1; })
+                }
+                WalEntry::Insert { table, record_id, vector, payload } => {
+                    let request = CreateRecordRequest {
+                        id: record_id,
+                        vector,
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload,
+                    };
+                    self.insert_records(&table, vec![request]).await.map(|_| { records += 1; })
+                }
+                WalEntry::Delete { table, record_id } => {
+                    self.delete_records(&table, vec![record_id]).await
+                }
+                WalEntry::DeleteTable { table } => self.delete_table(&table).await,
+                WalEntry::Checkpoint { .. } => Ok(()),
+            };
+
+            // A single bad entry must not cost us the rest of the log. Most commonly this is a
+            // Delete for a record the log never created, which is harmless.
+            if let Err(e) = outcome {
+                skipped += 1;
+                warn!("WAL seq {} could not be replayed, skipping: {}", seq, e);
+            }
+        }
+
+        self.replaying.store(false, Ordering::SeqCst);
+        info!(
+            "WAL replay finished: {} entries -> {} tables, {} records, {} skipped",
+            total, tables, records, skipped
+        );
+        Ok(())
+    }
+
+    /// 写一条 WAL 条目并落盘。回放期间是空操作。
+    ///
+    /// 每次调用都 `force_flush`：`write_entry` 默认攒够 256KB 才写文件，攒着的部分
+    /// `kill -9` 就没了，而"已经返回成功的写入不能丢"正是 WAL 存在的理由。
+    fn wal_append(&self, entries: Vec<WalEntry>) -> crate::Result<()> {
+        if self.replaying.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(ref wal) = self.wal else { return Ok(()) };
+
+        let mut guard = wal.lock()
+            .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+        for entry in entries {
+            guard.write_entry(entry)?;
+        }
+        guard.force_flush()?;
+        Ok(())
     }
     
     /// 创建表时自动选择最优索引
@@ -561,7 +701,9 @@ impl IntelligentIndexedStorage {
             let mut tables = self.tables.write().await;
             tables.insert(table.name.clone(), table_data);
         }
-        
+
+        self.wal_append(vec![WalEntry::CreateTableWithConfig { config }])?;
+
         Ok(table)
     }
     
@@ -578,8 +720,24 @@ impl IntelligentIndexedStorage {
         }).map_err(|e| crate::Error::Internal(format!("Failed to send insert request: {}", e)))?;
 
         // 等待后台处理器响应
-        response_rx.await
-            .map_err(|e| crate::Error::Internal(format!("Insert request was cancelled: {}", e)))?
+        let inserted = response_rx.await
+            .map_err(|e| crate::Error::Internal(format!("Insert request was cancelled: {}", e)))??;
+
+        // 先落内存再记日志，最后才返回给调用方。中间崩掉的话这次写入还没被确认，丢了也符合语义；
+        // 反过来先记日志的话，处理器若因维度不符等原因失败，日志里就留下了一条永远重放不成功的
+        // 幽灵记录。
+        self.wal_append(
+            inserted.iter()
+                .map(|r| WalEntry::Insert {
+                    table: tablename.to_string(),
+                    record_id: r.id.clone(),
+                    vector: r.vector.clone(),
+                    payload: serde_json::to_value(&r.payload).ok(),
+                })
+                .collect(),
+        )?;
+
+        Ok(inserted)
     }
     
     /// 搜索向量
@@ -1197,10 +1355,13 @@ impl IntelligentIndexedStorage {
     
     /// 删除表
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
-        let mut tables = self.tables.write().await;
+        {
+            let mut tables = self.tables.write().await;
+            tables.remove(name)
+                .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+        }
 
-        tables.remove(name)
-            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+        self.wal_append(vec![WalEntry::DeleteTable { table: name.to_string() }])?;
 
         Ok(())
     }
@@ -1876,6 +2037,14 @@ impl IntelligentIndexedStorage {
         // Sync record_count from actual HashMap size (handles concurrent deletes correctly)
         table_data.table.record_count = table_data.records.len() as u64;
         table_data.table.updated_at = chrono::Utc::now();
+
+        drop(tables);
+
+        self.wal_append(
+            record_ids.into_iter()
+                .map(|id| WalEntry::Delete { table: tablename.to_string(), record_id: id })
+                .collect(),
+        )?;
 
         Ok(())
     }
