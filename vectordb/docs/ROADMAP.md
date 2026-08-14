@@ -446,7 +446,7 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [ ] W5 — clippy 清零
+### [x] W5 — clippy 清零 — 完成于 <SHA5>
 
 **目标**：让 `make verify` 第一次变成一个能用的门禁。
 
@@ -462,6 +462,25 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 **同时要处理**：`make fmt` 跑的是 `cargo fmt`（写入，不是 `--check`），仓库从未 fmt 干净过，
 跑一次重排 208 个文件。建议把 Makefile 的 `verify` 目标改成用 `cargo fmt -- --check`，
 再单独提一个纯格式化 commit。
+
+> **已完成。`make verify` 现在真的能过了**（"All checks passed!"，exit 0）。
+>
+> - clippy `--all-targets -D warnings`：**154 → 0**。约三分之二由 `cargo clippy --fix`
+>   自动完成，其余手工。
+> - **`benches/filter_performance_bench.rs` 自导入以来就编译不过**——它 import 的是
+>   crate `vectordb`，而 lib 名是 `dxmt_vectordb`，且 `TableConfig` / `CreateRecordRequest`
+>   / `SearchQuery` / `StorageConfig` 四个字面量全是旧结构。所以 CLAUDE.md 里那句
+>   "唯一注册的 bench 目标"从来没跑起来过。已按当前 API 修好。
+> - `make verify` 的 `fmt` 步骤换成新的 `fmt-check`（`cargo fmt -- --check`）。**会改你文件的
+>   东西不能当门禁。** `lint` 也补上了 `--all-targets`，否则 tests/benches/examples 全不检查。
+> - Makefile 里三处指向已不存在的 `scripts/` 的 `python3 ... || true` 步骤删掉了——
+>   它们静默 no-op，让 target 看起来做了比实际更多的事。
+> - 纯格式化单独一个 commit（212 文件）。注意 `cargo fmt` 在本仓库**不是幂等的**：
+>   第一遍之后 `--check` 仍报 `src/storage/mod.rs` 一处行尾注释对齐，需要再跑一遍才收敛。
+>
+> 两个 `assert!(true)` 是删掉而不是改写的。一个在 GPU 测试里，有没有 GPU 都是合法结果，
+> 那个测试的意义是证明 `try_new` 不 panic，注释改成了这么说；另一个守着一条需要 live
+> factory 的 `IndexManager` 路径，改成 `#[ignore]` 并写明原因——通过的同义反复不算诚实。
 
 ---
 

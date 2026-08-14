@@ -21,7 +21,7 @@ pub mod tiered;
 pub mod tombstone_tracker;
 pub mod traits;
 pub mod wal_entry; // New: WAL entry definitions
-// Removed
+                   // Removed
 
 // Re-export main types
 pub use background_demotion::{

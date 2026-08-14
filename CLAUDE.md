@@ -60,11 +60,10 @@ and has no `/api/v1` at all, so nothing will connect.
 - **CI does not run.** The workflows in `vectordb/.github/workflows/` invoke `cargo` at the
   checkout root with no `working-directory:`, and GitHub Actions only reads `.github/` at the
   true repo root — so they neither trigger nor would pass now that the crate is nested.
-- **`make verify` does not pass, and never has.** It is fmt + `clippy -D warnings` + test, and
-  clippy reports 154 errors on the current tree (161 on the original import commit `1668a8b`).
-  The working gate is `cargo test --lib`. Worse, its first step is `cargo fmt` — which writes,
-  not `--check` — and the repo has never been fmt-clean, so running it reformats 208 files and
-  buries whatever you actually changed. Check with `cargo fmt -- --check` instead.
+- **`make verify` passes as of W5** and is now a usable gate: `fmt-check` + `clippy
+  --all-targets -D warnings` + `test`. It used to fail on 154 clippy errors, and its first step
+  was `cargo fmt`, which writes rather than checks — a gate that edits your tree is not a gate.
+  Note `cargo fmt` is not idempotent on this repo; run it twice if `fmt-check` still complains.
 - **Half the module names do not describe what runs.** `vectordb/docs/ROADMAP.md` is the
   authority on which code the server actually reaches; read it before trusting a module name,
   a doc claim, or a passing test as evidence that a feature works. The headline: records live

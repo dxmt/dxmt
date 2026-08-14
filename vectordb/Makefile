@@ -75,7 +75,6 @@ run-release: release
 test:
 	@echo "Running all tests..."
 	@cargo test
-	@python3 scripts/test/api_test.py || true
 
 test-unit:
 	@echo "Running unit tests..."
@@ -100,9 +99,16 @@ fmt:
 	@echo "Formatting code..."
 	@cargo fmt
 
+# Checks formatting without rewriting. `verify` uses this, not `fmt`: a gate that edits
+# your working tree is not a gate, and `cargo fmt` on an unformatted repo buries the change
+# under review in hundreds of reformatted files.
+fmt-check:
+	@echo "Checking formatting..."
+	@cargo fmt -- --check
+
 lint:
 	@echo "Running clippy..."
-	@cargo clippy -- -D warnings
+	@cargo clippy --all-targets -- -D warnings
 
 check:
 	@echo "Running cargo check..."
@@ -157,7 +163,7 @@ clean:
 	@find . -name "__pycache__" -delete
 
 # Verify everything is working
-verify: fmt lint test
+verify: fmt-check lint test
 	@echo "All checks passed!"
 
 # Release process
