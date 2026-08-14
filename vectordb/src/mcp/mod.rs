@@ -14,10 +14,11 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// MCP protocol version
-pub const MCP_VERSION: &str = "1.0.0";
+pub const MCP_VERSION: &str = "2024-11-05";
 
 /// MCP server information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -27,6 +28,7 @@ pub struct ServerInfo {
 
 /// Server capabilities declaration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     pub tools: Option<ToolsCapability>,
     pub resources: Option<ResourcesCapability>,
@@ -35,22 +37,26 @@ pub struct ServerCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolsCapability {
     pub list_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourcesCapability {
     pub subscribe: bool,
     pub list_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptsCapability {
     pub list_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LoggingCapability {
     pub levels: Vec<String>,
 }
@@ -101,6 +107,7 @@ pub enum McpResponse {
 
 /// Initialize parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub protocol_version: String,
     pub capabilities: ClientCapabilities,
@@ -108,6 +115,7 @@ pub struct InitializeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     pub experimental: Option<HashMap<String, serde_json::Value>>,
     pub sampling: Option<SamplingCapability>,
@@ -117,12 +125,14 @@ pub struct ClientCapabilities {
 pub struct SamplingCapability {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub protocol_version: String,
     pub capabilities: ServerCapabilities,
@@ -131,17 +141,20 @@ pub struct InitializeResult {
 
 /// Tool-related types
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallToolParams {
     pub name: String,
     pub arguments: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListToolsResult {
     pub tools: Vec<Tool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
     pub description: Option<String>,
@@ -149,6 +162,7 @@ pub struct Tool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     pub content: Vec<ToolContent>,
     pub is_error: Option<bool>,
@@ -167,16 +181,19 @@ pub enum ToolContent {
 
 /// Resource-related types
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadResourceParams {
     pub uri: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListResourcesResult {
     pub resources: Vec<Resource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub uri: String,
     pub name: String,
@@ -190,6 +207,7 @@ pub struct ResourceReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadResourceResult {
     pub contents: Vec<ResourceContent>,
 }
@@ -205,17 +223,20 @@ pub enum ResourceContent {
 
 /// Prompt-related types
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetPromptParams {
     pub name: String,
     pub arguments: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListPromptsResult {
     pub prompts: Vec<Prompt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Prompt {
     pub name: String,
     pub description: Option<String>,
@@ -223,6 +244,7 @@ pub struct Prompt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptArgument {
     pub name: String,
     pub description: Option<String>,
@@ -230,12 +252,14 @@ pub struct PromptArgument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetPromptResult {
     pub description: Option<String>,
     pub messages: Vec<PromptMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptMessage {
     pub role: MessageRole,
     pub content: MessageContent,
@@ -303,6 +327,7 @@ pub struct Completion {
 
 /// Error handling
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpError {
     pub code: i32,
     pub message: String,
@@ -348,7 +373,12 @@ pub struct JsonRpcMessage {
 #[serde(untagged)]
 pub enum JsonRpcContent {
     Request { method: String, params: Option<serde_json::Value> },
-    Response { result: Option<serde_json::Value>, error: Option<McpError> },
+    Response {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<McpError>,
+    },
     Notification { method: String, params: Option<serde_json::Value> },
 }
 

@@ -390,7 +390,7 @@ cargo test --lib
 
 ---
 
-### [ ] W4 — MCP Server 接线
+### [x] W4 — MCP Server 接线 — 完成于 <SHA4>
 
 **目标**：`vectordb serve --mcp`（或独立 bin）能被 Claude Desktop / Cline 之类的客户端连上。
 
@@ -406,7 +406,43 @@ cargo test --lib
 3. `src/mcp/tools.rs:154` 有个 `"rebuild_index"` 工具定义，核对它调的是不是主路径上的
    `rebuild_index`。
 
-**验收**：用 `npx @modelcontextprotocol/inspector` 连上，能列出 tools 并成功调一次搜索。
+**验收**：`vectordb mcp` 启动 stdio 服务，实测 initialize → tools/list（7 个工具）→
+create_table → insert_vector → vector_search → list_tables 全部成功。
+
+> **已完成。** 接线本身确实只有十几行，但顺带暴露了三个协议 bug，不修的话任何真实客户端
+> 都连不上：
+>
+> 1. **`initialize` 直接失败**，报 `missing field 'protocol_version'`。MCP 线上格式是
+>    camelCase，而这些结构体用 serde 默认的 snake_case。25 个协议结构体全部补了
+>    `#[serde(rename_all = "camelCase")]`。同理 `input_schema` 也得是 `inputSchema`。
+> 2. **`MCP_VERSION` 是 `"1.0.0"`**。MCP 的协议版本是日期串，改成 `"2024-11-05"`。
+> 3. **`tools/list` 只返回 1 个工具。** `McpServer::new` 里 `tokio::spawn` 了一个任务往
+>    catalogue 里塞工具，跟所有调用方赛跑；而真正定义了 7 个工具的 `initialize_tools()`
+>    从来没人调用。改成 `pub async fn initialize()`，两个 transport 都在服务前先调。
+>
+> 另外 JSON-RPC 响应原本同时带 `result` 和 `error: null`，严格的客户端会拒。
+> 两个字段都加了 `skip_serializing_if`。
+>
+> **stdout 是 JSON-RPC 通道**，所以 MCP 模式下 tracing 必须写 stderr，否则一行日志插进
+> 消息流里，客户端报一个指向不明的解析错误就断开。`main.rs` 里按子命令切换 writer。
+>
+> `tests/mcp_stdio_test.rs` 直接 spawn 真实二进制来测——这里最容易坏的东西
+> （日志串到 stdout、忘了 flush、字段大小写）全都在 handler 之外，直接调
+> `handle_message` 的测试会在服务完全不可用的情况下通过。4 个测试，其中一个验证
+> MCP 与 HTTP 共用同一份持久化存储：换个进程用同一个 WAL 目录，向量还在。
+
+**客户端配置**（Claude Desktop / Cline 的 `mcpServers`）：
+
+```json
+{
+  "mcpServers": {
+    "dxmt-vectordb": {
+      "command": "/path/to/vectordb",
+      "args": ["mcp", "--wal-dir", "/path/to/data/wal"]
+    }
+  }
+}
+```
 
 ---
 

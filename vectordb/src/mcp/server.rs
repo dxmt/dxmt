@@ -47,37 +47,29 @@ impl<S: Storage + 'static> McpServer<S> {
             prompts: Arc::new(RwLock::new(Vec::new())),
         };
 
-        // Initialize default tools in a separate task
-        let tools_clone = Arc::clone(&server.tools);
-        let prompts_clone = Arc::clone(&server.prompts);
-        tokio::spawn(async move {
-            // Initialize tools directly here
-            let mut tools = tools_clone.write().await;
-            tools.push(Tool {
-                name: "create_table".to_string(),
-                description: Some("Create a new vector table".to_string()),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "dimension": {"type": "integer"},
-                        "metric": {"type": "string"}
-                    }
-                }),
-            });
-            // Add more tools as needed
-
-            let mut prompts = prompts_clone.write().await;
-            prompts.push(Prompt {
-                name: "vector_search".to_string(),
-                description: Some("Search for similar vectors".to_string()),
-                arguments: Some(vec![]),
-            });
-        });
-
+        // The catalogue is filled by `initialize`, not here. This constructor used to
+        // `tokio::spawn` a task that pushed a single tool, which raced every caller: a
+        // tools/list arriving first saw an empty or half-filled list, and the other seven tools
+        // defined in `initialize_tools` were never registered at all because nothing called it.
         server
     }
     
+    /// Populate the tool and prompt catalogues. Idempotent.
+    ///
+    /// Must run before the first `tools/list`, so both transports call it up front rather than
+    /// leaving it to a background task.
+    pub async fn initialize(&self) {
+        self.tools.write().await.clear();
+        self.prompts.write().await.clear();
+        self.initialize_tools().await;
+        self.initialize_prompts().await;
+        info!(
+            "MCP catalogue ready: {} tools, {} prompts",
+            self.tools.read().await.len(),
+            self.prompts.read().await.len()
+        );
+    }
+
     /// Initialize built-in tools
     async fn initialize_tools(&self) {
         let mut tools = self.tools.write().await;
@@ -324,7 +316,71 @@ impl<S: Storage + 'static> McpServer<S> {
     }
     
     /// Handle MCP WebSocket connection
+    /// Serve MCP over stdin/stdout, one JSON-RPC message per line.
+    ///
+    /// This is the transport MCP clients actually use — Claude Desktop, Cline and the
+    /// inspector all launch the server as a subprocess and speak newline-delimited JSON over
+    /// its pipes. The WebSocket path below existed but nothing could start it, because the CLI
+    /// had no subcommand for MCP at all.
+    ///
+    /// **Nothing else may write to stdout while this runs.** The caller is responsible for
+    /// sending logs to stderr; a stray log line lands in the middle of the JSON-RPC stream and
+    /// the client drops the connection with a parse error that points nowhere useful.
+    pub async fn serve_stdio(&self) -> Result<(), McpServerError> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        self.initialize().await;
+
+        let session_id = Uuid::new_v4();
+        self.sessions.write().await.insert(
+            session_id,
+            SessionState {
+                id: session_id,
+                client_info: None,
+                capabilities: None,
+                initialized: false,
+            },
+        );
+
+        info!("MCP stdio session {} started", session_id);
+
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut stdout = tokio::io::stdout();
+
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let reply = match self.handle_message(session_id, &line).await {
+                // Notifications produce no response; writing an empty line would be a protocol
+                // violation, so swallow it.
+                Ok(response) if response.is_empty() => continue,
+                Ok(response) => response,
+                Err(e) => {
+                    error!("MCP request failed: {}", e);
+                    serde_json::to_string(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": { "code": -32603, "message": e.to_string() }
+                    }))?
+                }
+            };
+
+            stdout.write_all(reply.as_bytes()).await?;
+            stdout.write_all(b"\n").await?;
+            // Flush per message: the client blocks waiting for this reply, so buffering it
+            // until the pipe fills would look exactly like a hung server.
+            stdout.flush().await?;
+        }
+
+        self.sessions.write().await.remove(&session_id);
+        info!("MCP stdio session {} closed", session_id);
+        Ok(())
+    }
+
     pub async fn handle_connection(&self, ws: WebSocket) {
+        self.initialize().await;
+
         let session_id = Uuid::new_v4();
         let session = SessionState {
             id: session_id,

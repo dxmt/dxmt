@@ -257,9 +257,13 @@ readiness, in dependency order:
 
 Minimal stubs, do not rely on them: `cluster`, `consensus`, `embeddings` (Rust-side).
 
-Compiled, but with no caller from any binary — do not assume these run: `mcp/`,
+Compiled, but with no caller from any binary — do not assume these run:
 `index_management/` + `adaptive_index/`, `async_wal.rs`, `multi_tenant/`, `worker_pool/`,
 `memory_pool.rs`. Each is classified in `docs/ROADMAP.md` §3.
+
+`mcp/` is wired as of W4: `vectordb mcp` serves the Model Context Protocol over stdio against
+the same WAL-backed storage as `serve`. Note that stdout is the JSON-RPC channel there, so
+`main.rs` routes tracing to stderr for that subcommand — never `println!` on an MCP path.
 
 ## Python SDK Integrations
 

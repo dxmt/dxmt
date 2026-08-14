@@ -45,6 +45,29 @@ each one widens the exposed surface, so opt in per process:
 | `--graphql`   | `POST /graphql`                                      |
 | `--websocket` | `GET /ws` (upgrade)                                  |
 
+### MCP server
+
+The database also speaks the Model Context Protocol over stdio, backed by the same durable
+storage as the HTTP server:
+
+```bash
+./target/release/vectordb mcp --wal-dir ./data/wal
+```
+
+Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_vector`,
+`create_table`, `list_tables`, `get_table_info`, `delete_vectors`, `hybrid_search`):
+
+```json
+{
+  "mcpServers": {
+    "dxmt-vectordb": {
+      "command": "/path/to/vectordb",
+      "args": ["mcp", "--wal-dir", "/path/to/data/wal"]
+    }
+  }
+}
+```
+
 ## Architecture
 
 Both server modes converge on one storage implementation, `IntelligentIndexedStorage`:
