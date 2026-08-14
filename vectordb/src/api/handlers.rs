@@ -491,6 +491,22 @@ pub async fn rebuild_index(
     }
 }
 
+/// Write a snapshot of every table so the next restart skips replaying the whole WAL.
+///
+/// Explicit rather than automatic: snapshotting walks every table and serializes every index,
+/// so when it runs is an operational decision. It also runs after `index/rebuild`, which is the
+/// other moment the index is known to be both current and expensive to reproduce.
+pub async fn create_snapshot(State(state): State<AppState>) -> impl IntoResponse {
+    match state.storage.snapshot().await {
+        Ok(tables) => ApiResponse::success(serde_json::json!({
+            "message": format!("Snapshot written for {} table(s).", tables),
+            "tables": tables,
+        }))
+        .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Branch a table — create an independent copy of source table's schema and records.
 ///
 /// POST /tables/:table_name/branch

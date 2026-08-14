@@ -248,3 +248,81 @@ async fn without_a_wal_directory_nothing_is_persisted() {
         "new() must not write a WAL"
     );
 }
+
+#[tokio::test]
+async fn a_snapshot_lets_recovery_skip_the_log_it_covers() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage.create_table(table("t", 4, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .insert_records(
+                "t",
+                (0..50).map(|i| record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0])).collect(),
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+    }
+
+    let recovered = open(&wal_dir).await;
+    assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 50);
+
+    let hits = recovered.search("t", query(vec![7.0, 0.0, 0.0, 0.0], 1)).await.unwrap();
+    assert_eq!(hits.hits[0].id, "r7", "the restored index must answer, not just exist");
+}
+
+#[tokio::test]
+async fn writes_after_a_snapshot_are_replayed_on_top_of_it() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage.create_table(table("t", 4, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![record("keep", vec![1.0, 0.0, 0.0, 0.0]), record("gone", vec![2.0, 0.0, 0.0, 0.0])],
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+
+        // Both edits land after the snapshot, so they exist only in the WAL tail. If recovery
+        // stopped at the snapshot, `late` would vanish and `gone` would come back — and the
+        // record count alone would not reveal it, since the two errors cancel out.
+        storage.insert_records("t", vec![record("late", vec![3.0, 0.0, 0.0, 0.0])]).await.unwrap();
+        storage.delete_records("t", vec!["gone".to_string()]).await.unwrap();
+    }
+
+    let recovered = open(&wal_dir).await;
+    let hits = recovered.search("t", query(vec![0.0, 0.0, 0.0, 0.0], 10)).await.unwrap();
+    let mut ids: Vec<_> = hits.hits.iter().map(|h| h.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["keep", "late"]);
+}
+
+#[tokio::test]
+async fn a_corrupt_snapshot_falls_back_to_full_replay() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage.create_table(table("t", 2, DistanceMetric::Cosine)).await.unwrap();
+        storage.insert_records("t", vec![record("a", vec![1.0, 0.0])]).await.unwrap();
+        storage.snapshot().await.unwrap();
+    }
+
+    // A snapshot is an optimisation, never the only copy. Damage it and recovery must still
+    // produce the right database from the log — slower, but correct.
+    std::fs::write(wal_dir.join("snapshot").join("manifest"), b"garbage").unwrap();
+
+    let recovered = open(&wal_dir).await;
+    assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
+    let hits = recovered.search("t", query(vec![1.0, 0.0], 1)).await.unwrap();
+    assert_eq!(hits.hits[0].id, "a");
+}

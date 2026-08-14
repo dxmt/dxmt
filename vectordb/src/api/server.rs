@@ -16,6 +16,7 @@ use crate::{
 			create_incremental_backup,
 			create_manual_backup,
 			alter_table,
+			create_snapshot,
 			create_table,
 			delete_backup,
 			delete_records,
@@ -141,6 +142,8 @@ pub async fn create_app_with_features(
 		// 索引管理API
 		.route("/tables/:table_name/index", delete(drop_index))
 		.route("/tables/:table_name/index/rebuild", post(rebuild_index))
+		// 快照：把所有表落盘，下次启动只回放快照之后的 WAL
+		.route("/snapshot", post(create_snapshot))
 		// 表分支API
 		.route("/tables/:table_name/branch", post(branch_table))
 		// DXQL query API

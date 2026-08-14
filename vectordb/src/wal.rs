@@ -183,6 +183,14 @@ impl WalManager {
     pub fn force_flush(&mut self) -> Result<()> {
         self.flush_buffer()
     }
+
+    /// Sequence number the next entry will get.
+    ///
+    /// Recorded alongside an index snapshot so that recovery can replay only the tail of the
+    /// log instead of the whole thing.
+    pub fn next_sequence(&self) -> u64 {
+        self.sequence_number
+    }
     
     /// Replay WAL entries from a given sequence number (supports compression)
     pub fn replay_from(&self, from_seq: u64) -> Result<Vec<(u64, WalEntry)>> {

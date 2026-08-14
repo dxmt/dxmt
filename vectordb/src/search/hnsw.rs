@@ -732,6 +732,11 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
         self.id_to_idx.len()
     }
     
+    fn snapshot_to(&self, path: &std::path::Path) -> crate::Result<bool> {
+        crate::search::index_traits::SerializableIndex::save(self, path)?;
+        Ok(true)
+    }
+
     fn is_empty(&self) -> bool {
         self.id_to_idx.is_empty()
     }

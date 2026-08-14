@@ -1,6 +1,6 @@
 use tracing::info;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum IndexAlgorithm {
     HNSW {
         m: usize,

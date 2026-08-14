@@ -102,6 +102,19 @@ impl IndexWrapper {
         index.is_empty()
     }
 
+    /// Write the index to `path`; false means this index type has no on-disk form.
+    pub async fn snapshot_to(&self, path: &std::path::Path) -> Result<bool> {
+        let index = self.index.read().await;
+        index.snapshot_to(path)
+    }
+
+    /// Replace the wrapped index in place, keeping the same `Arc` so existing clones of this
+    /// wrapper — the table holds one, and searches hold more — observe the new index.
+    pub async fn replace(&self, new_index: Box<dyn VectorIndex>) {
+        let mut index = self.index.write().await;
+        *index = new_index;
+    }
+
     /// Clear the index - requires write lock
     pub async fn clear(&self) -> Result<()> {
         // Note: VectorIndex trait doesn't have a clear() method

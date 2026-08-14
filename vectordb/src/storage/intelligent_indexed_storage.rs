@@ -31,6 +31,23 @@ use crate::search::{IndexWrapper, IndexCollection};
 #[cfg(feature = "text-bm25")]
 use crate::search::full_text::{FullTextSearchEngine, FullTextDocument, FullTextConfig, FullTextSearchRequest as EngineSearchRequest};
 
+/// 快照清单：记住写快照那一刻 WAL 的下一个序号，恢复时只回放这之后的部分。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotManifest {
+    wal_next_sequence: u64,
+    tables: usize,
+}
+
+/// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
+/// （例如 BruteForce），恢复时从 `records` 重新插入即可。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TableSnapshot {
+    table: Table,
+    algorithm: IndexAlgorithm,
+    records: Vec<Record>,
+    has_index: bool,
+}
+
 /// 插入请求（用于 channel-based 架构）
 struct InsertRequest {
     table_name: String,
@@ -68,6 +85,9 @@ pub struct IntelligentIndexedStorage {
     /// 预写日志。`None` 表示不持久化——`new()` 保持这个行为，只有
     /// `new_with_wal()` 会打开它，见该函数的说明。
     wal: Option<Arc<StdMutex<WalManager>>>,
+
+    /// WAL 目录，快照写在它下面的 `snapshot/`。
+    wal_dir: Option<PathBuf>,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -397,11 +417,25 @@ impl IntelligentIndexedStorage {
 
         if let Some(dir) = wal_dir {
             let manager = WalManager::new(&dir)?;
-            let pending = manager.replay_from(0)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
+            storage.wal_dir = Some(dir.clone());
+
+            // Snapshot first, then only the log written after it. Replay has to run with the
+            // snapshot already in place: the tail may delete or overwrite records the snapshot
+            // restored, and applying it to an empty store would lose those edits.
+            let from_seq = storage.load_snapshot(&dir).await;
+
+            let pending = {
+                let guard = storage.wal.as_ref().unwrap().lock()
+                    .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+                guard.replay_from(from_seq)?
+            };
 
             if pending.is_empty() {
-                info!("WAL at {} is empty; starting with no tables", dir.display());
+                info!(
+                    "No WAL entries after sequence {}; recovery complete from snapshot alone",
+                    from_seq
+                );
             } else {
                 storage.replay(pending).await?;
             }
@@ -485,6 +519,7 @@ impl IntelligentIndexedStorage {
             default_memory_optimization,
             insert_tx,
             wal: None,
+            wal_dir: None,
             replaying: replaying_flag,
             #[cfg(feature = "gpu")]
             gpu_calculator,
@@ -561,6 +596,209 @@ impl IntelligentIndexedStorage {
             "WAL replay finished: {} entries -> {} tables, {} records, {} skipped",
             total, tables, records, skipped
         );
+        Ok(())
+    }
+
+    /// 一张表的快照元数据。索引本体在同名的 `.idx` 文件里。
+    ///
+    /// 记录也一并存下来：只存索引不够——索引里只有 id 和向量，payload、版本号、时间戳都在
+    /// `records` map 里，光靠索引恢复出来的表 payload 全空。
+    fn snapshot_dir(wal_dir: &std::path::Path) -> PathBuf {
+        wal_dir.join("snapshot")
+    }
+
+    /// 把当前所有表写成快照，并记下 WAL 的下一个序号。
+    ///
+    /// 恢复时先加载快照、再只回放该序号之后的日志，避免把每条记录重新插一遍索引——
+    /// 那正是"启动时间随数据量线性增长"的来源。
+    ///
+    /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
+    /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
+    pub async fn snapshot(&self) -> crate::Result<usize> {
+        let Some(ref wal) = self.wal else {
+            return Err(crate::Error::InvalidInput(
+                "snapshot requires a WAL-backed storage (use new_with_wal)".to_string(),
+            ));
+        };
+
+        let seq = {
+            let mut guard = wal.lock()
+                .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+            guard.force_flush()?;
+            guard.next_sequence()
+        };
+
+        let dir = Self::snapshot_dir(self.wal_dir.as_ref().ok_or_else(|| {
+            crate::Error::Internal("WAL enabled without a directory".to_string())
+        })?);
+        let staging = dir.with_extension("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+
+        let tables = self.tables.read().await;
+        let mut written = 0usize;
+        let mut names = Vec::new();
+
+        for (name, data) in tables.iter() {
+            // 表名来自用户输入，不能直接当文件名。用序号命名，真实名字放进元数据。
+            let stem = format!("t{}", written);
+            let idx_path = staging.join(format!("{}.idx", stem));
+            let has_index = data.index.snapshot_to(&idx_path).await.unwrap_or(false);
+
+            let meta = TableSnapshot {
+                table: data.table.clone(),
+                algorithm: data.selected_algorithm.clone(),
+                records: data.records.values().cloned().collect(),
+                has_index,
+            };
+            crate::search::index_persistence::write_index(
+                &staging.join(format!("{}.meta", stem)),
+                "table-snapshot",
+                &meta,
+            )?;
+
+            names.push(name.clone());
+            written += 1;
+        }
+        drop(tables);
+
+        crate::search::index_persistence::write_index(
+            &staging.join("manifest"),
+            "snapshot-manifest",
+            &SnapshotManifest { wal_next_sequence: seq, tables: written },
+        )?;
+
+        // 原子替换：中途崩了要么是旧快照、要么是新快照，不会是半个。
+        let previous = dir.with_extension("previous");
+        let _ = std::fs::remove_dir_all(&previous);
+        if dir.exists() {
+            std::fs::rename(&dir, &previous)?;
+        }
+        std::fs::rename(&staging, &dir)?;
+        let _ = std::fs::remove_dir_all(&previous);
+
+        info!("Snapshot written: {} tables at WAL sequence {}", written, seq);
+        Ok(written)
+    }
+
+    /// 加载快照，返回 WAL 应该从哪个序号开始回放。没有快照就返回 0（全量回放）。
+    async fn load_snapshot(&self, wal_dir: &std::path::Path) -> u64 {
+        let dir = Self::snapshot_dir(wal_dir);
+        let manifest: SnapshotManifest = match crate::search::index_persistence::read_index(
+            &dir.join("manifest"),
+            "snapshot-manifest",
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                if dir.exists() {
+                    // 快照读不出来不是致命错误——全量回放 WAL 就是了。但要说出来，
+                    // 否则表现只是"启动变慢了"，没人会去查。
+                    warn!("Snapshot unreadable, falling back to full WAL replay: {}", e);
+                }
+                return 0;
+            }
+        };
+
+        for i in 0..manifest.tables {
+            let stem = format!("t{}", i);
+            let meta: TableSnapshot = match crate::search::index_persistence::read_index(
+                &dir.join(format!("{}.meta", stem)),
+                "table-snapshot",
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("Snapshot table {} unreadable, full replay: {}", i, e);
+                    return 0;
+                }
+            };
+
+            if let Err(e) = self.restore_table(&dir.join(format!("{}.idx", stem)), meta).await {
+                warn!("Snapshot table {} could not be restored, full replay: {}", i, e);
+                return 0;
+            }
+        }
+
+        info!(
+            "Snapshot loaded: {} tables; replaying WAL from sequence {}",
+            manifest.tables, manifest.wal_next_sequence
+        );
+        manifest.wal_next_sequence
+    }
+
+    async fn restore_table(
+        &self,
+        idx_path: &std::path::Path,
+        meta: TableSnapshot,
+    ) -> crate::Result<()> {
+        use crate::search::index_traits::SerializableIndex;
+
+        let name = meta.table.name.clone();
+        let dimension = meta.table.dimension;
+        let metric = meta.table.distance_metric;
+
+        // Rebuild the container through the normal path so index selection, named vectors and
+        // the full-text engine are set up exactly as a live CREATE TABLE would set them up.
+        let config = TableConfig {
+            name: name.clone(),
+            dimension,
+            distance_metric: metric,
+            description: meta.table.description.clone(),
+            index_type: None,
+            text_fields: meta.table.text_fields.clone(),
+            enable_full_text_search: meta.table.enable_full_text_search,
+            memory_optimization: meta.table.memory_optimization,
+            payload_schema: meta.table.payload_schema.clone(),
+            schema_version: meta.table.schema_version,
+            named_vectors: meta.table.named_vectors.clone(),
+        };
+        self.create_table(config).await?;
+
+        let restored_index = if meta.has_index {
+            match &meta.algorithm {
+                IndexAlgorithm::HNSW { .. } => crate::search::hnsw::HnswIndex::load(idx_path)
+                    .map(|i| Box::new(i) as Box<dyn VectorIndex>)
+                    .ok(),
+                IndexAlgorithm::HnswPQ { .. } => {
+                    crate::search::hnsw_pq::HnswPqIndex::load(idx_path)
+                        .map(|i| Box::new(i) as Box<dyn VectorIndex>)
+                        .ok()
+                }
+                // BruteForce and the variants that fall back to it have no on-disk form worth
+                // loading; re-inserting is as cheap as reading the file would be.
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let mut tables = self.tables.write().await;
+        let data = tables.get_mut(&name)
+            .ok_or_else(|| crate::Error::TableNotFound(name.clone()))?;
+
+        let index_restored = restored_index.is_some();
+        if let Some(index) = restored_index {
+            data.index.replace(index).await;
+        }
+
+        for record in &meta.records {
+            data.records.insert(record.id.clone(), record.clone());
+        }
+        data.table.record_count = data.records.len() as u64;
+
+        let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
+            Vec::new()
+        } else {
+            meta.records.iter().map(|r| (r.id.clone(), r.vector.clone())).collect()
+        };
+        let wrapper = data.index.clone();
+        drop(tables);
+
+        // Only reached when the index had no on-disk form. Doing it outside the write lock
+        // keeps a large table from blocking every reader for the duration.
+        for (id, vector) in to_index {
+            wrapper.insert(id, vector).await?;
+        }
+
         Ok(())
     }
 
@@ -1495,6 +1733,15 @@ impl IntelligentIndexedStorage {
         // Phase 2: populate the new index outside the write lock
         for (id, vector) in records_snapshot {
             new_wrapper.insert(id, vector).await?;
+        }
+
+        // A rebuild is the one moment we know the index is both current and expensive to
+        // reproduce, so snapshot it. Failure is logged, not propagated: the rebuild itself
+        // succeeded, and a missing snapshot only costs startup time.
+        if self.wal.is_some() {
+            if let Err(e) = self.snapshot().await {
+                warn!("Index rebuilt but snapshot failed: {}", e);
+            }
         }
 
         Ok(())

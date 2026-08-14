@@ -289,11 +289,43 @@ curl -sX POST localhost:19999/api/v1/tables/t/search -H 'Content-Type: applicati
 
 ---
 
-### [ ] W2 — 索引持久化（HNSW / HNSW-PQ 的 save / load）
+### [x] W2 — 索引持久化（HNSW / HNSW-PQ 的 save / load）— 完成于 <SHA2>
 
 **目标**：重启不需要把所有向量重新插一遍索引。
 
 **前置**：W1。没有 W1 就没有可恢复的数据，这一项无从谈起。
+
+> **已完成。** 2 万条 32 维记录，release 构建实测：
+>
+> | | 恢复耗时 |
+> |---|---|
+> | 全量回放 WAL | **151.56 秒** |
+> | 从快照恢复 | **0.349 秒** |
+>
+> 434 倍。两次的 top-5 搜索结果与崩溃前逐位相同。快照本身耗时 0.6 秒，55MB
+> （索引 52MB + 记录 5MB）。
+>
+> 增量正确性也验证了：快照后再插一条、删一条，`kill -9` 重启后新增的在、删掉的是 404、
+> 总数正确，耗时仍是 0.355 秒。
+>
+> 实现要点：
+> - **快照 = 每表 `.meta`（表元数据 + 记录 + 算法）+ `.idx`（索引本体）+ 一个 manifest
+>   记录当时 WAL 的下一个序号**。恢复时先加载快照，再只回放该序号之后的日志。
+>   只存索引不够——payload、版本号、时间戳都在记录里，光靠索引恢复出来 payload 全空。
+> - **顺序是先取序号再落盘**。反过来的话，取序号之前的写入会既在快照里又被当尾部重放；
+>   因为插入是 upsert 所以不出错，只是白做功。
+> - **`SerializableIndex::load` 是静态构造函数，没法放进 `VectorIndex` trait**（调用方
+>   必须先知道具体类型）。存是没这个问题的，所以只给 trait 加了
+>   `snapshot_to(&self, path) -> Result<bool>`，默认返回 false 表示"这个索引类型没有磁盘
+>   格式"（BruteForce 没什么可存的），与"存失败了"区分开。恢复时按 `.meta` 里记的
+>   `IndexAlgorithm` 选类型加载。
+> - **快照是优化，永远不是唯一副本**。manifest 读不出来就退回全量回放，只告警不报错——
+>   有测试专门把 manifest 写坏来验证这条。
+> - 触发时机：`POST /api/v1/snapshot`，以及 `index/rebuild` 之后自动做一次。
+>
+> **尚未做**：优雅退出时自动快照、定期快照。需要把 storage 的 `Arc` 传到 `main.rs`
+> 才能挂 shutdown hook，而 `create_app_with_features` 现在只返回 `Router`。
+> 另外 WAL 至今不会截断——快照之后旧日志仍然全留着，磁盘会一直涨。这两条见 W7。
 
 **背景**：`SerializableIndex` trait 在 `src/search/index_traits.rs:38` 定义好了
 （`save` / `load` / `stats`），全仓库只有 `src/search/ivf.rs:273` 一处实现。
@@ -326,7 +358,7 @@ cargo test --lib
 
 ---
 
-### [ ] W3 — TieredStorage：接上，或者删掉
+### [ ] W3 — TieredStorage 接线（已定：对标 Turbopuffer）
 
 **目标**：消除全仓库最大的一处名实不符。**二选一，不允许继续放着。**
 
@@ -344,7 +376,17 @@ cargo test --lib
 把 README / CLAUDE.md 的架构描述改成"单节点内存 + WAL 持久化"。诚实，但放弃了定位。
 
 **决策要点**：这不是技术问题，是产品定位问题。选 B 的话，产品就是"带持久化的高性能单机向量库"，
-对标 Chroma；选 A 才是对标 Turbopuffer / LanceDB 的路子。**在动手之前先把这个决定做了。**
+对标 Chroma；选 A 才是对标 Turbopuffer / LanceDB 的路子。
+
+> **已决策（2026-08-14）：选 A，对标 Turbopuffer。** 接上 TieredStorage，对象存储为准。
+>
+> 这个定位决定了后面几件事的优先级：
+> - W2 的快照格式就是分层存储的下沉单位——`.idx` + `.meta` 可以直接作为对象存储上的
+>   不可变段文件，不用另起一套格式。
+> - `tier_promotion.rs` 的 `hotness_score`（阈值 0.7 / 0.5 / 0.4 / 0.2，3600 秒窗口）
+>   已经实现且有单测，缺的是读路径按它决定从哪一层取。
+> - Turbopuffer 的关键在"对象存储为准 + 本地只做缓存"，所以写路径要先落对象存储再更新
+>   本地层，不能反过来。这一点会影响 W2 快照的触发时机：下沉即快照。
 
 ---
 
@@ -407,3 +449,24 @@ cargo test --lib
 - [ ] `POST /tables/{n}/hybrid_search` 静默丢弃 sparse 和 text 分量，只返回 dense 结果，
       却照收 `alpha`/`beta`/`gamma` 权重（`api/handlers.rs:961-966`）。要么实现，要么对
       带 sparse/text 的请求直接报 400。
+- [ ] **批量写入期间整个库对读不可用。** `insertion_processor` 取一次
+      `tables.write().await`，然后在锁内把整批记录逐条插进 HNSW。一次 5000 条的请求会把
+      写锁攥到全部插完，期间连 `GET /tables` 都阻塞——debug 构建下实测好几分钟。
+      改法：分片持锁，或者把索引插入挪到锁外（记录 map 和索引分两阶段）。
+- [ ] `/tables/{n}/records` 有 10000 条的批次上限，超了返回
+      `{"error":"Validation failed","details":"Batch size 20000 exceeds maximum of 10000"}`，
+      README 和 SDK 文档都没写。
+
+---
+
+### [ ] W7 — 快照的运维缺口
+
+**前置**：W2（已完成）。这几条是 W2 交付后剩下的口子，不做的话快照在生产里不好用。
+
+- [ ] **WAL 永不截断。** 快照之后旧日志仍然全留着，磁盘只涨不降。`wal.rs` 有
+      `checkpoint()` 但没人调。快照成功后应该以 manifest 里的序号为界截断。
+- [ ] **优雅退出不快照。** 现在只有 `POST /snapshot` 和 `index/rebuild` 会触发，
+      正常 `SIGTERM` 停机不会存，下次启动仍要全量回放。需要把 storage 的 `Arc` 传到
+      `main.rs` 挂 shutdown hook，而 `create_app_with_features` 目前只返回 `Router`。
+- [ ] **没有定期快照。** 长期只写不重建索引的库，WAL 会一直长。
+- [ ] **快照期间持 `tables` 读锁遍历所有表**，大库上会阻塞写入。

@@ -33,6 +33,17 @@ pub trait VectorIndex: Send + Sync {
     async fn delete(&mut self, id: &str) -> crate::Result<()>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;
+
+    /// Write this index to `path`, returning false if the implementation has no on-disk form.
+    ///
+    /// `SerializableIndex::load` is a static constructor, so it cannot live on this trait — the
+    /// caller has to know which concrete type to build. Saving has no such problem, and routing
+    /// it through here spares the storage layer a downcast on `Box<dyn VectorIndex>`. Returning
+    /// false rather than erroring keeps "this index cannot be snapshotted" (BruteForce has
+    /// nothing worth storing) distinct from "snapshotting it failed".
+    fn snapshot_to(&self, _path: &std::path::Path) -> crate::Result<bool> {
+        Ok(false)
+    }
 }
 
 pub trait SerializableIndex {
