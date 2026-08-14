@@ -190,3 +190,194 @@ commit 的说明。
 - 唯一注册的 bench 目标是 `cargo bench --bench filter_performance_bench --features text-bm25`。
 - `examples/` 下 41 个文件里只有 3 个 Rust example 在 `Cargo.toml` 注册，其余 `.rs`
   （含 `examples/legacy/`）不参与编译，别拿它们当可运行示例。
+
+---
+
+## 7. 工作项清单
+
+每一项都写成自包含的：换个会话、上下文丢了，照着这一节也能接着做。**动手前先读 §1 和 §5。**
+
+约定：
+- 每项完成后把 `[ ]` 改成 `[x]`，并在标题后追加 `— 完成于 <commit sha>`。
+- 每项独立一个 commit，不要合并。
+- 验收命令必须真的跑过，把输出贴进 commit message，不要写"应该可以"。
+- 门禁是 `cargo test --lib`（当前 413 passed）。**不要用 `make verify`**，理由见 §6。
+
+---
+
+### [ ] W1 — WAL 接入主写路径 + 启动恢复
+
+**目标**：建表 → 插入 N 条 → `kill -9` → 重启 → N 条全部可查。这是当前唯一缺失的核心能力。
+
+**前置**：无。这是 P0 的第一项，后面几项都依赖它。
+
+**要改的文件**
+- `src/storage/intelligent_indexed_storage.rs` — 主要工作量
+- `src/wal.rs` — 需要扩展 `WalEntry`，见下面的坑
+- `src/config/mod.rs` — 加 WAL 目录配置项
+- `tests/integration.rs` — 取消 `wal_recovery_test` 的注释
+
+**步骤**
+1. `WalEntry::CreateTable` 目前只有 `{ table, dimension }`（`wal.rs:25`），**不足以重建一张表**——
+   丢了 `distance_metric`、`named_vectors`、`payload_schema`、`memory_optimization`、
+   `enable_full_text_search`。改成携带序列化后的完整 `TableConfig`，或新增一个
+   `CreateTableV2 { config: TableConfig }` 变体并在 replay 时兼容旧变体。
+   `TableConfig` 已经是 `Serialize`/`Deserialize`，直接用。
+2. `IntelligentIndexedStorage` 加字段 `wal: Arc<Mutex<WalManager>>`（用 `std::sync::Mutex`：
+   `write_entry` 是同步 I/O，不跨 await 持锁）。构造函数里按配置的 WAL 目录建好。
+3. `insertion_processor`（`:212`）多收一个 `wal` 参数。**在写入 `tables` 之前**先
+   `write_entry(WalEntry::Insert{..})`，写失败就直接返回错误、不改内存状态。
+   注意它现在是自由函数，`tokio::spawn` 在 `:410` 拉起。
+4. `create_table` / `delete_table` / `delete_records` 三个路径同样补 WAL 写入。
+   注意 `insert_records` 里有 UPSERT 逻辑（`:245` 起），更新走的也是 Insert 条目，replay 时
+   靠同样的 UPSERT 语义自然收敛，不需要额外的 Update 变体。
+5. 构造函数末尾做 replay：`replay_from(0)` 拿到 `Vec<(u64, WalEntry)>`，**按序号顺序**先重建表
+   再灌记录。灌记录要走真正的索引插入路径，不能只塞 `records` map，否则索引是空的。
+6. `tests/integration.rs` 里 `wal_recovery_test` 那段注释（写着 "WAL tests disabled - WAL
+   configuration has been restructured"）取消掉，`tests/integration/wal_recovery_test.rs`
+   530 行还在，按新 API 调整。
+
+**验收**
+```bash
+cargo test --lib                      # 不低于 413 passed
+cargo test --test integration         # wal_recovery_test 全绿
+# 端到端，必须手动跑一遍：
+./target/debug/vectordb serve --port 19999 &
+curl -sX POST localhost:19999/api/v1/tables -H 'Content-Type: application/json' \
+     -d '{"name":"t","dimension":4,"distance_metric":"cosine"}'
+curl -sX POST localhost:19999/api/v1/tables/t/records -H 'Content-Type: application/json' \
+     -d '{"records":[{"id":"a","vector":[1,0,0,0]},{"id":"b","vector":[0,1,0,0]}]}'
+kill -9 <pid>                         # 必须是 -9，不能给它优雅退出的机会
+./target/debug/vectordb serve --port 19999 &
+curl -s localhost:19999/api/v1/tables                    # 期望 total=1
+curl -sX POST localhost:19999/api/v1/tables/t/search -H 'Content-Type: application/json' \
+     -d '{"vector":[1,0,0,0],"top_k":2}'                 # 期望 2 条命中，score 与重启前一致
+```
+
+**坑**
+- 别用 `atomic_ops.rs` 那条路。它的 `AtomicStorageManager` 只被 `cluster/shard_router.rs`
+  引用，绑着 `_Storage` trait 和 LMDB/RocksDB 后端，和主路径的 `tables` map 是两套东西。
+- `async_wal.rs`（§3.3）看着更合适，但它没有 replay，且零调用者零测试。先用同步的
+  `wal.rs` 把语义跑通，性能问题留给 W4。
+- WAL 目录默认值要落在工作目录下（例如 `./data/wal`），并加进 `.gitignore`。
+
+---
+
+### [ ] W2 — 索引持久化（HNSW / HNSW-PQ 的 save / load）
+
+**目标**：重启不需要把所有向量重新插一遍索引。
+
+**前置**：W1。没有 W1 就没有可恢复的数据，这一项无从谈起。
+
+**背景**：`SerializableIndex` trait 在 `src/search/index_traits.rs:38` 定义好了
+（`save` / `load` / `stats`），全仓库只有 `src/search/ivf.rs:273` 一处实现。
+
+**要改的文件**
+- `src/search/hnsw.rs`、`src/search/hnsw_pq.rs` — 实现 `SerializableIndex`
+- `src/storage/intelligent_indexed_storage.rs` — 启动时先试 load，失败再回退到 W1 的 replay
+
+**步骤**
+1. 给 `HnswIndex` 实现 `SerializableIndex`。图结构（`nodes`、各层邻接表、entry point）用
+   bincode 序列化；注意 `DistanceMetric` 和 `HnswConfig` 也要一并存，load 时校验一致。
+2. `HnswPqIndex` 同理，额外要存 PQ 码本（`product_quantization.rs` 里的 centroids）。
+   码本不存的话 load 回来的 PQ code 无法解码。
+3. 存盘时机：先做最简单的——`POST /tables/{n}/index/rebuild` 之后存一次，以及进程收到
+   SIGTERM 时存一次。增量/定期 checkpoint 留给以后。
+4. 启动顺序：load 索引成功 → 只 replay WAL 里 checkpoint 之后的条目；load 失败 → 全量 replay。
+
+**验收**
+```bash
+cargo test --lib
+# 插入 10 万条后重启，启动耗时应从"分钟级"降到"秒级"，把两次的实测数字贴进 commit
+```
+
+**坑**
+- `IndexWrapper` 是 `Arc<RwLock<Box<dyn VectorIndex>>>`，而 `SerializableIndex` 不在
+  `VectorIndex` trait 里。需要么给 `VectorIndex` 加一个 `fn as_serializable(&self) ->
+  Option<&dyn SerializableIndex>`，么在 `IndexAlgorithm` 上分派。别为此把两个 trait 合并——
+  `BruteForceIndex` 没有可存的东西。
+- 版本兼容：存盘格式带一个 magic + version 头，否则改了结构之后老索引文件会静默解析错。
+
+---
+
+### [ ] W3 — TieredStorage：接上，或者删掉
+
+**目标**：消除全仓库最大的一处名实不符。**二选一，不允许继续放着。**
+
+**前置**：W1、W2。
+
+**现状**：`storage/object/tiered.rs` 实现完整、单测通过，`tier_promotion.rs` 的热度评分是真的，
+但 `IntelligentIndexedStorage` 只在构造函数里建了个 `TieredStorage` 放进
+`#[allow(dead_code)]` 字段（`:43-44`），全文 `self.storage` 出现 0 次。
+
+**选项 A — 接上**：读路径按 `tier_promotion` 的 `hotness_score` 决定从内存/SSD/对象存储取，
+写路径异步下沉到对象存储。这样 README 的 "object storage as the source of truth" 才成立。
+工作量大，但这是产品差异化所在。
+
+**选项 B — 删掉**：删 `storage/object/`、`storage/tier_promotion.rs`、`storage/factory.rs`，
+把 README / CLAUDE.md 的架构描述改成"单节点内存 + WAL 持久化"。诚实，但放弃了定位。
+
+**决策要点**：这不是技术问题，是产品定位问题。选 B 的话，产品就是"带持久化的高性能单机向量库"，
+对标 Chroma；选 A 才是对标 Turbopuffer / LanceDB 的路子。**在动手之前先把这个决定做了。**
+
+---
+
+### [ ] W4 — MCP Server 接线
+
+**目标**：`vectordb serve --mcp`（或独立 bin）能被 Claude Desktop / Cline 之类的客户端连上。
+
+**前置**：无，可以和 W1 并行。**投入产出比最高的一项**——代码基本齐了，缺的是十几行接线。
+
+**现状**：`src/mcp/` 3,519 行，六个文件 server / tools / prompts / resources / transport，
+`transport.rs` 有 2 个测试。`main.rs` 只有 `serve` 一个子命令，没有任何方式启动它。
+
+**步骤**
+1. 读 `src/mcp/server.rs`（948 行）和 `src/mcp/transport.rs`，确认 stdio transport 是否可用。
+2. `main.rs` 加 `--mcp` 开关或 `Commands::Mcp` 子命令，把 `IntelligentIndexedStorage`
+   注入 `mcp::server`。
+3. `src/mcp/tools.rs:154` 有个 `"rebuild_index"` 工具定义，核对它调的是不是主路径上的
+   `rebuild_index`。
+
+**验收**：用 `npx @modelcontextprotocol/inspector` 连上，能列出 tools 并成功调一次搜索。
+
+---
+
+### [ ] W5 — clippy 清零
+
+**目标**：让 `make verify` 第一次变成一个能用的门禁。
+
+**前置**：无，随时可做，但**必须单独一个 commit**，别和功能改动混在一起。
+
+**现状**：`cargo clippy --all-targets -- -D warnings` 报 154 个错误
+（原始导入 commit `1668a8b` 上是 161 个）。分布最集中的：
+`benchmarks/metrics/{map,ndcg,precision,evaluator}.rs` 共 56 个、
+`index_management/` 26 个、`storage/intelligent_indexed_storage.rs` 6 个。
+
+大部分是 `new_without_default`、`should_implement_trait` 这类机械问题。
+
+**同时要处理**：`make fmt` 跑的是 `cargo fmt`（写入，不是 `--check`），仓库从未 fmt 干净过，
+跑一次重排 208 个文件。建议把 Makefile 的 `verify` 目标改成用 `cargo fmt -- --check`，
+再单独提一个纯格式化 commit。
+
+---
+
+### [ ] W6 — 修掉 §5 里的名实不符
+
+**目标**：让函数名不撒谎。每一条都很小，可以分批做。
+
+- [ ] `search/auto_tuned.rs` 四个函数全部直接调 `brute_force_search`——要么真的实现，
+      要么删掉这个文件（它没有任何调用者）。
+- [ ] `search/quantization/product_quantizer.rs` 52 行的假 PQ（`encode_batch` 返回全 0 码字）
+      与 `product_quantization.rs` 的真实现同名并存。删掉假的，把 `fastscan/` 指向真的。
+- [ ] `create_index_instance` 里 `DiskANN` / `ScaNN` / `QuantizedIVF` 三个分支静默退化成
+      `BruteForceIndex`（`:1553` / `:1595` / `:1600`）——改成显式报错，或从
+      `IndexAlgorithm` 枚举里去掉。静默退化最坏：用户以为在用 DiskANN。
+- [ ] 建表日志三处自相矛盾：0 条记录的表打印 "Medium dataset detected (10K-100K)"，
+      紧接着打印 "Selected HNSW"，而 API 返回的元数据是 `"index_type":"bruteforce"`。
+      表元数据要反映真实选中的算法。
+- [ ] `rebuild_index`（`:1260`）写死 `memory_budget_mb: 512` / `has_avx2: false` /
+      `supports_simd: false`，没用构造时已检测好的 `self.hardware_capabilities`。
+- [ ] `EnhancedDiskANN` 用 `TempDir::new()...keep()`（`:1570`）建索引目录，重启即孤儿。
+- [ ] `POST /tables/{n}/hybrid_search` 静默丢弃 sparse 和 text 分量，只返回 dense 结果，
+      却照收 `alpha`/`beta`/`gamma` 权重（`api/handlers.rs:961-966`）。要么实现，要么对
+      带 sparse/text 的请求直接报 400。

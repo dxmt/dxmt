@@ -70,6 +70,10 @@ and has no `/api/v1` at all, so nothing will connect.
   a doc claim, or a passing test as evidence that a feature works. The headline: records live
   in a process-local `HashMap` and a restart loses everything, even though a WAL and a tiered
   object-storage backend are both implemented in the tree.
+- **Active work is tracked in `vectordb/docs/ROADMAP.md` §7**, as self-contained items W1–W6
+  with acceptance commands. Pick up from the first unchecked box; tick it and append the commit
+  SHA when done. One commit per item, and paste real command output into the message — the
+  gate is `cargo test --lib`, not `make verify`.
 - **Two forward-looking lists, different axes.** `vectordb/TODO.md` is the competitive
   algorithm roadmap (Chinese, P0/P1/P2, benchmarked against Chroma/Qdrant/LanceDB/Weaviate).
   `vectordb/docs/ROADMAP.md` is the architecture/wiring plan. `docs/TODO_PRIORITY.md` was
