@@ -79,6 +79,7 @@ serve           →  /api/v1/*
              IntelligentIndexedStorage
                ├─ records: in-process HashMap      ← all data lives here
                ├─ wal:     ./data/wal              ← durability; replayed on startup
+               ├─ snapshot: ./data/wal/snapshot    ← every 300s, on SIGTERM, after a rebuild
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
@@ -113,6 +114,8 @@ Configuration is read from the environment. Copy `.env.example` and adjust:
 DB_HOST=0.0.0.0
 DB_PORT=9999
 DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
+DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables persistence
+DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```
@@ -175,10 +178,10 @@ DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
 
 These are real gaps, not roadmap aspirations:
 
-- **Startup replays the whole log.** Recovery reconstructs every table by re-inserting each
-  record, so boot time grows with the dataset — no index implements `SerializableIndex` except
-  `src/search/ivf.rs`, and there is no checkpoint/compaction yet. Fine for thousands of
-  records, painful for millions.
+- **A snapshot is the only copy of what it covers.** The WAL is compacted once a snapshot
+  verifies, so the entries below that point exist nowhere else. The snapshot is read back before
+  the log is trimmed, and an unreadable snapshot makes the server refuse to start rather than
+  come up empty — but back up `data/wal/snapshot/` like the data it is.
 - **One fsync per write batch.** Durability is paid for synchronously; there is no group
   commit yet.
 - **A batch insert blocks every reader for its whole duration.** The insertion task takes the

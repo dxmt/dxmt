@@ -402,7 +402,7 @@ async fn writes_after_a_snapshot_are_replayed_on_top_of_it() {
 }
 
 #[tokio::test]
-async fn a_corrupt_snapshot_falls_back_to_full_replay() {
+async fn a_corrupt_snapshot_is_refused_rather_than_silently_ignored() {
     let tmp = TempDir::new().unwrap();
     let wal_dir = tmp.path().join("wal");
 
@@ -419,15 +419,54 @@ async fn a_corrupt_snapshot_falls_back_to_full_replay() {
         storage.snapshot().await.unwrap();
     }
 
-    // A snapshot is an optimisation, never the only copy. Damage it and recovery must still
-    // produce the right database from the log — slower, but correct.
     std::fs::write(wal_dir.join("snapshot").join("manifest"), b"garbage").unwrap();
 
-    let recovered = open(&wal_dir).await;
-    assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
-    let hits = recovered
-        .search("t", query(vec![1.0, 0.0], 1))
+    // A verified snapshot lets the WAL be compacted, which makes it the only copy of the
+    // entries it covers. Falling back to "replay whatever is left" would therefore come up
+    // with an empty database and a warning nobody reads. Refusing to start is the only
+    // honest response.
+    let msg = match IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal_dir)).await
+    {
+        Ok(_) => panic!("a corrupt snapshot must not be silently ignored"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("unreadable"), "unhelpful error: {}", msg);
+    assert!(
+        msg.contains("lose data"),
+        "the error must say what is at stake: {}",
+        msg
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_that_cannot_be_read_back_does_not_compact_the_log() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    let storage = open(&wal_dir).await;
+    storage
+        .create_table(table("t", 2, DistanceMetric::Cosine))
         .await
         .unwrap();
-    assert_eq!(hits.hits[0].id, "a");
+    storage
+        .insert_records("t", vec![record("a", vec![1.0, 0.0])])
+        .await
+        .unwrap();
+
+    let before = std::fs::metadata(wal_dir.join("wal.log")).unwrap().len();
+    storage.snapshot().await.unwrap();
+    let after = std::fs::metadata(wal_dir.join("wal.log")).unwrap().len();
+
+    // Compaction is the point of the snapshot; without it the log grows forever.
+    assert!(
+        after < before,
+        "WAL was not compacted after a successful snapshot: {} -> {}",
+        before,
+        after
+    );
+
+    // And the database still comes back.
+    drop(storage);
+    let recovered = open(&wal_dir).await;
+    assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
 }

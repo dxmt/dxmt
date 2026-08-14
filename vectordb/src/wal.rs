@@ -266,6 +266,70 @@ impl WalManager {
         Ok(checkpoint_seq)
     }
 
+    /// Drop every entry below `keep_from`, keeping the rest.
+    ///
+    /// Without this the log only grows: a snapshot makes the entries it covers redundant, but
+    /// they stay on disk forever and every restart re-reads them. Returns how many bytes were
+    /// reclaimed.
+    ///
+    /// Rewrites to a temporary file and renames it into place, so an interruption leaves the
+    /// old log intact. Losing the log to a failed compaction would be worse than never
+    /// compacting: the snapshot alone cannot account for writes made after it.
+    pub fn truncate_before(&mut self, keep_from: u64) -> Result<u64> {
+        self.flush_buffer()?;
+
+        let wal_file_path = self.wal_path.join("wal.log");
+        if !wal_file_path.exists() {
+            return Ok(0);
+        }
+        let before = std::fs::metadata(&wal_file_path).map_err(Error::Io)?.len();
+
+        let kept = self.replay_from(keep_from)?;
+
+        let tmp_path = self.wal_path.join("wal.log.compacting");
+        {
+            let mut tmp = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp_path)
+                .map_err(Error::Io)?;
+
+            for (seq, entry) in kept {
+                let bytes =
+                    rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
+                let payload = if self.compression_enabled {
+                    zstd::encode_all(&bytes[..], self.compression_level)
+                        .map_err(|e| Error::Serialization(format!("Compression failed: {}", e)))?
+                } else {
+                    bytes
+                };
+                tmp.write_all(&seq.to_le_bytes()).map_err(Error::Io)?;
+                tmp.write_all(&[u8::from(self.compression_enabled)])
+                    .map_err(Error::Io)?;
+                tmp.write_all(&(payload.len() as u32).to_le_bytes())
+                    .map_err(Error::Io)?;
+                tmp.write_all(&payload).map_err(Error::Io)?;
+            }
+            tmp.sync_data().map_err(Error::Io)?;
+        }
+
+        // Close our append handle before swapping the file underneath it.
+        self.current_file = None;
+        std::fs::rename(&tmp_path, &wal_file_path).map_err(Error::Io)?;
+
+        // `open_current_file` derives the next sequence number by scanning the file. If the
+        // compaction removed every entry, that scan would restart numbering at 1 and the next
+        // writes would collide with sequence numbers a snapshot manifest already refers to.
+        // The counter only ever moves forward.
+        let next = self.sequence_number;
+        self.open_current_file()?;
+        self.sequence_number = self.sequence_number.max(next);
+
+        let after = std::fs::metadata(&wal_file_path).map_err(Error::Io)?.len();
+        Ok(before.saturating_sub(after))
+    }
+
     /// Get the current sequence number
     pub fn current_sequence(&self) -> u64 {
         self.sequence_number
@@ -334,6 +398,61 @@ impl Drop for WalManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn truncate_before_drops_only_the_covered_prefix() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(dir.path()).unwrap();
+
+        for i in 0..10 {
+            wal.write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: format!("r{}", i),
+            })
+            .unwrap();
+        }
+        wal.force_flush().unwrap();
+
+        let reclaimed = wal.truncate_before(7).unwrap();
+        assert!(reclaimed > 0, "compaction reclaimed nothing");
+
+        let kept = wal.replay_from(0).unwrap();
+        assert_eq!(kept.len(), 3, "expected entries 7,8,9 to survive");
+        assert_eq!(kept.first().unwrap().0, 7);
+    }
+
+    #[test]
+    fn truncating_everything_does_not_rewind_the_sequence() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(dir.path()).unwrap();
+
+        for i in 0..5 {
+            wal.write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: format!("r{}", i),
+            })
+            .unwrap();
+        }
+        wal.force_flush().unwrap();
+        let next_before = wal.next_sequence();
+
+        // Compacting past the end empties the log. Deriving the next sequence from an empty
+        // file would restart at 1, and those numbers are already referenced by any snapshot
+        // manifest taken earlier.
+        wal.truncate_before(u64::MAX).unwrap();
+        assert!(wal.replay_from(0).unwrap().is_empty());
+        assert!(
+            wal.next_sequence() >= next_before,
+            "sequence went backwards: {} -> {}",
+            next_before,
+            wal.next_sequence()
+        );
+
+        let seq = wal
+            .write_entry(WalEntry::Checkpoint { timestamp: 0 })
+            .unwrap();
+        assert!(seq >= next_before, "reused a sequence number: {}", seq);
+    }
 
     #[test]
     fn test_wal_basic_operations() {

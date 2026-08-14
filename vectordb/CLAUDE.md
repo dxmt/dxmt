@@ -240,8 +240,9 @@ python            # PyO3 Python bindings
 See `docs/ROADMAP.md` for the ordered plan. Current blockers for single-node production
 readiness, in dependency order:
 
-1. **Startup replays the entire log** — recovery re-inserts every record, so boot time scales
-   with the dataset. No checkpoint or log compaction yet.
+1. **A verified snapshot is the sole copy of the log it replaced.** Snapshots are read back
+   before the WAL is compacted, and an unreadable snapshot aborts startup rather than yielding
+   an empty database — but `data/wal/snapshot/` is now real data, not a cache.
 2. **No index persistence** — only `src/search/ivf.rs` implements `SerializableIndex`; HNSW
    and HNSW-PQ have no save/load, so even with §2.1 a restart means a full index rebuild.
    Roadmap §2.2.

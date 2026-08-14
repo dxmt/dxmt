@@ -54,12 +54,61 @@ pub async fn create_app() -> Result<Router> {
     create_app_with_features(false, false, false).await
 }
 
+/// Snapshot interval in seconds; 0 disables. Default 300.
+///
+/// Without a periodic snapshot the WAL only shrinks when someone calls POST /snapshot, so
+/// recovery time grows without bound on a long-lived server.
+fn snapshot_interval_from_env() -> u64 {
+    std::env::var("DB_SNAPSHOT_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+}
+
+/// Snapshot every `interval` seconds for as long as the process runs.
+fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
+    if interval == 0 {
+        tracing::info!("Periodic snapshots disabled (DB_SNAPSHOT_INTERVAL_SECS=0)");
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        // The first tick fires immediately; skip it so startup does not snapshot what it has
+        // just finished restoring.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match storage.snapshot().await {
+                Ok(tables) => tracing::debug!("Periodic snapshot: {} table(s)", tables),
+                // Never fatal: the WAL still holds everything a failed snapshot would have
+                // covered, so this costs startup time on the next boot and nothing else.
+                Err(e) => tracing::warn!("Periodic snapshot failed: {}", e),
+            }
+        }
+    });
+    tracing::info!("Periodic snapshots every {}s", interval);
+}
+
 /// 创建带有功能开关的应用程序路由器
 pub async fn create_app_with_features(
     enable_swagger: bool,
     enable_graphql: bool,
     enable_websocket: bool,
 ) -> Result<Router> {
+    create_app_with_storage(enable_swagger, enable_graphql, enable_websocket)
+        .await
+        .map(|(router, _)| router)
+}
+
+/// As [`create_app_with_features`], but also hands back the storage.
+///
+/// `main` needs it to snapshot on shutdown. Returning only a `Router` left no way to reach it,
+/// which is why a clean SIGTERM used to leave the next start replaying the entire log.
+pub async fn create_app_with_storage(
+    enable_swagger: bool,
+    enable_graphql: bool,
+    enable_websocket: bool,
+) -> Result<(Router, Arc<IntelligentIndexedStorage>)> {
     // 加载配置
     let config = AppConfig::load()?;
 
@@ -222,7 +271,9 @@ pub async fn create_app_with_features(
 
     let app = app.with_state(base_state);
 
-    Ok(app)
+    spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+
+    Ok((app, storage))
 }
 
 // integration tests live in tests/

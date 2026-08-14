@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tracing::info;
 
 use dxmt_vectordb::{
-    api::{create_app_with_cluster, create_app_with_features, simple_core::create_simple_app},
+    api::{create_app_with_cluster, create_app_with_storage, simple_core::create_simple_app},
     config::AppConfig,
     mcp::server::McpServer,
     storage::IntelligentIndexedStorage,
@@ -64,6 +64,33 @@ enum Commands {
     },
 }
 
+/// Resolve when the process is asked to stop, so the server can drain and then snapshot.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!("Cannot listen for SIGTERM ({}); Ctrl-C only", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl-C, shutting down"),
+        _ = terminate => info!("Received SIGTERM, shutting down"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -119,12 +146,15 @@ async fn main() -> Result<()> {
                 info!("Starting DXMT VectorDB on {}...", bind_addr);
 
                 let config = AppConfig::load()?;
-                let app = if config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false) {
-                    create_app_with_cluster(&config).await?
+                let (app, storage) = if config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false)
+                {
+                    (create_app_with_cluster(&config).await?, None)
                 } else {
                     // These are off unless asked for: each one widens the exposed
                     // surface, and `create_app()` has always passed false for all three.
-                    create_app_with_features(swagger, graphql, websocket).await?
+                    let (app, storage) =
+                        create_app_with_storage(swagger, graphql, websocket).await?;
+                    (app, Some(storage))
                 };
 
                 info!("REST API mounted under /api/v1; /health and /status are at the root");
@@ -142,8 +172,19 @@ async fn main() -> Result<()> {
 
                 axum::Server::bind(&bind_addr)
                     .serve(app.into_make_service())
+                    .with_graceful_shutdown(shutdown_signal())
                     .await
                     .map_err(|e| dxmt_vectordb::Error::Internal(format!("server error: {}", e)))?;
+
+                // A clean shutdown used to discard everything written since the last snapshot.
+                // Not a correctness problem — the WAL still held it — but it made the next
+                // start replay the whole log for no reason.
+                if let Some(storage) = storage {
+                    match storage.snapshot().await {
+                        Ok(tables) => info!("Shutdown snapshot written for {} table(s)", tables),
+                        Err(e) => tracing::warn!("Shutdown snapshot failed: {}", e),
+                    }
+                }
             }
         }
 

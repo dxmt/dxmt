@@ -470,7 +470,7 @@ impl IntelligentIndexedStorage {
             // Snapshot first, then only the log written after it. Replay has to run with the
             // snapshot already in place: the tail may delete or overwrite records the snapshot
             // restored, and applying it to an empty store would lose those edits.
-            let from_seq = storage.load_snapshot(&dir).await;
+            let from_seq = storage.load_snapshot(&dir).await?;
 
             let pending = {
                 let guard = storage
@@ -737,6 +737,10 @@ impl IntelligentIndexedStorage {
             },
         )?;
 
+        // 落盘后先读一遍。截断日志会让快照成为唯一副本，所以"写完了"不够，必须"读得回来"
+        // 才算数——否则一个写坏的快照配上被截断的日志，就是静默的数据丢失。
+        Self::verify_snapshot(&staging, written)?;
+
         // 原子替换：中途崩了要么是旧快照、要么是新快照，不会是半个。
         let previous = dir.with_extension("previous");
         let _ = std::fs::remove_dir_all(&previous);
@@ -746,6 +750,24 @@ impl IntelligentIndexedStorage {
         std::fs::rename(&staging, &dir)?;
         let _ = std::fs::remove_dir_all(&previous);
 
+        // Only now is it safe to drop the log this snapshot covers. Compacting any earlier
+        // leaves a window where neither the previous snapshot nor the log can reconstruct
+        // those writes.
+        match wal
+            .lock()
+            .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))
+            .and_then(|mut g| g.truncate_before(seq))
+        {
+            Ok(reclaimed) if reclaimed > 0 => info!(
+                "WAL compacted below sequence {}: {} bytes reclaimed",
+                seq, reclaimed
+            ),
+            Ok(_) => {}
+            // The snapshot is durable already, so a failed compaction costs disk and startup
+            // time, not correctness.
+            Err(e) => warn!("Snapshot written but WAL compaction failed: {}", e),
+        }
+
         info!(
             "Snapshot written: {} tables at WAL sequence {}",
             written, seq
@@ -753,57 +775,88 @@ impl IntelligentIndexedStorage {
         Ok(written)
     }
 
-    /// 加载快照，返回 WAL 应该从哪个序号开始回放。没有快照就返回 0（全量回放）。
-    async fn load_snapshot(&self, wal_dir: &std::path::Path) -> u64 {
-        let dir = Self::snapshot_dir(wal_dir);
-        let manifest: SnapshotManifest = match crate::search::index_persistence::read_index(
+    /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
+    fn verify_snapshot(dir: &std::path::Path, tables: usize) -> crate::Result<()> {
+        let manifest: SnapshotManifest = crate::search::index_persistence::read_index(
             &dir.join("manifest"),
             "snapshot-manifest",
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                if dir.exists() {
-                    // 快照读不出来不是致命错误——全量回放 WAL 就是了。但要说出来，
-                    // 否则表现只是"启动变慢了"，没人会去查。
-                    warn!(
-                        "Snapshot unreadable, falling back to full WAL replay: {}",
-                        e
-                    );
+        )?;
+        if manifest.tables != tables {
+            return Err(crate::Error::Internal(format!(
+                "snapshot manifest claims {} tables, {} were written",
+                manifest.tables, tables
+            )));
+        }
+
+        for i in 0..tables {
+            let stem = format!("t{}", i);
+            let meta: TableSnapshot = crate::search::index_persistence::read_index(
+                &dir.join(format!("{}.meta", stem)),
+                "table-snapshot",
+            )?;
+            if meta.has_index {
+                let idx = dir.join(format!("{}.idx", stem));
+                if !idx.exists() {
+                    return Err(crate::Error::Internal(format!(
+                        "snapshot for table '{}' claims an index but {} is missing",
+                        meta.table.name,
+                        idx.display()
+                    )));
                 }
-                return 0;
             }
-        };
+        }
+        Ok(())
+    }
+
+    /// 加载快照，返回 WAL 应该从哪个序号开始回放。没有快照就返回 0（全量回放）。
+    async fn load_snapshot(&self, wal_dir: &std::path::Path) -> crate::Result<u64> {
+        let dir = Self::snapshot_dir(wal_dir);
+        if !dir.exists() {
+            return Ok(0);
+        }
+
+        // From here on a failure is fatal rather than a fallback. The WAL is compacted once a
+        // snapshot is verified, so the entries this snapshot covers are gone — coming up with
+        // an empty database and a warning in the log would be silent data loss. Refuse to
+        // start and let the operator restore or delete the snapshot deliberately.
+        let manifest: SnapshotManifest = crate::search::index_persistence::read_index(
+            &dir.join("manifest"),
+            "snapshot-manifest",
+        )
+        .map_err(|e| {
+            crate::Error::Internal(format!(
+                "snapshot at {} is unreadable ({}). The WAL no longer covers the entries \
+                         it holds, so starting would lose data. Restore it from backup, or delete \
+                         the directory to accept the loss and start from whatever the WAL still \
+                         has.",
+                dir.display(),
+                e
+            ))
+        })?;
 
         for i in 0..manifest.tables {
             let stem = format!("t{}", i);
-            let meta: TableSnapshot = match crate::search::index_persistence::read_index(
+            let meta: TableSnapshot = crate::search::index_persistence::read_index(
                 &dir.join(format!("{}.meta", stem)),
                 "table-snapshot",
-            ) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!("Snapshot table {} unreadable, full replay: {}", i, e);
-                    return 0;
-                }
-            };
+            )
+            .map_err(|e| {
+                crate::Error::Internal(format!("snapshot table {} is unreadable: {}", i, e))
+            })?;
 
-            if let Err(e) = self
-                .restore_table(&dir.join(format!("{}.idx", stem)), meta)
+            let name = meta.table.name.clone();
+            self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
                 .await
-            {
-                warn!(
-                    "Snapshot table {} could not be restored, full replay: {}",
-                    i, e
-                );
-                return 0;
-            }
+                .map_err(|e| {
+                    crate::Error::Internal(format!("restoring table '{}' failed: {}", name, e))
+                })?;
         }
 
         info!(
             "Snapshot loaded: {} tables; replaying WAL from sequence {}",
             manifest.tables, manifest.wal_next_sequence
         );
-        manifest.wal_next_sequence
+        Ok(manifest.wal_next_sequence)
     }
 
     async fn restore_table(

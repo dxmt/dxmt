@@ -518,14 +518,34 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [ ] W7 — 快照的运维缺口
+### [x] W7 — 快照的运维缺口 — 完成于 <SHA7>
 
 **前置**：W2（已完成）。这几条是 W2 交付后剩下的口子，不做的话快照在生产里不好用。
 
-- [ ] **WAL 永不截断。** 快照之后旧日志仍然全留着，磁盘只涨不降。`wal.rs` 有
-      `checkpoint()` 但没人调。快照成功后应该以 manifest 里的序号为界截断。
-- [ ] **优雅退出不快照。** 现在只有 `POST /snapshot` 和 `index/rebuild` 会触发，
-      正常 `SIGTERM` 停机不会存，下次启动仍要全量回放。需要把 storage 的 `Arc` 传到
-      `main.rs` 挂 shutdown hook，而 `create_app_with_features` 目前只返回 `Router`。
-- [ ] **没有定期快照。** 长期只写不重建索引的库，WAL 会一直长。
-- [ ] **快照期间持 `tables` 读锁遍历所有表**，大库上会阻塞写入。
+- [x] **WAL 现在会截断。** 新增 `WalManager::truncate_before(seq)`，快照成功后按 manifest
+      的序号截断。实测优雅停机后 `wal.log` 从 155 字节压到 0。
+      两个坑：写临时文件再 rename（中途中断保留旧日志——丢日志比不压缩糟得多）；
+      以及**截断后不能让序号倒退**——`open_current_file` 是从文件扫出下一个序号的，
+      日志被清空时会重新从 1 开始，与快照 manifest 已引用的序号冲突。有测试专门盯这条。
+- [x] **优雅退出会快照。** 加了 `create_app_with_storage`（返回 `(Router, Arc<Storage>)`），
+      `main.rs` 用 `with_graceful_shutdown` 接 SIGTERM/Ctrl-C，drain 之后做一次快照。
+      实测：SIGTERM → 快照落盘 → WAL 归零 → 重启 `Snapshot loaded: 1 tables` +
+      `No WAL entries after sequence 3`。
+- [x] **定期快照**：`DB_SNAPSHOT_INTERVAL_SECS`，默认 300 秒，设 0 关闭。
+      失败只告警不致命——WAL 里还有全部内容，代价只是下次启动慢一点。
+- [ ] **快照期间持 `tables` 读锁遍历所有表**，大库上会阻塞写入。（未修）
+
+**这一项改变了一条安全属性，必须知道：**
+
+W2 里写的"快照是优化，永远不是唯一副本"**在截断之后不再成立**。日志一旦按快照序号压缩，
+那部分写入就只存在于快照里了。所以配套加了两道防线：
+
+1. **落盘后先校验再截断**（`verify_snapshot`）：manifest、每个 `.meta`、以及每个声称有索引的
+   `.idx` 都要真的读得回来。"写完了"不等于"读得回来"。
+2. **快照存在却读不出来时硬失败，不再静默全量回放。** 原来的行为是告警一句然后当无事发生，
+   在截断之后那等于"空库启动 + 一条没人看的日志" —— 静默数据丢失。现在直接拒绝启动，
+   错误信息里写明后果和两个选择（从备份恢复，或删掉快照目录、接受损失后用剩下的日志启动）。
+
+原来那个 `a_corrupt_snapshot_falls_back_to_full_replay` 测试因此不再成立，
+改写成 `a_corrupt_snapshot_is_refused_rather_than_silently_ignored`，
+另加 `a_snapshot_that_cannot_be_read_back_does_not_compact_the_log` 验证压缩确实发生。
