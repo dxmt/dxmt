@@ -32,8 +32,8 @@ changing the Rust HTTP API means updating the SDKs separately; nothing cross-val
 
 ```bash
 # Rust crate
-cd vectordb && make verify              # fmt + clippy -D warnings + test
-cd vectordb && cargo test --lib         # unit tests only (what CI gates on)
+cd vectordb && make verify              # fmt-check + clippy --all-targets -D warnings + test
+cd vectordb && cargo test --lib         # unit tests only, the fastest useful signal
 
 # Python SDK — pytest.ini sets asyncio_mode=auto and --strict-markers
 cd vectordb/dxmt-python-sdk && pytest
@@ -53,10 +53,10 @@ and has no `/api/v1` at all, so nothing will connect.
 
 ## Traps worth knowing before you trust a green result
 
-- **The Makefile's Python test steps are dead.** `make test`, `make test-integ`, and
-  `make bench` each append a `python3 scripts/...` step that does not exist in the tree
-  (`scripts/test/`, `scripts/benchmark/` were removed). They are `|| true`-guarded, so they
-  no-op silently. Treat these targets as plain `cargo test` / `cargo bench`.
+- **Some Makefile targets still call scripts that are gone.** `test-integ`, `bench`,
+  `test-cluster` and the release targets append `python3 scripts/...` steps for files that left
+  the tree, guarded with `|| true` so they no-op silently. `test` and `verify` were cleaned up
+  in W5; the rest still advertise work they do not do.
 - **CI does not run.** The workflows in `vectordb/.github/workflows/` invoke `cargo` at the
   checkout root with no `working-directory:`, and GitHub Actions only reads `.github/` at the
   true repo root — so they neither trigger nor would pass now that the crate is nested.
@@ -67,12 +67,12 @@ and has no `/api/v1` at all, so nothing will connect.
 - **Half the module names do not describe what runs.** `vectordb/docs/ROADMAP.md` is the
   authority on which code the server actually reaches; read it before trusting a module name,
   a doc claim, or a passing test as evidence that a feature works. The headline: records live
-  in a process-local `HashMap` and a restart loses everything, even though a WAL and a tiered
-  object-storage backend are both implemented in the tree.
-- **Active work is tracked in `vectordb/docs/ROADMAP.md` §7**, as self-contained items W1–W6
+  in a process-local `HashMap`, made durable by a WAL plus periodic snapshots (W1, W2), while
+  the tiered object-storage backend is implemented but still not on the write path.
+- **Active work is tracked in `vectordb/docs/ROADMAP.md` §7**, as self-contained items W1–W7
   with acceptance commands. Pick up from the first unchecked box; tick it and append the commit
-  SHA when done. One commit per item, and paste real command output into the message — the
-  gate is `cargo test --lib`, not `make verify`.
+  SHA in a follow-up commit (a commit cannot carry its own hash). One commit per item, and paste
+  real command output into the message rather than claiming it should work.
 - **Two forward-looking lists, different axes.** `vectordb/TODO.md` is the competitive
   algorithm roadmap (Chinese, P0/P1/P2, benchmarked against Chroma/Qdrant/LanceDB/Weaviate).
   `vectordb/docs/ROADMAP.md` is the architecture/wiring plan. `docs/TODO_PRIORITY.md` was
