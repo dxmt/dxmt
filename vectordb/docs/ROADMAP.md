@@ -446,7 +446,7 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [x] W5 — clippy 清零 — 完成于 <SHA5>
+### [x] W5 — clippy 清零 — 完成于 ff8981e
 
 **目标**：让 `make verify` 第一次变成一个能用的门禁。
 
