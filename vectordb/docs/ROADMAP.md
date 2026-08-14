@@ -516,7 +516,7 @@ create_table → insert_vector → vector_search → list_tables 全部成功。
 
 ---
 
-### [x] W6 — 修掉 §5 里的名实不符 — 完成于 5716888 + <SHA6b>
+### [x] W6 — 修掉 §5 里的名实不符 — 完成于 5716888 + fa7f6db
 
 **目标**：让函数名不撒谎。每一条都很小，可以分批做。
 
