@@ -61,10 +61,7 @@ impl LookupTableBuilder {
     /// Compute L2 distance
     #[inline]
     fn compute_distance(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum()
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
     }
 }
 

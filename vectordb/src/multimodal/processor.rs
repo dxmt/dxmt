@@ -1,23 +1,23 @@
-use std::sync::Arc;
-use async_trait::async_trait;
+use crate::embeddings::EmbeddingFunction;
 use crate::types::{
     multimodal::{ModalityType, MultimodalContent},
     DenseVector,
 };
-use crate::embeddings::EmbeddingFunction;
+use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Trait for processing multimodal content
 #[async_trait]
 pub trait MultimodalProcessor: Send + Sync {
     /// Get the modality this processor handles
     fn modality(&self) -> ModalityType;
-    
+
     /// Process content and generate embedding
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector>;
-    
+
     /// Validate content format
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()>;
-    
+
     /// Get embedding dimension
     fn dimension(&self) -> usize;
 }
@@ -38,25 +38,30 @@ impl MultimodalProcessor for TextProcessor {
     fn modality(&self) -> ModalityType {
         ModalityType::Text
     }
-    
+
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector> {
         match content {
-            MultimodalContent::Text(text) => {
-                self.embedding_function.embed(text).await
-                    .map_err(|e| crate::Error::Internal(format!("Embedding failed: {:?}", e)))
-            }
-            _ => Err(crate::Error::InvalidInput("Expected text content".to_string()))
+            MultimodalContent::Text(text) => self
+                .embedding_function
+                .embed(text)
+                .await
+                .map_err(|e| crate::Error::Internal(format!("Embedding failed: {:?}", e))),
+            _ => Err(crate::Error::InvalidInput(
+                "Expected text content".to_string(),
+            )),
         }
     }
-    
+
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()> {
         match content {
             MultimodalContent::Text(text) if !text.is_empty() => Ok(()),
             MultimodalContent::Text(_) => Err(crate::Error::InvalidInput("Empty text".to_string())),
-            _ => Err(crate::Error::InvalidInput("Expected text content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected text content".to_string(),
+            )),
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.embedding_function.dimension()
     }
@@ -78,7 +83,7 @@ impl MultimodalProcessor for ImageProcessor {
     fn modality(&self) -> ModalityType {
         ModalityType::Image
     }
-    
+
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector> {
         match content {
             MultimodalContent::ImagePath(_path) => {
@@ -90,19 +95,23 @@ impl MultimodalProcessor for ImageProcessor {
                 Ok(vec![0.0; self.dimension])
             }
             MultimodalContent::Embedding(vec) => Ok(vec.clone()),
-            _ => Err(crate::Error::InvalidInput("Expected image content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected image content".to_string(),
+            )),
         }
     }
-    
+
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()> {
         match content {
-            MultimodalContent::ImagePath(_) | 
-            MultimodalContent::ImageBytes(_) | 
-            MultimodalContent::Embedding(_) => Ok(()),
-            _ => Err(crate::Error::InvalidInput("Expected image content".to_string()))
+            MultimodalContent::ImagePath(_)
+            | MultimodalContent::ImageBytes(_)
+            | MultimodalContent::Embedding(_) => Ok(()),
+            _ => Err(crate::Error::InvalidInput(
+                "Expected image content".to_string(),
+            )),
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -124,7 +133,7 @@ impl MultimodalProcessor for AudioProcessor {
     fn modality(&self) -> ModalityType {
         ModalityType::Audio
     }
-    
+
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector> {
         match content {
             MultimodalContent::AudioPath(_path) => {
@@ -136,19 +145,23 @@ impl MultimodalProcessor for AudioProcessor {
                 Ok(vec![0.0; self.dimension])
             }
             MultimodalContent::Embedding(vec) => Ok(vec.clone()),
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()> {
         match content {
-            MultimodalContent::AudioPath(_) | 
-            MultimodalContent::AudioBytes(_) | 
-            MultimodalContent::Embedding(_) => Ok(()),
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            MultimodalContent::AudioPath(_)
+            | MultimodalContent::AudioBytes(_)
+            | MultimodalContent::Embedding(_) => Ok(()),
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }

@@ -65,7 +65,10 @@ pub fn calculate_optimal_memory_config(systeminfo: &SystemMemoryInfo) -> Optimiz
     let index_memorybytes = (usable_memorybytes as f64 * index_pct) as u64;
     let buffer_memorybytes = (usable_memorybytes as f64 * buffer_pct) as u64;
 
-    info!("Calculated memory allocation for {:.2} GB system:", total_gb);
+    info!(
+        "Calculated memory allocation for {:.2} GB system:",
+        total_gb
+    );
     info!("  OS reserved: {:.2} GB", os_reserved_gb);
     info!("  Max memory: {:.2} GB", usable_memory_gb);
     info!(
@@ -94,7 +97,8 @@ pub fn calculate_optimal_memory_config(systeminfo: &SystemMemoryInfo) -> Optimiz
 
 pub fn apply_memory_config_overrides(
     config: &mut crate::config::AppConfig,
-    memoryconfig: &OptimizedMemoryConfig) {
+    memoryconfig: &OptimizedMemoryConfig,
+) {
     if let Some(ref mut memory_config_section) = config.storage.memory {
         memory_config_section.max_size_mb = (memoryconfig.cachememorybytes / (1024 * 1024)) as usize
     }

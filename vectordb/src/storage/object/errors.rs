@@ -89,8 +89,8 @@ impl From<reqwest::Error> for ObjectStorageError {
 
 impl From<serde_json::Error> for ObjectStorageError {
     fn from(err: serde_json::Error) -> Self {
-        ObjectStorageError::SerializationError { 
-            message: err.to_string() 
+        ObjectStorageError::SerializationError {
+            message: err.to_string(),
         }
     }
 }

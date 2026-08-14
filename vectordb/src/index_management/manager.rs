@@ -6,11 +6,11 @@
 //! - Tracking metadata about current index
 //! - Integration with AdaptiveIndex recommendations
 
+use super::{DataMigrator, IndexFactory, IndexMetadata, SwitchResult, TransactionLog};
 use crate::adaptive_index::AdaptiveIndex;
+use crate::error::{Error, Result};
 use crate::search::IndexWrapper;
 use crate::types::table::IndexType;
-use crate::error::{Error, Result};
-use super::{IndexFactory, IndexMetadata, SwitchResult, DataMigrator, TransactionLog};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -127,13 +127,16 @@ impl IndexManager {
 
         // Migrate data from current to new
         let old_index = self.current.read().await;
-        let migration_stats = self.migrator.migrate(
-            &old_index,
-            &new_index,
-            Some(Box::new(|_progress| {
-                // progress event emission not yet wired to a channel
-            })),
-        ).await?;
+        let migration_stats = self
+            .migrator
+            .migrate(
+                &old_index,
+                &new_index,
+                Some(Box::new(|_progress| {
+                    // progress event emission not yet wired to a channel
+                })),
+            )
+            .await?;
 
         // Atomic swap
         drop(old_index); // Release read lock
@@ -175,7 +178,10 @@ impl IndexManager {
 
     /// Adapt index based on workload if beneficial
     pub async fn adapt_if_beneficial(&self) -> Result<bool> {
-        let recommendation = self.adaptive.get_recommendation().await
+        let recommendation = self
+            .adaptive
+            .get_recommendation()
+            .await
             .map_err(|e| crate::Error::Internal(e.to_string()))?;
 
         if recommendation.should_switch() {
@@ -189,7 +195,6 @@ impl IndexManager {
 
 #[cfg(test)]
 mod tests {
-    
 
     #[tokio::test]
     #[ignore = "needs a live IndexFactory + IndexWrapper; can_switch() is unconditional today"]

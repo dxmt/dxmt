@@ -3,8 +3,8 @@
 //! This module provides utilities for iterating over records in indexes,
 //! which is essential for data migration operations.
 
-use crate::types::{RecordId, DenseVector};
 use crate::error::Result;
+use crate::types::{DenseVector, RecordId};
 use async_trait::async_trait;
 
 /// A record in an index (ID + Vector)

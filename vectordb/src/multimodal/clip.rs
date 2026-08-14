@@ -12,13 +12,13 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::path::PathBuf;
 
-use crate::types::DenseVector;
+use super::{Modality, MultimodalContent, MultimodalEmbedding};
 use crate::embeddings::EmbeddingError;
-use super::{MultimodalContent, MultimodalEmbedding, Modality};
+use crate::types::DenseVector;
 
 #[cfg(feature = "python")]
 use super::clip_pytorch::ClipPyTorchWrapper;
@@ -53,7 +53,7 @@ impl CLIPModel {
             Self::Custom(name) => name.clone(),
         }
     }
-    
+
     pub fn dimension(&self) -> usize {
         match self {
             Self::ViTBasePatch32 | Self::ViTBasePatch16 => 512,
@@ -63,7 +63,7 @@ impl CLIPModel {
             Self::Custom(_) => 512, // Default
         }
     }
-    
+
     pub fn image_size(&self) -> usize {
         match self {
             Self::ViTBasePatch32 => 224,
@@ -124,7 +124,7 @@ impl ImagePreprocessor {
             std: vec![0.26862954, 0.261_302_6, 0.275_777_1],
         }
     }
-    
+
     fn preprocess(&self, _image_data: &[u8]) -> Result<ndarray::Array3<f32>, EmbeddingError> {
         // TODO: Image preprocessing requires the 'image' crate feature
         // This is disabled by default to reduce compilation dependencies
@@ -170,25 +170,25 @@ impl CLIPTokenizer {
             context_length: 77,
         }
     }
-    
+
     fn tokenize(&self, text: &str) -> Vec<i64> {
         // Simplified tokenization (in production, use proper CLIP tokenizer)
         let mut tokens = vec![49406]; // Start token
-        
+
         // Convert text to tokens (simplified)
         for word in text.split_whitespace().take(self.context_length - 2) {
             // Hash word to token ID (simplified)
             let token_id = (word.len() as i64 * 100) % (self.vocab_size as i64);
             tokens.push(token_id);
         }
-        
+
         tokens.push(49407); // End token
-        
+
         // Pad to context length
         while tokens.len() < self.context_length {
             tokens.push(0);
         }
-        
+
         tokens.truncate(self.context_length);
         tokens
     }
@@ -216,7 +216,11 @@ struct CLIPOnnxBackend {
 }
 
 impl CLIPOnnxBackend {
-    async fn new(model_path: PathBuf, dimension: usize, image_size: usize) -> Result<Self, EmbeddingError> {
+    async fn new(
+        model_path: PathBuf,
+        dimension: usize,
+        image_size: usize,
+    ) -> Result<Self, EmbeddingError> {
         // FIXME: Implement proper ONNX session initialization
         // when ort 2.0 API stabilizes
         // Placeholder for now - sessions not created
@@ -263,7 +267,7 @@ pub struct CLIPEmbedding {
 impl CLIPEmbedding {
     pub async fn new(config: CLIPConfig) -> Result<Self, EmbeddingError> {
         let cache = Arc::new(RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(500).unwrap()
+            std::num::NonZeroUsize::new(500).unwrap(),
         )));
 
         Ok(Self {
@@ -278,7 +282,7 @@ impl CLIPEmbedding {
             cache,
         })
     }
-    
+
     pub async fn load_model(&self) -> Result<(), EmbeddingError> {
         #[cfg(feature = "python")]
         {
@@ -300,7 +304,7 @@ impl CLIPEmbedding {
                 Device::Auto => {
                     // Auto-detect: prefer CUDA > MPS > CPU
                     "cuda" // Python will fall back to CPU if CUDA unavailable
-                },
+                }
             };
 
             let backend = ClipPyTorchWrapper::new(model_name, device)?;
@@ -309,7 +313,9 @@ impl CLIPEmbedding {
 
             tracing::info!(
                 "Loaded CLIP PyTorch backend: model={}, device={}, dimension={}",
-                model_name, device, self.config.model.dimension()
+                model_name,
+                device,
+                self.config.model.dimension()
             );
 
             Ok(())
@@ -318,7 +324,10 @@ impl CLIPEmbedding {
         #[cfg(not(feature = "python"))]
         {
             // ONNX backend (fallback)
-            let cache_dir = self.config.cache_dir.clone()
+            let cache_dir = self
+                .config
+                .cache_dir
+                .clone()
                 .unwrap_or_else(|| PathBuf::from(".cache/clip"));
 
             let model_name = self.config.model.model_name();
@@ -334,7 +343,8 @@ impl CLIPEmbedding {
                 model_dir,
                 self.config.model.dimension(),
                 self.config.model.image_size(),
-            ).await?;
+            )
+            .await?;
 
             let mut backend_guard = self.onnx_backend.write().await;
             *backend_guard = Some(backend);
@@ -346,7 +356,7 @@ impl CLIPEmbedding {
             Ok(())
         }
     }
-    
+
     pub async fn encode_image(&self, image_data: Vec<u8>) -> Result<Vec<f32>, EmbeddingError> {
         // Check cache
         {
@@ -361,27 +371,31 @@ impl CLIPEmbedding {
             #[cfg(feature = "python")]
             {
                 let backend_guard = self.pytorch_backend.read().await;
-                let backend = backend_guard.as_ref()
-                    .ok_or_else(|| EmbeddingError::ModelLoadError(
-                        "Model not loaded. Call load_model() first.".to_string()
-                    ))?;
+                let backend = backend_guard.as_ref().ok_or_else(|| {
+                    EmbeddingError::ModelLoadError(
+                        "Model not loaded. Call load_model() first.".to_string(),
+                    )
+                })?;
 
                 // PyTorch backend is sync, run in blocking task
                 let image_data_clone = image_data.clone();
                 let backend_clone = backend.clone();
-                tokio::task::spawn_blocking(move || {
-                    backend_clone.encode_image(&image_data_clone)
-                }).await
-                    .map_err(|e| EmbeddingError::InferenceError(format!("Task join error: {}", e)))??
+                tokio::task::spawn_blocking(move || backend_clone.encode_image(&image_data_clone))
+                    .await
+                    .map_err(|e| {
+                        EmbeddingError::InferenceError(format!("Task join error: {}", e))
+                    })??
             }
 
             #[cfg(not(feature = "python"))]
             {
                 let backend_guard = self.onnx_backend.read().await;
-                let backend = backend_guard.as_ref()
-                    .ok_or_else(|| EmbeddingError::ModelLoadError(
-                        "Model not loaded. Call load_model() first or enable 'python' feature.".to_string()
-                    ))?;
+                let backend = backend_guard.as_ref().ok_or_else(|| {
+                    EmbeddingError::ModelLoadError(
+                        "Model not loaded. Call load_model() first or enable 'python' feature."
+                            .to_string(),
+                    )
+                })?;
 
                 backend.encode_image(&image_data).await?
             }
@@ -395,7 +409,7 @@ impl CLIPEmbedding {
 
         Ok(embedding)
     }
-    
+
     pub async fn encode_text(&self, text: String) -> Result<Vec<f32>, EmbeddingError> {
         let cache_key = text.as_bytes().to_vec();
 
@@ -412,27 +426,31 @@ impl CLIPEmbedding {
             #[cfg(feature = "python")]
             {
                 let backend_guard = self.pytorch_backend.read().await;
-                let backend = backend_guard.as_ref()
-                    .ok_or_else(|| EmbeddingError::ModelLoadError(
-                        "Model not loaded. Call load_model() first.".to_string()
-                    ))?;
+                let backend = backend_guard.as_ref().ok_or_else(|| {
+                    EmbeddingError::ModelLoadError(
+                        "Model not loaded. Call load_model() first.".to_string(),
+                    )
+                })?;
 
                 // PyTorch backend is sync, run in blocking task
                 let text_clone = text.clone();
                 let backend_clone = backend.clone();
-                tokio::task::spawn_blocking(move || {
-                    backend_clone.encode_text(&text_clone)
-                }).await
-                    .map_err(|e| EmbeddingError::InferenceError(format!("Task join error: {}", e)))??
+                tokio::task::spawn_blocking(move || backend_clone.encode_text(&text_clone))
+                    .await
+                    .map_err(|e| {
+                        EmbeddingError::InferenceError(format!("Task join error: {}", e))
+                    })??
             }
 
             #[cfg(not(feature = "python"))]
             {
                 let backend_guard = self.onnx_backend.read().await;
-                let backend = backend_guard.as_ref()
-                    .ok_or_else(|| EmbeddingError::ModelLoadError(
-                        "Model not loaded. Call load_model() first or enable 'python' feature.".to_string()
-                    ))?;
+                let backend = backend_guard.as_ref().ok_or_else(|| {
+                    EmbeddingError::ModelLoadError(
+                        "Model not loaded. Call load_model() first or enable 'python' feature."
+                            .to_string(),
+                    )
+                })?;
 
                 backend.encode_text(&text).await?
             }
@@ -457,22 +475,22 @@ impl MultimodalEmbedding for CLIPEmbedding {
                 let text = String::from_utf8(content.data)
                     .map_err(|e| EmbeddingError::InvalidInput(format!("Invalid UTF-8: {}", e)))?;
                 self.encode_text(text).await
-            },
+            }
             _ => Err(EmbeddingError::UnsupportedModality {
                 modality: format!("{:?}", content.modality),
                 function_name: "CLIP".to_string(),
             }),
         }
     }
-    
+
     fn supported_modalities(&self) -> Vec<Modality> {
         vec![Modality::Text, Modality::Image]
     }
-    
+
     fn dimension(&self) -> usize {
         self.config.model.dimension()
     }
-    
+
     fn name(&self) -> String {
         format!("clip-{}", self.config.model.model_name())
     }
@@ -481,14 +499,14 @@ impl MultimodalEmbedding for CLIPEmbedding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_clip_model_dimensions() {
         assert_eq!(CLIPModel::ViTBasePatch32.dimension(), 512);
         assert_eq!(CLIPModel::ViTLargePatch14.dimension(), 768);
         assert_eq!(CLIPModel::ResNet50.dimension(), 1024);
     }
-    
+
     #[test]
     fn test_tokenizer() {
         let tokenizer = CLIPTokenizer::new();

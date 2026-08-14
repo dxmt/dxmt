@@ -1,18 +1,20 @@
 use axum::{
-    extract::{Path, State, Query},
-    Json,
+    extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::types::multimodal::{
-        CreateMultiVectorRequest, CrossModalSearchQuery, MultimodalSearchResult,
-        EmbeddingConfig, EmbeddingRequest, EmbeddingResponse, 
-        MultiVectorRecord, MultimodalContent
-    };
-use crate::api::{response::{ApiResponse, ApiError}, handlers::AppState};
+use crate::api::{
+    handlers::AppState,
+    response::{ApiError, ApiResponse},
+};
 use crate::embeddings::{EmbeddingManager, MultimodalUtils};
+use crate::types::multimodal::{
+    CreateMultiVectorRequest, CrossModalSearchQuery, EmbeddingConfig, EmbeddingRequest,
+    EmbeddingResponse, MultiVectorRecord, MultimodalContent, MultimodalSearchResult,
+};
 
 #[derive(Clone)]
 pub struct MultimodalAppState {
@@ -43,15 +45,16 @@ pub async fn list_embedding_functions(
 ) -> std::result::Result<ApiResponse, StatusCode> {
     let registry = state.embeddingmanager.registry();
     let all_metadata = registry.get_all_metadata();
-    
+
     let filteredpayload: Vec<_> = if let Some(modality) = query.modality {
-        all_metadata.into_iter()
+        all_metadata
+            .into_iter()
             .filter(|meta| meta.modality.to_lowercase() == modality.to_lowercase())
             .collect()
     } else {
         all_metadata
     };
-    
+
     Ok(ApiResponse::success(filteredpayload))
 }
 
@@ -73,10 +76,17 @@ pub async fn load_embedding_function(
 ) -> std::result::Result<ApiResponse, StatusCode> {
     let config_value = match serde_json::to_value(&config) {
         Ok(v) => v,
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    state.embeddingmanager.load_function(&name, config_value).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(ApiResponse::success(format!("Embedding function '{}' loaded successfully", name)))
+    state
+        .embeddingmanager
+        .load_function(&name, config_value)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(ApiResponse::success(format!(
+        "Embedding function '{}' loaded successfully",
+        name
+    )))
 }
 
 /// 卸载嵌入函数
@@ -93,8 +103,15 @@ pub async fn unload_embedding_function(
     State(state): State<MultimodalAppState>,
     Path(name): Path<String>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
-    state.embeddingmanager.unload_function(&name).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(ApiResponse::success(format!("Embedding function '{}' unloaded successfully", name)))
+    state
+        .embeddingmanager
+        .unload_function(&name)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(ApiResponse::success(format!(
+        "Embedding function '{}' unloaded successfully",
+        name
+    )))
 }
 
 /// 列出已加载的嵌入函数
@@ -134,17 +151,24 @@ pub async fn generate_embedding(
     // 获取嵌入函数
     let _embedding_function = match state.embeddingmanager.get_function(&request.model).await {
         Some(func) => func,
-        None => return Ok(ApiResponse::error(ApiError::new("NOT_FOUND", &format!("Embedding function '{}' not found", request.model))))
+        None => {
+            return Ok(ApiResponse::error(ApiError::new(
+                "NOT_FOUND",
+                &format!("Embedding function '{}' not found", request.model),
+            )))
+        }
     };
-    
+
     // 生成嵌入 - 临时返回空向量
     let embeddings = vec![vec![0.0f32; 768]];
-    
+
     let response = EmbeddingResponse {
         embeddings,
         modality: crate::types::ModalityType::Text, // 简化处理
         model: request.model,
-        usage: request.options.and_then(|opts| serde_json::to_value(opts).ok()),
+        usage: request
+            .options
+            .and_then(|opts| serde_json::to_value(opts).ok()),
     };
     Ok(ApiResponse::success(response))
 }
@@ -171,9 +195,9 @@ pub async fn create_multimodal_record(
     // 验证表是否存在
     let table = match state.basestate.storage.get_table(&table_name).await {
         Ok(table) => table,
-        Err(e) => return Ok(ApiResponse::error(e.into()))
+        Err(e) => return Ok(ApiResponse::error(e.into())),
     };
-    
+
     // 如果提供了原始数据但没有向量，尝试生成嵌入
     if let (None, Some(raw_data)) = (&request.vectors, &request.raw_data) {
         // 验证内容 - convert to bytes based on content type
@@ -182,7 +206,9 @@ pub async fn create_multimodal_record(
             MultimodalContent::ImageBytes(bytes) => bytes.as_bytes().to_vec(),
             MultimodalContent::AudioBytes(bytes) => bytes.as_bytes().to_vec(),
             MultimodalContent::VideoBytes(bytes) => bytes.as_bytes().to_vec(),
-            MultimodalContent::ImagePath(_) | MultimodalContent::AudioPath(_) | MultimodalContent::VideoPath(_) => vec![],
+            MultimodalContent::ImagePath(_)
+            | MultimodalContent::AudioPath(_)
+            | MultimodalContent::VideoPath(_) => vec![],
             _ => vec![],
         };
         if let Err(e) = MultimodalUtils::validate_content(&contentbytes) {
@@ -193,23 +219,25 @@ pub async fn create_multimodal_record(
         // 暂时返回错误要求显式提供向量
         return Ok(ApiResponse::error(ApiError::from(crate::Error::InvalidInput("Automatic embedding generation not implemented. Please provide vectors explicitly.".to_string()))));
     }
-    
+
     // 创建多向量记录
     let record = match MultiVectorRecord::new(request) {
         Ok(record) => record,
-        Err(e) => return Ok(ApiResponse::error(e.into()))
+        Err(e) => return Ok(ApiResponse::error(e.into())),
     };
-    
+
     // 验证向量维度
     for vector in record.vectors.values() {
         if vector.len() != table.dimension {
-            return Ok(ApiResponse::error(ApiError::from(crate::Error::DimensionMismatch {
-                expected: table.dimension,
-                actual: vector.len(),
-            })))
+            return Ok(ApiResponse::error(ApiError::from(
+                crate::Error::DimensionMismatch {
+                    expected: table.dimension,
+                    actual: vector.len(),
+                },
+            )));
         }
     }
-    
+
     // 存储记录（这里需要扩展存储层以支持多向量记录）
     // 暂时返回成功响应
     Ok(ApiResponse::success(serde_json::json!({
@@ -239,9 +267,9 @@ pub async fn cross_modal_search(
     // 验证表是否存在
     let _table = match state.basestate.storage.get_table(&table_name).await {
         Ok(table) => table,
-        Err(e) => return Ok(ApiResponse::error(e.into()))
+        Err(e) => return Ok(ApiResponse::error(e.into())),
     };
-    
+
     // 这里实现跨模态搜索逻辑
     // 暂时返回模拟结果
     let search_result = MultimodalSearchResult {
@@ -250,7 +278,7 @@ pub async fn cross_modal_search(
         tookms: 10,
         fusion_weights: None,
     };
-    
+
     Ok(ApiResponse::success(search_result))
 }
 
@@ -268,35 +296,40 @@ pub async fn cross_modal_search(
     tag = "multimodal"
 )]
 pub async fn validate_multimodal_content(
-    Json(contents): Json<Vec<crate::types::MultimodalContent>>) -> std::result::Result<ApiResponse, StatusCode> {
+    Json(contents): Json<Vec<crate::types::MultimodalContent>>,
+) -> std::result::Result<ApiResponse, StatusCode> {
     // Convert MultimodalContent to bytes
-    let bytecontents: Vec<Vec<u8>> = contents.iter().map(|content| {
-        match content {
+    let bytecontents: Vec<Vec<u8>> = contents
+        .iter()
+        .map(|content| match content {
             MultimodalContent::Text(text) => text.as_bytes().to_vec(),
             MultimodalContent::ImageBytes(bytes) => bytes.as_bytes().to_vec(),
             MultimodalContent::AudioBytes(bytes) => bytes.as_bytes().to_vec(),
             MultimodalContent::VideoBytes(bytes) => bytes.as_bytes().to_vec(),
             _ => vec![],
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     match MultimodalUtils::validate_batch(&bytecontents) {
         Ok(_) => {
-            let validation_info = bytecontents.iter().map(|contentbytes| {
-                serde_json::json!({
-                    "type": MultimodalUtils::infer_modality_type(contentbytes),
-                    "size": MultimodalUtils::estimate_content_size(contentbytes),
-                    "hash": MultimodalUtils::content_hash(contentbytes)
+            let validation_info = bytecontents
+                .iter()
+                .map(|contentbytes| {
+                    serde_json::json!({
+                        "type": MultimodalUtils::infer_modality_type(contentbytes),
+                        "size": MultimodalUtils::estimate_content_size(contentbytes),
+                        "hash": MultimodalUtils::content_hash(contentbytes)
+                    })
                 })
-            }).collect::<Vec<_>>();
-            
+                .collect::<Vec<_>>();
+
             Ok(ApiResponse::success(serde_json::json!({
                 "valid": true,
                 "count": contents.len(),
                 "details": validation_info
             })))
-        },
-        Err(e) => Ok(ApiResponse::error(e.into()))
+        }
+        Err(e) => Ok(ApiResponse::error(e.into())),
     }
 }
 
@@ -311,7 +344,8 @@ pub async fn validate_multimodal_content(
     tag = "multimodal"
 )]
 pub async fn get_multimodal_info(
-    Json(content): Json<crate::types::MultimodalContent>) -> std::result::Result<ApiResponse, StatusCode> {
+    Json(content): Json<crate::types::MultimodalContent>,
+) -> std::result::Result<ApiResponse, StatusCode> {
     // Convert MultimodalContent to bytes
     let contentbytes = match &content {
         MultimodalContent::Text(text) => text.as_bytes().to_vec(),
@@ -320,22 +354,20 @@ pub async fn get_multimodal_info(
         MultimodalContent::VideoBytes(bytes) => bytes.as_bytes().to_vec(),
         _ => vec![],
     };
-    
+
     let info = serde_json::json!({
         "modality": MultimodalUtils::infer_modality_type(&contentbytes),
         "estimated_size": MultimodalUtils::estimate_content_size(&contentbytes),
         "content_hash": MultimodalUtils::content_hash(&contentbytes),
         "valid": MultimodalUtils::validate_content(&contentbytes).is_ok()
     });
-    
+
     Ok(ApiResponse::success(info))
 }
 
 #[cfg(test)]
 mod tests {
-    
-    
-    
+
     // multimodal tests omitted: MultimodalUtils expects &[u8] but MultimodalContent is enum —
     // these need to be rewritten once the multimodal ONNX path (ort 2.0) is stabilized
 }

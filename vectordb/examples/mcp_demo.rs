@@ -3,11 +3,10 @@
 //! This example shows how AI assistants like Claude can interact with DXMT VectorDB
 //! through the Model Context Protocol (MCP).
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use axum::{routing::get, Router};
 use dxmt_vectordb::{
-    config::{StorageConfig, MemoryConfig},
-    mcp::server::{McpServer, mcp_websocket_handler},
+    config::{MemoryConfig, StorageConfig},
+    mcp::server::{mcp_websocket_handler, McpServer},
     storage::IntelligentIndexedStorage,
     types::{
         record::{CreateRecordRequest, SearchMode, SearchQuery},
@@ -15,7 +14,8 @@ use dxmt_vectordb::{
         vector::DistanceMetric,
     },
 };
-use axum::{Router, routing::get};
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,19 +35,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = Arc::new(IntelligentIndexedStorage::new(&config).await?);
 
     // Create sample table
-    storage.create_table(TableConfig {
-        name: "products".to_string(),
-        dimension: 4,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await?;
+    storage
+        .create_table(TableConfig {
+            name: "products".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await?;
 
     // Insert sample products
     let records = vec![
@@ -128,5 +130,7 @@ fn print_example_interactions() {
     println!("Example MCP interactions:");
     println!(r#"  1. {{ "method": "initialize", "params": {{ "protocol_version": "1.0.0" }} }}"#);
     println!(r#"  2. {{ "method": "tools/list" }}"#);
-    println!(r#"  3. {{ "method": "tools/call", "params": {{ "name": "vector_search", "arguments": {{ "table": "products", "vector": [0.12, 0.22, 0.32, 0.42], "limit": 5 }} }} }}"#);
+    println!(
+        r#"  3. {{ "method": "tools/call", "params": {{ "name": "vector_search", "arguments": {{ "table": "products", "vector": [0.12, 0.22, 0.32, 0.42], "limit": 5 }} }} }}"#
+    );
 }

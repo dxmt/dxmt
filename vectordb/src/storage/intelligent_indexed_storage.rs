@@ -1,35 +1,41 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use crate::search::index_traits::VectorIndex;
 use crate::search::brute_force::BruteForceIndex;
+use crate::search::index_traits::VectorIndex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Mutex as StdMutex};
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::wal::{WalEntry, WalManager};
-use tracing::{info, error, warn, debug};
+use tracing::{debug, error, info, warn};
 
 pub use crate::storage::index_selector::{
-    IndexAlgorithm, IndexConfig, PerformanceRequirements, CostConstraints,
-    HardwareCapabilities, IndexDecision, ExpectedPerformance, IntelligentIndexSelector,
+    CostConstraints, ExpectedPerformance, HardwareCapabilities, IndexAlgorithm, IndexConfig,
+    IndexDecision, IntelligentIndexSelector, PerformanceRequirements,
 };
 
 use crate::config::StorageConfig;
+use crate::search::sparse_index::SparseIndex;
+use crate::search::{IndexCollection, IndexWrapper};
 use crate::storage::object::TieredStorage;
 use crate::types::{
+    record::{CreateRecordRequest, Record, SearchHit, SearchMode, SearchQuery, SearchResult},
+    record::{
+        FullTextSearchHit, FullTextSearchRequest, FullTextSearchResult, FusionMethod,
+        HybridSearchRequest,
+    },
     table::{Table, TableAlterRequest, TableConfig, TextSource},
-    record::{Record, CreateRecordRequest, SearchQuery, SearchResult, SearchHit, SearchMode},
-    record::{FullTextSearchRequest, FullTextSearchResult, FullTextSearchHit, HybridSearchRequest, FusionMethod},
-    vector::{RecordId, DistanceMetric, DenseVector},
+    vector::{DenseVector, DistanceMetric, RecordId},
 };
-use crate::search::sparse_index::SparseIndex;
-use crate::search::{IndexWrapper, IndexCollection};
 
 #[cfg(feature = "text-bm25")]
-use crate::search::full_text::{FullTextSearchEngine, FullTextDocument, FullTextConfig, FullTextSearchRequest as EngineSearchRequest};
+use crate::search::full_text::{
+    FullTextConfig, FullTextDocument, FullTextSearchEngine,
+    FullTextSearchRequest as EngineSearchRequest,
+};
 
 /// 快照清单：记住写快照那一刻 WAL 的下一个序号，恢复时只回放这之后的部分。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -138,16 +144,16 @@ struct IntelligentTableData {
 pub struct PerformanceStats {
     /// 总查询次数
     total_queries: u64,
-    
+
     /// 平均查询延迟
     avg_query_latency_ms: f64,
-    
+
     /// P95查询延迟
     p95_query_latency_ms: f64,
-    
+
     /// 召回率
     avg_recall_rate: f64,
-    
+
     /// 插入吞吐量
     insert_throughput: f64,
 }
@@ -178,10 +184,12 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
                                 serde_json::Value::Bool(b) => Some(b.to_string()),
                                 serde_json::Value::Array(arr) => {
                                     // Join array elements with spaces
-                                    Some(arr.iter()
-                                        .filter_map(|v| v.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(" "))
+                                    Some(
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(" "),
+                                    )
                                 }
                                 _ => None,
                             }
@@ -193,7 +201,9 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
                 TextSource::Dedicated(field_name) => {
                     // For now, treat dedicated fields the same as metadata fields
                     if let serde_json::Value::Object(map) = &record.payload {
-                        map.get(field_name).and_then(|v| v.as_str()).map(|s| s.to_string())
+                        map.get(field_name)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     } else {
                         None
                     }
@@ -220,7 +230,8 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
                     }
                     serde_json::Value::Array(arr) => {
                         // Join array elements with spaces
-                        let text = arr.iter()
+                        let text = arr
+                            .iter()
                             .filter_map(|v| v.as_str())
                             .collect::<Vec<_>>()
                             .join(" ");
@@ -234,7 +245,8 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
         }
     }
 
-    if text_content.len() > 1 {  // More than just the ID
+    if text_content.len() > 1 {
+        // More than just the ID
         Some(text_content)
     } else {
         None
@@ -255,7 +267,8 @@ async fn insertion_processor(
         let result = async {
             let mut tables = tables.write().await;
 
-            let table_data = tables.get_mut(&req.table_name)
+            let table_data = tables
+                .get_mut(&req.table_name)
                 .ok_or_else(|| crate::Error::TableNotFound(req.table_name.clone()))?;
 
             let expected_dim = table_data.table.dimension;
@@ -274,11 +287,12 @@ async fn insertion_processor(
                 }
 
                 // 🔄 UPSERT Logic: Check if record exists and remove old vector first
-                let (is_update, existing_created_at, existing_version) = if let Some(existing) = table_data.records.get(&record_id) {
-                    (true, existing.created_at, existing.version + 1)
-                } else {
-                    (false, chrono::Utc::now(), 1)
-                };
+                let (is_update, existing_created_at, existing_version) =
+                    if let Some(existing) = table_data.records.get(&record_id) {
+                        (true, existing.created_at, existing.version + 1)
+                    } else {
+                        (false, chrono::Utc::now(), 1)
+                    };
 
                 if is_update {
                     // Delete old vector from index before adding new one
@@ -290,7 +304,10 @@ async fn insertion_processor(
                     #[cfg(feature = "text-bm25")]
                     if let Some(engine) = &table_data.full_text_engine {
                         if let Err(e) = engine.delete_document(&record_id).await {
-                            warn!("Failed to remove old full-text document for {}: {}", record_id, e);
+                            warn!(
+                                "Failed to remove old full-text document for {}: {}",
+                                record_id, e
+                            );
                         }
                     }
                 } else {
@@ -299,7 +316,10 @@ async fn insertion_processor(
                 }
 
                 // 插入到稠密向量索引
-                table_data.index.insert(record_id.clone(), request.vector.clone()).await?;
+                table_data
+                    .index
+                    .insert(record_id.clone(), request.vector.clone())
+                    .await?;
 
                 // Insert into named vector indexes if present
                 if let (Some(ref named_indexes), Some(ref named_vecs)) =
@@ -307,8 +327,13 @@ async fn insertion_processor(
                 {
                     for (vec_name, vec_data) in named_vecs {
                         if let Some(named_idx) = named_indexes.get_index(vec_name).await {
-                            if let Err(e) = named_idx.insert(record_id.clone(), vec_data.clone()).await {
-                                warn!("Failed to insert into named index '{}' for {}: {}", vec_name, record_id, e);
+                            if let Err(e) =
+                                named_idx.insert(record_id.clone(), vec_data.clone()).await
+                            {
+                                warn!(
+                                    "Failed to insert into named index '{}' for {}: {}",
+                                    vec_name, record_id, e
+                                );
                             }
                         }
                     }
@@ -337,14 +362,18 @@ async fn insertion_processor(
                 // 索引文本内容（如果启用全文搜索）
                 #[cfg(feature = "text-bm25")]
                 if let Some(engine) = &table_data.full_text_engine {
-                    if let Some(text_content) = extract_text_from_record(&table_data.table, &record) {
+                    if let Some(text_content) = extract_text_from_record(&table_data.table, &record)
+                    {
                         // Create a FullTextDocument
                         let doc = FullTextDocument {
                             id: record.id.clone(),
                             title: text_content.get("title").cloned(),
                             content: text_content.get("content").cloned().unwrap_or_default(),
                             description: text_content.get("description").cloned(),
-                            tags: text_content.get("tags").map(|s| vec![s.clone()]).unwrap_or_default(),
+                            tags: text_content
+                                .get("tags")
+                                .map(|s| vec![s.clone()])
+                                .unwrap_or_default(),
                             payload: Some(record.payload.clone()),
                             timestamp: chrono::Utc::now().timestamp(),
                         };
@@ -360,7 +389,9 @@ async fn insertion_processor(
                 table_data.records.insert(record_id.clone(), record.clone());
 
                 // 更新 PayloadIndex
-                table_data.payload_index.insert_record(&record_id, &record.payload);
+                table_data
+                    .payload_index
+                    .insert_record(&record_id, &record.payload);
 
                 records.push(record);
             }
@@ -385,7 +416,8 @@ async fn insertion_processor(
             }
 
             Ok(records)
-        }.await;
+        }
+        .await;
 
         // 发送响应
         if req.response_tx.send(result).is_err() {
@@ -426,7 +458,11 @@ impl IntelligentIndexedStorage {
             let from_seq = storage.load_snapshot(&dir).await;
 
             let pending = {
-                let guard = storage.wal.as_ref().unwrap().lock()
+                let guard = storage
+                    .wal
+                    .as_ref()
+                    .unwrap()
+                    .lock()
                     .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
                 guard.replay_from(from_seq)?
             };
@@ -447,10 +483,10 @@ impl IntelligentIndexedStorage {
     async fn build(config: &StorageConfig) -> crate::Result<Self> {
         let storage = TieredStorage::new_from_config(config).await?;
         let index_selector = IntelligentIndexSelector::new();
-        
+
         // 从配置或系统检测硬件能力
         let hardware_capabilities = Self::detect_hardware_capabilities();
-        
+
         // 默认性能要求
         let performance_requirements = PerformanceRequirements {
             target_recall: 0.95,
@@ -461,7 +497,7 @@ impl IntelligentIndexedStorage {
             target_qps: 1000.0,
             min_insert_throughput: 100.0,
         };
-        
+
         // 默认成本约束
         let cost_constraints = CostConstraints {
             max_memory_gb: 32.0,
@@ -471,14 +507,17 @@ impl IntelligentIndexedStorage {
             max_compute_cost_per_hour: 10.0,
             total_budget_limit: 1000.0,
         };
-        
+
         // 读取全局默认内存优化配置
         let default_memory_optimization = std::env::var("DB_MEMORY_OPTIMIZATION")
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true); // 默认启用内存优化
 
-        info!("Global memory_optimization setting: {}", default_memory_optimization);
+        info!(
+            "Global memory_optimization setting: {}",
+            default_memory_optimization
+        );
 
         // 创建 channel-based 插入架构（消除锁竞争）
         let (insert_tx, insert_rx) = mpsc::unbounded_channel();
@@ -542,7 +581,9 @@ impl IntelligentIndexedStorage {
         for (seq, entry) in entries {
             let outcome = match entry {
                 WalEntry::CreateTableWithConfig { config } => {
-                    self.create_table(config).await.map(|_| { tables += 1; })
+                    self.create_table(config).await.map(|_| {
+                        tables += 1;
+                    })
                 }
                 WalEntry::CreateTable { table, dimension } => {
                     warn!(
@@ -564,9 +605,16 @@ impl IntelligentIndexedStorage {
                         schema_version: 1,
                         named_vectors: None,
                     };
-                    self.create_table(config).await.map(|_| { tables += 1; })
+                    self.create_table(config).await.map(|_| {
+                        tables += 1;
+                    })
                 }
-                WalEntry::Insert { table, record_id, vector, payload } => {
+                WalEntry::Insert {
+                    table,
+                    record_id,
+                    vector,
+                    payload,
+                } => {
                     let request = CreateRecordRequest {
                         id: record_id,
                         vector,
@@ -574,7 +622,9 @@ impl IntelligentIndexedStorage {
                         named_vectors: None,
                         payload,
                     };
-                    self.insert_records(&table, vec![request]).await.map(|_| { records += 1; })
+                    self.insert_records(&table, vec![request]).await.map(|_| {
+                        records += 1;
+                    })
                 }
                 WalEntry::Delete { table, record_id } => {
                     self.delete_records(&table, vec![record_id]).await
@@ -622,7 +672,8 @@ impl IntelligentIndexedStorage {
         };
 
         let seq = {
-            let mut guard = wal.lock()
+            let mut guard = wal
+                .lock()
                 .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
             guard.force_flush()?;
             guard.next_sequence()
@@ -665,7 +716,10 @@ impl IntelligentIndexedStorage {
         crate::search::index_persistence::write_index(
             &staging.join("manifest"),
             "snapshot-manifest",
-            &SnapshotManifest { wal_next_sequence: seq, tables: written },
+            &SnapshotManifest {
+                wal_next_sequence: seq,
+                tables: written,
+            },
         )?;
 
         // 原子替换：中途崩了要么是旧快照、要么是新快照，不会是半个。
@@ -677,7 +731,10 @@ impl IntelligentIndexedStorage {
         std::fs::rename(&staging, &dir)?;
         let _ = std::fs::remove_dir_all(&previous);
 
-        info!("Snapshot written: {} tables at WAL sequence {}", written, seq);
+        info!(
+            "Snapshot written: {} tables at WAL sequence {}",
+            written, seq
+        );
         Ok(written)
     }
 
@@ -693,7 +750,10 @@ impl IntelligentIndexedStorage {
                 if dir.exists() {
                     // 快照读不出来不是致命错误——全量回放 WAL 就是了。但要说出来，
                     // 否则表现只是"启动变慢了"，没人会去查。
-                    warn!("Snapshot unreadable, falling back to full WAL replay: {}", e);
+                    warn!(
+                        "Snapshot unreadable, falling back to full WAL replay: {}",
+                        e
+                    );
                 }
                 return 0;
             }
@@ -712,8 +772,14 @@ impl IntelligentIndexedStorage {
                 }
             };
 
-            if let Err(e) = self.restore_table(&dir.join(format!("{}.idx", stem)), meta).await {
-                warn!("Snapshot table {} could not be restored, full replay: {}", i, e);
+            if let Err(e) = self
+                .restore_table(&dir.join(format!("{}.idx", stem)), meta)
+                .await
+            {
+                warn!(
+                    "Snapshot table {} could not be restored, full replay: {}",
+                    i, e
+                );
                 return 0;
             }
         }
@@ -772,7 +838,8 @@ impl IntelligentIndexedStorage {
         };
 
         let mut tables = self.tables.write().await;
-        let data = tables.get_mut(&name)
+        let data = tables
+            .get_mut(&name)
             .ok_or_else(|| crate::Error::TableNotFound(name.clone()))?;
 
         let index_restored = restored_index.is_some();
@@ -788,7 +855,10 @@ impl IntelligentIndexedStorage {
         let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
             Vec::new()
         } else {
-            meta.records.iter().map(|r| (r.id.clone(), r.vector.clone())).collect()
+            meta.records
+                .iter()
+                .map(|r| (r.id.clone(), r.vector.clone()))
+                .collect()
         };
         let wrapper = data.index.clone();
         drop(tables);
@@ -810,9 +880,12 @@ impl IntelligentIndexedStorage {
         if self.replaying.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let Some(ref wal) = self.wal else { return Ok(()) };
+        let Some(ref wal) = self.wal else {
+            return Ok(());
+        };
 
-        let mut guard = wal.lock()
+        let mut guard = wal
+            .lock()
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
         for entry in entries {
             guard.write_entry(entry)?;
@@ -820,7 +893,7 @@ impl IntelligentIndexedStorage {
         guard.force_flush()?;
         Ok(())
     }
-    
+
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
         // Check if table exists (quickly release the lock)
@@ -830,12 +903,13 @@ impl IntelligentIndexedStorage {
                 return Err(crate::Error::TableAlreadyExists(config.name.clone()));
             }
         }
-        
+
         // 创建表元数据
         let table = Table::new(config.clone())?;
 
         // ✨ 配置层级决策：表级配置覆盖全局配置
-        let memory_optimization = config.memory_optimization
+        let memory_optimization = config
+            .memory_optimization
             .unwrap_or(self.default_memory_optimization);
 
         info!(
@@ -867,16 +941,21 @@ impl IntelligentIndexedStorage {
             self.select_memory_optimized_index(&index_config).await?
         } else {
             // 高精度模式：使用标准索引选择逻辑
-            self.index_selector.select_optimal_index(&index_config).await?
+            self.index_selector
+                .select_optimal_index(&index_config)
+                .await?
         };
-        
+
         info!(
             "Selected {} algorithm for table {} with confidence {:.2}",
-            format!("{:?}", index_decision.selected_algorithm).split('{').next().unwrap_or("Unknown"),
+            format!("{:?}", index_decision.selected_algorithm)
+                .split('{')
+                .next()
+                .unwrap_or("Unknown"),
             table.name,
             index_decision.confidence
         );
-        
+
         // 创建索引实例
         let index_impl = self.create_index_instance(
             &index_decision.selected_algorithm,
@@ -896,7 +975,9 @@ impl IntelligentIndexedStorage {
                     vec_cfg.dimension,
                     vec_cfg.distance_metric,
                 )?;
-                collection.add_index(vec_cfg.name.clone(), IndexWrapper::new(named_index_impl)).await;
+                collection
+                    .add_index(vec_cfg.name.clone(), IndexWrapper::new(named_index_impl))
+                    .await;
             }
             Some(collection)
         } else {
@@ -908,9 +989,12 @@ impl IntelligentIndexedStorage {
         let full_text_engine = if table.enable_full_text_search {
             match Self::create_full_text_engine(&table).await {
                 Ok(engine) => {
-                    info!("Successfully created full-text search engine for table {}", table.name);
+                    info!(
+                        "Successfully created full-text search engine for table {}",
+                        table.name
+                    );
                     Some(Arc::new(engine))
-                },
+                }
                 Err(e) => {
                     warn!("Failed to create full-text search engine for table {}: {}. Full-text search will be disabled.", table.name, e);
                     None
@@ -933,7 +1017,7 @@ impl IntelligentIndexedStorage {
             #[cfg(feature = "text-bm25")]
             full_text_engine,
         };
-        
+
         // Re-acquire the lock to insert the table
         {
             let mut tables = self.tables.write().await;
@@ -944,28 +1028,36 @@ impl IntelligentIndexedStorage {
 
         Ok(table)
     }
-    
+
     /// 插入记录 - Channel-based 无锁架构
-    pub async fn insert_records(&self, tablename: &str, requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>> {
+    pub async fn insert_records(
+        &self,
+        tablename: &str,
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>> {
         // 创建响应 channel
         let (response_tx, response_rx) = oneshot::channel();
 
         // 发送插入请求到后台处理器
-        self.insert_tx.send(InsertRequest {
-            table_name: tablename.to_string(),
-            records: requests,
-            response_tx,
-        }).map_err(|e| crate::Error::Internal(format!("Failed to send insert request: {}", e)))?;
+        self.insert_tx
+            .send(InsertRequest {
+                table_name: tablename.to_string(),
+                records: requests,
+                response_tx,
+            })
+            .map_err(|e| crate::Error::Internal(format!("Failed to send insert request: {}", e)))?;
 
         // 等待后台处理器响应
-        let inserted = response_rx.await
-            .map_err(|e| crate::Error::Internal(format!("Insert request was cancelled: {}", e)))??;
+        let inserted = response_rx.await.map_err(|e| {
+            crate::Error::Internal(format!("Insert request was cancelled: {}", e))
+        })??;
 
         // 先落内存再记日志，最后才返回给调用方。中间崩掉的话这次写入还没被确认，丢了也符合语义；
         // 反过来先记日志的话，处理器若因维度不符等原因失败，日志里就留下了一条永远重放不成功的
         // 幽灵记录。
         self.wal_append(
-            inserted.iter()
+            inserted
+                .iter()
                 .map(|r| WalEntry::Insert {
                     table: tablename.to_string(),
                     record_id: r.id.clone(),
@@ -977,13 +1069,14 @@ impl IntelligentIndexedStorage {
 
         Ok(inserted)
     }
-    
+
     /// 搜索向量
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         let start_time = std::time::Instant::now();
         let tables = self.tables.read().await;
 
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Validate query vector dimension against the default space only when no named vector
@@ -1018,8 +1111,8 @@ impl IntelligentIndexedStorage {
             } else {
                 None
             };
-        let active_index: &crate::search::IndexWrapper = named_index_opt.as_ref()
-            .unwrap_or(&table_data.index);
+        let active_index: &crate::search::IndexWrapper =
+            named_index_opt.as_ref().unwrap_or(&table_data.index);
 
         // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
         let cardinality_and_sel = if let Some(ref filter) = query.filter {
@@ -1038,74 +1131,95 @@ impl IntelligentIndexedStorage {
         let default_ef = 100usize;
         // Use adaptive EF when SearchMode::Auto and a filter is present
         let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
-            query.search_mode.ef_search_adaptive(default_ef, result_limit, *selectivity)
+            query
+                .search_mode
+                .ef_search_adaptive(default_ef, result_limit, *selectivity)
         } else {
             query.search_mode.ef_search(default_ef, result_limit)
         };
 
         // Determine strategy and execute search
-        let (results, post_filter) = if let (Some(ref filter), Some((ref cardinality, selectivity))) =
-            (&query.filter, &cardinality_and_sel)
-        {
-            let total_records = table_data.records.len();
+        let (results, post_filter) =
+            if let (Some(ref filter), Some((ref cardinality, selectivity))) =
+                (&query.filter, &cardinality_and_sel)
+            {
+                let total_records = table_data.records.len();
 
-            if *selectivity < 0.05 && cardinality.exp < 10000 {
-                // Acorn-style in-graph filter: selectivity < 5%
-                let filter_ids = table_data.payload_index.get_matching_ids(filter);
-                info!(
-                    "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
-                    selectivity * 100.0, filter_ids.len()
-                );
+                if *selectivity < 0.05 && cardinality.exp < 10000 {
+                    // Acorn-style in-graph filter: selectivity < 5%
+                    let filter_ids = table_data.payload_index.get_matching_ids(filter);
+                    info!(
+                        "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
+                        selectivity * 100.0,
+                        filter_ids.len()
+                    );
 
-                // When filter_ids is very small, kNN approximation is unreliable:
-                // fetching top-K from the full index may miss all filter candidates.
-                // Instead, compute exact distances only for the matching IDs (O(|filter_ids|)).
-                let r = if filter_ids.len() <= result_limit * 4 {
-                    let metric = table_data.table.distance_metric;
-                    let mut scored: Vec<(RecordId, f32)> = filter_ids.iter()
-                        .filter_map(|id| {
-                            table_data.records.get(id).map(|rec| {
-                                let dist = metric.calculate(&query.vector, &rec.vector)
-                                    .unwrap_or(f32::MAX);
-                                (id.clone(), dist)
+                    // When filter_ids is very small, kNN approximation is unreliable:
+                    // fetching top-K from the full index may miss all filter candidates.
+                    // Instead, compute exact distances only for the matching IDs (O(|filter_ids|)).
+                    let r = if filter_ids.len() <= result_limit * 4 {
+                        let metric = table_data.table.distance_metric;
+                        let mut scored: Vec<(RecordId, f32)> = filter_ids
+                            .iter()
+                            .filter_map(|id| {
+                                table_data.records.get(id).map(|rec| {
+                                    let dist = metric
+                                        .calculate(&query.vector, &rec.vector)
+                                        .unwrap_or(f32::MAX);
+                                    (id.clone(), dist)
+                                })
                             })
-                        })
-                        .collect();
-                    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-                    scored.truncate(result_limit);
-                    scored
+                            .collect();
+                        scored.sort_by(|a, b| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        scored.truncate(result_limit);
+                        scored
+                    } else {
+                        active_index
+                            .search_with_filter(&query.vector, result_limit, ef_hint, &filter_ids)
+                            .await?
+                    };
+                    (r, false)
+                } else if *selectivity < 0.3 {
+                    // PRE-FILTERING: still fetch amplified and post-filter
+                    let safety = 2.0;
+                    let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
+                        .min(total_records)
+                        .max(result_limit * 2);
+                    info!(
+                        "PRE-FILTERING: selectivity={:.2}%, fetch={}",
+                        selectivity * 100.0,
+                        fetch
+                    );
+                    let r = active_index
+                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                        .await?;
+                    (r, true)
                 } else {
-                    active_index.search_with_filter(
-                        &query.vector, result_limit, ef_hint, &filter_ids
-                    ).await?
-                };
-                (r, false)
-            } else if *selectivity < 0.3 {
-                // PRE-FILTERING: still fetch amplified and post-filter
-                let safety = 2.0;
-                let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
-                    .min(total_records).max(result_limit * 2);
-                info!(
-                    "PRE-FILTERING: selectivity={:.2}%, fetch={}",
-                    selectivity * 100.0, fetch
-                );
-                let r = active_index.search_with_ef_hint(&query.vector, fetch, ef_hint).await?;
-                (r, true)
+                    // POST-FILTERING: selectivity >= 30%, fetch extra and filter
+                    let fetch = result_limit * 3;
+                    info!(
+                        "POST-FILTERING: selectivity={:.2}%, fetch={}",
+                        selectivity * 100.0,
+                        fetch
+                    );
+                    let r = active_index
+                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                        .await?;
+                    (r, true)
+                }
             } else {
-                // POST-FILTERING: selectivity >= 30%, fetch extra and filter
-                let fetch = result_limit * 3;
-                info!("POST-FILTERING: selectivity={:.2}%, fetch={}", selectivity * 100.0, fetch);
-                let r = active_index.search_with_ef_hint(&query.vector, fetch, ef_hint).await?;
-                (r, true)
-            }
-        } else {
-            // No filter
-            let r = active_index.search_with_ef_hint(&query.vector, result_limit, ef_hint).await?;
-            (r, false)
-        };
+                // No filter
+                let r = active_index
+                    .search_with_ef_hint(&query.vector, result_limit, ef_hint)
+                    .await?;
+                (r, false)
+            };
 
         // 应用filter并构建搜索结果
-        let hits: Vec<SearchHit> = results.into_iter()
+        let hits: Vec<SearchHit> = results
+            .into_iter()
             .filter_map(|(id, score)| {
                 // POST-FILTERING: apply payload filter on results that weren't in-graph filtered
                 if post_filter {
@@ -1121,12 +1235,24 @@ impl IntelligentIndexedStorage {
 
                 // Load payload and vector based on query flags
                 let (payload, vector) = if query.with_payload || query.with_vector {
-                    table_data.records.get(&id).map(|r| {
-                        (
-                            if query.with_payload { Some(r.payload.clone()) } else { None },
-                            if query.with_vector { Some(r.vector.clone()) } else { None },
-                        )
-                    }).unwrap_or((None, None))
+                    table_data
+                        .records
+                        .get(&id)
+                        .map(|r| {
+                            (
+                                if query.with_payload {
+                                    Some(r.payload.clone())
+                                } else {
+                                    None
+                                },
+                                if query.with_vector {
+                                    Some(r.vector.clone())
+                                } else {
+                                    None
+                                },
+                            )
+                        })
+                        .unwrap_or((None, None))
                 } else {
                     (None, None)
                 };
@@ -1158,7 +1284,7 @@ impl IntelligentIndexedStorage {
                     vector,
                 })
             })
-            .take(result_limit)  // 过滤后只保留指定数量的结果
+            .take(result_limit) // 过滤后只保留指定数量的结果
             .collect();
 
         let query_time = start_time.elapsed();
@@ -1189,25 +1315,25 @@ impl IntelligentIndexedStorage {
         let start_time = std::time::Instant::now();
         let tables = self.tables.read().await;
 
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Check if full-text search is enabled
         if !table_data.table.enable_full_text_search {
             return Err(crate::Error::InvalidInput(
-                "Full-text search is not enabled for this table".to_string()
+                "Full-text search is not enabled for this table".to_string(),
             ));
         }
 
         // Get the full-text engine
-        let engine = table_data.full_text_engine.as_ref()
-            .ok_or_else(|| crate::Error::Internal(
-                "Full-text search engine not initialized".to_string()
-            ))?;
+        let engine = table_data.full_text_engine.as_ref().ok_or_else(|| {
+            crate::Error::Internal("Full-text search engine not initialized".to_string())
+        })?;
 
         // 如果有过滤器，获取更多结果以补偿过滤后的损失
         let fetch_limit = if request.filter.is_some() {
-            request.limit * 3  // 获取3倍结果
+            request.limit * 3 // 获取3倍结果
         } else {
             request.limit
         };
@@ -1221,11 +1347,14 @@ impl IntelligentIndexedStorage {
             highlight: request.highlight,
             highlight_pre_tag: None,
             highlight_post_tag: None,
-            fuzzy: request.fuzzy.as_ref().map(|f| crate::search::full_text::FuzzyConfig {
-                max_distance: f.max_distance,
-                prefix_length: f.prefix_length as u8,
-                transpositions: true,
-            }),
+            fuzzy: request
+                .fuzzy
+                .as_ref()
+                .map(|f| crate::search::full_text::FuzzyConfig {
+                    max_distance: f.max_distance,
+                    prefix_length: f.prefix_length as u8,
+                    transpositions: true,
+                }),
             filters: None,
             sort_by: None,
         };
@@ -1234,7 +1363,8 @@ impl IntelligentIndexedStorage {
         let search_results = engine.search(&engine_request).await?;
 
         // Convert engine results to API results
-        let hits: Vec<FullTextSearchHit> = search_results.into_iter()
+        let hits: Vec<FullTextSearchHit> = search_results
+            .into_iter()
             .filter_map(|result| {
                 // Apply filters if specified
                 if let Some(ref filter) = request.filter {
@@ -1247,7 +1377,10 @@ impl IntelligentIndexedStorage {
                 }
 
                 // Get the full record if needed
-                let payload = table_data.records.get(&result.id).map(|r| r.payload.clone());
+                let payload = table_data
+                    .records
+                    .get(&result.id)
+                    .map(|r| r.payload.clone());
 
                 Some(FullTextSearchHit {
                     id: result.id,
@@ -1255,16 +1388,15 @@ impl IntelligentIndexedStorage {
                     payload,
                     highlights: if request.highlight {
                         // Flatten HashMap<String, Vec<String>> to Vec<String>
-                        result.highlights.map(|h| {
-                            h.into_values().flatten()
-                                .collect()
-                        })
+                        result
+                            .highlights
+                            .map(|h| h.into_values().flatten().collect())
                     } else {
                         None
                     },
                 })
             })
-            .take(request.limit)  // 过滤后只保留limit个
+            .take(request.limit) // 过滤后只保留limit个
             .collect();
 
         let total = hits.len();
@@ -1291,7 +1423,9 @@ impl IntelligentIndexedStorage {
         text: Vec<(RecordId, f32)>,
     ) -> HashMap<RecordId, f32> {
         fn dbsf_norm(list: &[(RecordId, f32)]) -> HashMap<RecordId, f32> {
-            if list.is_empty() { return HashMap::new(); }
+            if list.is_empty() {
+                return HashMap::new();
+            }
             let n = list.len() as f32;
             let mean = list.iter().map(|(_, s)| s).sum::<f32>() / n;
             let var = list.iter().map(|(_, s)| (s - mean).powi(2)).sum::<f32>() / n;
@@ -1299,16 +1433,24 @@ impl IntelligentIndexedStorage {
             let low = mean - 3.0 * std;
             let high = mean + 3.0 * std;
             let range = (high - low).max(1e-8);
-            list.iter().map(|(id, s)| {
-                let clipped = s.max(low).min(high);
-                (id.clone(), (clipped - low) / range)
-            }).collect()
+            list.iter()
+                .map(|(id, s)| {
+                    let clipped = s.max(low).min(high);
+                    (id.clone(), (clipped - low) / range)
+                })
+                .collect()
         }
 
         let mut scores: HashMap<RecordId, f32> = HashMap::new();
-        for (id, s) in dbsf_norm(&vector)  { *scores.entry(id).or_insert(0.0) += s; }
-        for (id, s) in dbsf_norm(&sparse)  { *scores.entry(id).or_insert(0.0) += s; }
-        for (id, s) in dbsf_norm(&text)    { *scores.entry(id).or_insert(0.0) += s; }
+        for (id, s) in dbsf_norm(&vector) {
+            *scores.entry(id).or_insert(0.0) += s;
+        }
+        for (id, s) in dbsf_norm(&sparse) {
+            *scores.entry(id).or_insert(0.0) += s;
+        }
+        for (id, s) in dbsf_norm(&text) {
+            *scores.entry(id).or_insert(0.0) += s;
+        }
         scores
     }
 
@@ -1323,10 +1465,14 @@ impl IntelligentIndexedStorage {
         // Normalize and weight vector scores
         if !vector_results.is_empty() {
             let scores: Vec<f32> = vector_results.iter().map(|(_, s)| *s).collect();
-            let max_score = scores.iter().cloned()
+            let max_score = scores
+                .iter()
+                .cloned()
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
-            let min_score = scores.iter().cloned()
+            let min_score = scores
+                .iter()
+                .cloned()
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(0.0);
             let score_range = max_score - min_score;
@@ -1345,10 +1491,14 @@ impl IntelligentIndexedStorage {
         // Normalize and weight text scores
         if !text_results.is_empty() {
             let scores: Vec<f32> = text_results.iter().map(|(_, s)| *s).collect();
-            let max_score = scores.iter().cloned()
+            let max_score = scores
+                .iter()
+                .cloned()
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
-            let min_score = scores.iter().cloned()
+            let min_score = scores
+                .iter()
+                .cloned()
                 .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(0.0);
             let score_range = max_score - min_score;
@@ -1432,10 +1582,15 @@ impl IntelligentIndexedStorage {
         let start_time = std::time::Instant::now();
         let tables = self.tables.read().await;
 
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        let fetch_limit = if request.filter.is_some() { request.limit * 10 } else { request.limit * 3 };
+        let fetch_limit = if request.filter.is_some() {
+            request.limit * 10
+        } else {
+            request.limit * 3
+        };
 
         // Validate dense vector dimension if provided
         let expected_dim = table_data.table.dimension;
@@ -1508,8 +1663,14 @@ impl IntelligentIndexedStorage {
                         merged_vec.push((id.clone(), *s));
                     }
                 }
-                merged_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                self.fuse_reciprocal_rank(merged_vec, text_results, request.vector_weight, request.rrf_k)
+                merged_vec
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                self.fuse_reciprocal_rank(
+                    merged_vec,
+                    text_results,
+                    request.vector_weight,
+                    request.rrf_k,
+                )
             }
             FusionMethod::Dbsf => {
                 // Distribution-Based Score Fusion: normalise each of the three lists independently
@@ -1518,7 +1679,8 @@ impl IntelligentIndexedStorage {
         };
 
         // 3. Apply filters FIRST (before truncating)
-        let mut scored_results: Vec<(RecordId, f32)> = combined_scores.into_iter()
+        let mut scored_results: Vec<(RecordId, f32)> = combined_scores
+            .into_iter()
             .filter(|(id, _score)| {
                 // Apply filters if specified
                 if let Some(ref filter) = request.filter {
@@ -1541,15 +1703,28 @@ impl IntelligentIndexedStorage {
         let total = scored_results.len();
 
         // 6. Build search hits with payload if requested
-        let hits: Vec<SearchHit> = scored_results.into_iter()
+        let hits: Vec<SearchHit> = scored_results
+            .into_iter()
             .map(|(id, score)| {
                 let (payload, vector) = if request.with_payload || request.with_vector {
-                    table_data.records.get(&id).map(|r| {
-                        (
-                            if request.with_payload { Some(r.payload.clone()) } else { None },
-                            if request.with_vector { Some(r.vector.clone()) } else { None },
-                        )
-                    }).unwrap_or((None, None))
+                    table_data
+                        .records
+                        .get(&id)
+                        .map(|r| {
+                            (
+                                if request.with_payload {
+                                    Some(r.payload.clone())
+                                } else {
+                                    None
+                                },
+                                if request.with_vector {
+                                    Some(r.vector.clone())
+                                } else {
+                                    None
+                                },
+                            )
+                        })
+                        .unwrap_or((None, None))
                 } else {
                     (None, None)
                 };
@@ -1575,28 +1750,31 @@ impl IntelligentIndexedStorage {
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
         let tables = self.tables.read().await;
-        
+
         tables
             .get(name)
             .map(|data| data.table.clone())
             .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))
     }
-    
+
     /// 列出所有表
     pub async fn list_tables(&self) -> crate::Result<Vec<Table>> {
         let tables = self.tables.read().await;
         Ok(tables.values().map(|data| data.table.clone()).collect())
     }
-    
+
     /// 删除表
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
         {
             let mut tables = self.tables.write().await;
-            tables.remove(name)
+            tables
+                .remove(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
         }
 
-        self.wal_append(vec![WalEntry::DeleteTable { table: name.to_string() }])?;
+        self.wal_append(vec![WalEntry::DeleteTable {
+            table: name.to_string(),
+        }])?;
 
         Ok(())
     }
@@ -1619,9 +1797,8 @@ impl IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
 
             let distance_metric = table_data.table.distance_metric;
-            let new_wrapper = crate::search::IndexWrapper::new(
-                Box::new(BruteForceIndex::new(distance_metric)),
-            );
+            let new_wrapper =
+                crate::search::IndexWrapper::new(Box::new(BruteForceIndex::new(distance_metric)));
 
             let records_snapshot: Vec<(RecordId, Vec<f32>)> = table_data
                 .records
@@ -1752,11 +1929,16 @@ impl IntelligentIndexedStorage {
     ///
     /// Snapshot semantics are chosen over copy-on-write because branches here are
     /// short-lived experiment targets, where write isolation matters more than space.
-    pub async fn branch_table(&self, source_table: &str, branch_name: &str) -> crate::Result<Table> {
+    pub async fn branch_table(
+        &self,
+        source_table: &str,
+        branch_name: &str,
+    ) -> crate::Result<Table> {
         // Snapshot source records under the read lock
         let (source_config, records_snapshot) = {
             let tables = self.tables.read().await;
-            let src = tables.get(source_table)
+            let src = tables
+                .get(source_table)
                 .ok_or_else(|| crate::Error::TableNotFound(source_table.to_string()))?;
 
             if tables.contains_key(branch_name) {
@@ -1767,7 +1949,11 @@ impl IntelligentIndexedStorage {
                 name: branch_name.to_string(),
                 dimension: src.table.dimension,
                 distance_metric: src.table.distance_metric,
-                description: Some(format!("Branch of '{}' at {}", source_table, chrono::Utc::now())),
+                description: Some(format!(
+                    "Branch of '{}' at {}",
+                    source_table,
+                    chrono::Utc::now()
+                )),
                 index_type: None,
                 text_fields: src.table.text_fields.clone(),
                 enable_full_text_search: src.table.enable_full_text_search,
@@ -1777,7 +1963,9 @@ impl IntelligentIndexedStorage {
                 named_vectors: None,
             };
 
-            let records: Vec<CreateRecordRequest> = src.records.values()
+            let records: Vec<CreateRecordRequest> = src
+                .records
+                .values()
                 .map(|r| CreateRecordRequest {
                     id: r.id.clone(),
                     vector: r.vector.clone(),
@@ -1801,7 +1989,8 @@ impl IntelligentIndexedStorage {
     /// 列出表中所有记录 ID（用于一致性检查和数据迁移）
     pub async fn list_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
         let tables = self.tables.read().await;
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
         Ok(table_data.records.keys().cloned().collect())
     }
@@ -1809,7 +1998,8 @@ impl IntelligentIndexedStorage {
     /// 获取向量索引中的记录数（用于一致性检查）
     pub async fn get_index_record_count(&self, tablename: &str) -> crate::Result<usize> {
         let tables = self.tables.read().await;
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
         Ok(table_data.index.len().await)
     }
@@ -1818,17 +2008,26 @@ impl IntelligentIndexedStorage {
     pub async fn get_performance_stats(&self, tablename: &str) -> crate::Result<PerformanceStats> {
         let tables = self.tables.read().await;
 
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        let stats = table_data.performance_stats.lock()
+        let stats = table_data
+            .performance_stats
+            .lock()
             .map_err(|_| crate::Error::Internal("PerformanceStats lock poisoned".to_string()))?;
         Ok(stats.clone())
     }
 
     /// 选择内存优化索引（memory_optimization=true 时使用）
-    async fn select_memory_optimized_index(&self, config: &IndexConfig) -> crate::Result<IndexDecision> {
-        info!("Selecting memory-optimized index for dataset size: {}", config.dataset_size);
+    async fn select_memory_optimized_index(
+        &self,
+        config: &IndexConfig,
+    ) -> crate::Result<IndexDecision> {
+        info!(
+            "Selecting memory-optimized index for dataset size: {}",
+            config.dataset_size
+        );
 
         // 根据数据集大小选择内存优化索引
         let (selected_algorithm, recall, latency_p95_ms, throughput_qps, memory_usage_mb) =
@@ -1841,8 +2040,8 @@ impl IntelligentIndexedStorage {
                         ef_construction: 200,
                         ef_search: 50,
                     },
-                    0.98,  // 98% recall
-                    5.0,   // 5ms latency
+                    0.98,   // 98% recall
+                    5.0,    // 5ms latency
                     2000.0, // 2K QPS
                     (config.dimension * config.dataset_size * 4 * 120 / 100) / 1024 / 1024, // HNSW memory
                 )
@@ -1850,13 +2049,14 @@ impl IntelligentIndexedStorage {
                 // 中数据集 (10K-100K): 使用 Hierarchical Clustering (Phase 3)
                 info!("Medium dataset detected (10K-100K), using Hierarchical Clustering");
                 (
-                    IndexAlgorithm::HNSW {  // HierarchicalClustering not yet available; using HNSW
+                    IndexAlgorithm::HNSW {
+                        // HierarchicalClustering not yet available; using HNSW
                         m: 16,
                         ef_construction: 200,
                         ef_search: 50,
                     },
-                    0.95,  // 95% recall
-                    2.0,   // 2ms latency
+                    0.95,   // 95% recall
+                    2.0,    // 2ms latency
                     3000.0, // 3K QPS
                     (config.dimension * config.dataset_size * 4 * 105 / 100) / 1024 / 1024, // Clustering memory
                 )
@@ -1864,7 +2064,8 @@ impl IntelligentIndexedStorage {
                 // 大数据集 (>100K): 使用 Hybrid RaBitQ + Clustering (Phase 4)
                 info!("Large dataset detected (>100K), using Hybrid RaBitQ + Clustering");
                 (
-                    IndexAlgorithm::HnswPQ {  // HybridRaBitQClustering not yet available; using HnswPQ
+                    IndexAlgorithm::HnswPQ {
+                        // HybridRaBitQClustering not yet available; using HnswPQ
                         m: 16,
                         ef_construction: 200,
                         ef_search: 50,
@@ -1872,8 +2073,8 @@ impl IntelligentIndexedStorage {
                         num_centroids: 256,
                         enable_reranking: true,
                     },
-                    0.90,  // 90% recall (Phase 4 tradeoff)
-                    1.0,   // 1ms latency
+                    0.90,   // 90% recall (Phase 4 tradeoff)
+                    1.0,    // 1ms latency
                     5000.0, // 5K QPS
                     (config.dimension * config.dataset_size * 4 * 10 / 100) / 1024 / 1024, // 90% memory savings
                 )
@@ -1896,7 +2097,8 @@ impl IntelligentIndexedStorage {
         &self,
         algorithm: &IndexAlgorithm,
         dimension: usize,
-        distance_metric: DistanceMetric) -> crate::Result<Box<dyn VectorIndex + Send + Sync>> {
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<Box<dyn VectorIndex + Send + Sync>> {
         match algorithm {
             IndexAlgorithm::BruteForce { .. } => {
                 // BruteForce索引, with optional GPU acceleration
@@ -1912,14 +2114,21 @@ impl IntelligentIndexedStorage {
                 Ok(Box::new(index))
             }
 
-            IndexAlgorithm::HNSW { m, ef_construction, ef_search } => {
+            IndexAlgorithm::HNSW {
+                m,
+                ef_construction,
+                ef_search,
+            } => {
                 let config = crate::search::hnsw::HnswConfig {
                     max_connections: *m,
                     ef_construction: *ef_construction,
                     ef_search: *ef_search,
                     ..Default::default()
                 };
-                Ok(Box::new(crate::search::hnsw::HnswIndex::new(distance_metric, Some(config))))
+                Ok(Box::new(crate::search::hnsw::HnswIndex::new(
+                    distance_metric,
+                    Some(config),
+                )))
             }
 
             IndexAlgorithm::HnswPQ {
@@ -1930,8 +2139,8 @@ impl IntelligentIndexedStorage {
                 num_centroids,
                 enable_reranking,
             } => {
-                use crate::search::hnsw_pq::{HnswPqIndex, HnswPqConfig};
                 use crate::search::hnsw::HnswConfig;
+                use crate::search::hnsw_pq::{HnswPqConfig, HnswPqIndex};
 
                 let config = HnswPqConfig {
                     hnsw_config: HnswConfig {
@@ -1952,7 +2161,11 @@ impl IntelligentIndexedStorage {
                     rerank_factor: 3,
                 };
 
-                Ok(Box::new(HnswPqIndex::new(dimension, distance_metric, Some(config))?))
+                Ok(Box::new(HnswPqIndex::new(
+                    dimension,
+                    distance_metric,
+                    Some(config),
+                )?))
             }
 
             IndexAlgorithm::DiskANN { .. } => {
@@ -1967,13 +2180,14 @@ impl IntelligentIndexedStorage {
                 num_pq_subvectors,
                 cache_size,
             } => {
-                use crate::search::diskann_enhanced::{EnhancedDiskANNIndex, EnhancedDiskANNConfig};
+                use crate::search::diskann_enhanced::{
+                    EnhancedDiskANNConfig, EnhancedDiskANNIndex,
+                };
                 use tempfile::TempDir;
 
                 // Create temporary directory for index storage
                 // In production, this would use a persistent directory
-                let temp_dir = TempDir::new()
-                    .map_err(crate::Error::Io)?;
+                let temp_dir = TempDir::new().map_err(crate::Error::Io)?;
                 let index_dir = temp_dir.keep();
 
                 let config = EnhancedDiskANNConfig {
@@ -2008,58 +2222,62 @@ impl IntelligentIndexedStorage {
             }
         }
     }
-//     
-//     /// 重新评估索引选择
-//     async fn reevaluate_index_selection(
-//         &self,
-//         tablename: &str,
-//         table_data: &mut IntelligentTableData) -> crate::Result<()> {
-//         debug!("Re-evaluating index selection for table {}", tablename);
-//         
-//         // 准备新的索引配置
-//         let index_config = IndexConfig {
-//             dataset_size: table_data.table.record_count as usize,
-//             dimension: table_data.table.dimension,
-//             distance_metric: table_data.table.distance_metric,
-//             memory_budget_mb: self.hardware_capabilities.available_memory_gb as usize * 512,
-//             performance_requirements: self.performance_requirements.clone(),
-//             cost_constraints: self.cost_constraints.clone(),
-//             hardware_capabilities: self.hardware_capabilities.clone(),
-//         };
-//         
-//         // 重新选择索引
-//         let new_decision = self.index_selector.select_optimal_index(&index_config).await?;
-//         
-//         // 检查是否需要切换算法
-//         if !Self::algorithms_equal(&new_decision.selected_algorithm, &table_data.selected_algorithm) &&
-//            new_decision.confidence > table_data.index_decision.confidence * 1.2 {
-//             
-//             info!(
-//                 "Switching index algorithm for table {} from {:?} to {:?}",
-//                 tablename,
-//                 table_data.selected_algorithm,
-//                 new_decision.selected_algorithm
-//             );
-//             
-//             // index migration: create new index, copy data, atomic swap, drop old
-//         }
-//
-//         Ok(())
-//     }
-    
+    //
+    //     /// 重新评估索引选择
+    //     async fn reevaluate_index_selection(
+    //         &self,
+    //         tablename: &str,
+    //         table_data: &mut IntelligentTableData) -> crate::Result<()> {
+    //         debug!("Re-evaluating index selection for table {}", tablename);
+    //
+    //         // 准备新的索引配置
+    //         let index_config = IndexConfig {
+    //             dataset_size: table_data.table.record_count as usize,
+    //             dimension: table_data.table.dimension,
+    //             distance_metric: table_data.table.distance_metric,
+    //             memory_budget_mb: self.hardware_capabilities.available_memory_gb as usize * 512,
+    //             performance_requirements: self.performance_requirements.clone(),
+    //             cost_constraints: self.cost_constraints.clone(),
+    //             hardware_capabilities: self.hardware_capabilities.clone(),
+    //         };
+    //
+    //         // 重新选择索引
+    //         let new_decision = self.index_selector.select_optimal_index(&index_config).await?;
+    //
+    //         // 检查是否需要切换算法
+    //         if !Self::algorithms_equal(&new_decision.selected_algorithm, &table_data.selected_algorithm) &&
+    //            new_decision.confidence > table_data.index_decision.confidence * 1.2 {
+    //
+    //             info!(
+    //                 "Switching index algorithm for table {} from {:?} to {:?}",
+    //                 tablename,
+    //                 table_data.selected_algorithm,
+    //                 new_decision.selected_algorithm
+    //             );
+    //
+    //             // index migration: create new index, copy data, atomic swap, drop old
+    //         }
+    //
+    //         Ok(())
+    //     }
+
     /// 检查两个算法是否相同
     #[allow(dead_code)]
     fn algorithms_equal(a: &IndexAlgorithm, b: &IndexAlgorithm) -> bool {
         std::mem::discriminant(a) == std::mem::discriminant(b)
     }
-    
+
     /// 检测硬件能力
     fn detect_hardware_capabilities() -> HardwareCapabilities {
         let has_gpu_available = {
             #[cfg(feature = "gpu")]
-            { crate::acceleration::gpu::is_cuda_available() }
+            {
+                crate::acceleration::gpu::is_cuda_available()
+            }
             #[cfg(not(feature = "gpu"))]
-            { false }
+            {
+                false
+            }
         };
 
         let available_memory_gb = {
@@ -2077,22 +2295,36 @@ impl IntelligentIndexedStorage {
                     .unwrap_or(16.0)
             }
             #[cfg(not(target_os = "linux"))]
-            { 16.0_f32 }
+            {
+                16.0_f32
+            }
         };
 
         let has_avx2 = {
             #[cfg(target_arch = "x86_64")]
-            { is_x86_feature_detected!("avx2") }
+            {
+                is_x86_feature_detected!("avx2")
+            }
             #[cfg(not(target_arch = "x86_64"))]
-            { false }
+            {
+                false
+            }
         };
 
         if has_gpu_available {
-            info!("Hardware detection: {} CPU cores, {:.1} GB RAM, AVX2={}, GPU=available",
-                num_cpus::get(), available_memory_gb, has_avx2);
+            info!(
+                "Hardware detection: {} CPU cores, {:.1} GB RAM, AVX2={}, GPU=available",
+                num_cpus::get(),
+                available_memory_gb,
+                has_avx2
+            );
         } else {
-            info!("Hardware detection: {} CPU cores, {:.1} GB RAM, AVX2={}, GPU=not available",
-                num_cpus::get(), available_memory_gb, has_avx2);
+            info!(
+                "Hardware detection: {} CPU cores, {:.1} GB RAM, AVX2={}, GPU=not available",
+                num_cpus::get(),
+                available_memory_gb,
+                has_avx2
+            );
         }
 
         HardwareCapabilities {
@@ -2106,44 +2338,55 @@ impl IntelligentIndexedStorage {
             supports_gpu: has_gpu_available,
         }
     }
-    
+
     /// Bulk optimized insert
     pub async fn insert_records_batch(
         &self,
         tablename: &str,
-        records: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+        records: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         // For now, just use regular insert
         let inserted = self.insert_records(tablename, records).await?;
         Ok(inserted.into_iter().map(|r| r.id).collect())
     }
-    
+
     /// Deferred index insert
     pub async fn insert_records_deferred_index(
         &self,
         tablename: &str,
-        records: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+        records: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         // For now, just use regular insert
         // In a full implementation, this would defer index building
         let inserted = self.insert_records(tablename, records).await?;
         Ok(inserted.into_iter().map(|r| r.id).collect())
     }
-    
+
     /// Get a single record
     pub async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
         let tables = self.tables.read().await;
-        let table = tables.get(tablename).ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-        
-        table.records.get(record_id).cloned().ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
+        let table = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        table
+            .records
+            .get(record_id)
+            .cloned()
+            .ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
     }
-    
+
     /// Update a record
     pub async fn update_record(
         &self,
         tablename: &str,
         record_id: &RecordId,
-        request: CreateRecordRequest) -> crate::Result<Record> {
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         let mut tables = self.tables.write().await;
-        let table_data = tables.get_mut(tablename).ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let table_data = tables
+            .get_mut(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Validate vector dimension
         let expected_dim = table_data.table.dimension;
@@ -2155,7 +2398,9 @@ impl IntelligentIndexedStorage {
         }
 
         // Get existing record's created_at, version, and payload if it exists (preserves created_at on update)
-        let (created_at, version, old_payload) = table_data.records.get(record_id)
+        let (created_at, version, old_payload) = table_data
+            .records
+            .get(record_id)
             .map(|r| (r.created_at, r.version + 1, Some(r.payload.clone())))
             .unwrap_or_else(|| (chrono::Utc::now(), 1, None));
 
@@ -2164,7 +2409,10 @@ impl IntelligentIndexedStorage {
             vector: request.vector.clone(),
             sparse_vector: request.sparse_vector,
             named_vectors: request.named_vectors.clone(),
-            payload: request.payload.clone().unwrap_or_else(|| serde_json::json!({})),
+            payload: request
+                .payload
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
             created_at,
             updated_at: chrono::Utc::now(),
             version,
@@ -2173,15 +2421,25 @@ impl IntelligentIndexedStorage {
 
         // Update vector index: remove old entry then re-insert with new vector
         let _ = table_data.index.remove(record_id).await;
-        if let Err(e) = table_data.index.insert(record_id.clone(), record.vector.clone()).await {
-            warn!("Failed to update vector index for record {}: {}", record_id, e);
+        if let Err(e) = table_data
+            .index
+            .insert(record_id.clone(), record.vector.clone())
+            .await
+        {
+            warn!(
+                "Failed to update vector index for record {}: {}",
+                record_id, e
+            );
         }
 
         // Update sparse index if present
         if let Some(sv) = &record.sparse_vector {
             let _ = table_data.sparse_index.delete(record_id);
             if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
-                warn!("Failed to update sparse index for record {}: {}", record_id, e);
+                warn!(
+                    "Failed to update sparse index for record {}: {}",
+                    record_id, e
+                );
             }
         }
 
@@ -2194,14 +2452,20 @@ impl IntelligentIndexedStorage {
                     title: text_content.get("title").cloned(),
                     content: text_content.get("content").cloned().unwrap_or_default(),
                     description: text_content.get("description").cloned(),
-                    tags: text_content.get("tags").map(|s| vec![s.clone()]).unwrap_or_default(),
+                    tags: text_content
+                        .get("tags")
+                        .map(|s| vec![s.clone()])
+                        .unwrap_or_default(),
                     payload: Some(record.payload.clone()),
                     timestamp: chrono::Utc::now().timestamp(),
                 };
 
                 // Update document in full-text engine
                 if let Err(e) = engine.update_document(doc).await {
-                    warn!("Failed to update text index for record {}: {}", record.id, e);
+                    warn!(
+                        "Failed to update text index for record {}: {}",
+                        record.id, e
+                    );
                 }
             }
         }
@@ -2219,23 +2483,29 @@ impl IntelligentIndexedStorage {
         // Update PayloadIndex
         if let Some(old_payload_val) = old_payload.as_ref() {
             // Update existing record
-            table_data.payload_index.update_record(
-                record_id,
-                old_payload_val,
-                &record.payload
-            );
+            table_data
+                .payload_index
+                .update_record(record_id, old_payload_val, &record.payload);
         } else {
             // Insert new record (upsert case)
-            table_data.payload_index.insert_record(record_id, &record.payload);
+            table_data
+                .payload_index
+                .insert_record(record_id, &record.payload);
         }
 
         Ok(record)
     }
-    
+
     /// Delete multiple records
-    pub async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>) -> crate::Result<()> {
+    pub async fn delete_records(
+        &self,
+        tablename: &str,
+        record_ids: Vec<RecordId>,
+    ) -> crate::Result<()> {
         let mut tables = self.tables.write().await;
-        let table_data = tables.get_mut(tablename).ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let table_data = tables
+            .get_mut(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         for id in &record_ids {
             // Remove from full-text index (if enabled)
@@ -2285,8 +2555,12 @@ impl IntelligentIndexedStorage {
         drop(tables);
 
         self.wal_append(
-            record_ids.into_iter()
-                .map(|id| WalEntry::Delete { table: tablename.to_string(), record_id: id })
+            record_ids
+                .into_iter()
+                .map(|id| WalEntry::Delete {
+                    table: tablename.to_string(),
+                    record_id: id,
+                })
                 .collect(),
         )?;
 
@@ -2297,15 +2571,17 @@ impl IntelligentIndexedStorage {
     pub async fn get_stats(&self) -> HashMap<String, serde_json::Value> {
         let mut stats = HashMap::new();
         let tables = self.tables.read().await;
-        
+
         stats.insert("table_count".to_string(), serde_json::json!(tables.len()));
         let total_records: usize = tables.values().map(|t| t.records.len()).sum();
-        stats.insert("total_records".to_string(), serde_json::json!(total_records));
-        
-        stats
+        stats.insert(
+            "total_records".to_string(),
+            serde_json::json!(total_records),
+        );
 
+        stats
     }
-    
+
     // Lock-free insert (stub)
     // Simplified insertion methods - removed 8 redundant stubs that all called the same function
     // All "optimized" modes (lockfree, streaming, memory_pool, ultra_fast, vm_optimized, nvme, ultimate)
@@ -2315,38 +2591,68 @@ impl IntelligentIndexedStorage {
     pub async fn insert_records_lockfree(
         &self,
         tablename: &str,
-        records: Vec<CreateRecordRequest>
+        records: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<RecordId>> {
         // All "optimized" modes delegate to batch insert since they had no real implementation
         self.insert_records_batch(tablename, records).await
     }
 
     // Aliases for backwards compatibility - will be deprecated
-    pub async fn insert_records_streaming(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_streaming(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
-    pub async fn insert_records_with_memory_pool(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_with_memory_pool(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
-    pub async fn insert_records_ultra_fast(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_ultra_fast(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
-    pub async fn insert_records_vm_optimized(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_vm_optimized(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
-    pub async fn insert_records_nvme_optimized(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_nvme_optimized(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
-    pub async fn insert_records_ultimate(&self, t: &str, r: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
+    pub async fn insert_records_ultimate(
+        &self,
+        t: &str,
+        r: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
         self.insert_records_batch(t, r).await
     }
 
     /// Add a single record to a table (for simple mode API)
-    pub async fn add_record(&self, tablename: &str, request: CreateRecordRequest) -> crate::Result<Record> {
+    pub async fn add_record(
+        &self,
+        tablename: &str,
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         let records = self.insert_records(tablename, vec![request]).await?;
-        records.into_iter().next().ok_or_else(|| crate::Error::Internal("Failed to add record".to_string()))
+        records
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::Error::Internal("Failed to add record".to_string()))
     }
-
 
     /// Search for records in a table
     pub async fn search_records(
@@ -2358,7 +2664,8 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<Vec<(Record, f32)>> {
         let tables = self.tables.read().await;
 
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Validate query vector dimension
@@ -2372,7 +2679,7 @@ impl IntelligentIndexedStorage {
 
         // 如果有过滤器，获取更多结果以补偿过滤后的损失
         let fetch_limit = if filter.is_some() {
-            limit * 3  // 获取3倍结果
+            limit * 3 // 获取3倍结果
         } else {
             limit
         };
@@ -2433,12 +2740,14 @@ impl IntelligentIndexedStorage {
         offset: usize,
     ) -> crate::Result<(Vec<Record>, usize)> {
         let tables = self.tables.read().await;
-        let table_data = tables.get(tablename)
+        let table_data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let mut matching_records: Vec<Record> = if let Some(filter) = filter {
             let matching_ids = table_data.payload_index.get_matching_ids(filter);
-            matching_ids.iter()
+            matching_ids
+                .iter()
                 .filter_map(|id| table_data.records.get(id).cloned())
                 .collect()
         } else {
@@ -2475,25 +2784,35 @@ impl IntelligentIndexedStorage {
         let index_path = format!("{}/dxmt_full_text_{}", base_dir, table.id);
 
         // Create directory if it doesn't exist
-        std::fs::create_dir_all(&index_path)
-            .map_err(|e| crate::Error::Internal(format!("Failed to create index directory: {}", e)))?;
+        std::fs::create_dir_all(&index_path).map_err(|e| {
+            crate::Error::Internal(format!("Failed to create index directory: {}", e))
+        })?;
 
         // Build fields configuration for Tantivy
         let mut fields = Vec::new();
 
         // Always add an ID field
-        fields.push(("id".to_string(), tantivy::schema::TEXT | tantivy::schema::STORED));
+        fields.push((
+            "id".to_string(),
+            tantivy::schema::TEXT | tantivy::schema::STORED,
+        ));
 
         // Add configured text fields
         if let Some(text_fields) = &table.text_fields {
             for field_config in text_fields {
                 // For now, all fields are TEXT | STORED
                 // In the future, we can customize based on analyzer type
-                fields.push((field_config.name.clone(), tantivy::schema::TEXT | tantivy::schema::STORED));
+                fields.push((
+                    field_config.name.clone(),
+                    tantivy::schema::TEXT | tantivy::schema::STORED,
+                ));
             }
         } else {
             // Default: add a generic "content" field
-            fields.push(("content".to_string(), tantivy::schema::TEXT | tantivy::schema::STORED));
+            fields.push((
+                "content".to_string(),
+                tantivy::schema::TEXT | tantivy::schema::STORED,
+            ));
         }
 
         let default_fields: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
@@ -2521,7 +2840,10 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
 
     async fn get_table(&self, name: &str) -> crate::Result<Table> {
         let tables = self.tables.read().await;
-        tables.get(name).map(|data| data.table.clone()).ok_or_else(|| crate::Error::TableNotFound(name.to_string()))
+        tables
+            .get(name)
+            .map(|data| data.table.clone())
+            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))
     }
 
     async fn list_tables(&self) -> crate::Result<Vec<Table>> {
@@ -2531,13 +2853,17 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
 
     async fn delete_table(&self, name: &str) -> crate::Result<()> {
         let mut tables = self.tables.write().await;
-        tables.remove(name).ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+        tables
+            .remove(name)
+            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
         Ok(())
     }
 
     async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
         let mut tables = self.tables.write().await;
-        let data = tables.get_mut(name).ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+        let data = tables
+            .get_mut(name)
+            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
         let updated = data.table.apply_alter(&req);
         data.table = updated.clone();
         Ok(updated)
@@ -2546,18 +2872,21 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     async fn insert_record(
         &self,
         tablename: &str,
-        request: CreateRecordRequest) -> crate::Result<Record> {
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         let records = self.insert_records(tablename, vec![request]).await?;
-        records.into_iter().next().ok_or_else(|| crate::Error::Internal("Failed to insert record".to_string()))
-
+        records
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::Error::Internal("Failed to insert record".to_string()))
     }
 
     async fn batch_insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>> {
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>> {
         self.insert_records(tablename, requests).await
-
     }
 
     async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
@@ -2566,31 +2895,44 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
 
     async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
         let tables = self.tables.read().await;
-        let table = tables.get(tablename).ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-        
-        table.records.get(record_id).cloned().ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
+        let table = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        table
+            .records
+            .get(record_id)
+            .cloned()
+            .ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
     }
 
     async fn update_record(
         &self,
         tablename: &str,
         record_id: &RecordId,
-        request: CreateRecordRequest) -> crate::Result<Record> {
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         self.update_record(tablename, record_id, request).await
     }
 
     async fn delete_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<()> {
-        self.delete_records(tablename, vec![record_id.clone()]).await
+        self.delete_records(tablename, vec![record_id.clone()])
+            .await
     }
 
     async fn insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>> {
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>> {
         self.insert_records(tablename, requests).await
     }
 
-    async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>) -> crate::Result<()> {
+    async fn delete_records(
+        &self,
+        tablename: &str,
+        record_ids: Vec<RecordId>,
+    ) -> crate::Result<()> {
         self.delete_records(tablename, record_ids).await
     }
 
@@ -2605,14 +2947,15 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
             records: Vec<&'a Record>,
         }
         let tables = self.tables.read().await;
-        let data = tables.get(table_name)
+        let data = tables
+            .get(table_name)
             .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
         let snap = Snapshot {
             table: &data.table,
             records: data.records.values().collect(),
         };
-        let json = serde_json::to_vec(&snap)
-            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_vec(&snap).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         std::fs::write(backup_path, json)
             .map_err(|e| crate::Error::Internal(format!("backup write failed: {}", e)))?;
         Ok(())
@@ -2648,19 +2991,22 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         let _ = self.delete_table(table_name).await;
         self.create_table(table_cfg).await?;
 
-        let requests: Vec<CreateRecordRequest> = snap.records.into_iter().map(|r| CreateRecordRequest {
-            id: r.id,
-            vector: r.vector,
-            sparse_vector: r.sparse_vector,
-            payload: Some(r.payload),
-            named_vectors: None,
-        }).collect();
+        let requests: Vec<CreateRecordRequest> = snap
+            .records
+            .into_iter()
+            .map(|r| CreateRecordRequest {
+                id: r.id,
+                vector: r.vector,
+                sparse_vector: r.sparse_vector,
+                payload: Some(r.payload),
+                named_vectors: None,
+            })
+            .collect();
         if !requests.is_empty() {
             self.insert_records(table_name, requests).await?;
         }
         Ok(())
     }
-
 }
 
 impl Clone for PerformanceStats {
@@ -2678,11 +3024,10 @@ impl Clone for PerformanceStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::SearchQuery;
-use crate::CreateRecordRequest;
-use crate::RecordId;
+    use crate::CreateRecordRequest;
+    use crate::RecordId;
+    use crate::SearchQuery;
 
-    
     #[tokio::test]
     async fn test_intelligent_storage_creation() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
@@ -2715,7 +3060,7 @@ use crate::RecordId;
         assert_eq!(table.dimension, 128);
         Ok(())
     }
-    
+
     #[tokio::test]
     async fn test_intelligent_index_selection() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
@@ -2752,13 +3097,19 @@ use crate::RecordId;
             };
 
             let table = storage.create_table(table_config).await?;
-            println!("Created table {} with dimension {}", table.name, table.dimension);
+            println!(
+                "Created table {} with dimension {}",
+                table.name, table.dimension
+            );
 
             // Check that appropriate algorithm was selected
             let tables = storage.tables.read().await;
             let table_data = tables.get(name).ok_or("Table not found")?;
             println!("Selected algorithm: {:?}", table_data.selected_algorithm);
-            println!("Decision confidence: {:.2}", table_data.index_decision.confidence);
+            println!(
+                "Decision confidence: {:.2}",
+                table_data.index_decision.confidence
+            );
         }
         Ok(())
     }
@@ -2821,7 +3172,11 @@ use crate::RecordId;
         storage.insert_records("source", vec![req2]).await?;
         let branch_tables = storage.tables.read().await;
         let branch_data = branch_tables.get("branch_v1").unwrap();
-        assert_eq!(branch_data.records.len(), 1, "branch should still have 1 record after source insert");
+        assert_eq!(
+            branch_data.records.len(),
+            1,
+            "branch should still have 1 record after source insert"
+        );
         Ok(())
     }
 
@@ -2854,13 +3209,15 @@ use crate::RecordId;
         storage.create_table(table_config).await?;
 
         // Insert a few records
-        let requests: Vec<_> = (0..5).map(|i| CreateRecordRequest {
-            id: format!("rec-{}", i),
-            vector: vec![i as f32, 0.0, 0.0, 0.0],
-            sparse_vector: None,
-            payload: None,
-            named_vectors: None,
-        }).collect();
+        let requests: Vec<_> = (0..5)
+            .map(|i| CreateRecordRequest {
+                id: format!("rec-{}", i),
+                vector: vec![i as f32, 0.0, 0.0, 0.0],
+                sparse_vector: None,
+                payload: None,
+                named_vectors: None,
+            })
+            .collect();
         storage.insert_records("rebuild_test", requests).await?;
 
         // Drop the index (leaves BruteForce in place) then rebuild
@@ -2875,7 +3232,11 @@ use crate::RecordId;
             ..Default::default()
         };
         let result = storage.search("rebuild_test", query).await?;
-        assert_eq!(result.hits.len(), 5, "all records should be reachable after rebuild");
+        assert_eq!(
+            result.hits.len(),
+            5,
+            "all records should be reachable after rebuild"
+        );
         Ok(())
     }
 }

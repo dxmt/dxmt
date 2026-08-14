@@ -6,22 +6,26 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub mod client;
-pub mod compat;
-pub mod providers;
-pub mod openai;
 pub mod cohere;
+pub mod compat;
+pub mod openai;
+pub mod providers;
 // pub mod sentence_transformers; // Temporarily disabled for compilation
-pub mod sentence_transformers_simplified;
 pub mod auto_embedding;
+pub mod sentence_transformers_simplified;
 
 // Re-export the trait and implementations
-pub use compat::{EmbeddingFunction, EmbeddingError, EmbeddingResult, TextEmbeddingFunction};
-pub use providers::{EmbeddingProvider, OpenAIProvider, HuggingFaceProvider, SentenceTransformerProvider};
-pub use openai::{OpenAIEmbedding, OpenAIConfig, OpenAIModel};
-pub use cohere::{CohereEmbedding, CohereConfig, CohereModel};
+pub use cohere::{CohereConfig, CohereEmbedding, CohereModel};
+pub use compat::{EmbeddingError, EmbeddingFunction, EmbeddingResult, TextEmbeddingFunction};
+pub use openai::{OpenAIConfig, OpenAIEmbedding, OpenAIModel};
+pub use providers::{
+    EmbeddingProvider, HuggingFaceProvider, OpenAIProvider, SentenceTransformerProvider,
+};
 // pub use sentence_transformers::{SentenceTransformerEmbedding, SentenceTransformerConfig, SentenceTransformerModel};
-pub use sentence_transformers_simplified::{SentenceTransformersEmbedding, SentenceTransformersConfig};
 pub use auto_embedding::{AutoEmbedding, AutoEmbeddingConfig, EmbeddingStrategy};
+pub use sentence_transformers_simplified::{
+    SentenceTransformersConfig, SentenceTransformersEmbedding,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingFunctionMetadata {
@@ -46,11 +50,11 @@ impl EmbeddingFunctionRegistry {
             functions: HashMap::new(),
         }
     }
-    
+
     pub fn list_functions(&self) -> Vec<EmbeddingFunctionMetadata> {
         self.functions.values().cloned().collect()
     }
-    
+
     pub fn get_all_metadata(&self) -> Vec<EmbeddingFunctionMetadata> {
         self.functions.values().cloned().collect()
     }
@@ -113,9 +117,10 @@ impl EmbeddingRegistry {
         provider_name: &str,
         model_name: &str,
     ) -> Result<(), EmbeddingError> {
-        let provider = self.get_provider(provider_name).await
-            .ok_or_else(|| EmbeddingError::InternalError(format!("Provider {} not found", provider_name)))?;
-        
+        let provider = self.get_provider(provider_name).await.ok_or_else(|| {
+            EmbeddingError::InternalError(format!("Provider {} not found", provider_name))
+        })?;
+
         let function = provider.create_function(model_name).await?;
         self.register_function(function_name, function).await;
         Ok(())
@@ -137,7 +142,7 @@ pub struct EmbeddingManager {
 impl EmbeddingManager {
     pub fn new() -> Self {
         let mut registry = EmbeddingFunctionRegistry::new();
-        
+
         // Register built-in functions
         registry.functions.insert(
             "openai/text-embedding-3-small".to_string(),
@@ -145,82 +150,97 @@ impl EmbeddingManager {
                 name: "openai/text-embedding-3-small".to_string(),
                 description: "OpenAI's small text embedding model".to_string(),
                 modality: "text".to_string(),
-            }
+            },
         );
-        
+
         registry.functions.insert(
             "huggingface/all-MiniLM-L6-v2".to_string(),
             EmbeddingFunctionMetadata {
                 name: "huggingface/all-MiniLM-L6-v2".to_string(),
                 description: "Sentence transformer MiniLM model".to_string(),
                 modality: "text".to_string(),
-            }
+            },
         );
-        
+
         Self {
             registry: Arc::new(RwLock::new(registry)),
             functions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     pub fn registry(&self) -> EmbeddingFunctionRegistry {
         // Return a clone for now (in real implementation, would return a reference)
         EmbeddingFunctionRegistry::new()
     }
-    
+
     pub async fn load_function(&self, name: &str, config: serde_json::Value) -> crate::Result<()> {
         // Parse provider from name (e.g., "openai/text-embedding-3-small")
         let parts: Vec<&str> = name.split('/').collect();
         if parts.len() != 2 {
-            return Err(crate::Error::InvalidInput(format!("Invalid function name: {}", name)));
+            return Err(crate::Error::InvalidInput(format!(
+                "Invalid function name: {}",
+                name
+            )));
         }
-        
+
         let provider_name = parts[0];
         let model_name = parts[1];
-        
+
         // Create the appropriate provider and function
         let function: Arc<dyn EmbeddingFunction> = match provider_name {
             "openai" => {
-                let api_key = config.get("api_key").and_then(|v| v.as_str()).map(String::from);
+                let api_key = config
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let provider = OpenAIProvider::new(api_key);
-                provider.create_function(model_name).await
-                    .map_err(|e| crate::Error::Internal(format!("Failed to create function: {:?}", e)))?
+                provider.create_function(model_name).await.map_err(|e| {
+                    crate::Error::Internal(format!("Failed to create function: {:?}", e))
+                })?
             }
             "huggingface" => {
-                let api_key = config.get("api_key").and_then(|v| v.as_str()).map(String::from);
+                let api_key = config
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let provider = HuggingFaceProvider::new(api_key);
-                provider.create_function(model_name).await
-                    .map_err(|e| crate::Error::Internal(format!("Failed to create function: {:?}", e)))?
+                provider.create_function(model_name).await.map_err(|e| {
+                    crate::Error::Internal(format!("Failed to create function: {:?}", e))
+                })?
             }
             _ => {
-                return Err(crate::Error::InvalidInput(format!("Unknown provider: {}", provider_name)));
+                return Err(crate::Error::InvalidInput(format!(
+                    "Unknown provider: {}",
+                    provider_name
+                )));
             }
         };
-        
+
         // Store the function
         let mut functions = self.functions.write().await;
         functions.insert(name.to_string(), function);
-        
+
         Ok(())
     }
-    
+
     pub async fn unload_function(&self, name: &str) -> crate::Result<()> {
         let mut functions = self.functions.write().await;
-        functions.remove(name)
+        functions
+            .remove(name)
             .ok_or_else(|| crate::Error::NotFound(format!("Function {} not found", name)))?;
         Ok(())
     }
-    
+
     pub async fn list_active_functions(&self) -> Vec<String> {
         let functions = self.functions.read().await;
         functions.keys().cloned().collect()
     }
-    
+
     pub async fn get_function(&self, name: &str) -> Option<Arc<dyn EmbeddingFunction>> {
         let functions = self.functions.read().await;
         functions.get(name).cloned()
     }
-    
+
     pub async fn get_function_metadata(&self, name: &str) -> Option<EmbeddingFunctionMetadata> {
         let registry = self.registry.read().await;
         registry.functions.get(name).cloned()
@@ -241,7 +261,7 @@ impl MultimodalUtils {
         if content.is_empty() {
             return Err(crate::Error::InvalidInput("Empty content".to_string()));
         }
-        
+
         let modality = Self::infer_modality_type(content);
         match modality {
             "image" => Self::validate_image_content(content),
@@ -250,31 +270,30 @@ impl MultimodalUtils {
             _ => Ok(()), // Allow unknown types
         }
     }
-    
+
     pub fn validate_batch(contents: &[Vec<u8>]) -> crate::Result<()> {
         if contents.is_empty() {
             return Err(crate::Error::InvalidInput("Empty batch".to_string()));
         }
-        
+
         for (index, content) in contents.iter().enumerate() {
-            Self::validate_content(content)
-                .map_err(|e| crate::Error::InvalidInput(
-                    format!("Validation failed at index {}: {}", index, e)
-                ))?;
+            Self::validate_content(content).map_err(|e| {
+                crate::Error::InvalidInput(format!("Validation failed at index {}: {}", index, e))
+            })?;
         }
         Ok(())
     }
-    
+
     pub fn infer_modality_type(content: &[u8]) -> &'static str {
         if content.len() < 4 {
             return "unknown";
         }
-        
+
         match &content[..4] {
-            [0xFF, 0xD8, 0xFF, _] => "image", // JPEG
+            [0xFF, 0xD8, 0xFF, _] => "image",    // JPEG
             [0x89, 0x50, 0x4E, 0x47] => "image", // PNG
             [0x47, 0x49, 0x46, 0x38] => "image", // GIF
-            [0x42, 0x4D, _, _] => "image", // BMP
+            [0x42, 0x4D, _, _] => "image",       // BMP
             [0x52, 0x49, 0x46, 0x46] => {
                 // RIFF container - could be WAV, AVI, WEBP
                 if content.len() >= 12 && &content[8..12] == b"WAVE" {
@@ -284,11 +303,11 @@ impl MultimodalUtils {
                 } else {
                     "audio" // Default to audio for RIFF
                 }
-            },
-            [0x49, 0x44, 0x33, _] => "audio", // MP3 with ID3
-            [0xFF, 0xFB, _, _] => "audio", // MP3
-            [0xFF, 0xF3, _, _] => "audio", // MP3
-            [0xFF, 0xF2, _, _] => "audio", // MP3
+            }
+            [0x49, 0x44, 0x33, _] => "audio",    // MP3 with ID3
+            [0xFF, 0xFB, _, _] => "audio",       // MP3
+            [0xFF, 0xF3, _, _] => "audio",       // MP3
+            [0xFF, 0xF2, _, _] => "audio",       // MP3
             [0x66, 0x4C, 0x61, 0x43] => "audio", // FLAC
             [0x4F, 0x67, 0x67, 0x53] => "audio", // OGG
             _ => {
@@ -301,25 +320,27 @@ impl MultimodalUtils {
             }
         }
     }
-    
+
     pub fn estimate_content_size(content: &[u8]) -> usize {
         content.len()
     }
-    
+
     pub fn content_hash(content: &[u8]) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         format!("{:x}", hasher.finish())
     }
-    
+
     fn validate_image_content(content: &[u8]) -> crate::Result<()> {
         if content.len() < 10 {
-            return Err(crate::Error::InvalidInput("Image content too small".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Image content too small".to_string(),
+            ));
         }
-        
+
         match &content[..4] {
             [0xFF, 0xD8, 0xFF, _] => {
                 // JPEG validation
@@ -342,12 +363,14 @@ impl MultimodalUtils {
         }
         Ok(())
     }
-    
+
     fn validate_audio_content(content: &[u8]) -> crate::Result<()> {
         if content.len() < 12 {
-            return Err(crate::Error::InvalidInput("Audio content too small".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Audio content too small".to_string(),
+            ));
         }
-        
+
         match &content[..4] {
             [0x52, 0x49, 0x46, 0x46] => {
                 // WAV/RIFF validation
@@ -370,13 +393,14 @@ impl MultimodalUtils {
         }
         Ok(())
     }
-    
+
     fn validate_text_content(content: &[u8]) -> crate::Result<()> {
         match std::str::from_utf8(content) {
             Ok(_) => Ok(()),
-            Err(e) => Err(crate::Error::InvalidInput(
-                format!("Invalid UTF-8 text: {}", e)
-            )),
+            Err(e) => Err(crate::Error::InvalidInput(format!(
+                "Invalid UTF-8 text: {}",
+                e
+            ))),
         }
     }
 }

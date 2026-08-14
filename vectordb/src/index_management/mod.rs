@@ -6,29 +6,33 @@
 //! - DataMigrator: Safe data copying between indexes
 //! - TransactionLog: Recovery and durability
 
+pub mod benchmark_harness;
+pub mod errors;
 pub mod factory;
+pub mod factory_impl;
 pub mod manager;
 pub mod migrator;
-pub mod transaction_log;
-pub mod factory_impl;
-pub mod errors;
 pub mod monitoring;
 pub mod production;
 pub mod profiling;
-pub mod benchmark_harness;
 pub mod record_iterator;
+pub mod transaction_log;
 
 // Tests
 #[cfg(test)]
 mod tests;
 
+pub use benchmark_harness::{quick_benchmark, BenchmarkConfigBuilder, Phase3BenchmarkHarness};
 pub use factory::IndexFactory;
 pub use manager::IndexManager;
-pub use migrator::{DataMigrator, MigrationStats, MigrationProgress};
-pub use transaction_log::{TransactionLog, LogEntry, LogEntryType};
-pub use profiling::{OperationProfiler, OperationProfileHandle, PerformanceProfile, BenchmarkConfig, BenchmarkResult};
-pub use benchmark_harness::{Phase3BenchmarkHarness, BenchmarkConfigBuilder, quick_benchmark};
-pub use record_iterator::{IndexRecord, RecordIterator, SimpleRecordIterator, RecordIteratorBuilder, MigrationContext};
+pub use migrator::{DataMigrator, MigrationProgress, MigrationStats};
+pub use profiling::{
+    BenchmarkConfig, BenchmarkResult, OperationProfileHandle, OperationProfiler, PerformanceProfile,
+};
+pub use record_iterator::{
+    IndexRecord, MigrationContext, RecordIterator, RecordIteratorBuilder, SimpleRecordIterator,
+};
+pub use transaction_log::{LogEntry, LogEntryType, TransactionLog};
 
 use crate::types::table::IndexType;
 use serde::{Deserialize, Serialize};

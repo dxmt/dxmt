@@ -10,8 +10,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use crate::search::IndexWrapper;
 use crate::error::{Error, Result};
+use crate::search::IndexWrapper;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -136,9 +136,10 @@ impl DataMigrator {
 
             // Check timeout
             if start.elapsed() > self.timeout {
-                return Err(Error::Timeout(
-                    format!("Migration timeout exceeded: {:?}", self.timeout)
-                ));
+                return Err(Error::Timeout(format!(
+                    "Migration timeout exceeded: {:?}",
+                    self.timeout
+                )));
             }
         }
 

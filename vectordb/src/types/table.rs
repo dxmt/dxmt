@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::fmt;
+use uuid::Uuid;
 
-use crate::types::{vector::DistanceMetric};
+use crate::types::vector::DistanceMetric;
 
 /// 创建表的请求（兼容API）
 pub type CreateTableRequest = TableConfig;
@@ -92,8 +92,6 @@ pub enum TextAnalyzer {
     /// 语言特定分析器（如 "en", "zh", "ja"）
     Language(String),
 }
-
-
 
 /// 文本源配置
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +260,11 @@ impl Table {
             }
         }
         schema.retain(|f| !req.drop_fields.contains(&f.name));
-        updated.payload_schema = if schema.is_empty() { None } else { Some(schema) };
+        updated.payload_schema = if schema.is_empty() {
+            None
+        } else {
+            Some(schema)
+        };
 
         updated
     }
@@ -292,8 +294,11 @@ impl Table {
 
 impl fmt::Display for Table {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Table[{}] {} ({}D, {})",
-               self.id, self.name, self.dimension, self.index_type)
+        write!(
+            f,
+            "Table[{}] {} ({}D, {})",
+            self.id, self.name, self.dimension, self.index_type
+        )
     }
 }
 
@@ -311,7 +316,6 @@ pub struct TableStats {
     pub enable_full_text_search: bool,
     pub text_fields_count: usize,
 }
-
 
 impl std::str::FromStr for IndexType {
     type Err = crate::error::Error;
@@ -345,7 +349,6 @@ pub enum TableSchema {
     /// 企业级模式 - 带有高级功能的严格schema
     Enterprise,
 }
-
 
 impl std::fmt::Display for TableSchema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

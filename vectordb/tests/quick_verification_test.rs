@@ -1,12 +1,10 @@
 // Quick verification test for critical fixes
 // This test verifies that the new modules compile and basic functionality works
 
+use dxmt_vectordb::storage::consistency_check::{ConsistencyChecker, RepairReport};
 use dxmt_vectordb::storage::wal_entry::{WalEntry, WalOperation};
-use dxmt_vectordb::storage::consistency_check::{
-    ConsistencyChecker, RepairReport,
-};
-use dxmt_vectordb::types::table::TableConfig;
 use dxmt_vectordb::types::record::CreateRecordRequest;
+use dxmt_vectordb::types::table::TableConfig;
 use dxmt_vectordb::types::vector::DistanceMetric;
 use std::collections::HashSet;
 
@@ -72,11 +70,7 @@ fn test_consistency_checker_consistent_state() {
     index.insert("id2".to_string());
     index.insert("id3".to_string());
 
-    let report = ConsistencyChecker::build_report(
-        "test_table".to_string(),
-        records,
-        index,
-    );
+    let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
     assert!(report.is_consistent);
     assert_eq!(report.total_records, 3);
@@ -99,11 +93,7 @@ fn test_consistency_checker_detects_missing() {
     index.insert("id1".to_string());
     index.insert("id2".to_string());
 
-    let report = ConsistencyChecker::build_report(
-        "test_table".to_string(),
-        records,
-        index,
-    );
+    let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
     assert!(!report.is_consistent);
     assert_eq!(report.missing_from_index.len(), 1);
@@ -123,11 +113,7 @@ fn test_consistency_checker_detects_orphaned() {
     index.insert("id2".to_string());
     index.insert("id3".to_string());
 
-    let report = ConsistencyChecker::build_report(
-        "test_table".to_string(),
-        records,
-        index,
-    );
+    let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
     assert!(!report.is_consistent);
     assert_eq!(report.orphaned_in_index.len(), 2);
@@ -153,8 +139,8 @@ fn test_repair_report_creation() {
 
 #[test]
 fn test_repair_report_failure() {
-    let report = RepairReport::new("test_table".to_string())
-        .mark_failed("Simulated error".to_string());
+    let report =
+        RepairReport::new("test_table".to_string()).mark_failed("Simulated error".to_string());
 
     assert!(!report.success);
     assert!(report.error_message.is_some());

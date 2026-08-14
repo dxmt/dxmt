@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{Read, Write, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 type IoResult<T> = std::result::Result<T, std::io::Error>;
@@ -33,8 +33,8 @@ impl Dataset {
         test_size: usize,
         k: usize,
     ) -> Self {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
 
         let mut rng = SmallRng::from_entropy();
 
@@ -437,4 +437,3 @@ pub fn load_fvecs(path: &Path) -> IoResult<Vec<Vec<f32>>> {
 
     Ok(result)
 }
-

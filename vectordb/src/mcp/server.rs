@@ -6,9 +6,12 @@
 
 use super::*;
 use crate::storage::traits::_Storage as Storage;
-use crate::types::{record::{SearchQuery, Filter}, vector::DenseVector};
+use crate::types::{
+    record::{Filter, SearchQuery},
+    vector::DenseVector,
+};
 use axum::{
-    extract::{ws::WebSocket, WebSocketUpgrade, State},
+    extract::{ws::WebSocket, State, WebSocketUpgrade},
     response::Response,
 };
 use futures::{SinkExt, StreamExt};
@@ -53,7 +56,7 @@ impl<S: Storage + 'static> McpServer<S> {
         // defined in `initialize_tools` were never registered at all because nothing called it.
         server
     }
-    
+
     /// Populate the tool and prompt catalogues. Idempotent.
     ///
     /// Must run before the first `tools/list`, so both transports call it up front rather than
@@ -73,7 +76,7 @@ impl<S: Storage + 'static> McpServer<S> {
     /// Initialize built-in tools
     async fn initialize_tools(&self) {
         let mut tools = self.tools.write().await;
-        
+
         // Vector search tool
         tools.push(Tool {
             name: "vector_search".to_string(),
@@ -103,7 +106,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "required": ["table", "vector"]
             }),
         });
-        
+
         // Insert vector tool
         tools.push(Tool {
             name: "insert_vector".to_string(),
@@ -132,7 +135,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "required": ["table", "id", "vector"]
             }),
         });
-        
+
         // Create table tool
         tools.push(Tool {
             name: "create_table".to_string(),
@@ -164,7 +167,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "required": ["name", "dimension"]
             }),
         });
-        
+
         // List tables tool
         tools.push(Tool {
             name: "list_tables".to_string(),
@@ -174,7 +177,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "properties": {}
             }),
         });
-        
+
         // Get table info tool
         tools.push(Tool {
             name: "get_table_info".to_string(),
@@ -190,7 +193,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "required": ["name"]
             }),
         });
-        
+
         // Delete vectors tool
         tools.push(Tool {
             name: "delete_vectors".to_string(),
@@ -219,7 +222,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 ]
             }),
         });
-        
+
         // Hybrid search tool
         tools.push(Tool {
             name: "hybrid_search".to_string(),
@@ -255,11 +258,11 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
     }
-    
+
     /// Initialize built-in prompts
     async fn initialize_prompts(&self) {
         let mut prompts = self.prompts.write().await;
-        
+
         // RAG prompt
         prompts.push(Prompt {
             name: "rag_query".to_string(),
@@ -277,7 +280,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 },
             ]),
         });
-        
+
         // Similarity analysis prompt
         prompts.push(Prompt {
             name: "similarity_analysis".to_string(),
@@ -295,7 +298,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 },
             ]),
         });
-        
+
         // Data ingestion prompt
         prompts.push(Prompt {
             name: "data_ingestion".to_string(),
@@ -314,7 +317,7 @@ impl<S: Storage + 'static> McpServer<S> {
             ]),
         });
     }
-    
+
     /// Handle MCP WebSocket connection
     /// Serve MCP over stdin/stdout, one JSON-RPC message per line.
     ///
@@ -388,13 +391,16 @@ impl<S: Storage + 'static> McpServer<S> {
             capabilities: None,
             initialized: false,
         };
-        
-        self.sessions.write().await.insert(session_id, session.clone());
-        
+
+        self.sessions
+            .write()
+            .await
+            .insert(session_id, session.clone());
+
         let (mut sender, mut receiver) = ws.split();
-        
+
         info!("New MCP connection established: {}", session_id);
-        
+
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(msg) => {
@@ -428,11 +434,11 @@ impl<S: Storage + 'static> McpServer<S> {
                 }
             }
         }
-        
+
         self.sessions.write().await.remove(&session_id);
         info!("MCP connection closed: {}", session_id);
     }
-    
+
     /// Handle incoming MCP message
     async fn handle_message(
         &self,
@@ -440,7 +446,7 @@ impl<S: Storage + 'static> McpServer<S> {
         message: &str,
     ) -> Result<String, McpServerError> {
         let json_rpc: JsonRpcMessage = serde_json::from_str(message)?;
-        
+
         let response = match json_rpc.content {
             JsonRpcContent::Request { method, params } => {
                 self.handle_request(session_id, &method, params).await?
@@ -453,7 +459,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 return Err("Invalid message type".into());
             }
         };
-        
+
         let response_msg = JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: json_rpc.id,
@@ -462,10 +468,10 @@ impl<S: Storage + 'static> McpServer<S> {
                 error: None,
             },
         };
-        
+
         Ok(serde_json::to_string(&response_msg)?)
     }
-    
+
     /// Handle MCP request
     async fn handle_request(
         &self,
@@ -475,42 +481,36 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<McpResponse, McpServerError> {
         match method {
             "initialize" => {
-                let params: InitializeParams = serde_json::from_value(
-                    params.ok_or("Missing initialize params")?
-                )?;
-                Ok(McpResponse::Initialize(self.handle_initialize(session_id, params).await?))
+                let params: InitializeParams =
+                    serde_json::from_value(params.ok_or("Missing initialize params")?)?;
+                Ok(McpResponse::Initialize(
+                    self.handle_initialize(session_id, params).await?,
+                ))
             }
-            "tools/list" => {
-                Ok(McpResponse::Tools(self.handle_list_tools().await?))
-            }
+            "tools/list" => Ok(McpResponse::Tools(self.handle_list_tools().await?)),
             "tools/call" => {
-                let params: CallToolParams = serde_json::from_value(
-                    params.ok_or("Missing tool call params")?
-                )?;
+                let params: CallToolParams =
+                    serde_json::from_value(params.ok_or("Missing tool call params")?)?;
                 Ok(McpResponse::ToolCall(self.handle_call_tool(params).await?))
             }
-            "resources/list" => {
-                Ok(McpResponse::Resources(self.handle_list_resources().await?))
-            }
+            "resources/list" => Ok(McpResponse::Resources(self.handle_list_resources().await?)),
             "resources/read" => {
-                let params: ReadResourceParams = serde_json::from_value(
-                    params.ok_or("Missing resource read params")?
-                )?;
-                Ok(McpResponse::Resource(self.handle_read_resource(params).await?))
+                let params: ReadResourceParams =
+                    serde_json::from_value(params.ok_or("Missing resource read params")?)?;
+                Ok(McpResponse::Resource(
+                    self.handle_read_resource(params).await?,
+                ))
             }
-            "prompts/list" => {
-                Ok(McpResponse::Prompts(self.handle_list_prompts().await?))
-            }
+            "prompts/list" => Ok(McpResponse::Prompts(self.handle_list_prompts().await?)),
             "prompts/get" => {
-                let params: GetPromptParams = serde_json::from_value(
-                    params.ok_or("Missing prompt params")?
-                )?;
+                let params: GetPromptParams =
+                    serde_json::from_value(params.ok_or("Missing prompt params")?)?;
                 Ok(McpResponse::Prompt(self.handle_get_prompt(params).await?))
             }
             _ => Err(format!("Unknown method: {}", method).into()),
         }
     }
-    
+
     /// Handle notification
     async fn handle_notification(
         &self,
@@ -521,7 +521,7 @@ impl<S: Storage + 'static> McpServer<S> {
         debug!("Received notification: {} from {}", method, session_id);
         // Handle notifications (logging, events, etc.)
     }
-    
+
     /// Handle initialize request
     async fn handle_initialize(
         &self,
@@ -534,14 +534,14 @@ impl<S: Storage + 'static> McpServer<S> {
             session.capabilities = Some(params.capabilities);
             session.initialized = true;
         }
-        
+
         Ok(InitializeResult {
             protocol_version: MCP_VERSION.to_string(),
             capabilities: ServerInfo::default().capabilities,
             server_info: ServerInfo::default(),
         })
     }
-    
+
     /// Handle list tools request
     async fn handle_list_tools(&self) -> Result<ListToolsResult, McpServerError> {
         let tools = self.tools.read().await;
@@ -549,7 +549,7 @@ impl<S: Storage + 'static> McpServer<S> {
             tools: tools.clone(),
         })
     }
-    
+
     /// Handle tool call
     async fn handle_call_tool(
         &self,
@@ -566,7 +566,7 @@ impl<S: Storage + 'static> McpServer<S> {
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
     }
-    
+
     /// Handle vector search tool
     async fn handle_vector_search(
         &self,
@@ -579,8 +579,10 @@ impl<S: Storage + 'static> McpServer<S> {
 
         // Parse filter if provided
         let filter = if let Some(filter_json) = args.get("filter") {
-            Some(serde_json::from_value::<Filter>(filter_json.clone())
-                .map_err(|e| format!("Invalid filter format: {}", e))?)
+            Some(
+                serde_json::from_value::<Filter>(filter_json.clone())
+                    .map_err(|e| format!("Invalid filter format: {}", e))?,
+            )
         } else {
             None
         };
@@ -594,15 +596,17 @@ impl<S: Storage + 'static> McpServer<S> {
         };
 
         let results = self.storage.search(table_name, query).await?;
-        
+
         let response_text = serde_json::to_string_pretty(&results)?;
-        
+
         Ok(CallToolResult {
-            content: vec![ToolContent::Text { text: response_text }],
+            content: vec![ToolContent::Text {
+                text: response_text,
+            }],
             is_error: Some(false),
         })
     }
-    
+
     /// Handle insert vector tool
     async fn handle_insert_vector(
         &self,
@@ -613,7 +617,7 @@ impl<S: Storage + 'static> McpServer<S> {
         let id = args["id"].as_str().ok_or("Missing vector ID")?;
         let vector: Vec<f32> = serde_json::from_value(args["vector"].clone())?;
         let metadata = args.get("metadata").cloned();
-        
+
         // Insert vector
         let record = crate::types::record::CreateRecordRequest {
             id: id.to_string(),
@@ -623,15 +627,18 @@ impl<S: Storage + 'static> McpServer<S> {
             named_vectors: None,
         };
         self.storage.insert(table_name, record).await?;
-        
+
         Ok(CallToolResult {
             content: vec![ToolContent::Text {
-                text: format!("Successfully inserted vector '{}' into table '{}'", id, table_name),
+                text: format!(
+                    "Successfully inserted vector '{}' into table '{}'",
+                    id, table_name
+                ),
             }],
             is_error: Some(false),
         })
     }
-    
+
     /// Handle create table tool
     async fn handle_create_table(
         &self,
@@ -640,13 +647,15 @@ impl<S: Storage + 'static> McpServer<S> {
         let args = args.ok_or("Missing arguments")?;
         let name = args["name"].as_str().ok_or("Missing table name")?;
         let dimension = args["dimension"].as_u64().ok_or("Missing dimension")? as usize;
-        let metric = args.get("metric")
+        let metric = args
+            .get("metric")
             .and_then(|m| m.as_str())
             .unwrap_or("cosine");
-        let index_type = args.get("index_type")
+        let index_type = args
+            .get("index_type")
             .and_then(|i| i.as_str())
             .unwrap_or("hnsw");
-        
+
         // Create table
         let table_config = crate::types::table::TableConfig {
             name: name.to_string(),
@@ -671,7 +680,7 @@ impl<S: Storage + 'static> McpServer<S> {
         };
 
         self.storage.create_table(table_config).await?;
-        
+
         Ok(CallToolResult {
             content: vec![ToolContent::Text {
                 text: format!(
@@ -682,18 +691,20 @@ impl<S: Storage + 'static> McpServer<S> {
             is_error: Some(false),
         })
     }
-    
+
     /// Handle list tables tool
     async fn handle_list_tables(&self) -> Result<CallToolResult, McpServerError> {
         let tables = self.storage.list_tables().await?;
         let response_text = serde_json::to_string_pretty(&tables)?;
-        
+
         Ok(CallToolResult {
-            content: vec![ToolContent::Text { text: response_text }],
+            content: vec![ToolContent::Text {
+                text: response_text,
+            }],
             is_error: Some(false),
         })
     }
-    
+
     /// Handle get table info tool
     async fn handle_get_table_info(
         &self,
@@ -701,16 +712,18 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<CallToolResult, McpServerError> {
         let args = args.ok_or("Missing arguments")?;
         let name = args["name"].as_str().ok_or("Missing table name")?;
-        
+
         let info = self.storage.get_table_info(name).await?;
         let response_text = serde_json::to_string_pretty(&info)?;
-        
+
         Ok(CallToolResult {
-            content: vec![ToolContent::Text { text: response_text }],
+            content: vec![ToolContent::Text {
+                text: response_text,
+            }],
             is_error: Some(false),
         })
     }
-    
+
     /// Handle delete vectors tool
     async fn handle_delete_vectors(
         &self,
@@ -718,22 +731,30 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<CallToolResult, McpServerError> {
         let args = args.ok_or("Missing arguments")?;
         let table_name = args["table"].as_str().ok_or("Missing table name")?;
-        
+
         if let Some(ids) = args.get("ids") {
             let ids: Vec<String> = serde_json::from_value(ids.clone())?;
             let count = ids.len();
             self.storage.delete_by_ids(table_name, ids).await?;
             Ok(CallToolResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Successfully deleted {} vectors from table '{}'", count, table_name),
+                    text: format!(
+                        "Successfully deleted {} vectors from table '{}'",
+                        count, table_name
+                    ),
                 }],
                 is_error: Some(false),
             })
         } else if let Some(filter) = args.get("filter") {
-            self.storage.delete_by_filter(table_name, filter.clone()).await?;
+            self.storage
+                .delete_by_filter(table_name, filter.clone())
+                .await?;
             Ok(CallToolResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Successfully deleted vectors from table '{}' matching filter", table_name),
+                    text: format!(
+                        "Successfully deleted vectors from table '{}' matching filter",
+                        table_name
+                    ),
                 }],
                 is_error: Some(false),
             })
@@ -741,7 +762,7 @@ impl<S: Storage + 'static> McpServer<S> {
             Err("Must provide either 'ids' or 'filter'".into())
         }
     }
-    
+
     /// Handle hybrid search tool
     async fn handle_hybrid_search(
         &self,
@@ -749,26 +770,28 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<CallToolResult, McpServerError> {
         let args = args.ok_or("Missing arguments")?;
         let table_name = args["table"].as_str().ok_or("Missing table name")?;
-        
-        let vector = args.get("vector")
+
+        let vector = args
+            .get("vector")
             .map(|v| serde_json::from_value::<Vec<f32>>(v.clone()))
             .transpose()?;
         let text = args.get("text").and_then(|t| t.as_str());
-        let vector_weight = args.get("vector_weight")
+        let vector_weight = args
+            .get("vector_weight")
             .and_then(|w| w.as_f64())
             .unwrap_or(0.7) as f32;
-        let limit = args.get("limit")
-            .and_then(|l| l.as_u64())
-            .unwrap_or(10) as usize;
-        
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
+
         if vector.is_none() && text.is_none() {
             return Err("Must provide either 'vector' or 'text' for hybrid search".into());
         }
 
         // Parse filter if provided
         let filter = if let Some(filter_json) = args.get("filter") {
-            Some(serde_json::from_value::<Filter>(filter_json.clone())
-                .map_err(|e| format!("Invalid filter format: {}", e))?)
+            Some(
+                serde_json::from_value::<Filter>(filter_json.clone())
+                    .map_err(|e| format!("Invalid filter format: {}", e))?,
+            )
         } else {
             None
         };
@@ -807,19 +830,21 @@ impl<S: Storage + 'static> McpServer<S> {
             });
         };
         let results = self.storage.hybrid_search(table_name, query).await?;
-        
+
         let response_text = serde_json::to_string_pretty(&results)?;
-        
+
         Ok(CallToolResult {
-            content: vec![ToolContent::Text { text: response_text }],
+            content: vec![ToolContent::Text {
+                text: response_text,
+            }],
             is_error: Some(false),
         })
     }
-    
+
     /// Handle list resources
     async fn handle_list_resources(&self) -> Result<ListResourcesResult, McpServerError> {
         let tables = self.storage.list_tables().await?;
-        
+
         let resources: Vec<Resource> = tables
             .iter()
             .map(|table| Resource {
@@ -829,10 +854,10 @@ impl<S: Storage + 'static> McpServer<S> {
                 mime_type: Some("application/json".to_string()),
             })
             .collect();
-        
+
         Ok(ListResourcesResult { resources })
     }
-    
+
     /// Handle read resource
     async fn handle_read_resource(
         &self,
@@ -841,18 +866,18 @@ impl<S: Storage + 'static> McpServer<S> {
         if !params.uri.starts_with("vectordb://") {
             return Err("Invalid resource URI".into());
         }
-        
+
         let path = params.uri.strip_prefix("vectordb://").unwrap();
         let parts: Vec<&str> = path.split('/').collect();
-        
+
         if parts.len() < 2 || parts[0] != "table" {
             return Err("Invalid resource path".into());
         }
-        
+
         let table_name = parts[1];
         let info = self.storage.get_table_info(table_name).await?;
         let content = serde_json::to_string_pretty(&info)?;
-        
+
         Ok(ReadResourceResult {
             contents: vec![ResourceContent::Text {
                 uri: params.uri,
@@ -861,7 +886,7 @@ impl<S: Storage + 'static> McpServer<S> {
             }],
         })
     }
-    
+
     /// Handle list prompts
     async fn handle_list_prompts(&self) -> Result<ListPromptsResult, McpServerError> {
         let prompts = self.prompts.read().await;
@@ -869,7 +894,7 @@ impl<S: Storage + 'static> McpServer<S> {
             prompts: prompts.clone(),
         })
     }
-    
+
     /// Handle get prompt
     async fn handle_get_prompt(
         &self,
@@ -882,18 +907,20 @@ impl<S: Storage + 'static> McpServer<S> {
             _ => Err(format!("Unknown prompt: {}", params.name).into()),
         }
     }
-    
+
     /// Get RAG prompt
     fn get_rag_prompt(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let question = args.as_ref()
+        let question = args
+            .as_ref()
             .and_then(|a| a.get("question"))
             .map(|s| s.as_str())
             .unwrap_or("[Question]");
-        let context_limit = args.as_ref()
+        let context_limit = args
+            .as_ref()
             .and_then(|a| a.get("context_limit"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(5);
-        
+
         GetPromptResult {
             description: Some("Perform retrieval-augmented generation".to_string()),
             messages: vec![
@@ -902,7 +929,8 @@ impl<S: Storage + 'static> McpServer<S> {
                     content: MessageContent::Text(
                         "You are a helpful AI assistant with access to a vector database. \
                          Use the vector search tools to find relevant context, then answer \
-                         the user's question based on that context.".to_string()
+                         the user's question based on that context."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
@@ -917,18 +945,20 @@ impl<S: Storage + 'static> McpServer<S> {
             ],
         }
     }
-    
+
     /// Get similarity analysis prompt
     fn get_similarity_prompt(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let items = args.as_ref()
+        let items = args
+            .as_ref()
             .and_then(|a| a.get("items"))
             .map(|s| s.as_str())
             .unwrap_or("[Items to analyze]");
-        let metric = args.as_ref()
+        let metric = args
+            .as_ref()
             .and_then(|a| a.get("metric"))
             .map(|s| s.as_str())
             .unwrap_or("cosine");
-        
+
         GetPromptResult {
             description: Some("Analyze similarity between items".to_string()),
             messages: vec![
@@ -937,7 +967,8 @@ impl<S: Storage + 'static> McpServer<S> {
                     content: MessageContent::Text(
                         "You are an AI assistant specialized in similarity analysis. \
                          Use the vector database tools to compute and explain similarities \
-                         between different items.".to_string()
+                         between different items."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
@@ -951,18 +982,20 @@ impl<S: Storage + 'static> McpServer<S> {
             ],
         }
     }
-    
+
     /// Get data ingestion prompt
     fn get_ingestion_prompt(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let data_source = args.as_ref()
+        let data_source = args
+            .as_ref()
             .and_then(|a| a.get("data_source"))
             .map(|s| s.as_str())
             .unwrap_or("[Data source]");
-        let format = args.as_ref()
+        let format = args
+            .as_ref()
             .and_then(|a| a.get("format"))
             .map(|s| s.as_str())
             .unwrap_or("json");
-        
+
         GetPromptResult {
             description: Some("Guide for data ingestion".to_string()),
             messages: vec![

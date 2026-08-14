@@ -1,10 +1,10 @@
 /// 墓碑标记系统 - 跟踪已删除记录，确保搜索时不返回已删除数据
 use crate::types::RecordId;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use chrono::{DateTime, Utc, Duration};
-use serde::{Deserialize, Serialize};
 
 /// 纯 Rust 实现的 Bloom filter（双哈希：FNV-1a + DJB2）
 /// 预期误判率约为 `fp_rate`，位数组大小由 `m = -n*ln(p) / ln(2)^2` 公式确定。
@@ -164,11 +164,9 @@ impl TombstoneTracker {
     /// 创建新的墓碑追踪器
     pub fn new(config: TombstoneConfig) -> crate::Result<Self> {
         // 创建Bloom Filter
-        let bloom_filter = BloomFilter::with_rate(
-            config.expected_elements,
-            config.false_positive_rate as f64,
-        );
-        
+        let bloom_filter =
+            BloomFilter::with_rate(config.expected_elements, config.false_positive_rate as f64);
+
         let tracker = Self {
             config,
             bloom_filter: Arc::new(RwLock::new(bloom_filter)),
@@ -176,10 +174,10 @@ impl TombstoneTracker {
             table_stats: Arc::new(RwLock::new(HashMap::new())),
             cleanup_handle: None,
         };
-        
+
         Ok(tracker)
     }
-    
+
     /// 启动自动清理任务
     pub fn start_cleanup_task(&mut self) {
         let tombstones = self.tombstones.clone();
@@ -187,42 +185,42 @@ impl TombstoneTracker {
         let table_stats = self.table_stats.clone();
         let cleanup_interval = self.config.cleanup_interval;
         let retention_period = self.config.retention_period;
-        
+
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_secs(cleanup_interval.num_seconds() as u64)
-            );
-            
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                cleanup_interval.num_seconds() as u64,
+            ));
+
             loop {
                 interval.tick().await;
-                
+
                 let cutoff_time = Utc::now() - retention_period;
                 let mut cleaned_count = 0;
                 let mut table_updates: HashMap<String, u64> = HashMap::new();
-                
+
                 // 清理过期的墓碑记录
                 tombstones.retain(|_id, entry| {
                     if entry.deleted_at < cutoff_time {
-                        *table_updates.entry(entry.table_name.clone())
-                            .or_insert(0) += 1;
+                        *table_updates.entry(entry.table_name.clone()).or_insert(0) += 1;
                         cleaned_count += 1;
                         false // 删除此记录
                     } else {
                         true // 保留此记录
                     }
                 });
-                
+
                 // 更新统计信息
                 if cleaned_count > 0 {
                     let mut stats = table_stats.write().await;
                     for (table_name, count) in table_updates {
                         if let Some(table_stat) = stats.get_mut(&table_name) {
-                            table_stat.pending_cleanup = table_stat.pending_cleanup.saturating_sub(count);
+                            table_stat.pending_cleanup =
+                                table_stat.pending_cleanup.saturating_sub(count);
                         }
                     }
-                    
+
                     tracing::info!("Cleaned {} expired tombstone records", cleaned_count);
-                    
+
                     // 如果清理了大量记录，重建Bloom Filter
                     if cleaned_count > 10000 {
                         Self::rebuild_bloom_filter(&bloom_filter, &tombstones).await;
@@ -230,40 +228,47 @@ impl TombstoneTracker {
                 }
             }
         });
-        
+
         self.cleanup_handle = Some(handle);
     }
-    
+
     /// 标记记录为已删除
-    pub async fn mark_deleted(&self, id: RecordId, table_name: String, reason: Option<String>) -> crate::Result<()> {
+    pub async fn mark_deleted(
+        &self,
+        id: RecordId,
+        table_name: String,
+        reason: Option<String>,
+    ) -> crate::Result<()> {
         let entry = TombstoneEntry {
             id: id.clone(),
             deleted_at: Utc::now(),
             reason,
             table_name: table_name.clone(),
         };
-        
+
         // 添加到Bloom Filter
         {
             let mut bloom = self.bloom_filter.write().await;
             bloom.insert(id.to_string().as_bytes());
         }
-        
+
         // 添加到精确映射
         self.tombstones.insert(id, entry);
-        
+
         // 更新统计信息
         {
             let mut stats = self.table_stats.write().await;
-            let table_stat = stats.entry(table_name).or_insert_with(TombstoneStats::default);
+            let table_stat = stats
+                .entry(table_name)
+                .or_insert_with(TombstoneStats::default);
             table_stat.total_deleted += 1;
             table_stat.last_deleted_at = Some(Utc::now());
             table_stat.pending_cleanup += 1;
         }
-        
+
         Ok(())
     }
-    
+
     /// 批量标记记录为已删除
     pub async fn mark_deleted_batch(
         &self,
@@ -274,9 +279,9 @@ impl TombstoneTracker {
         let mut processed = 0;
         let mut skipped = 0;
         let errors = Vec::new();
-        
+
         let deleted_at = Utc::now();
-        
+
         // 批量更新Bloom Filter
         {
             let mut bloom = self.bloom_filter.write().await;
@@ -285,41 +290,43 @@ impl TombstoneTracker {
                 bloom.insert(key.as_bytes());
             }
         }
-        
+
         // 批量添加到映射
         for id in ids {
             if self.tombstones.contains_key(&id) {
                 skipped += 1;
                 continue;
             }
-            
+
             let entry = TombstoneEntry {
                 id: id.clone(),
                 deleted_at,
                 reason: reason.clone(),
                 table_name: table_name.clone(),
             };
-            
+
             self.tombstones.insert(id, entry);
             processed += 1;
         }
-        
+
         // 更新统计信息
         if processed > 0 {
             let mut stats = self.table_stats.write().await;
-            let table_stat = stats.entry(table_name).or_insert_with(TombstoneStats::default);
+            let table_stat = stats
+                .entry(table_name)
+                .or_insert_with(TombstoneStats::default);
             table_stat.total_deleted += processed as u64;
             table_stat.last_deleted_at = Some(deleted_at);
             table_stat.pending_cleanup += processed as u64;
         }
-        
+
         Ok(BatchOperationResult {
             processed,
             skipped,
             errors,
         })
     }
-    
+
     /// 检查记录是否已删除（快速检查）
     pub async fn is_deleted_fast(&self, id: &RecordId) -> bool {
         // 首先使用Bloom Filter进行快速检查
@@ -327,36 +334,37 @@ impl TombstoneTracker {
         if !bloom.contains(id.to_string().as_bytes()) {
             return false; // 肯定没有删除
         }
-        
+
         // Bloom Filter可能有误报，需要精确检查
         drop(bloom); // 释放读锁
         self.tombstones.contains_key(id)
     }
-    
+
     /// 检查记录是否已删除（精确检查）
     pub fn is_deleted_exact(&self, id: &RecordId) -> bool {
         self.tombstones.contains_key(id)
     }
-    
+
     /// 获取删除记录的详细信息
     pub fn get_tombstone(&self, id: &RecordId) -> Option<TombstoneEntry> {
         self.tombstones.get(id).map(|entry| entry.clone())
     }
-    
+
     /// 批量检查记录是否已删除
     pub async fn are_deleted_batch(&self, ids: &[RecordId]) -> Vec<bool> {
         let mut results = Vec::with_capacity(ids.len());
-        
+
         // 首先用Bloom Filter批量检查
         let bloom = self.bloom_filter.read().await;
-        let bloom_results: Vec<bool> = ids.iter()
+        let bloom_results: Vec<bool> = ids
+            .iter()
             .map(|id| {
                 let key = id.to_string();
                 bloom.contains(key.as_bytes())
             })
             .collect();
         drop(bloom);
-        
+
         // 对Bloom Filter返回true的记录进行精确检查
         for (i, &bloom_result) in bloom_results.iter().enumerate() {
             if !bloom_result {
@@ -365,60 +373,65 @@ impl TombstoneTracker {
                 results.push(self.tombstones.contains_key(&ids[i])); // 精确检查
             }
         }
-        
+
         results
     }
-    
+
     /// 过滤搜索结果，移除已删除的记录
-    pub async fn filter_deleted_records<T>(&self, results: Vec<(RecordId, T)>) -> Vec<(RecordId, T)> {
+    pub async fn filter_deleted_records<T>(
+        &self,
+        results: Vec<(RecordId, T)>,
+    ) -> Vec<(RecordId, T)> {
         if results.is_empty() {
             return results;
         }
-        
+
         let ids: Vec<_> = results.iter().map(|(id, _)| id.clone()).collect();
         let deleted_flags = self.are_deleted_batch(&ids).await;
-        
-        results.into_iter()
+
+        results
+            .into_iter()
             .zip(deleted_flags)
-            .filter_map(|(result, is_deleted)| {
-                if !is_deleted {
-                    Some(result)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(result, is_deleted)| {
+                    if !is_deleted {
+                        Some(result)
+                    } else {
+                        None
+                    }
+                },
+            )
             .collect()
     }
-    
+
     /// 获取表的墓碑统计信息
     pub async fn get_table_stats(&self, table_name: &str) -> Option<TombstoneStats> {
         let stats = self.table_stats.read().await;
         stats.get(table_name).cloned()
     }
-    
+
     /// 获取所有表的墓碑统计信息
     pub async fn get_all_stats(&self) -> HashMap<String, TombstoneStats> {
         let stats = self.table_stats.read().await;
         stats.clone()
     }
-    
+
     /// 手动触发清理过期记录
     pub async fn cleanup_expired(&self) -> usize {
         let cutoff_time = Utc::now() - self.config.retention_period;
         let mut cleaned_count = 0;
         let mut table_updates: HashMap<String, u64> = HashMap::new();
-        
+
         self.tombstones.retain(|_id, entry| {
             if entry.deleted_at < cutoff_time {
-                *table_updates.entry(entry.table_name.clone())
-                    .or_insert(0) += 1;
+                *table_updates.entry(entry.table_name.clone()).or_insert(0) += 1;
                 cleaned_count += 1;
                 false
             } else {
                 true
             }
         });
-        
+
         // 更新统计信息
         if cleaned_count > 0 {
             let mut stats = self.table_stats.write().await;
@@ -427,14 +440,14 @@ impl TombstoneTracker {
                     table_stat.pending_cleanup = table_stat.pending_cleanup.saturating_sub(count);
                 }
             }
-            
+
             // 重建Bloom Filter
             Self::rebuild_bloom_filter(&self.bloom_filter, &self.tombstones).await;
         }
-        
+
         cleaned_count
     }
-    
+
     /// 重建Bloom Filter
     async fn rebuild_bloom_filter(
         bloom_filter: &Arc<RwLock<BloomFilter>>,
@@ -442,14 +455,17 @@ impl TombstoneTracker {
     ) {
         let mut bloom = bloom_filter.write().await;
         bloom.clear();
-        
+
         for entry in tombstones.iter() {
             bloom.insert(entry.key().to_string().as_bytes());
         }
-        
-        tracing::info!("Rebuilt Bloom filter with {} tombstone records", tombstones.len());
+
+        tracing::info!(
+            "Rebuilt Bloom filter with {} tombstone records",
+            tombstones.len()
+        );
     }
-    
+
     /// 获取内存使用统计
     pub fn get_memory_usage(&self) -> MemoryUsage {
         MemoryUsage {
@@ -458,24 +474,24 @@ impl TombstoneTracker {
             estimated_bytes: self.tombstones.len() * std::mem::size_of::<TombstoneEntry>(),
         }
     }
-    
+
     /// 清除所有墓碑记录（谨慎使用）
     pub async fn clear_all(&self) {
         self.tombstones.clear();
-        
+
         {
             let mut bloom = self.bloom_filter.write().await;
             bloom.clear();
         }
-        
+
         {
             let mut stats = self.table_stats.write().await;
             stats.clear();
         }
-        
+
         tracing::warn!("All tombstone records have been cleared");
     }
-    
+
     /// 恢复记录（移除墓碑标记）
     pub async fn restore_record(&self, id: &RecordId) -> bool {
         if let Some((_, entry)) = self.tombstones.remove(id) {
@@ -485,10 +501,10 @@ impl TombstoneTracker {
                 table_stat.total_deleted = table_stat.total_deleted.saturating_sub(1);
                 table_stat.pending_cleanup = table_stat.pending_cleanup.saturating_sub(1);
             }
-            
+
             // 注意：不从Bloom Filter中删除，因为Bloom Filter不支持删除
             // 这意味着快速检查可能会有误报，但精确检查会准确
-            
+
             true
         } else {
             false
@@ -516,34 +532,40 @@ impl Drop for TombstoneTracker {
 mod tests {
     use super::*;
     use crate::types::RecordId;
-    
+
     #[tokio::test]
     async fn test_basic_tombstone_operations() -> crate::Result<()> {
         let config = TombstoneConfig::default();
         let tracker = TombstoneTracker::new(config)?;
-        
+
         let id = RecordId::from("test_record_1");
         let table_name = "test_table".to_string();
-        
+
         // 检查记录最初未删除
         assert!(!tracker.is_deleted_fast(&id).await);
         assert!(!tracker.is_deleted_exact(&id));
-        
+
         // 标记为删除
-        tracker.mark_deleted(id.clone(), table_name.clone(), Some("test deletion".to_string())).await?;
-        
+        tracker
+            .mark_deleted(
+                id.clone(),
+                table_name.clone(),
+                Some("test deletion".to_string()),
+            )
+            .await?;
+
         // 验证记录已删除
         assert!(tracker.is_deleted_fast(&id).await);
         assert!(tracker.is_deleted_exact(&id));
-        
+
         // 获取墓碑信息
         let tombstone = tracker.get_tombstone(&id);
         assert!(tombstone.is_some());
         assert_eq!(tombstone.unwrap().table_name, table_name);
-        
+
         Ok(())
     }
-    
+
     #[tokio::test]
     async fn test_batch_operations() -> crate::Result<()> {
         let config = TombstoneConfig::default();
@@ -557,7 +579,9 @@ mod tests {
         let table_name = "test_table".to_string();
 
         // 批量标记删除
-        let result = tracker.mark_deleted_batch(ids.clone(), table_name, None).await?;
+        let result = tracker
+            .mark_deleted_batch(ids.clone(), table_name, None)
+            .await?;
         assert_eq!(result.processed, 3);
         assert_eq!(result.skipped, 0);
 
@@ -567,55 +591,55 @@ mod tests {
 
         Ok(())
     }
-    
+
     #[tokio::test]
     async fn test_filter_search_results() -> crate::Result<()> {
         let config = TombstoneConfig::default();
         let tracker = TombstoneTracker::new(config)?;
-        
+
         let results = vec![
             (RecordId::from("record_1"), 0.5f32),
             (RecordId::from("record_2"), 0.7f32),
             (RecordId::from("record_3"), 0.3f32),
         ];
-        
+
         // 标记record_2为删除
-        tracker.mark_deleted(
-            RecordId::from("record_2"), 
-            "test_table".to_string(), 
-            None
-        ).await?;
-        
+        tracker
+            .mark_deleted(RecordId::from("record_2"), "test_table".to_string(), None)
+            .await?;
+
         // 过滤结果
         let filtered = tracker.filter_deleted_records(results).await;
-        
+
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].0, RecordId::from("record_1"));
         assert_eq!(filtered[1].0, RecordId::from("record_3"));
-        
+
         Ok(())
     }
-    
+
     #[tokio::test]
     async fn test_restore_record() -> crate::Result<()> {
         let config = TombstoneConfig::default();
         let tracker = TombstoneTracker::new(config)?;
-        
+
         let id = RecordId::from("test_record");
-        
+
         // 标记删除
-        tracker.mark_deleted(id.clone(), "test_table".to_string(), None).await?;
+        tracker
+            .mark_deleted(id.clone(), "test_table".to_string(), None)
+            .await?;
         assert!(tracker.is_deleted_exact(&id));
-        
+
         // 恢复记录
         let restored = tracker.restore_record(&id).await;
         assert!(restored);
         assert!(!tracker.is_deleted_exact(&id));
-        
+
         // 再次恢复应该返回false
         let restored_again = tracker.restore_record(&id).await;
         assert!(!restored_again);
-        
+
         Ok(())
     }
 }

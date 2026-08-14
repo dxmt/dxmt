@@ -6,11 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::types::DenseVector;
-use crate::types::vector::DistanceMetric;
 use crate::embeddings::EmbeddingError;
+use crate::types::vector::DistanceMetric;
+use crate::types::DenseVector;
 
 #[cfg(feature = "gpu")]
 use cudarc::driver::CudaDevice;
@@ -109,7 +109,10 @@ impl GpuDevice {
         if !devices.is_empty() {
             info!("Detected {} GPU device(s):", devices.len());
             for dev in &devices {
-                info!("  - [{}] {} ({:.1} GB, {:?})", dev.id, dev.name, dev.memory_gb, dev.backend);
+                info!(
+                    "  - [{}] {} ({:.1} GB, {:?})",
+                    dev.id, dev.name, dev.memory_gb, dev.backend
+                );
             }
         } else {
             debug!("No GPU devices detected");
@@ -173,7 +176,8 @@ impl GpuAccelerator {
     ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let start = std::time::Instant::now();
 
-        let results = self.calculator
+        let results = self
+            .calculator
             .batch_distances(&DistanceMetric::Cosine, queries, vectors)
             .map_err(|e| EmbeddingError::InternalError(format!("GPU cosine failed: {}", e)))?;
 

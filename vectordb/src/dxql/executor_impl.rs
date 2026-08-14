@@ -6,15 +6,12 @@
 //! - Result ranking and limiting
 //! - Multiple data types (dense vectors, sparse vectors, payloads)
 
-use crate::dxql::{DxqlError, QueryResult, ResultRecord, QueryMetadata, compiler::*};
+use crate::dxql::{compiler::*, DxqlError, QueryMetadata, QueryResult, ResultRecord};
 use crate::storage::traits::_Storage;
-use crate::types::{
-    record::CreateRecordRequest,
-    vector::DistanceMetric,
-};
+use crate::types::{record::CreateRecordRequest, vector::DistanceMetric};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use std::collections::HashMap;
 
 /// Executor that can access storage backends for query execution
 pub struct StorageAwareExecutor {
@@ -95,7 +92,10 @@ impl StorageAwareExecutor {
 
             if select.projections.is_empty() {
                 // No projections — include id, vector, and all payload fields
-                fields.insert("id".to_string(), serde_json::Value::String(record.id.clone()));
+                fields.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(record.id.clone()),
+                );
                 if let serde_json::Value::Object(map) = &record.payload {
                     for (k, v) in map {
                         fields.insert(k.clone(), v.clone());
@@ -107,7 +107,10 @@ impl StorageAwareExecutor {
                     let value = match projection.field.as_str() {
                         "id" => serde_json::Value::String(record.id.clone()),
                         "vector" => serde_json::json!(record.vector),
-                        _ => record.payload.get(&projection.field).cloned()
+                        _ => record
+                            .payload
+                            .get(&projection.field)
+                            .cloned()
                             .unwrap_or(serde_json::Value::Null),
                     };
                     fields.insert(alias.clone(), value);
@@ -203,10 +206,8 @@ impl StorageAwareExecutor {
                 match assignment.field.as_str() {
                     "vector" => {
                         if let Some(arr) = assignment.value.as_array() {
-                            let v: Option<Vec<f32>> = arr
-                                .iter()
-                                .map(|x| x.as_f64().map(|f| f as f32))
-                                .collect();
+                            let v: Option<Vec<f32>> =
+                                arr.iter().map(|x| x.as_f64().map(|f| f as f32)).collect();
                             new_vector = v;
                         }
                     }
@@ -256,11 +257,10 @@ impl StorageAwareExecutor {
         // Enumerate all records and apply filters in memory.
         // This is O(N) but correct — ANN search with a zero vector is unreliable for
         // arbitrary distance metrics and silently misses records beyond top_k.
-        let all_ids = self
-            .storage
-            .list_all_record_ids(table)
-            .await
-            .map_err(|e| DxqlError::ExecutionError(format!("list_all_record_ids failed: {}", e)))?;
+        let all_ids =
+            self.storage.list_all_record_ids(table).await.map_err(|e| {
+                DxqlError::ExecutionError(format!("list_all_record_ids failed: {}", e))
+            })?;
 
         if filters.is_empty() {
             return Ok(all_ids);
@@ -290,11 +290,29 @@ impl StorageAwareExecutor {
                 (Some(fv), filter_val) => match f.operation.as_str() {
                     "=" => &fv == filter_val,
                     "!=" => &fv != filter_val,
-                    ">" => fv.as_f64().zip(filter_val.as_f64()).map(|(a, b)| a > b).unwrap_or(false),
-                    ">=" => fv.as_f64().zip(filter_val.as_f64()).map(|(a, b)| a >= b).unwrap_or(false),
-                    "<" => fv.as_f64().zip(filter_val.as_f64()).map(|(a, b)| a < b).unwrap_or(false),
-                    "<=" => fv.as_f64().zip(filter_val.as_f64()).map(|(a, b)| a <= b).unwrap_or(false),
-                    "LIKE" => fv.as_str().zip(filter_val.as_str())
+                    ">" => fv
+                        .as_f64()
+                        .zip(filter_val.as_f64())
+                        .map(|(a, b)| a > b)
+                        .unwrap_or(false),
+                    ">=" => fv
+                        .as_f64()
+                        .zip(filter_val.as_f64())
+                        .map(|(a, b)| a >= b)
+                        .unwrap_or(false),
+                    "<" => fv
+                        .as_f64()
+                        .zip(filter_val.as_f64())
+                        .map(|(a, b)| a < b)
+                        .unwrap_or(false),
+                    "<=" => fv
+                        .as_f64()
+                        .zip(filter_val.as_f64())
+                        .map(|(a, b)| a <= b)
+                        .unwrap_or(false),
+                    "LIKE" => fv
+                        .as_str()
+                        .zip(filter_val.as_str())
                         .map(|(s, pat)| s.contains(&pat.replace('%', "")))
                         .unwrap_or(false),
                     _ => false,
@@ -307,7 +325,6 @@ impl StorageAwareExecutor {
         }
         true
     }
-
 
     async fn execute_create(&self, create: CreatePlan) -> Result<(), DxqlError> {
         match create {
@@ -327,19 +344,16 @@ impl StorageAwareExecutor {
                     named_vectors: None,
                 };
 
-                self.storage
-                    .create_table(config)
-                    .await
-                    .map_err(|e| DxqlError::ExecutionError(format!("Create table failed: {}", e)))?;
+                self.storage.create_table(config).await.map_err(|e| {
+                    DxqlError::ExecutionError(format!("Create table failed: {}", e))
+                })?;
 
                 Ok(())
             }
-            CreatePlan::Index { name } => {
-                Err(DxqlError::ExecutionError(format!(
-                    "CREATE INDEX '{}' not yet implemented",
-                    name
-                )))
-            }
+            CreatePlan::Index { name } => Err(DxqlError::ExecutionError(format!(
+                "CREATE INDEX '{}' not yet implemented",
+                name
+            ))),
         }
     }
 
@@ -349,9 +363,7 @@ impl StorageAwareExecutor {
                 self.storage
                     .delete_table(&drop.name)
                     .await
-                    .map_err(|e| {
-                        DxqlError::ExecutionError(format!("Drop table failed: {}", e))
-                    })?;
+                    .map_err(|e| DxqlError::ExecutionError(format!("Drop table failed: {}", e)))?;
                 Ok(())
             }
             _ => Err(DxqlError::ExecutionError(format!(
@@ -522,19 +534,11 @@ mod tests {
             Ok(())
         }
 
-        async fn backup(
-            &self,
-            _tablename: &str,
-            _backup_path: &str,
-        ) -> crate::Result<()> {
+        async fn backup(&self, _tablename: &str, _backup_path: &str) -> crate::Result<()> {
             Ok(())
         }
 
-        async fn restore(
-            &self,
-            _tablename: &str,
-            _backup_path: &str,
-        ) -> crate::Result<()> {
+        async fn restore(&self, _tablename: &str, _backup_path: &str) -> crate::Result<()> {
             Ok(())
         }
     }
@@ -616,23 +620,38 @@ mod tests {
             named_vectors: None,
         };
 
-        let match_filters = vec![
-            Filter { field: "age".to_string(), operation: "=".to_string(), value: serde_json::json!(30) },
-        ];
-        assert!(StorageAwareExecutor::record_matches_filters(&record, &match_filters));
+        let match_filters = vec![Filter {
+            field: "age".to_string(),
+            operation: "=".to_string(),
+            value: serde_json::json!(30),
+        }];
+        assert!(StorageAwareExecutor::record_matches_filters(
+            &record,
+            &match_filters
+        ));
 
-        let no_match_filters = vec![
-            Filter { field: "age".to_string(), operation: ">".to_string(), value: serde_json::json!(50) },
-        ];
-        assert!(!StorageAwareExecutor::record_matches_filters(&record, &no_match_filters));
+        let no_match_filters = vec![Filter {
+            field: "age".to_string(),
+            operation: ">".to_string(),
+            value: serde_json::json!(50),
+        }];
+        assert!(!StorageAwareExecutor::record_matches_filters(
+            &record,
+            &no_match_filters
+        ));
 
         // Empty filters always match
         assert!(StorageAwareExecutor::record_matches_filters(&record, &[]));
 
         // LIKE filter
-        let like_filter = vec![
-            Filter { field: "name".to_string(), operation: "LIKE".to_string(), value: serde_json::json!("%Alice%") },
-        ];
-        assert!(StorageAwareExecutor::record_matches_filters(&record, &like_filter));
+        let like_filter = vec![Filter {
+            field: "name".to_string(),
+            operation: "LIKE".to_string(),
+            value: serde_json::json!("%Alice%"),
+        }];
+        assert!(StorageAwareExecutor::record_matches_filters(
+            &record,
+            &like_filter
+        ));
     }
 }

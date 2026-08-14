@@ -81,9 +81,9 @@ impl PerformanceThreshold {
     pub fn brute_force_default() -> Self {
         Self {
             index_type: "BruteForce".to_string(),
-            min_recall_at_k: 1.0,  // Exact search
+            min_recall_at_k: 1.0, // Exact search
             recall_k: 10,
-            min_qps: 100.0,  // Much slower but accurate
+            min_qps: 100.0, // Much slower but accurate
             max_p99_latency_ms: 1000.0,
             min_precision_at_k: Some(1.0),
             min_ndcg_at_k: Some(1.0),
@@ -114,7 +114,14 @@ impl ThresholdValidation {
     /// Print validation report
     pub fn print_report(&self) {
         println!("\n=== Threshold Validation: {} ===", self.index_type);
-        println!("Status: {}", if self.passed { "✅ PASSED" } else { "❌ FAILED" });
+        println!(
+            "Status: {}",
+            if self.passed {
+                "✅ PASSED"
+            } else {
+                "❌ FAILED"
+            }
+        );
 
         println!("\nMetrics:");
         println!("  Recall@{}: {:.4}", 10, self.metrics.recall_at_k);
@@ -150,10 +157,19 @@ impl ThresholdValidator {
         let mut thresholds = HashMap::new();
 
         thresholds.insert("HNSW".to_string(), PerformanceThreshold::hnsw_default());
-        thresholds.insert("DiskANN".to_string(), PerformanceThreshold::diskann_default());
+        thresholds.insert(
+            "DiskANN".to_string(),
+            PerformanceThreshold::diskann_default(),
+        );
         thresholds.insert("IVF-PQ".to_string(), PerformanceThreshold::ivf_pq_default());
-        thresholds.insert("HNSW-PQ".to_string(), PerformanceThreshold::hnsw_pq_default());
-        thresholds.insert("BruteForce".to_string(), PerformanceThreshold::brute_force_default());
+        thresholds.insert(
+            "HNSW-PQ".to_string(),
+            PerformanceThreshold::hnsw_pq_default(),
+        );
+        thresholds.insert(
+            "BruteForce".to_string(),
+            PerformanceThreshold::brute_force_default(),
+        );
 
         Self { thresholds }
     }
@@ -169,11 +185,7 @@ impl ThresholdValidator {
     }
 
     /// Validate metrics against thresholds
-    pub fn validate(
-        &self,
-        index_type: &str,
-        metrics: ValidationMetrics,
-    ) -> ThresholdValidation {
+    pub fn validate(&self, index_type: &str, metrics: ValidationMetrics) -> ThresholdValidation {
         let threshold = match self.get_threshold(index_type) {
             Some(t) => t,
             None => {
@@ -214,7 +226,8 @@ impl ThresholdValidator {
 
         // Validate precision (if specified)
         if let (Some(min_precision), Some(actual_precision)) =
-            (threshold.min_precision_at_k, metrics.precision_at_k) {
+            (threshold.min_precision_at_k, metrics.precision_at_k)
+        {
             if actual_precision < min_precision {
                 failures.push(format!(
                     "Precision@{} {:.4} < threshold {:.4}",
@@ -224,8 +237,7 @@ impl ThresholdValidator {
         }
 
         // Validate NDCG (if specified)
-        if let (Some(min_ndcg), Some(actual_ndcg)) =
-            (threshold.min_ndcg_at_k, metrics.ndcg_at_k) {
+        if let (Some(min_ndcg), Some(actual_ndcg)) = (threshold.min_ndcg_at_k, metrics.ndcg_at_k) {
             if actual_ndcg < min_ndcg {
                 failures.push(format!(
                     "NDCG@{} {:.4} < threshold {:.4}",
@@ -313,7 +325,7 @@ mod tests {
         let validator = ThresholdValidator::new();
 
         let metrics = ValidationMetrics {
-            recall_at_k: 0.90,  // Below threshold (0.95)
+            recall_at_k: 0.90, // Below threshold (0.95)
             qps: 12_000.0,
             p99_latency_ms: 8.0,
             precision_at_k: None,
@@ -332,7 +344,7 @@ mod tests {
 
         let metrics = ValidationMetrics {
             recall_at_k: 0.96,
-            qps: 5_000.0,  // Below threshold (10,000)
+            qps: 5_000.0, // Below threshold (10,000)
             p99_latency_ms: 8.0,
             precision_at_k: None,
             ndcg_at_k: None,
@@ -351,7 +363,7 @@ mod tests {
         let metrics = ValidationMetrics {
             recall_at_k: 0.96,
             qps: 12_000.0,
-            p99_latency_ms: 15.0,  // Above threshold (10.0)
+            p99_latency_ms: 15.0, // Above threshold (10.0)
             precision_at_k: None,
             ndcg_at_k: None,
         };
@@ -367,9 +379,9 @@ mod tests {
         let validator = ThresholdValidator::new();
 
         let metrics = ValidationMetrics {
-            recall_at_k: 0.90,     // Fail
-            qps: 5_000.0,          // Fail
-            p99_latency_ms: 15.0,  // Fail
+            recall_at_k: 0.90,    // Fail
+            qps: 5_000.0,         // Fail
+            p99_latency_ms: 15.0, // Fail
             precision_at_k: None,
             ndcg_at_k: None,
         };
@@ -401,20 +413,26 @@ mod tests {
         let validator = ThresholdValidator::new();
 
         let results = vec![
-            ("HNSW".to_string(), ValidationMetrics {
-                recall_at_k: 0.96,
-                qps: 12_000.0,
-                p99_latency_ms: 8.0,
-                precision_at_k: None,
-                ndcg_at_k: None,
-            }),
-            ("DiskANN".to_string(), ValidationMetrics {
-                recall_at_k: 0.92,
-                qps: 6_000.0,
-                p99_latency_ms: 40.0,
-                precision_at_k: None,
-                ndcg_at_k: None,
-            }),
+            (
+                "HNSW".to_string(),
+                ValidationMetrics {
+                    recall_at_k: 0.96,
+                    qps: 12_000.0,
+                    p99_latency_ms: 8.0,
+                    precision_at_k: None,
+                    ndcg_at_k: None,
+                },
+            ),
+            (
+                "DiskANN".to_string(),
+                ValidationMetrics {
+                    recall_at_k: 0.92,
+                    qps: 6_000.0,
+                    p99_latency_ms: 40.0,
+                    precision_at_k: None,
+                    ndcg_at_k: None,
+                },
+            ),
         ];
 
         let validations = validator.validate_batch(results);
@@ -449,6 +467,6 @@ mod tests {
         };
 
         let result = validator.validate("HNSW", metrics);
-        result.print_report();  // Should not panic
+        result.print_report(); // Should not panic
     }
 }

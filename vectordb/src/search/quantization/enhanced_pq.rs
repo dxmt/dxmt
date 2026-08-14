@@ -151,9 +151,7 @@ impl EnhancedPQ {
         let start = subq * self.subvector_dim;
         let end = (subq + 1) * self.subvector_dim;
 
-        data.iter()
-            .map(|vec| vec[start..end].to_vec())
-            .collect()
+        data.iter().map(|vec| vec[start..end].to_vec()).collect()
     }
 
     /// Train a single subquantizer using balanced K-means
@@ -280,10 +278,7 @@ impl EnhancedPQ {
     /// Compute L2 distance
     #[inline]
     fn compute_l2_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum()
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
     }
 
     /// Optimize polysemous codes order
@@ -384,10 +379,7 @@ impl EnhancedPQ {
 
     /// Encode batch of vectors
     pub fn encode_batch(&self, vectors: &[DenseVector]) -> Result<Vec<Vec<u8>>> {
-        vectors
-            .par_iter()
-            .map(|v| self.encode_single(v))
-            .collect()
+        vectors.par_iter().map(|v| self.encode_single(v)).collect()
     }
 
     /// Decode batch of codes
@@ -457,8 +449,8 @@ impl ScalarQuantizer {
         let mut encoded = Vec::with_capacity(vector.len());
 
         for (i, &v) in vector.iter().enumerate() {
-            let normalized = (v - self.trained_min[i])
-                / (self.trained_max[i] - self.trained_min[i]);
+            let normalized =
+                (v - self.trained_min[i]) / (self.trained_max[i] - self.trained_min[i]);
             let quantized = (normalized * levels as f32).round() as u8;
             encoded.push(quantized.min(levels as u8));
         }
@@ -473,8 +465,8 @@ impl ScalarQuantizer {
 
         for (i, &code) in codes.iter().enumerate() {
             let normalized = code as f32 / levels as f32;
-            let value = self.trained_min[i]
-                + normalized * (self.trained_max[i] - self.trained_min[i]);
+            let value =
+                self.trained_min[i] + normalized * (self.trained_max[i] - self.trained_min[i]);
             decoded.push(value);
         }
 

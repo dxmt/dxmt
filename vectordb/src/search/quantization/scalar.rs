@@ -53,7 +53,9 @@ impl ScalarQuantizer {
     /// 训练量化器
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Training vectors cannot be empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Training vectors cannot be empty".to_string(),
+            ));
         }
 
         let dimension = training_vectors[0].len();
@@ -64,7 +66,7 @@ impl ScalarQuantizer {
                 return Err(crate::Error::DimensionMismatch {
                     expected: dimension,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -96,7 +98,9 @@ impl ScalarQuantizer {
     /// 量化向量
     pub fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before quantization".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before quantization".to_string(),
+            ));
         }
 
         let mut encoded_data = Vec::with_capacity(vector.len());
@@ -128,7 +132,9 @@ impl ScalarQuantizer {
     /// 编码查询向量
     pub fn encode_query(&self, query: &DenseVector) -> crate::Result<ScalarQuery> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before encoding".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before encoding".to_string(),
+            ));
         }
 
         let mut encoded_query = Vec::with_capacity(query.len());
@@ -152,7 +158,9 @@ impl ScalarQuantizer {
             let score = self.score_vectors(&query.encoded_query, encoded_vector);
             Ok(self.multiplier * score + query.offset)
         } else {
-            Err(crate::Error::InvalidInput("Vector is not scalar quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector is not scalar quantized".to_string(),
+            ))
         }
     }
 
@@ -166,16 +174,16 @@ impl ScalarQuantizer {
         for vector in vectors {
             for &value in vector {
                 if value.is_finite() {
-
                     min_val = min_val.min(value);
                     max_val = max_val.max(value);
-
                 }
             }
         }
 
         if min_val == f32::INFINITY || max_val == f32::NEG_INFINITY {
-            return Err(crate::Error::InvalidInput("No valid values found in training vectors".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "No valid values found in training vectors".to_string(),
+            ));
         }
 
         let range = max_val - min_val;
@@ -185,9 +193,15 @@ impl ScalarQuantizer {
         Ok((alpha, offset))
     }
 
-    fn find_quantile_range(&self, vectors: &[DenseVector], quantile: f32) -> crate::Result<(f32, f32)> {
+    fn find_quantile_range(
+        &self,
+        vectors: &[DenseVector],
+        quantile: f32,
+    ) -> crate::Result<(f32, f32)> {
         if !(0.5..=1.0).contains(&quantile) {
-            return Err(crate::Error::InvalidInput("Quantile must be between 0.5 and 1.0".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantile must be between 0.5 and 1.0".to_string(),
+            ));
         }
 
         // 收集所有值
@@ -198,7 +212,9 @@ impl ScalarQuantizer {
             .collect();
 
         if all_values.is_empty() {
-            return Err(crate::Error::InvalidInput("No valid values found".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "No valid values found".to_string(),
+            ));
         }
 
         all_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -299,7 +315,9 @@ impl QuantizedIndex for ScalarQuantizedIndex {
             self.vectors.insert(vector.id.clone(), vector);
             Ok(())
         } else {
-            Err(crate::Error::InvalidInput("Vector must be scalar quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector must be scalar quantized".to_string(),
+            ))
         }
     }
 
@@ -319,7 +337,8 @@ impl QuantizedIndex for ScalarQuantizedIndex {
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(k);
 
-        self.query_latency_us.store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.query_latency_us
+            .store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         Ok(candidates)
     }
@@ -340,8 +359,7 @@ impl QuantizedIndex for ScalarQuantizedIndex {
             ScalarQuantizer,
             HashMap<String, QuantizedVector>,
             QuantizationStats,
-        ) = bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string())
-        )?;
+        ) = bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
         self.quantizer = quantizer;
         self.vectors = vectors;

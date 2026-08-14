@@ -73,7 +73,7 @@ fn test_table_config_memory_optimization_none() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
-        memory_optimization: None,  // 使用全局配置
+        memory_optimization: None, // 使用全局配置
         named_vectors: None,
         payload_schema: None,
         schema_version: 1,
@@ -96,7 +96,7 @@ fn test_table_config_memory_optimization_true() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
-        memory_optimization: Some(true),  // 显式启用
+        memory_optimization: Some(true), // 显式启用
         named_vectors: None,
         payload_schema: None,
         schema_version: 1,
@@ -120,7 +120,7 @@ fn test_table_config_memory_optimization_false() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
-        memory_optimization: Some(false),  // 显式禁用
+        memory_optimization: Some(false), // 显式禁用
         named_vectors: None,
         payload_schema: None,
         schema_version: 1,
@@ -152,14 +152,15 @@ fn test_config_hierarchy_table_overrides_global() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
-        memory_optimization: Some(false),  // 覆盖全局配置
+        memory_optimization: Some(false), // 覆盖全局配置
         named_vectors: None,
         payload_schema: None,
         schema_version: 1,
     };
 
     // 验证配置层级：表级配置应覆盖全局配置
-    let effective_config = table_config.memory_optimization
+    let effective_config = table_config
+        .memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
     assert!(
@@ -189,14 +190,15 @@ fn test_config_hierarchy_uses_global_when_none() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
-        memory_optimization: None,  // 使用全局配置
+        memory_optimization: None, // 使用全局配置
         named_vectors: None,
         payload_schema: None,
         schema_version: 1,
     };
 
     // 验证配置层级：应使用全局配置
-    let effective_config = table_config.memory_optimization
+    let effective_config = table_config
+        .memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
     assert!(
@@ -262,11 +264,14 @@ fn test_mixed_table_configurations() {
     };
 
     // 验证配置决策
-    let config1 = table1.memory_optimization
+    let config1 = table1
+        .memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
-    let config2 = table2.memory_optimization
+    let config2 = table2
+        .memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
-    let config3 = table3.memory_optimization
+    let config3 = table3
+        .memory_optimization
         .unwrap_or(global_config.tables.default_memory_optimization);
 
     assert!(config1, "Table1 should use global config (true)");

@@ -4,11 +4,11 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use backoff::{future::retry, ExponentialBackoff};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use backoff::{ExponentialBackoff, future::retry};
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use crate::embeddings::compat::EmbeddingError;
 
@@ -31,7 +31,7 @@ impl OpenAIModel {
             Self::TextEmbeddingAda002 => 1536,
         }
     }
-    
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::TextEmbedding3Small => "text-embedding-3-small",
@@ -39,7 +39,7 @@ impl OpenAIModel {
             Self::TextEmbeddingAda002 => "text-embedding-ada-002",
         }
     }
-    
+
     pub fn max_tokens(&self) -> usize {
         match self {
             Self::TextEmbedding3Small => 8191,
@@ -130,7 +130,7 @@ impl OpenAIEmbedding {
             .timeout(config.timeout)
             .build()
             .expect("Failed to create HTTP client");
-            
+
         Self {
             config,
             client,
@@ -140,56 +140,60 @@ impl OpenAIEmbedding {
                 reset_time: None,
             })),
             cache: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(1000).unwrap()
+                std::num::NonZeroUsize::new(1000).unwrap(),
             ))),
         }
     }
-    
+
     pub fn with_api_key(api_key: String) -> Self {
-        Self::new(OpenAIConfig { api_key, ..Default::default() })
+        Self::new(OpenAIConfig {
+            api_key,
+            ..Default::default()
+        })
     }
-    
+
     async fn check_rate_limit(&self) -> Result<(), EmbeddingError> {
         let state = self.rate_limit.read().await;
-        
+
         // Check if we're rate limited
         if let Some(reset_time) = state.reset_time {
             if std::time::Instant::now() < reset_time {
                 let wait_time = reset_time - std::time::Instant::now();
-                return Err(EmbeddingError::RateLimitError(
-                    format!("Rate limited. Wait {:?}", wait_time)
-                ));
+                return Err(EmbeddingError::RateLimitError(format!(
+                    "Rate limited. Wait {:?}",
+                    wait_time
+                )));
             }
         }
-        
+
         // Check remaining requests
         if let Some(remaining) = state.requests_remaining {
             if remaining <= 0 {
                 return Err(EmbeddingError::RateLimitError(
-                    "No requests remaining".to_string()
+                    "No requests remaining".to_string(),
                 ));
             }
         }
-        
+
         Ok(())
     }
-    
+
     async fn update_rate_limit(&self, headers: &reqwest::header::HeaderMap) {
         let mut state = self.rate_limit.write().await;
-        
+
         // Parse rate limit headers
         if let Some(remaining) = headers.get("x-ratelimit-remaining-requests") {
             if let Ok(val) = remaining.to_str() {
                 state.requests_remaining = val.parse().ok();
             }
         }
-        
+
         if let Some(remaining) = headers.get("x-ratelimit-remaining-tokens") {
             if let Ok(val) = remaining.to_str() {
                 state.tokens_remaining = val.parse().ok();
             }
         }
-        
+
         if let Some(reset) = headers.get("x-ratelimit-reset-requests") {
             if let Ok(val) = reset.to_str() {
                 if let Ok(timestamp) = val.parse::<u64>() {
@@ -199,13 +203,16 @@ impl OpenAIEmbedding {
             }
         }
     }
-    
-    async fn embed_batch_with_retry(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    async fn embed_batch_with_retry(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let backoff = ExponentialBackoff {
             max_elapsed_time: Some(Duration::from_secs(60)),
             ..Default::default()
         };
-        
+
         retry(backoff, || async {
             self.embed_batch_internal(texts.clone()).await.map_err(|e| {
                 if matches!(e, EmbeddingError::RateLimitError(_)) {
@@ -214,19 +221,23 @@ impl OpenAIEmbedding {
                     backoff::Error::permanent(e)
                 }
             })
-        }).await
+        })
+        .await
     }
-    
-    async fn embed_batch_internal(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    async fn embed_batch_internal(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         // Check rate limit
         self.check_rate_limit().await?;
-        
+
         // Check cache
         let mut cache = self.cache.write().await;
         let mut cached_results = vec![None; texts.len()];
         let mut uncached_indices = Vec::new();
         let mut uncached_texts = Vec::new();
-        
+
         for (i, text) in texts.iter().enumerate() {
             if let Some(embedding) = cache.get(text) {
                 cached_results[i] = Some(embedding.clone());
@@ -235,11 +246,11 @@ impl OpenAIEmbedding {
                 uncached_texts.push(text.clone());
             }
         }
-        
+
         if uncached_texts.is_empty() {
             return Ok(cached_results.into_iter().map(|r| r.unwrap()).collect());
         }
-        
+
         // Prepare request
         let request = EmbeddingRequest {
             input: uncached_texts.clone(),
@@ -248,93 +259,108 @@ impl OpenAIEmbedding {
             dimensions: None,
             user: None,
         };
-        
-        let base_url = self.config.base_url.as_deref()
+
+        let base_url = self
+            .config
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.openai.com/v1");
-            
+
         let url = format!("{}/embeddings", base_url);
-        
+
         // Build request
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json");
-            
+
         if let Some(org_id) = &self.config.organization_id {
             req = req.header("OpenAI-Organization", org_id);
         }
-        
+
         // Send request
         let response = req
             .json(&request)
             .send()
             .await
             .map_err(|e| EmbeddingError::NetworkError(e.to_string()))?;
-            
+
         // Update rate limit info
         self.update_rate_limit(response.headers()).await;
-        
+
         // Check status
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-                
+
             if status.as_u16() == 429 {
                 return Err(EmbeddingError::RateLimitError(error_text));
             } else {
-                return Err(EmbeddingError::ApiError(
-                    format!("Status {}: {}", status, error_text)
-                ));
+                return Err(EmbeddingError::ApiError(format!(
+                    "Status {}: {}",
+                    status, error_text
+                )));
             }
         }
-        
+
         // Parse response
-        let embedding_response: EmbeddingResponse = response.json().await
+        let embedding_response: EmbeddingResponse = response
+            .json()
+            .await
             .map_err(|e| EmbeddingError::ApiError(e.to_string()))?;
-            
+
         // Sort embeddings by index
         let mut embeddings = embedding_response.data;
         embeddings.sort_by_key(|e| e.index);
-        
+
         // Update cache and build results
         for (i, embedding_data) in embeddings.iter().enumerate() {
             let text = &uncached_texts[i];
             cache.put(text.clone(), embedding_data.embedding.clone());
         }
-        
+
         // Merge cached and new results
         let mut final_results = Vec::with_capacity(texts.len());
         let mut uncached_iter = embeddings.into_iter();
-        
+
         for cached in cached_results {
             if let Some(embedding) = cached {
                 final_results.push(embedding);
             } else {
-                let embedding_data = uncached_iter.next()
+                let embedding_data = uncached_iter
+                    .next()
                     .ok_or_else(|| EmbeddingError::ApiError("Missing embedding".to_string()))?;
                 final_results.push(embedding_data.embedding);
             }
         }
-        
+
         Ok(final_results)
     }
-    
-    pub async fn embed_documents(&self, documents: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    pub async fn embed_documents(
+        &self,
+        documents: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let mut all_embeddings = Vec::new();
-        
+
         // Process in batches
         for chunk in documents.chunks(self.config.batch_size) {
             let batch_embeddings = self.embed_batch_with_retry(chunk.to_vec()).await?;
             all_embeddings.extend(batch_embeddings);
         }
-        
+
         Ok(all_embeddings)
     }
-    
+
     pub async fn embed_query(&self, query: String) -> Result<Vec<f32>, EmbeddingError> {
         let embeddings = self.embed_batch_with_retry(vec![query]).await?;
-        embeddings.into_iter().next()
+        embeddings
+            .into_iter()
+            .next()
             .ok_or_else(|| EmbeddingError::ApiError("No embedding returned".to_string()))
     }
 }
@@ -368,14 +394,14 @@ impl EmbeddingFunction for OpenAIEmbedding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_model_dimensions() {
         assert_eq!(OpenAIModel::TextEmbedding3Small.dimension(), 1536);
         assert_eq!(OpenAIModel::TextEmbedding3Large.dimension(), 3072);
         assert_eq!(OpenAIModel::TextEmbeddingAda002.dimension(), 1536);
     }
-    
+
     #[test]
     fn test_config_serialization() {
         let config = OpenAIConfig::default();

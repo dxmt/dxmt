@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::{Client, Config};
-use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
 use futures::future::join_all;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 
 use crate::storage::object::{
-    traits::{StorageStats, ObjectStorage, ObjectStorageResult},
+    traits::{ObjectStorage, ObjectStorageResult, StorageStats},
     types::{ListObjectsOptions, ListObjectsResult, ObjectMetadata, PartInfo},
     ObjectInfo, ObjectStorageError,
 };
@@ -44,26 +44,20 @@ impl BatchS3Storage {
         endpoint: Option<String>,
         max_concurrent_ops: Option<usize>,
         batchsize: Option<usize>,
-        cache_size: Option<usize>) -> ObjectStorageResult<Self> {
+        cache_size: Option<usize>,
+    ) -> ObjectStorageResult<Self> {
         let region = Region::new(region.unwrap_or_else(|| "us-east-1".to_string()));
 
-        let mut config_builder = Config::builder()
-            .region(region)
-            .behavior_version_latest();
+        let mut config_builder = Config::builder().region(region).behavior_version_latest();
 
         if let (Some(access_key), Some(secret_key)) = (access_key_id, secret_access_key) {
-
-
             let creds = Credentials::new(access_key, secret_key, None, None, "batch_s3");
             config_builder = config_builder.credentials_provider(creds);
-
         }
         if let Some(endpoint_url) = endpoint {
-
             config_builder = config_builder
                 .endpoint_url(endpoint_url)
                 .force_path_style(true);
-
         }
         let config = config_builder.build();
         let client = Client::from_conf(config);
@@ -80,7 +74,12 @@ impl BatchS3Storage {
             max_concurrent_ops,
             batchsize: batch_size,
             prefetch_cache: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(cache_size).ok_or_else(|| ObjectStorageError::InvalidConfiguration("Cache size cannot be zero".to_string()))?))),
+                std::num::NonZeroUsize::new(cache_size).ok_or_else(|| {
+                    ObjectStorageError::InvalidConfiguration(
+                        "Cache size cannot be zero".to_string(),
+                    )
+                })?,
+            ))),
         })
     }
 
@@ -95,7 +94,8 @@ impl BatchS3Storage {
     /// Batch get objects with parallel fetching
     pub async fn batch_get_objects(
         &self,
-        keys: &[String]) -> ObjectStorageResult<Vec<(String, Bytes)>> {
+        keys: &[String],
+    ) -> ObjectStorageResult<Vec<(String, Bytes)>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -120,10 +120,13 @@ impl BatchS3Storage {
 
         // Fetch missing keys in parallel batches
         if !keys_to_fetch.is_empty() {
-
             let fetched = match self.parallel_fetch(&keys_to_fetch).await {
                 Ok(data) => data,
-                Err(e) => return Err(ObjectStorageError::InternalError { message: format!("Parallel fetch failed: {:?}", e) }),
+                Err(e) => {
+                    return Err(ObjectStorageError::InternalError {
+                        message: format!("Parallel fetch failed: {:?}", e),
+                    })
+                }
             };
 
             // Update cache
@@ -178,11 +181,7 @@ impl BatchS3Storage {
                 })
                 .collect();
 
-            let chunk_results: Vec<_> = join_all(futures)
-                .await
-                .into_iter()
-                .flatten()
-                .collect();
+            let chunk_results: Vec<_> = join_all(futures).await.into_iter().flatten().collect();
 
             all_results.extend(chunk_results);
         }
@@ -234,11 +233,7 @@ impl BatchS3Storage {
                 })
                 .collect();
 
-            let chunk_results: Vec<_> = join_all(futures)
-                .await
-                .into_iter()
-                .flatten()
-                .collect();
+            let chunk_results: Vec<_> = join_all(futures).await.into_iter().flatten().collect();
 
             all_uploaded.extend(chunk_results);
         }
@@ -298,7 +293,7 @@ impl BatchS3Storage {
                                     key.strip_prefix(&format!("{}/", self.prefix))
                                         .unwrap_or(&key)
                                         .to_string()
-                               };
+                                };
                                 all_deleted.push(original_key);
                             }
                         }
@@ -346,7 +341,8 @@ impl ObjectStorage for BatchS3Storage {
         &self,
         key: &str,
         data: Bytes,
-        _content_type: Option<&str>) -> ObjectStorageResult<()> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         let _full_key = self.full_key(key);
 
         self.client
@@ -356,7 +352,9 @@ impl ObjectStorage for BatchS3Storage {
             .body(data.clone().into())
             .send()
             .await
-            .map_err(|e| ObjectStorageError::NetworkError { message: format!("S3 put failed: {}", e) })?;
+            .map_err(|e| ObjectStorageError::NetworkError {
+                message: format!("S3 put failed: {}", e),
+            })?;
 
         // Update cache
         {
@@ -431,7 +429,8 @@ impl ObjectStorage for BatchS3Storage {
 
     async fn list_objects(
         &self,
-        options: &ListObjectsOptions) -> ObjectStorageResult<ListObjectsResult> {
+        options: &ListObjectsOptions,
+    ) -> ObjectStorageResult<ListObjectsResult> {
         let prefix = options.prefix.as_deref().unwrap_or("");
         let full_prefix = self.full_key(prefix);
 
@@ -442,17 +441,16 @@ impl ObjectStorage for BatchS3Storage {
             .prefix(&full_prefix);
 
         if let Some(max_keys) = options.max_keys {
-
-
             request = request.max_keys(max_keys);
-
         }
         // start_after not supported in ListObjectsOptions
 
         let output = request
             .send()
             .await
-            .map_err(|e| ObjectStorageError::InternalError { message: format!("Failed to list objects with prefix {}: {}", prefix, e) })?;
+            .map_err(|e| ObjectStorageError::InternalError {
+                message: format!("Failed to list objects with prefix {}: {}", prefix, e),
+            })?;
 
         let objects = output
             .contents()
@@ -465,7 +463,7 @@ impl ObjectStorage for BatchS3Storage {
                         key.strip_prefix(&format!("{}/", self.prefix))
                             .unwrap_or(key)
                             .to_string()
-                   };
+                    };
 
                     ObjectInfo {
                         key: original_key,
@@ -529,15 +527,19 @@ impl ObjectStorage for BatchS3Storage {
     async fn create_multipart_upload(
         &self,
         _key: &str,
-        _content_type: Option<&str>) -> ObjectStorageResult<String> {
-        Err(ObjectStorageError::InternalError { message: format!("Operation not implemented: {}", "create_multipart_upload") })
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<String> {
+        Err(ObjectStorageError::InternalError {
+            message: format!("Operation not implemented: {}", "create_multipart_upload"),
+        })
     }
 
     async fn get_object_range(
         &self,
         key: &str,
         start: u64,
-        end: u64) -> ObjectStorageResult<Vec<u8>> {
+        end: u64,
+    ) -> ObjectStorageResult<Vec<u8>> {
         let full_key = self.full_key(key);
         let range = format!("bytes={}-{}", start, end - 1);
 
@@ -620,7 +622,8 @@ impl ObjectStorage for BatchS3Storage {
         key: &str,
         stream: BoxStream<'static, Result<Bytes, std::io::Error>>,
         content_length: Option<u64>,
-        _content_type: Option<&str>) -> ObjectStorageResult<()> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         use aws_sdk_s3::primitives::ByteStream;
 
         let full_key = self.full_key(key);
@@ -651,10 +654,7 @@ impl ObjectStorage for BatchS3Storage {
             .body(body);
 
         if let Some(len) = content_length {
-
-
             request = request.content_length(len as i64);
-
         }
         request
             .send()
@@ -668,7 +668,8 @@ impl ObjectStorage for BatchS3Storage {
 
     async fn get_stream(
         &self,
-        key: &str) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
+        key: &str,
+    ) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
         let full_key = self.full_key(key);
 
         let output = self
@@ -685,16 +686,15 @@ impl ObjectStorage for BatchS3Storage {
         // Convert ByteStream to our stream type
         use futures::stream::{self, StreamExt};
         let key_owned = key.to_string();
-        let stream = stream::once(async move {
-            let aggregated = output
-                .body
-                .collect()
-                .await
-                .map_err(move |e| ObjectStorageError::NetworkError {
-                    message: format!("Failed to get object {}: {}", key_owned, e),
+        let stream =
+            stream::once(async move {
+                let aggregated = output.body.collect().await.map_err(move |e| {
+                    ObjectStorageError::NetworkError {
+                        message: format!("Failed to get object {}: {}", key_owned, e),
+                    }
                 })?;
-            Ok::<Bytes, ObjectStorageError>(aggregated.into_bytes())
-        });
+                Ok::<Bytes, ObjectStorageError>(aggregated.into_bytes())
+            });
 
         Ok(Box::pin(stream.map(|result| result)))
     }
@@ -704,7 +704,8 @@ impl ObjectStorage for BatchS3Storage {
         key: &str,
         upload_id: &str,
         part_number: u32,
-        data: &[u8]) -> ObjectStorageResult<PartInfo> {
+        data: &[u8],
+    ) -> ObjectStorageResult<PartInfo> {
         let full_key = self.full_key(key);
 
         let output = self
@@ -732,7 +733,8 @@ impl ObjectStorage for BatchS3Storage {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[PartInfo]) -> ObjectStorageResult<()> {
+        parts: &[PartInfo],
+    ) -> ObjectStorageResult<()> {
         use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
         let full_key = self.full_key(key);
@@ -797,10 +799,7 @@ impl ObjectStorage for BatchS3Storage {
                 .max_keys(1000);
 
             if let Some(token) = continuation_token {
-
-
                 request = request.continuation_token(token);
-
             }
             let output = request
                 .send()

@@ -23,10 +23,13 @@ pub async fn handle_announce(
     info!("Received announcement from node {}", announcement.nodeid);
 
     match discovery.handle_announcement(announcement).await {
-        Ok(_) => Ok(ApiResponse::success("Node announcement received".to_string())),
-        Err(e) => Ok(ApiResponse::error(ApiError::new("CLUSTER_ERROR",
-            &format!("Failed to process announcement: {}", e)
-        )))
+        Ok(_) => Ok(ApiResponse::success(
+            "Node announcement received".to_string(),
+        )),
+        Err(e) => Ok(ApiResponse::error(ApiError::new(
+            "CLUSTER_ERROR",
+            &format!("Failed to process announcement: {}", e),
+        ))),
     }
 }
 
@@ -35,10 +38,14 @@ pub async fn handle_heartbeat(
     State(discovery): State<Arc<SimpleDiscovery>>,
     Json(heartbeat): Json<HeartbeatRequest>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
-    match discovery.update_heartbeat(&heartbeat.from.to_string()).await {
+    match discovery
+        .update_heartbeat(&heartbeat.from.to_string())
+        .await
+    {
         Ok(_) => Ok(ApiResponse::success("Heartbeat received".to_string())),
-        Err(e) => Ok(ApiResponse::error(ApiError::new("CLUSTER_ERROR",
-            &format!("Failed to process heartbeat: {}", e)
+        Err(e) => Ok(ApiResponse::error(ApiError::new(
+            "CLUSTER_ERROR",
+            &format!("Failed to process heartbeat: {}", e),
         ))),
     }
 }

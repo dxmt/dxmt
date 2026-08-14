@@ -195,7 +195,9 @@ impl ServerHealth {
 
     /// Start tracking a search operation
     pub fn start_search(&self) -> OperationGuard {
-        self.metrics.ongoing_searches.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .ongoing_searches
+            .fetch_add(1, Ordering::Relaxed);
         OperationGuard {
             metrics: Arc::clone(&self.metrics),
             op_type: OperationType::Search,
@@ -213,7 +215,9 @@ impl ServerHealth {
 
     /// Start tracking a table operation
     pub fn start_table_op(&self) -> OperationGuard {
-        self.metrics.ongoing_table_ops.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .ongoing_table_ops
+            .fetch_add(1, Ordering::Relaxed);
         OperationGuard {
             metrics: Arc::clone(&self.metrics),
             op_type: OperationType::TableOp,
@@ -286,17 +290,23 @@ impl Drop for OperationGuard {
                 self.metrics.ongoing_inserts.fetch_sub(1, Ordering::Relaxed);
             }
             OperationType::Search => {
-                self.metrics.ongoing_searches.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .ongoing_searches
+                    .fetch_sub(1, Ordering::Relaxed);
             }
             OperationType::Delete => {
                 self.metrics.ongoing_deletes.fetch_sub(1, Ordering::Relaxed);
             }
             OperationType::TableOp => {
-                self.metrics.ongoing_table_ops.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .ongoing_table_ops
+                    .fetch_sub(1, Ordering::Relaxed);
             }
         }
         // Increment total operations counter
-        self.metrics.total_operations.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .total_operations
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -326,7 +336,10 @@ mod tests {
         // Add some operations
         let _guards: Vec<_> = (0..60).map(|_| health.start_insert()).collect();
         let state = health.current_state().await;
-        assert!(matches!(state, HealthState::Degraded | HealthState::Overloaded));
+        assert!(matches!(
+            state,
+            HealthState::Degraded | HealthState::Overloaded
+        ));
 
         // Drop guards
         drop(_guards);

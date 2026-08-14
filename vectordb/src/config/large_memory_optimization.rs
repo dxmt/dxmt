@@ -6,42 +6,40 @@ pub fn get_large_memory_cache_config(totalmemorygb: f64) -> CacheConfig {
     let config = if totalmemorygb >= 128.0 {
         // Ultra-high memory systems (128GB+)
         CacheConfig {
-            max_size_mb: 20000,  // 20GB cache
-            ttl_seconds: 7200,   // 2 hours TTL
+            max_size_mb: 20000, // 20GB cache
+            ttl_seconds: 7200,  // 2 hours TTL
             eviction_policy: "lru".to_string(),
         }
     } else if totalmemorygb >= 64.0 {
         // High memory systems (64GB+)
         CacheConfig {
-            max_size_mb: 10000,  // 10GB cache
-            ttl_seconds: 3600,   // 1 hour TTL
+            max_size_mb: 10000, // 10GB cache
+            ttl_seconds: 3600,  // 1 hour TTL
             eviction_policy: "lru".to_string(),
         }
     } else if totalmemorygb >= 32.0 {
         // Medium-high memory systems (32GB+)
         CacheConfig {
-            max_size_mb: 5000,   // 5GB cache
-            ttl_seconds: 1800,   // 30 minutes TTL
+            max_size_mb: 5000, // 5GB cache
+            ttl_seconds: 1800, // 30 minutes TTL
             eviction_policy: "lru".to_string(),
         }
     } else {
         // Standard configuration for smaller systems
         CacheConfig {
-            max_size_mb: 1000,   // 1GB cache
-            ttl_seconds: 600,    // 10 minutes TTL
+            max_size_mb: 1000, // 1GB cache
+            ttl_seconds: 600,  // 10 minutes TTL
             eviction_policy: "lru".to_string(),
         }
     };
 
     info!(
         "Cache configured for {:.2}GB system: max_size_mb={}, ttl_seconds={}",
-        totalmemorygb,
-        config.max_size_mb,
-        config.ttl_seconds
+        totalmemorygb, config.max_size_mb, config.ttl_seconds
     );
 
     config
-    }
+}
 
 /// Memory pressure thresholds optimized for system size
 pub fn get_optimized_memory_thresholds(totalmemorygb: f64) -> crate::Result<(f64, f64, f64)> {
@@ -64,7 +62,7 @@ pub fn get_optimized_memory_thresholds(totalmemorygb: f64) -> crate::Result<(f64
     );
 
     Ok((low, medium, high))
-    }
+}
 
 /// Batch processing configuration based on available memory
 pub fn get_optimized_batch_config(cachememorygb: f64) -> BatchConfig {
@@ -112,7 +110,7 @@ pub fn get_optimized_batch_config(cachememorygb: f64) -> BatchConfig {
     );
 
     config
-    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BatchConfig {

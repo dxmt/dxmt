@@ -1,4 +1,3 @@
-
 pub mod cpu_affinity;
 pub mod cpu_detection;
 pub mod memory_tracking;
@@ -7,27 +6,32 @@ pub mod safety_checks;
 /// 验证表名是否有效
 pub fn validate_table_name(name: &str) -> crate::Result<()> {
     if name.is_empty() {
-        return Err(crate::Error::InvalidInput("Table name cannot be empty".to_string()));
+        return Err(crate::Error::InvalidInput(
+            "Table name cannot be empty".to_string(),
+        ));
     }
 
     if name.len() > 63 {
         return Err(crate::Error::InvalidInput(
-            "Table name too long (max 63 characters)".to_string()
+            "Table name too long (max 63 characters)".to_string(),
         ));
     }
 
     // 表名必须以字母开头，只能包含字母、数字和下划线
-    let first_char = name.chars().next().ok_or_else(|| crate::Error::InvalidInput("Empty table name".to_string()))?;
+    let first_char = name
+        .chars()
+        .next()
+        .ok_or_else(|| crate::Error::InvalidInput("Empty table name".to_string()))?;
     if !first_char.is_ascii_alphabetic() {
         return Err(crate::Error::InvalidInput(
-            "Table name must start with a letter".to_string()
+            "Table name must start with a letter".to_string(),
         ));
     }
 
     for ch in name.chars() {
         if !ch.is_ascii_alphanumeric() && ch != '_' {
             return Err(crate::Error::InvalidInput(
-                "Table name can only contain letters, numbers, and underscores".to_string()
+                "Table name can only contain letters, numbers, and underscores".to_string(),
             ));
         }
     }
@@ -38,12 +42,14 @@ pub fn validate_table_name(name: &str) -> crate::Result<()> {
 /// 验证记录ID是否有效
 pub fn validate_record_id(id: &str) -> crate::Result<()> {
     if id.is_empty() {
-        return Err(crate::Error::InvalidInput("Record ID cannot be empty".to_string()));
+        return Err(crate::Error::InvalidInput(
+            "Record ID cannot be empty".to_string(),
+        ));
     }
 
     if id.len() > 255 {
         return Err(crate::Error::InvalidInput(
-            "Record ID too long (max 255 characters)".to_string()
+            "Record ID too long (max 255 characters)".to_string(),
         ));
     }
 
@@ -51,7 +57,7 @@ pub fn validate_record_id(id: &str) -> crate::Result<()> {
     for ch in id.chars() {
         if ch.is_control() {
             return Err(crate::Error::InvalidInput(
-                "Record ID cannot contain control characters".to_string()
+                "Record ID cannot contain control characters".to_string(),
             ));
         }
     }

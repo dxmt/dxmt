@@ -11,7 +11,6 @@
 // below have no callers. They are not dead — they are gated.
 #![allow(dead_code)]
 
-
 #[cfg(feature = "gpu")]
 use dxmt_vectordb::acceleration::{GpuDistanceCalculator, GpuDistanceConfig};
 
@@ -26,35 +25,29 @@ fn generate_vectors(rng: &mut SmallRng, count: usize, dim: usize) -> Vec<Vec<f32
         .collect()
 }
 
-fn compute_recall(
-    results: &[(String, f32)],
-    ground_truth: &[usize],
-    k: usize,
-) -> f64 {
+fn compute_recall(results: &[(String, f32)], ground_truth: &[usize], k: usize) -> f64 {
     let result_ids: std::collections::HashSet<usize> = results
         .iter()
         .filter_map(|(id, _)| id.strip_prefix("vec_").and_then(|s| s.parse().ok()))
         .collect();
-    let truth_set: std::collections::HashSet<usize> = ground_truth
-        .iter()
-        .take(k)
-        .cloned()
-        .collect();
+    let truth_set: std::collections::HashSet<usize> =
+        ground_truth.iter().take(k).cloned().collect();
     let intersection = result_ids.intersection(&truth_set).count();
     intersection as f64 / k as f64
 }
 
 /// Compute exact nearest neighbors (brute-force CPU reference)
-fn compute_ground_truth(
-    query: &[f32],
-    train_vectors: &[Vec<f32>],
-    k: usize,
-) -> Vec<usize> {
+fn compute_ground_truth(query: &[f32], train_vectors: &[Vec<f32>], k: usize) -> Vec<usize> {
     let mut distances: Vec<(usize, f32)> = train_vectors
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let dist: f32 = query.iter().zip(v.iter()).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+            let dist: f32 = query
+                .iter()
+                .zip(v.iter())
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
             (i, dist)
         })
         .collect();
@@ -76,19 +69,28 @@ async fn run_benchmark(
     let queries = generate_vectors(&mut rng, num_queries, GIST_DIM);
 
     println!("\n--- {} ---", label);
-    println!("  Dataset: {} vectors × {} dims, {} queries, k={}", train_size, GIST_DIM, num_queries, k);
+    println!(
+        "  Dataset: {} vectors × {} dims, {} queries, k={}",
+        train_size, GIST_DIM, num_queries, k
+    );
 
     // Build GPU index
     let mut gpu_index = BruteForceIndex::new(DistanceMetric::Euclidean);
     gpu_index.set_gpu_calculator(gpu_calc);
     for (i, v) in train_vectors.iter().enumerate() {
-        gpu_index.add(format!("vec_{}", i), v.clone()).await.unwrap();
+        gpu_index
+            .add(format!("vec_{}", i), v.clone())
+            .await
+            .unwrap();
     }
 
     // Build CPU index
     let mut cpu_index = BruteForceIndex::new(DistanceMetric::Euclidean);
     for (i, v) in train_vectors.iter().enumerate() {
-        cpu_index.add(format!("vec_{}", i), v.clone()).await.unwrap();
+        cpu_index
+            .add(format!("vec_{}", i), v.clone())
+            .await
+            .unwrap();
     }
 
     // Warm-up (1 query each)
@@ -130,8 +132,14 @@ async fn run_benchmark(
 
     let speedup = gpu_qps / cpu_qps;
 
-    println!("  GPU: {:.1} QPS, {:.2} ms/query, recall@{}: {:.4}", gpu_qps, gpu_latency_ms, k, gpu_recall);
-    println!("  CPU: {:.1} QPS, {:.2} ms/query, recall@{}: {:.4}", cpu_qps, cpu_latency_ms, k, cpu_recall);
+    println!(
+        "  GPU: {:.1} QPS, {:.2} ms/query, recall@{}: {:.4}",
+        gpu_qps, gpu_latency_ms, k, gpu_recall
+    );
+    println!(
+        "  CPU: {:.1} QPS, {:.2} ms/query, recall@{}: {:.4}",
+        cpu_qps, cpu_latency_ms, k, cpu_recall
+    );
     println!("  Speedup: {:.2}x", speedup);
 }
 
@@ -182,26 +190,38 @@ async fn test_gist_gpu_correctness() {
 
     let calc = match GpuDistanceCalculator::try_new(config) {
         Some(c) => Arc::new(c),
-        None => { println!("No GPU"); return; }
+        None => {
+            println!("No GPU");
+            return;
+        }
     };
 
     let mut rng = SmallRng::seed_from_u64(123);
     let n = 2000;
     let k = 10;
     let train_vectors = generate_vectors(&mut rng, n, GIST_DIM);
-    let query = generate_vectors(&mut rng, 1, GIST_DIM).into_iter().next().unwrap();
+    let query = generate_vectors(&mut rng, 1, GIST_DIM)
+        .into_iter()
+        .next()
+        .unwrap();
 
     // Build GPU index
     let mut gpu_index = BruteForceIndex::new(DistanceMetric::Euclidean);
     gpu_index.set_gpu_calculator(calc);
     for (i, v) in train_vectors.iter().enumerate() {
-        gpu_index.add(format!("vec_{}", i), v.clone()).await.unwrap();
+        gpu_index
+            .add(format!("vec_{}", i), v.clone())
+            .await
+            .unwrap();
     }
 
     // Build CPU index
     let mut cpu_index = BruteForceIndex::new(DistanceMetric::Euclidean);
     for (i, v) in train_vectors.iter().enumerate() {
-        cpu_index.add(format!("vec_{}", i), v.clone()).await.unwrap();
+        cpu_index
+            .add(format!("vec_{}", i), v.clone())
+            .await
+            .unwrap();
     }
 
     let gpu_results = gpu_index.search(&query, k).await.unwrap();
@@ -214,13 +234,32 @@ async fn test_gist_gpu_correctness() {
     println!("GIST-960 correctness test (n={}, k={}):", n, k);
     println!("  GPU recall@{}: {:.4}", k, gpu_recall);
     println!("  CPU recall@{}: {:.4}", k, cpu_recall);
-    println!("  GPU top-3: {:?}", &gpu_results[..3.min(gpu_results.len())]);
-    println!("  CPU top-3: {:?}", &cpu_results[..3.min(cpu_results.len())]);
+    println!(
+        "  GPU top-3: {:?}",
+        &gpu_results[..3.min(gpu_results.len())]
+    );
+    println!(
+        "  CPU top-3: {:?}",
+        &cpu_results[..3.min(cpu_results.len())]
+    );
 
-    assert!(gpu_recall >= 0.9, "GPU recall@{} too low: {}", k, gpu_recall);
-    assert!(cpu_recall >= 0.9, "CPU recall@{} too low: {}", k, cpu_recall);
-    assert_eq!(gpu_results[0].0, cpu_results[0].0,
-        "Nearest neighbor mismatch: GPU={} vs CPU={}", gpu_results[0].0, cpu_results[0].0);
+    assert!(
+        gpu_recall >= 0.9,
+        "GPU recall@{} too low: {}",
+        k,
+        gpu_recall
+    );
+    assert!(
+        cpu_recall >= 0.9,
+        "CPU recall@{} too low: {}",
+        k,
+        cpu_recall
+    );
+    assert_eq!(
+        gpu_results[0].0, cpu_results[0].0,
+        "Nearest neighbor mismatch: GPU={} vs CPU={}",
+        gpu_results[0].0, cpu_results[0].0
+    );
 }
 
 /// Test: pre-load vectors to GPU, only upload query per search
@@ -230,10 +269,16 @@ async fn test_gist_gpu_correctness() {
 async fn benchmark_gist_persistent_gpu() {
     use dxmt_vectordb::types::vector::DistanceMetric;
 
-    let config = GpuDistanceConfig { batch_threshold: 1, ..Default::default() };
+    let config = GpuDistanceConfig {
+        batch_threshold: 1,
+        ..Default::default()
+    };
     let calc = match GpuDistanceCalculator::try_new(config) {
         Some(c) => c,
-        None => { println!("No GPU"); return; }
+        None => {
+            println!("No GPU");
+            return;
+        }
     };
 
     let mut rng = SmallRng::seed_from_u64(99);
@@ -244,10 +289,16 @@ async fn benchmark_gist_persistent_gpu() {
     let queries = generate_vectors(&mut rng, num_queries, GIST_DIM);
 
     println!("\n--- Persistent GPU Buffer Test ---");
-    println!("  {} vectors × {} dims, {} queries, k={}", train_size, GIST_DIM, num_queries, k);
+    println!(
+        "  {} vectors × {} dims, {} queries, k={}",
+        train_size, GIST_DIM, num_queries, k
+    );
 
     // Pre-flatten all train vectors into one contiguous buffer
-    let vectors_flat: Vec<f32> = train_vectors.iter().flat_map(|v| v.iter().copied()).collect();
+    let vectors_flat: Vec<f32> = train_vectors
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .collect();
 
     // Time: upload vectors once to GPU
     let upload_start = Instant::now();
@@ -255,34 +306,46 @@ async fn benchmark_gist_persistent_gpu() {
     // This is Q queries × N vectors in one kernel launch (no re-upload)
     let all_queries_flat: Vec<f32> = queries.iter().flat_map(|q| q.iter().copied()).collect();
     let _ = all_queries_flat; // suppress unused warning
-    
+
     // Batch all queries into a single GPU call (upload vectors ONCE)
     let batch_gpu_start = Instant::now();
-    let all_results = calc.batch_distances(
-        &DistanceMetric::Euclidean,
-        &queries,
-        &train_vectors,
-    ).unwrap();
+    let all_results = calc
+        .batch_distances(&DistanceMetric::Euclidean, &queries, &train_vectors)
+        .unwrap();
     let batch_gpu_elapsed = batch_gpu_start.elapsed();
 
     let batch_qps = num_queries as f64 / batch_gpu_elapsed.as_secs_f64();
     let batch_latency_ms = batch_gpu_elapsed.as_secs_f64() * 1000.0 / num_queries as f64;
 
     println!("  Batched GPU (vectors uploaded once for all queries):");
-    println!("    Total time: {:.2} ms for {} queries", batch_gpu_elapsed.as_millis(), num_queries);
+    println!(
+        "    Total time: {:.2} ms for {} queries",
+        batch_gpu_elapsed.as_millis(),
+        num_queries
+    );
     println!("    Effective QPS: {:.1}", batch_qps);
     println!("    Effective latency: {:.2} ms/query", batch_latency_ms);
-    
+
     // Compute recall for first query
     let gt = compute_ground_truth(&queries[0], &train_vectors, k);
     // Extract top-k from batched results
-    let mut dist_with_idx: Vec<(usize, f32)> = all_results[0].iter().enumerate().map(|(i, &d)| (i, d)).collect();
+    let mut dist_with_idx: Vec<(usize, f32)> = all_results[0]
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| (i, d))
+        .collect();
     dist_with_idx.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let gpu_top_k: Vec<String> = dist_with_idx[..k].iter().map(|(i, _)| format!("vec_{}", i)).collect();
-    let fake_results: Vec<(String, f32)> = dist_with_idx[..k].iter().map(|(i, d)| (format!("vec_{}", i), *d)).collect();
+    let gpu_top_k: Vec<String> = dist_with_idx[..k]
+        .iter()
+        .map(|(i, _)| format!("vec_{}", i))
+        .collect();
+    let fake_results: Vec<(String, f32)> = dist_with_idx[..k]
+        .iter()
+        .map(|(i, d)| (format!("vec_{}", i), *d))
+        .collect();
     let recall = compute_recall(&fake_results, &gt, k);
     println!("    Recall@{}: {:.4}", k, recall);
-    
+
     let _ = gpu_top_k;
     let _ = upload_start;
     let _ = vectors_flat;

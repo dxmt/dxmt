@@ -3,11 +3,11 @@
 mod fixtures;
 
 use dxmt_vectordb::benchmarks::datasets::{
-    Dataset, DatasetRegistry, DatasetCache, SizeCategory, DimensionCategory,
-    load_fvecs, write_fvecs,
+    load_fvecs, write_fvecs, Dataset, DatasetCache, DatasetRegistry, DimensionCategory,
+    SizeCategory,
 };
-use tempfile::{TempDir, NamedTempFile};
 use std::fs;
+use tempfile::{NamedTempFile, TempDir};
 
 #[test]
 fn test_synthetic_dataset() {
@@ -37,12 +37,20 @@ fn test_synthetic_dataset_vectors_normalized() {
     // Check that vectors are normalized (L2 norm ≈ 1.0)
     for vec in &dataset.train_vectors {
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "Vector not normalized: norm = {}", norm);
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "Vector not normalized: norm = {}",
+            norm
+        );
     }
 
     for vec in &dataset.test_queries {
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "Vector not normalized: norm = {}", norm);
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "Vector not normalized: norm = {}",
+            norm
+        );
     }
 }
 
@@ -188,7 +196,9 @@ fn test_cache_list() {
     for i in 0..3 {
         let test_file = data_dir.join(format!("test{}.txt", i));
         fs::write(&test_file, format!("Test data {}", i)).unwrap();
-        cache.cache_file(&test_file, &format!("testlist{}", i)).unwrap();
+        cache
+            .cache_file(&test_file, &format!("testlist{}", i))
+            .unwrap();
     }
 
     let cached = cache.list_cached().unwrap();
@@ -218,7 +228,10 @@ fn test_cache_stats() {
     // Check stats
     let stats = cache.stats().unwrap();
     assert_eq!(stats.file_count, 1, "Should have exactly 1 cached file");
-    assert!(stats.total_size_bytes > 0, "Cache should have non-zero size");
+    assert!(
+        stats.total_size_bytes > 0,
+        "Cache should have non-zero size"
+    );
 
     println!("Cache size: {}", stats.format_size());
 }

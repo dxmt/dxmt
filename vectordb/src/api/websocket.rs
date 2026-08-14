@@ -11,9 +11,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::{
-    api::handlers::AppState,
-};
+use crate::api::handlers::AppState;
 
 /// WebSocket message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +34,7 @@ pub enum WsMessage {
         vector: Vec<f32>,
         k: usize,
     },
-    
+
     // Server -> Client
     Inserted {
         table: String,
@@ -78,11 +76,11 @@ pub async fn websocket_handler(
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (sender, mut receiver) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(100);
-    
+
     // Clone sender for the outbound task
     let sender_clone = Arc::new(tokio::sync::Mutex::new(sender));
     let sender_for_task = sender_clone.clone();
-    
+
     // Spawn task to handle outbound messages
     let tx_task = tokio::spawn(async move {
         let sender = sender_for_task;
@@ -103,9 +101,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Ok(Message::Text(text)) => {
                     if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
                         if let Err(e) = handle_message(ws_msg, &state, &tx).await {
-                            let _ = tx.send(WsMessage::Error {
-                                message: e.to_string(),
-                            }).await;
+                            let _ = tx
+                                .send(WsMessage::Error {
+                                    message: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -143,7 +143,10 @@ async fn handle_message(
     tx: &tokio::sync::mpsc::Sender<WsMessage>,
 ) -> crate::Result<()> {
     match msg {
-        WsMessage::Subscribe { table, filters: _filters } => {
+        WsMessage::Subscribe {
+            table,
+            filters: _filters,
+        } => {
             // For now, just acknowledge subscription
             info!("Client subscribed to table: {}", table);
             Ok(())
@@ -152,12 +155,8 @@ async fn handle_message(
             info!("Client unsubscribed from table: {}", table);
             Ok(())
         }
-        WsMessage::Insert { table, records } => {
-            handle_insert(table, records, state, tx).await
-        }
-        WsMessage::Search { table, vector, k } => {
-            handle_search(table, vector, k, state, tx).await
-        }
+        WsMessage::Insert { table, records } => handle_insert(table, records, state, tx).await,
+        WsMessage::Search { table, vector, k } => handle_search(table, vector, k, state, tx).await,
         _ => Ok(()),
     }
 }
@@ -170,26 +169,29 @@ async fn handle_insert(
     tx: &tokio::sync::mpsc::Sender<WsMessage>,
 ) -> crate::Result<()> {
     let table = state.storage.get_table(&table_name).await?;
-    
-    let requests: Vec<_> = records.into_iter().map(|r| {
-        crate::types::record::CreateRecordRequest {
+
+    let requests: Vec<_> = records
+        .into_iter()
+        .map(|r| crate::types::record::CreateRecordRequest {
             id: r.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             vector: r.vector,
             sparse_vector: None,
             payload: r.payload,
             named_vectors: None,
-        }
-    }).collect();
+        })
+        .collect();
 
     // Use insert_records method that exists
     let inserted_records = state.storage.insert_records(&table.name, requests).await?;
-    
+
     // Send confirmation for each inserted record
     for record in inserted_records {
-        let _ = tx.send(WsMessage::Inserted {
-            table: table_name.clone(),
-            record_id: record.id,
-        }).await;
+        let _ = tx
+            .send(WsMessage::Inserted {
+                table: table_name.clone(),
+                record_id: record.id,
+            })
+            .await;
     }
 
     Ok(())
@@ -204,19 +206,23 @@ async fn handle_search(
     tx: &tokio::sync::mpsc::Sender<WsMessage>,
 ) -> crate::Result<()> {
     let table = state.storage.get_table(&table_name).await?;
-    
+
     if vector.len() != table.dimension {
-        return Err(crate::Error::Internal("Vector dimension mismatch".to_string()));
+        return Err(crate::Error::Internal(
+            "Vector dimension mismatch".to_string(),
+        ));
     }
 
     // For now, return empty results as the search method doesn't exist in storage
     // This would need to be implemented based on actual storage interface
     let results = vec![];
 
-    let _ = tx.send(WsMessage::SearchResult {
-        table: table_name,
-        results,
-    }).await;
+    let _ = tx
+        .send(WsMessage::SearchResult {
+            table: table_name,
+            results,
+        })
+        .await;
 
     Ok(())
 }
@@ -262,16 +268,11 @@ impl WebSocketManager {
 
 /// Create WebSocket router
 pub fn create_websocket_router() -> axum::Router<AppState> {
-    axum::Router::new()
-        .route("/ws", axum::routing::get(websocket_handler))
+    axum::Router::new().route("/ws", axum::routing::get(websocket_handler))
 }
 
 /// Notification system for real-time updates
-pub async fn notify_record_inserted(
-    _table_name: &str,
-    _record_id: &str,
-    _interval_ms: u64,
-) {
+pub async fn notify_record_inserted(_table_name: &str, _record_id: &str, _interval_ms: u64) {
     // Placeholder for notification system
     // This would integrate with the WebSocket manager to broadcast updates
 }

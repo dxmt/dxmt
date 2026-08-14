@@ -25,7 +25,9 @@ impl CompressionManager {
         encoder
             .write_all(data)
             .map_err(|e| crate::Error::Storage(format!("Compression failed: {}", e)))?;
-        encoder.finish().map_err(|e| crate::Error::Storage(format!("Compression finish failed: {}", e)))
+        encoder
+            .finish()
+            .map_err(|e| crate::Error::Storage(format!("Compression finish failed: {}", e)))
     }
 
     pub fn decompress(&self, data: &[u8]) -> crate::Result<Vec<u8>> {
@@ -33,8 +35,7 @@ impl CompressionManager {
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
-            .map_err(|e| crate::Error::Storage(format!("Decompression failed: {}", e))
-            )?;
+            .map_err(|e| crate::Error::Storage(format!("Decompression failed: {}", e)))?;
         Ok(decompressed)
     }
 
@@ -44,8 +45,7 @@ impl CompressionManager {
     }
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub enum CompressionLevel {
     None,
     Fast,
@@ -54,10 +54,9 @@ pub enum CompressionLevel {
     Best,
 }
 
-
 /// Vector-specific compression algorithms
 pub mod vector_compression {
-    
+
     use crate::types::vector::DenseVector;
 
     /// Scalar quantization for float vectors
@@ -104,7 +103,7 @@ pub mod vector_compression {
                 .iter()
                 .map(|&value| {
                     let normalized = (value - self._min) / range;
-                    
+
                     (normalized * scale).round() as u8
                 })
                 .collect();
@@ -112,9 +111,15 @@ pub mod vector_compression {
             Ok(compressed)
         }
 
-        pub fn decompress(&self, compressed: &[u8], dimension: usize) -> crate::Result<DenseVector> {
+        pub fn decompress(
+            &self,
+            compressed: &[u8],
+            dimension: usize,
+        ) -> crate::Result<DenseVector> {
             if compressed.len() != dimension {
-                return Err(crate::Error::Storage("Compressed vector has wrong dimension".to_string()));
+                return Err(crate::Error::Storage(
+                    "Compressed vector has wrong dimension".to_string(),
+                ));
             }
 
             let scale = (1 << self.bits) as f32 - 1.0;
@@ -208,9 +213,12 @@ mod tests {
 
         let compressed = manager.compress(data)?;
         // Compression should work well on repetitive data
-        assert!(compressed.len() < data.len(),
+        assert!(
+            compressed.len() < data.len(),
             "Compressed size {} should be less than original size {}",
-            compressed.len(), data.len());
+            compressed.len(),
+            data.len()
+        );
 
         let decompressed = manager.decompress(&compressed)?;
         assert_eq!(decompressed, data);
@@ -222,10 +230,7 @@ mod tests {
         use crate::types::vector::DenseVector;
 
         let mut quantizer = vector_compression::ScalarQuantizer::new(8);
-        let vectors: Vec<DenseVector> = vec![
-            vec![1.0, 2.0, 3.0, 4.0],
-            vec![5.0, 6.0, 7.0, 8.0],
-        ];
+        let vectors: Vec<DenseVector> = vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]];
 
         quantizer.fit(&vectors);
 

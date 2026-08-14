@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
-    Json,
     http::StatusCode,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -9,9 +9,12 @@ use tokio::sync::Semaphore;
 use tracing::instrument;
 
 use crate::{
-    storage::IntelligentIndexedStorage,
-    types::{record::{CreateRecordRequest, SearchQuery}, vector::RecordId},
     api::{handlers::AppState, response::ApiResponse},
+    storage::IntelligentIndexedStorage,
+    types::{
+        record::{CreateRecordRequest, SearchQuery},
+        vector::RecordId,
+    },
 };
 
 /// 批量操作配置
@@ -131,10 +134,11 @@ impl BatchProcessor {
     pub async fn batch_insert(
         &self,
         tablename: String,
-        request: BatchInsertRequest) -> crate::Result<BatchOperationResult> {
+        request: BatchInsertRequest,
+    ) -> crate::Result<BatchOperationResult> {
         let config = request.config.unwrap_or_default();
         let start_time = std::time::Instant::now();
-        
+
         let mut success_count = 0;
         let mut failure_count = 0;
         let mut errors = Vec::new();
@@ -145,7 +149,8 @@ impl BatchProcessor {
         };
 
         // 将记录分批处理
-        let chunks: Vec<_> = request.records
+        let chunks: Vec<_> = request
+            .records
             .chunks(config.batchsize)
             .map(|chunk| chunk.to_vec())
             .collect();
@@ -156,11 +161,14 @@ impl BatchProcessor {
             let storage = self.storage.clone();
             let table = tablename.clone();
             let semaphore = self.semaphore.clone();
-            
+
             futures.push(async move {
-                let _permit = semaphore.acquire().await.map_err(|e| crate::Error::Internal(e.to_string()))?;
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| crate::Error::Internal(e.to_string()))?;
                 let mut batch_results = Vec::new();
-                
+
                 // Use batch insert for each chunk
                 match storage.insert_records(&table, chunk.clone()).await {
                     Ok(records) => {
@@ -181,14 +189,14 @@ impl BatchProcessor {
                         }
                     }
                 }
-                
+
                 Ok(batch_results)
             });
         }
 
         // 收集所有结果
         let batch_results = futures::future::join_all(futures).await;
-        
+
         for batch_result in batch_results {
             match batch_result {
                 Ok(items) => {
@@ -238,10 +246,11 @@ impl BatchProcessor {
     pub async fn batch_update(
         &self,
         tablename: String,
-        request: BatchUpdateRequest) -> crate::Result<BatchOperationResult> {
+        request: BatchUpdateRequest,
+    ) -> crate::Result<BatchOperationResult> {
         let config = request.config.unwrap_or_default();
         let start_time = std::time::Instant::now();
-        
+
         let mut success_count = 0;
         let mut failure_count = 0;
         let mut errors = Vec::new();
@@ -257,13 +266,13 @@ impl BatchProcessor {
             let storage = self.storage.clone();
             let table = tablename.clone();
             let semaphore = self.semaphore.clone();
-            
+
             updatefutures.push(async move {
                 let _permit = match semaphore.acquire().await {
                     Ok(p) => p,
                     Err(e) => return (idx, Err((None, crate::Error::Internal(e.to_string())))),
                 };
-                
+
                 let update_request = CreateRecordRequest {
                     id: update.id.clone(),
                     vector: update.vector.unwrap_or_default(),
@@ -271,8 +280,11 @@ impl BatchProcessor {
                     payload: update.payload,
                     named_vectors: None,
                 };
-                
-                match storage.update_record(&table, &update.id, update_request).await {
+
+                match storage
+                    .update_record(&table, &update.id, update_request)
+                    .await
+                {
                     Ok(_) => (idx, Ok(update.id)),
                     Err(e) => (idx, Err((Some(update.id), e))),
                 }
@@ -281,7 +293,7 @@ impl BatchProcessor {
 
         let update_results = futures::future::join_all(updatefutures).await;
         let total_count = update_results.len();
-        
+
         for (idx, result) in update_results {
             match result {
                 Ok(id) => {
@@ -322,12 +334,17 @@ impl BatchProcessor {
     pub async fn batch_delete(
         &self,
         tablename: String,
-        request: BatchDeleteRequest) -> crate::Result<BatchOperationResult> {
+        request: BatchDeleteRequest,
+    ) -> crate::Result<BatchOperationResult> {
         let _config = request.config.unwrap_or_default();
         let start_time = std::time::Instant::now();
-        
+
         // 使用存储层的批量删除方法
-        match self.storage.delete_records(&tablename, request.ids.clone()).await {
+        match self
+            .storage
+            .delete_records(&tablename, request.ids.clone())
+            .await
+        {
             Ok(_) => {
                 // Assume all were deleted successfully
                 Ok(BatchOperationResult {
@@ -348,10 +365,11 @@ impl BatchProcessor {
     pub async fn batch_search(
         &self,
         tablename: String,
-        request: BatchSearchRequest) -> crate::Result<BatchOperationResult> {
+        request: BatchSearchRequest,
+    ) -> crate::Result<BatchOperationResult> {
         let _config = request.config.unwrap_or_default();
         let start_time = std::time::Instant::now();
-        
+
         let mut success_count = 0;
         let mut failure_count = 0;
         let mut errors = Vec::new();
@@ -363,16 +381,17 @@ impl BatchProcessor {
             let storage = self.storage.clone();
             let table = tablename.clone();
             let semaphore = self.semaphore.clone();
-            
+
             searchfutures.push(async move {
                 let _permit = match semaphore.acquire().await {
                     Ok(p) => p,
                     Err(e) => return (idx, Err(crate::Error::Internal(e.to_string()))),
                 };
-                
+
                 match storage.search(&table, query).await {
                     Ok(search_result) => {
-                        let hits: Vec<SearchHit> = search_result.hits
+                        let hits: Vec<SearchHit> = search_result
+                            .hits
                             .into_iter()
                             .map(|hit| SearchHit {
                                 id: hit.id,
@@ -389,7 +408,7 @@ impl BatchProcessor {
 
         let search_results = futures::future::join_all(searchfutures).await;
         let total_count = search_results.len();
-        
+
         for (idx, result) in search_results {
             match result {
                 Ok(hits) => {
@@ -438,7 +457,7 @@ pub async fn batch_insert_records(
         state.storage.clone(),
         request.config.as_ref().map(|c| c.concurrency).unwrap_or(4),
     );
-    
+
     match processor.batch_insert(table_name, request).await {
         Ok(result) => Ok(ApiResponse::success(result)),
         Err(e) => Ok(ApiResponse::error(e.into())),
@@ -455,7 +474,7 @@ pub async fn batch_update_records(
         state.storage.clone(),
         request.config.as_ref().map(|c| c.concurrency).unwrap_or(4),
     );
-    
+
     match processor.batch_update(table_name, request).await {
         Ok(result) => Ok(ApiResponse::success(result)),
         Err(e) => Ok(ApiResponse::error(e.into())),
@@ -472,7 +491,7 @@ pub async fn batch_delete_records(
         state.storage.clone(),
         request.config.as_ref().map(|c| c.concurrency).unwrap_or(4),
     );
-    
+
     match processor.batch_delete(table_name, request).await {
         Ok(result) => Ok(ApiResponse::success(result)),
         Err(e) => Ok(ApiResponse::error(e.into())),
@@ -489,7 +508,7 @@ pub async fn batch_search_vectors(
         state.storage.clone(),
         request.config.as_ref().map(|c| c.concurrency).unwrap_or(4),
     );
-    
+
     match processor.batch_search(table_name, request).await {
         Ok(result) => Ok(ApiResponse::success(result)),
         Err(e) => Ok(ApiResponse::error(e.into())),
@@ -499,7 +518,6 @@ pub async fn batch_search_vectors(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[tokio::test]
     async fn test_batch_config_default() {

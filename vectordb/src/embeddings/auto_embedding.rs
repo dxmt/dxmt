@@ -6,13 +6,13 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
 
-use crate::embeddings::compat::{EmbeddingFunction, EmbeddingError};
-use crate::embeddings::openai::{OpenAIEmbedding, OpenAIConfig, OpenAIModel};
-use crate::embeddings::cohere::{CohereEmbedding, CohereConfig, CohereModel};
+use crate::embeddings::cohere::{CohereConfig, CohereEmbedding, CohereModel};
+use crate::embeddings::compat::{EmbeddingError, EmbeddingFunction};
+use crate::embeddings::openai::{OpenAIConfig, OpenAIEmbedding, OpenAIModel};
 // Commented out until sentence_transformers module is available
 // use crate::embeddings::sentence_transformers::{
 //     SentenceTransformerEmbedding, SentenceTransformerConfig, SentenceTransformerModel
@@ -66,23 +66,29 @@ pub struct AutoEmbeddingConfig {
 impl Default for AutoEmbeddingConfig {
     fn default() -> Self {
         let mut providers = HashMap::new();
-        
+
         // Default provider configurations
-        providers.insert("openai".to_string(), ProviderConfig::OpenAI {
-            api_key: None,
-            model: OpenAIModel::TextEmbedding3Small,
-        });
-        
-        providers.insert("cohere".to_string(), ProviderConfig::Cohere {
-            api_key: None,
-            model: CohereModel::EmbedEnglishV3,
-        });
-        
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig::OpenAI {
+                api_key: None,
+                model: OpenAIModel::TextEmbedding3Small,
+            },
+        );
+
+        providers.insert(
+            "cohere".to_string(),
+            ProviderConfig::Cohere {
+                api_key: None,
+                model: CohereModel::EmbedEnglishV3,
+            },
+        );
+
         // Commented out until sentence_transformers module is available
         // providers.insert("sentence-transformers".to_string(), ProviderConfig::SentenceTransformers {
         //     model: SentenceTransformerModel::AllMiniLML6V2,
         // });
-        
+
         Self {
             strategy: EmbeddingStrategy::LocalFirst,
             dimension: None,
@@ -134,11 +140,11 @@ impl EmbeddingProvider for OpenAIProvider {
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         self.embedding.embed_documents(texts).await
     }
-    
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
     }
-    
+
     fn is_available(&self) -> bool {
         // Assume available if the struct was created
         true
@@ -156,11 +162,11 @@ impl EmbeddingProvider for CohereProvider {
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         self.embedding.embed_documents(texts).await
     }
-    
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
     }
-    
+
     fn is_available(&self) -> bool {
         // Assume available if the struct was created
         true
@@ -173,17 +179,17 @@ impl EmbeddingProvider for CohereProvider {
 //     embedding: SentenceTransformerEmbedding,
 //     capabilities: ProviderCapabilities,
 // }
-// 
+//
 // #[async_trait]
 // impl EmbeddingProvider for SentenceTransformersProvider {
 //     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
 //         self.embedding.embed_documents(texts).await
 //     }
-//     
+//
 //     fn capabilities(&self) -> ProviderCapabilities {
 //         self.capabilities.clone()
 //     }
-//     
+//
 //     fn is_available(&self) -> bool {
 //         true // Local models are always available
 //     }
@@ -211,12 +217,13 @@ pub(crate) struct EmbeddingMetrics {
 impl AutoEmbedding {
     pub async fn new(config: AutoEmbeddingConfig) -> Result<Self, EmbeddingError> {
         let mut providers: HashMap<String, Arc<dyn EmbeddingProvider>> = HashMap::new();
-        
+
         // Initialize providers based on configuration
         for (name, provider_config) in &config.providers {
             let provider: Arc<dyn EmbeddingProvider> = match provider_config {
                 ProviderConfig::OpenAI { api_key, model } => {
-                    let resolved_key = api_key.clone()
+                    let resolved_key = api_key
+                        .clone()
                         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
                         .unwrap_or_default();
                     let openai_config = OpenAIConfig {
@@ -235,12 +242,16 @@ impl AutoEmbedding {
                         is_local: false,
                         requires_api_key: true,
                     };
-                    
-                    Arc::new(OpenAIProvider { embedding, capabilities })
-                },
-                
+
+                    Arc::new(OpenAIProvider {
+                        embedding,
+                        capabilities,
+                    })
+                }
+
                 ProviderConfig::Cohere { api_key, model } => {
-                    let resolved_key = api_key.clone()
+                    let resolved_key = api_key
+                        .clone()
                         .or_else(|| std::env::var("COHERE_API_KEY").ok())
                         .unwrap_or_default();
                     let cohere_config = CohereConfig {
@@ -259,15 +270,18 @@ impl AutoEmbedding {
                         is_local: false,
                         requires_api_key: true,
                     };
-                    
-                    Arc::new(CohereProvider { embedding, capabilities })
-                },
-                
+
+                    Arc::new(CohereProvider {
+                        embedding,
+                        capabilities,
+                    })
+                }
+
                 // Commented out until sentence_transformers module is available
                 // ProviderConfig::SentenceTransformers { model } => {
                 //     let mut st_config = SentenceTransformerConfig::default();
                 //     st_config.model = model.clone();
-                //     
+                //
                 //     let embedding = SentenceTransformerEmbedding::new(st_config).await?;
                 //     let capabilities = ProviderCapabilities {
                 //         name: name.clone(),
@@ -279,19 +293,18 @@ impl AutoEmbedding {
                 //         is_local: true,
                 //         requires_api_key: false,
                 //     };
-                //     
+                //
                 //     Arc::new(SentenceTransformersProvider { embedding, capabilities })
                 // },
-                
                 _ => continue, // Skip unsupported providers
             };
-            
+
             providers.insert(name.clone(), provider);
         }
-        
+
         let cache_size = std::num::NonZeroUsize::new(config.max_cache_size)
             .unwrap_or(std::num::NonZeroUsize::new(10000).unwrap());
-            
+
         Ok(Self {
             config,
             providers: Arc::new(RwLock::new(providers)),
@@ -299,74 +312,73 @@ impl AutoEmbedding {
             metrics: Arc::new(RwLock::new(EmbeddingMetrics::default())),
         })
     }
-    
+
     async fn select_provider(&self) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
         let providers = self.providers.read().await;
-        
-        let available_providers: Vec<_> = providers.values()
-            .filter(|p| p.is_available())
-            .collect();
-            
+
+        let available_providers: Vec<_> = providers.values().filter(|p| p.is_available()).collect();
+
         if available_providers.is_empty() {
-            return Err(EmbeddingError::ModelNotFound("No available providers".to_string()));
+            return Err(EmbeddingError::ModelNotFound(
+                "No available providers".to_string(),
+            ));
         }
-        
+
         let selected = match &self.config.strategy {
-            EmbeddingStrategy::Fastest => {
-                available_providers.into_iter()
-                    .min_by_key(|p| p.capabilities().latency_ms)
-                    .unwrap()
-            },
-            
-            EmbeddingStrategy::CostOptimized => {
-                available_providers.into_iter()
-                    .min_by(|a, b| {
-                        a.capabilities().cost_per_1k_tokens
-                            .partial_cmp(&b.capabilities().cost_per_1k_tokens)
-                            .unwrap()
-                    })
-                    .unwrap()
-            },
-            
-            EmbeddingStrategy::QualityFirst => {
-                available_providers.into_iter()
-                    .max_by(|a, b| {
-                        a.capabilities().quality_score
-                            .partial_cmp(&b.capabilities().quality_score)
-                            .unwrap()
-                    })
-                    .unwrap()
-            },
-            
-            EmbeddingStrategy::LocalFirst => {
-                available_providers.iter()
-                    .find(|p| p.capabilities().is_local)
-                    .or_else(|| available_providers.first())
-                    .unwrap()
-            },
-            
-            EmbeddingStrategy::Specific(name) => {
-                providers.get(name)
-                    .filter(|p| p.is_available())
-                    .ok_or_else(|| EmbeddingError::ModelNotFound(
-                        format!("Provider {} not available", name)
-                    ))?
-            },
-            
-            EmbeddingStrategy::Custom { priorities, .. } => {
-                priorities.iter()
-                    .find_map(|name| providers.get(name).filter(|p| p.is_available()))
-                    .or_else(|| available_providers.first().copied())
-                    .ok_or_else(|| EmbeddingError::ModelNotFound(
-                        "No providers match custom strategy".to_string()
-                    ))?
-            },
+            EmbeddingStrategy::Fastest => available_providers
+                .into_iter()
+                .min_by_key(|p| p.capabilities().latency_ms)
+                .unwrap(),
+
+            EmbeddingStrategy::CostOptimized => available_providers
+                .into_iter()
+                .min_by(|a, b| {
+                    a.capabilities()
+                        .cost_per_1k_tokens
+                        .partial_cmp(&b.capabilities().cost_per_1k_tokens)
+                        .unwrap()
+                })
+                .unwrap(),
+
+            EmbeddingStrategy::QualityFirst => available_providers
+                .into_iter()
+                .max_by(|a, b| {
+                    a.capabilities()
+                        .quality_score
+                        .partial_cmp(&b.capabilities().quality_score)
+                        .unwrap()
+                })
+                .unwrap(),
+
+            EmbeddingStrategy::LocalFirst => available_providers
+                .iter()
+                .find(|p| p.capabilities().is_local)
+                .or_else(|| available_providers.first())
+                .unwrap(),
+
+            EmbeddingStrategy::Specific(name) => providers
+                .get(name)
+                .filter(|p| p.is_available())
+                .ok_or_else(|| {
+                EmbeddingError::ModelNotFound(format!("Provider {} not available", name))
+            })?,
+
+            EmbeddingStrategy::Custom { priorities, .. } => priorities
+                .iter()
+                .find_map(|name| providers.get(name).filter(|p| p.is_available()))
+                .or_else(|| available_providers.first().copied())
+                .ok_or_else(|| {
+                    EmbeddingError::ModelNotFound("No providers match custom strategy".to_string())
+                })?,
         };
-        
+
         Ok(Arc::clone(selected))
     }
-    
-    pub async fn embed_with_fallback(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    pub async fn embed_with_fallback(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         // Try primary provider
         match self.embed_batch_internal(texts.clone()).await {
             Ok(embeddings) => Ok(embeddings),
@@ -381,21 +393,24 @@ impl AutoEmbedding {
                     }
                 }
                 Err(e)
-            },
+            }
             Err(e) => Err(e),
         }
     }
-    
-    async fn embed_batch_internal(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    async fn embed_batch_internal(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let mut metrics = self.metrics.write().await;
         metrics.total_requests += texts.len() as u64;
-        
+
         // Check cache
         let mut cache = self.cache.write().await;
         let mut cached_results = vec![None; texts.len()];
         let mut uncached_texts = Vec::new();
         let mut uncached_indices = Vec::new();
-        
+
         for (i, text) in texts.iter().enumerate() {
             if let Some(embedding) = cache.get(text) {
                 cached_results[i] = Some(embedding.clone());
@@ -406,40 +421,44 @@ impl AutoEmbedding {
                 metrics.cache_misses += 1;
             }
         }
-        
+
         if uncached_texts.is_empty() {
             return Ok(cached_results.into_iter().map(|r| r.unwrap()).collect());
         }
-        
+
         // Select provider
         let provider = self.select_provider().await?;
         let provider_name = provider.capabilities().name.clone();
-        
+
         // Update metrics
-        *metrics.provider_usage.entry(provider_name.clone()).or_insert(0) += uncached_texts.len() as u64;
-        
+        *metrics
+            .provider_usage
+            .entry(provider_name.clone())
+            .or_insert(0) += uncached_texts.len() as u64;
+
         // Estimate tokens (rough approximation)
-        let estimated_tokens: usize = uncached_texts.iter()
+        let estimated_tokens: usize = uncached_texts
+            .iter()
             .map(|t| t.split_whitespace().count() * 4 / 3)
             .sum();
         metrics.total_tokens += estimated_tokens as u64;
-        
+
         // Calculate cost
         let cost = (estimated_tokens as f32 / 1000.0) * provider.capabilities().cost_per_1k_tokens;
         metrics.total_cost += cost;
-        
+
         // Get embeddings
         let embeddings = provider.embed_batch(uncached_texts.clone()).await?;
-        
+
         // Update cache
         for (text, embedding) in uncached_texts.iter().zip(embeddings.iter()) {
             cache.put(text.clone(), embedding.clone());
         }
-        
+
         // Merge results
         let mut final_results = Vec::with_capacity(texts.len());
         let mut uncached_iter = embeddings.into_iter();
-        
+
         for cached in cached_results {
             if let Some(embedding) = cached {
                 final_results.push(embedding);
@@ -447,14 +466,14 @@ impl AutoEmbedding {
                 final_results.push(uncached_iter.next().unwrap());
             }
         }
-        
+
         Ok(final_results)
     }
-    
+
     pub(crate) async fn get_metrics(&self) -> EmbeddingMetrics {
         self.metrics.read().await.clone()
     }
-    
+
     pub async fn clear_cache(&self) {
         self.cache.write().await.clear();
     }
@@ -465,21 +484,23 @@ impl EmbeddingFunction for AutoEmbedding {
     fn name(&self) -> &str {
         "auto-embedding"
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.config.dimension.unwrap_or(768)
     }
-    
+
     async fn embed(&self, input: &str) -> Result<DenseVector, EmbeddingError> {
         let results = self.embed_with_fallback(vec![input.to_string()]).await?;
-        results.into_iter().next()
+        results
+            .into_iter()
+            .next()
             .ok_or_else(|| EmbeddingError::InternalError("No embedding returned".to_string()))
     }
-    
+
     async fn embed_batch(&self, inputs: &[String]) -> Result<Vec<DenseVector>, EmbeddingError> {
         self.embed_with_fallback(inputs.to_vec()).await
     }
@@ -501,14 +522,14 @@ impl Clone for EmbeddingMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_auto_embedding_creation() {
         let config = AutoEmbeddingConfig::default();
         let auto_embedding = AutoEmbedding::new(config).await;
         assert!(auto_embedding.is_ok());
     }
-    
+
     #[test]
     fn test_config_serialization() {
         let config = AutoEmbeddingConfig::default();

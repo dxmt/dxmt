@@ -6,13 +6,13 @@
 //! - Durability guarantees
 //! - Crash recovery procedures
 
-use crate::types::table::IndexType;
 use crate::error::{Error, Result};
+use crate::types::table::IndexType;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use chrono::Utc;
 
 /// Type of transaction log entry
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,9 +137,8 @@ impl TransactionLog {
         use tokio::io::AsyncWriteExt;
 
         // Step 1: Serialize entry to JSON
-        let json_entry = serde_json::to_string(entry).map_err(|e| {
-            Error::Serialization(format!("Failed to serialize log entry: {}", e))
-        })?;
+        let json_entry = serde_json::to_string(entry)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize log entry: {}", e)))?;
 
         // Step 2: Append to WAL file with newline separator
         use tokio::fs::File;
@@ -148,23 +147,21 @@ impl TransactionLog {
             .append(true)
             .open(&self.wal_path)
             .await
-            .map_err(|e| {
-                Error::internal(format!("Failed to open WAL file: {}", e))
-            })?;
+            .map_err(|e| Error::internal(format!("Failed to open WAL file: {}", e)))?;
 
         // Write entry as JSON line (JSON Lines format)
-        file.write_all(json_entry.as_bytes()).await.map_err(|e| {
-            Error::internal(format!("Failed to write to WAL: {}", e))
-        })?;
+        file.write_all(json_entry.as_bytes())
+            .await
+            .map_err(|e| Error::internal(format!("Failed to write to WAL: {}", e)))?;
 
-        file.write_all(b"\n").await.map_err(|e| {
-            Error::internal(format!("Failed to write newline to WAL: {}", e))
-        })?;
+        file.write_all(b"\n")
+            .await
+            .map_err(|e| Error::internal(format!("Failed to write newline to WAL: {}", e)))?;
 
         // Step 3: Fsync for durability
-        file.sync_all().await.map_err(|e| {
-            Error::internal(format!("Failed to sync WAL file: {}", e))
-        })?;
+        file.sync_all()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to sync WAL file: {}", e)))?;
 
         Ok(())
     }
@@ -228,9 +225,9 @@ impl TransactionLog {
         }
 
         // Open and read WAL file
-        let file = fs::File::open(&self.wal_path).await.map_err(|e| {
-            Error::internal(format!("Failed to open WAL file for recovery: {}", e))
-        })?;
+        let file = fs::File::open(&self.wal_path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to open WAL file for recovery: {}", e)))?;
 
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
@@ -248,9 +245,8 @@ impl TransactionLog {
                 continue; // Skip empty lines
             }
 
-            let entry: LogEntry = serde_json::from_str(&line).map_err(|e| {
-                Error::internal(format!("Failed to deserialize log entry: {}", e))
-            })?;
+            let entry: LogEntry = serde_json::from_str(&line)
+                .map_err(|e| Error::internal(format!("Failed to deserialize log entry: {}", e)))?;
 
             loaded_entries.push(entry);
         }

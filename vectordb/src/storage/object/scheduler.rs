@@ -255,7 +255,11 @@ impl DataScheduler {
         self.execute_migration_tasks().await?;
 
         // 4. 清理过期数据
-        self.cleanup_old_patterns().await.map_err(|e| ObjectStorageError::InternalError { message: format!("Cleanup failed: {:?}", e) })?;
+        self.cleanup_old_patterns()
+            .await
+            .map_err(|e| ObjectStorageError::InternalError {
+                message: format!("Cleanup failed: {:?}", e),
+            })?;
 
         debug!("Scheduling cycle completed");
         Ok(())
@@ -340,7 +344,8 @@ impl DataScheduler {
         &self,
         pattern: &AccessPattern,
         hotness: f64,
-        prediction: f64) -> StorageTier {
+        prediction: f64,
+    ) -> StorageTier {
         // 考虑对象大小限制
         let memory_size_limit = 1024 * 1024; // 1MB
         let ssd_size_limit = 100 * 1024 * 1024; // 100MB
@@ -365,7 +370,8 @@ impl DataScheduler {
         &self,
         pattern: &AccessPattern,
         hotness: f64,
-        prediction: f64) -> f64 {
+        prediction: f64,
+    ) -> f64 {
         let hotness_weight = 0.4;
         let prediction_weight = 0.3;
         let cost_weight = self.policy.cost_optimization_weight;

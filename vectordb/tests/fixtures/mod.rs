@@ -6,11 +6,11 @@
 // binaries from each rebuilding the same scaffolding.
 
 use dxmt_vectordb::{
+    config::{MemoryConfig, StorageConfig},
     storage::IntelligentIndexedStorage,
-    config::{StorageConfig, MemoryConfig},
     types::{
-        table::{TableConfig, TextFieldConfig, TextSource, TextAnalyzer},
         record::CreateRecordRequest,
+        table::{TableConfig, TextAnalyzer, TextFieldConfig, TextSource},
         vector::DistanceMetric,
     },
 };
@@ -62,14 +62,12 @@ pub fn create_fts_table_config(name: &str, dimension: usize) -> TableConfig {
         distance_metric: DistanceMetric::Cosine,
         description: Some(format!("Test FTS table: {}", name)),
         index_type: None,
-        text_fields: Some(vec![
-            TextFieldConfig {
-                name: "content".to_string(),
-                source: TextSource::MetadataField("text".to_string()),
-                analyzer: TextAnalyzer::Standard,
-                boost: 1.0,
-            }
-        ]),
+        text_fields: Some(vec![TextFieldConfig {
+            name: "content".to_string(),
+            source: TextSource::MetadataField("text".to_string()),
+            analyzer: TextAnalyzer::Standard,
+            boost: 1.0,
+        }]),
         enable_full_text_search: true,
         memory_optimization: None,
         payload_schema: None,
@@ -199,7 +197,11 @@ mod tests {
         // Check that vectors are normalized (L2 norm ≈ 1.0)
         for v in vectors {
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-5, "Vector not normalized: norm = {}", norm);
+            assert!(
+                (norm - 1.0).abs() < 1e-5,
+                "Vector not normalized: norm = {}",
+                norm
+            );
         }
     }
 

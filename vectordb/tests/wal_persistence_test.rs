@@ -4,13 +4,13 @@
 //! and can be recovered after restart.
 
 use dxmt_vectordb::{
+    error::Result,
     storage::{
         atomic_ops::{AtomicStorageManager, StorageBackends},
         lmdb::{LmdbStorage, LmdbStorageImpl},
         traits::_Storage,
     },
-    wal::{WalManager, WalEntry},
-    error::Result,
+    wal::{WalEntry, WalManager},
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -68,7 +68,9 @@ async fn test_wal_persistence_to_lmdb() -> Result<()> {
     manager.commit_transaction(&tx_id).await?;
 
     // Verify record was persisted to LMDB
-    let record = lmdb_storage.get_record("test_table", &"rec1".to_string()).await?;
+    let record = lmdb_storage
+        .get_record("test_table", &"rec1".to_string())
+        .await?;
     assert_eq!(record.id, "rec1");
     assert_eq!(record.vector.len(), 128);
     assert_eq!(record.payload["name"], "test");
@@ -103,26 +105,38 @@ async fn test_wal_replay_on_startup() -> Result<()> {
 
         // Create table
         let tx_id = manager.begin_transaction().await?;
-        manager.add_operation(&tx_id, WalEntry::CreateTable {
-            table: "recovery_test".to_string(),
-            dimension: 64,
-        }).await?;
+        manager
+            .add_operation(
+                &tx_id,
+                WalEntry::CreateTable {
+                    table: "recovery_test".to_string(),
+                    dimension: 64,
+                },
+            )
+            .await?;
         manager.commit_transaction(&tx_id).await?;
 
         // Insert records
         for i in 0..5 {
             let tx_id = manager.begin_transaction().await?;
-            manager.add_operation(&tx_id, WalEntry::Insert {
-                table: "recovery_test".to_string(),
-                record_id: format!("rec_{}", i),
-                vector: vec![i as f32 * 0.1; 64],
-                payload: Some(serde_json::json!({"index": i})),
-            }).await?;
+            manager
+                .add_operation(
+                    &tx_id,
+                    WalEntry::Insert {
+                        table: "recovery_test".to_string(),
+                        record_id: format!("rec_{}", i),
+                        vector: vec![i as f32 * 0.1; 64],
+                        payload: Some(serde_json::json!({"index": i})),
+                    },
+                )
+                .await?;
             manager.commit_transaction(&tx_id).await?;
         }
 
         // Verify data persisted
-        let record = lmdb_storage.get_record("recovery_test", &"rec_3".to_string()).await?;
+        let record = lmdb_storage
+            .get_record("recovery_test", &"rec_3".to_string())
+            .await?;
         assert_eq!(record.id, "rec_3");
         println!("✅ Phase 1: Data written successfully");
 
@@ -189,36 +203,55 @@ async fn test_delete_persistence() -> Result<()> {
 
     // Create table
     let tx_id = manager.begin_transaction().await?;
-    manager.add_operation(&tx_id, WalEntry::CreateTable {
-        table: "delete_test".to_string(),
-        dimension: 32,
-    }).await?;
+    manager
+        .add_operation(
+            &tx_id,
+            WalEntry::CreateTable {
+                table: "delete_test".to_string(),
+                dimension: 32,
+            },
+        )
+        .await?;
     manager.commit_transaction(&tx_id).await?;
 
     // Insert record
     let tx_id = manager.begin_transaction().await?;
-    manager.add_operation(&tx_id, WalEntry::Insert {
-        table: "delete_test".to_string(),
-        record_id: "to_delete".to_string(),
-        vector: vec![1.0; 32],
-        payload: None,
-    }).await?;
+    manager
+        .add_operation(
+            &tx_id,
+            WalEntry::Insert {
+                table: "delete_test".to_string(),
+                record_id: "to_delete".to_string(),
+                vector: vec![1.0; 32],
+                payload: None,
+            },
+        )
+        .await?;
     manager.commit_transaction(&tx_id).await?;
 
     // Verify insert
-    let record = lmdb_storage.get_record("delete_test", &"to_delete".to_string()).await?;
+    let record = lmdb_storage
+        .get_record("delete_test", &"to_delete".to_string())
+        .await?;
     assert_eq!(record.id, "to_delete");
 
     // Delete record
     let tx_id = manager.begin_transaction().await?;
-    manager.add_operation(&tx_id, WalEntry::Delete {
-        table: "delete_test".to_string(),
-        record_id: "to_delete".to_string(),
-    }).await?;
+    manager
+        .add_operation(
+            &tx_id,
+            WalEntry::Delete {
+                table: "delete_test".to_string(),
+                record_id: "to_delete".to_string(),
+            },
+        )
+        .await?;
     manager.commit_transaction(&tx_id).await?;
 
     // Verify deletion persisted
-    let result = lmdb_storage.get_record("delete_test", &"to_delete".to_string()).await;
+    let result = lmdb_storage
+        .get_record("delete_test", &"to_delete".to_string())
+        .await;
     assert!(result.is_err(), "Record should be deleted");
 
     println!("✅ Delete operations successfully persisted");
@@ -250,20 +283,30 @@ async fn test_crash_recovery() -> Result<()> {
 
         // Create table
         let tx_id = manager.begin_transaction().await?;
-        manager.add_operation(&tx_id, WalEntry::CreateTable {
-            table: "crash_test".to_string(),
-            dimension: 16,
-        }).await?;
+        manager
+            .add_operation(
+                &tx_id,
+                WalEntry::CreateTable {
+                    table: "crash_test".to_string(),
+                    dimension: 16,
+                },
+            )
+            .await?;
         manager.commit_transaction(&tx_id).await?;
 
         // Insert some records
         let tx_id = manager.begin_transaction().await?;
-        manager.add_operation(&tx_id, WalEntry::Insert {
-            table: "crash_test".to_string(),
-            record_id: "before_crash".to_string(),
-            vector: vec![1.0; 16],
-            payload: None,
-        }).await?;
+        manager
+            .add_operation(
+                &tx_id,
+                WalEntry::Insert {
+                    table: "crash_test".to_string(),
+                    record_id: "before_crash".to_string(),
+                    vector: vec![1.0; 16],
+                    payload: None,
+                },
+            )
+            .await?;
         manager.commit_transaction(&tx_id).await?;
 
         // Simulate crash (drop without cleanup)
@@ -291,7 +334,9 @@ async fn test_crash_recovery() -> Result<()> {
         let table = lmdb_storage.get_table("crash_test").await?;
         assert_eq!(table.name, "crash_test");
 
-        let record = lmdb_storage.get_record("crash_test", &"before_crash".to_string()).await?;
+        let record = lmdb_storage
+            .get_record("crash_test", &"before_crash".to_string())
+            .await?;
         assert_eq!(record.id, "before_crash");
 
         println!("✅ Successfully recovered from crash");

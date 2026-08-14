@@ -1,12 +1,12 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::sync::Arc;
-use tracing::{info, warn, error};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
-use crate::types::{vector::RecordId};
+use crate::types::vector::RecordId;
 use crate::wal::WalManager;
 
 /// 数据一致性验证器
@@ -120,37 +120,44 @@ impl ConsistencyChecker {
     pub fn new(
         storage: Arc<super::IntelligentIndexedStorage>,
         wal: Arc<WalManager>,
-        config: ConsistencyConfig) -> Self {
+        config: ConsistencyConfig,
+    ) -> Self {
         Self {
             storage,
             wal,
             config,
         }
     }
-    
+
     /// 执行全面的一致性检查
     pub async fn check_consistency(&self, tablename: &str) -> crate::Result<ConsistencyReport> {
         let start_time = std::time::Instant::now();
         let check_time = Utc::now();
         let mut inconsistencies = Vec::new();
-        
+
         info!("Starting consistency check for table: {}", tablename);
-        
+
         // 获取表信息
         let table = self.storage.get_table(tablename).await?;
         let total_records = table.record_count;
-        
+
         let mut checked_records = 0;
         let mut status = CheckStatus::Success;
-        
+
         // 检查1：验证索引和存储的记录数一致性
-        if let Err(e) = self.check_record_count_consistency(tablename, &mut inconsistencies).await {
+        if let Err(e) = self
+            .check_record_count_consistency(tablename, &mut inconsistencies)
+            .await
+        {
             warn!("Record count consistency check failed: {}", e);
             status = CheckStatus::Partial;
         }
-        
+
         // 检查2：逐个验证记录的一致性
-        match self.check_individual_records(tablename, &mut inconsistencies, &mut checked_records).await {
+        match self
+            .check_individual_records(tablename, &mut inconsistencies, &mut checked_records)
+            .await
+        {
             Ok(_) => {
                 info!("Individual record check completed for table: {}", tablename);
             }
@@ -159,17 +166,20 @@ impl ConsistencyChecker {
                 status = CheckStatus::Failed;
             }
         }
-        
+
         // 检查3：验证WAL和实际状态的一致性
         if self.config.enable_realtime_check {
-            if let Err(e) = self.check_wal_consistency(tablename, &mut inconsistencies).await {
+            if let Err(e) = self
+                .check_wal_consistency(tablename, &mut inconsistencies)
+                .await
+            {
                 warn!("WAL consistency check failed: {}", e);
                 status = CheckStatus::Partial;
             }
         }
-        
+
         let check_duration_ms = start_time.elapsed().as_millis() as u64;
-        
+
         let report = ConsistencyReport {
             check_time,
             tablename: tablename.to_string(),
@@ -179,22 +189,30 @@ impl ConsistencyChecker {
             check_duration_ms,
             status,
         };
-        
+
         // 记录检查结果
         if !inconsistencies.is_empty() {
-            warn!("Found {} inconsistencies in table {}", inconsistencies.len(), tablename);
+            warn!(
+                "Found {} inconsistencies in table {}",
+                inconsistencies.len(),
+                tablename
+            );
             for issue in &inconsistencies {
                 warn!("Inconsistency: {:?}", issue);
             }
         } else {
             info!("No inconsistencies found in table {}", tablename);
         }
-        
+
         Ok(report)
     }
-    
+
     /// 检查记录数一致性
-    async fn check_record_count_consistency(&self, tablename: &str, issues: &mut Vec<InconsistencyIssue>) -> crate::Result<()> {
+    async fn check_record_count_consistency(
+        &self,
+        tablename: &str,
+        issues: &mut Vec<InconsistencyIssue>,
+    ) -> crate::Result<()> {
         let table = self.storage.get_table(tablename).await?;
         let storage_count = table.record_count;
 
@@ -210,25 +228,30 @@ impl ConsistencyChecker {
 
         Ok(())
     }
-    
+
     /// 检查单个记录的一致性
-    async fn check_individual_records(&self, tablename: &str, issues: &mut Vec<InconsistencyIssue>, checked_count: &mut u64) -> crate::Result<()> {
+    async fn check_individual_records(
+        &self,
+        tablename: &str,
+        issues: &mut Vec<InconsistencyIssue>,
+        checked_count: &mut u64,
+    ) -> crate::Result<()> {
         // 获取表中的所有记录ID
         let record_ids = self.get_all_record_ids(tablename).await?;
-        
+
         for record_id in record_ids.iter().take(self.config.check_batch_size) {
             *checked_count += 1;
-            
+
             // 从存储获取记录
             let storage_record = match self.storage.get_record(tablename, record_id).await {
                 Ok(record) => Some(record),
                 Err(crate::Error::RecordNotFound { .. }) => None,
                 Err(e) => return Err(e),
             };
-            
+
             // 检查索引中是否存在该记录
             let index_exists = self.check_record_in_index(tablename, record_id).await?;
-            
+
             // 验证一致性
             match (storage_record, index_exists) {
                 (Some(record), false) => {
@@ -256,31 +279,42 @@ impl ConsistencyChecker {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// 检查WAL一致性
-    async fn check_wal_consistency(&self, tablename: &str, _issues: &mut Vec<InconsistencyIssue>) -> crate::Result<()> {
+    async fn check_wal_consistency(
+        &self,
+        tablename: &str,
+        _issues: &mut Vec<InconsistencyIssue>,
+    ) -> crate::Result<()> {
         // Simplified WAL consistency check
         // The current WalManager doesn't support transaction tracking
         // This is a placeholder for future implementation
 
-        warn!("WAL consistency check not fully implemented for table: {}", tablename);
+        warn!(
+            "WAL consistency check not fully implemented for table: {}",
+            tablename
+        );
 
         Ok(())
     }
-    
+
     /// 获取表中所有记录ID
     async fn get_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
         self.storage.list_all_record_ids(tablename).await
     }
-    
+
     /// 检查记录是否在索引中存在
-    async fn check_record_in_index(&self, tablename: &str, record_id: &RecordId) -> crate::Result<bool> {
+    async fn check_record_in_index(
+        &self,
+        tablename: &str,
+        record_id: &RecordId,
+    ) -> crate::Result<bool> {
         // 尝试搜索该记录的向量
         // 如果找到相同ID的记录，说明在索引中存在
-        
+
         // 首先获取记录的向量
         match self.storage.get_record(tablename, record_id).await {
             Ok(record) => {
@@ -307,9 +341,13 @@ impl ConsistencyChecker {
             Err(_) => Ok(false),
         }
     }
-    
+
     /// 验证向量一致性
-    async fn verify_vector_consistency(&self, tablename: &str, record: &crate::Record) -> std::result::Result<(), InconsistencyIssue> {
+    async fn verify_vector_consistency(
+        &self,
+        tablename: &str,
+        record: &crate::Record,
+    ) -> std::result::Result<(), InconsistencyIssue> {
         // 从索引中搜索相同向量，验证是否返回相同记录
         let search_query = crate::types::SearchQuery {
             vector: record.vector.clone(),
@@ -321,7 +359,7 @@ impl ConsistencyChecker {
             include_metadata: false,
             ..Default::default()
         };
-        
+
         match self.storage.search(tablename, search_query).await {
             Ok(result) => {
                 if let Some(hit) = result.hits.first() {
@@ -334,7 +372,7 @@ impl ConsistencyChecker {
                                     tablename: tablename.to_string(),
                                     storage_vector: Some(record.vector.clone()),
                                     index_vector: Some(index_vector.clone()),
-                                })
+                                });
                             }
                         }
                     }
@@ -345,19 +383,23 @@ impl ConsistencyChecker {
                 return Err(InconsistencyIssue::MissingInIndex {
                     record_id: record.id.clone(),
                     tablename: tablename.to_string(),
-                })
+                });
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// 修复发现的不一致问题
-    pub async fn repair_inconsistencies(&self, tablename: &str, issues: &[InconsistencyIssue]) -> crate::Result<RepairReport> {
+    pub async fn repair_inconsistencies(
+        &self,
+        tablename: &str,
+        issues: &[InconsistencyIssue],
+    ) -> crate::Result<RepairReport> {
         let mut repaired = 0;
         let mut failed = 0;
         let repair_start = std::time::Instant::now();
-        
+
         for issue in issues {
             match self.repair_single_issue(tablename, issue).await {
                 Ok(_) => {
@@ -370,9 +412,9 @@ impl ConsistencyChecker {
                 }
             }
         }
-        
+
         let repair_duration_ms = repair_start.elapsed().as_millis() as u64;
-        
+
         Ok(RepairReport {
             total_issues: issues.len(),
             repaired_count: repaired,
@@ -380,9 +422,13 @@ impl ConsistencyChecker {
             repair_duration_ms,
         })
     }
-    
+
     /// 修复单个不一致问题
-    async fn repair_single_issue(&self, tablename: &str, issue: &InconsistencyIssue) -> crate::Result<()> {
+    async fn repair_single_issue(
+        &self,
+        tablename: &str,
+        issue: &InconsistencyIssue,
+    ) -> crate::Result<()> {
         match issue {
             InconsistencyIssue::MissingInIndex { record_id, .. } => {
                 // 从存储获取记录，通过 update_record 触发 remove+insert 重建索引
@@ -394,13 +440,23 @@ impl ConsistencyChecker {
                     payload: Some(record.payload.clone()),
                     named_vectors: None,
                 };
-                self.storage.update_record(tablename, record_id, req).await?;
-                info!("Repaired: re-indexed record {} in table {}", record_id, tablename);
+                self.storage
+                    .update_record(tablename, record_id, req)
+                    .await?;
+                info!(
+                    "Repaired: re-indexed record {} in table {}",
+                    record_id, tablename
+                );
             }
             InconsistencyIssue::MissingInStorage { record_id, .. } => {
                 // 存储中不存在该记录，从索引中删除
-                self.storage.delete_records(tablename, vec![record_id.clone()]).await?;
-                info!("Repaired: removed orphan index entry for {} in table {}", record_id, tablename);
+                self.storage
+                    .delete_records(tablename, vec![record_id.clone()])
+                    .await?;
+                info!(
+                    "Repaired: removed orphan index entry for {} in table {}",
+                    record_id, tablename
+                );
             }
             InconsistencyIssue::VectorMismatch { record_id, .. } => {
                 // 向量不一致：以存储中的向量为准，强制更新索引
@@ -412,8 +468,13 @@ impl ConsistencyChecker {
                     payload: Some(record.payload.clone()),
                     named_vectors: None,
                 };
-                self.storage.update_record(tablename, record_id, req).await?;
-                info!("Repaired: re-synced vector for record {} in table {}", record_id, tablename);
+                self.storage
+                    .update_record(tablename, record_id, req)
+                    .await?;
+                info!(
+                    "Repaired: re-synced vector for record {} in table {}",
+                    record_id, tablename
+                );
             }
             _ => {
                 warn!("Unsupported repair for issue: {:?}", issue);
@@ -436,11 +497,11 @@ pub struct RepairReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::config::StorageConfig;
     use crate::storage::IntelligentIndexedStorage;
-    use crate::types::table::TableConfig;
     use crate::types::record::CreateRecordRequest;
+    use crate::types::table::TableConfig;
+    use tempfile::TempDir;
 
     async fn make_storage() -> std::sync::Arc<IntelligentIndexedStorage> {
         let config = StorageConfig {
@@ -482,20 +543,28 @@ mod tests {
         storage.create_table(table_cfg).await.unwrap();
 
         // Insert a record
-        storage.insert_records("test_consistency", vec![
-            CreateRecordRequest {
-                id: "r1".to_string(),
-                vector: vec![1.0, 0.0, 0.0, 0.0],
-                sparse_vector: None,
-                payload: None,
-                named_vectors: None,
-            }
-        ]).await.unwrap();
+        storage
+            .insert_records(
+                "test_consistency",
+                vec![CreateRecordRequest {
+                    id: "r1".to_string(),
+                    vector: vec![1.0, 0.0, 0.0, 0.0],
+                    sparse_vector: None,
+                    payload: None,
+                    named_vectors: None,
+                }],
+            )
+            .await
+            .unwrap();
 
         let report = checker.check_consistency("test_consistency").await.unwrap();
         // A freshly inserted record should not have inconsistencies
-        assert_eq!(report.inconsistencies.len(), 0,
-            "Expected no inconsistencies, got: {:?}", report.inconsistencies);
+        assert_eq!(
+            report.inconsistencies.len(),
+            0,
+            "Expected no inconsistencies, got: {:?}",
+            report.inconsistencies
+        );
     }
 
     #[tokio::test]
@@ -519,10 +588,28 @@ mod tests {
             named_vectors: None,
         };
         storage.create_table(table_cfg).await.unwrap();
-        storage.insert_records("test_ids", vec![
-            CreateRecordRequest { id: "a".to_string(), vector: vec![1.0, 0.0], sparse_vector: None, named_vectors: None, payload: None },
-            CreateRecordRequest { id: "b".to_string(), vector: vec![0.0, 1.0], sparse_vector: None, named_vectors: None, payload: None },
-        ]).await.unwrap();
+        storage
+            .insert_records(
+                "test_ids",
+                vec![
+                    CreateRecordRequest {
+                        id: "a".to_string(),
+                        vector: vec![1.0, 0.0],
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload: None,
+                    },
+                    CreateRecordRequest {
+                        id: "b".to_string(),
+                        vector: vec![0.0, 1.0],
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
 
         let ids = checker.get_all_record_ids("test_ids").await.unwrap();
         assert_eq!(ids.len(), 2);

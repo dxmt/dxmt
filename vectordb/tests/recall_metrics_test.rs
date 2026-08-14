@@ -5,9 +5,7 @@
 mod fixtures;
 
 use dxmt_vectordb::{
-    benchmarks::metrics::RecallEvaluator,
-    search::hnsw::HnswIndex,
-    types::vector::DistanceMetric,
+    benchmarks::metrics::RecallEvaluator, search::hnsw::HnswIndex, types::vector::DistanceMetric,
 };
 use fixtures::*;
 
@@ -23,7 +21,9 @@ fn test_recall_evaluator_basic() {
     assert!((recall - 1.0).abs() < 1e-6, "Perfect recall should be 1.0");
 
     // Partial recall
-    let retrieved = vec!["v1", "v2", "v5", "v6", "v11", "v12", "v13", "v14", "v15", "v16"];
+    let retrieved = vec![
+        "v1", "v2", "v5", "v6", "v11", "v12", "v13", "v14", "v15", "v16",
+    ];
     let ground_truth = vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"];
 
     let recall = evaluator.calculate_recall(&retrieved, &ground_truth);
@@ -36,9 +36,15 @@ fn test_recall_statistics() {
 
     let results = vec![
         vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"],
-        vec!["v1", "v2", "v3", "v4", "v5", "v11", "v12", "v13", "v14", "v15"],
-        vec!["v1", "v2", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"],
-        vec!["v1", "v2", "v3", "v11", "v12", "v13", "v14", "v15", "v16", "v17"],
+        vec![
+            "v1", "v2", "v3", "v4", "v5", "v11", "v12", "v13", "v14", "v15",
+        ],
+        vec![
+            "v1", "v2", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18",
+        ],
+        vec![
+            "v1", "v2", "v3", "v11", "v12", "v13", "v14", "v15", "v16", "v17",
+        ],
     ];
 
     let ground_truths = vec![
@@ -97,11 +103,8 @@ fn test_hnsw_recall() {
             .collect();
 
         distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let ground_truth_ids: Vec<String> = distances
-            .iter()
-            .take(k)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let ground_truth_ids: Vec<String> =
+            distances.iter().take(k).map(|(id, _)| id.clone()).collect();
 
         results.push(hnsw_ids);
         ground_truths.push(ground_truth_ids);
@@ -161,11 +164,8 @@ fn test_recall_with_sift_sample() {
             .collect();
 
         distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let ground_truth_ids: Vec<String> = distances
-            .iter()
-            .take(k)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let ground_truth_ids: Vec<String> =
+            distances.iter().take(k).map(|(id, _)| id.clone()).collect();
 
         results.push(hnsw_ids);
         ground_truths.push(ground_truth_ids);
@@ -174,7 +174,11 @@ fn test_recall_with_sift_sample() {
     let stats = evaluator.evaluate_batch(&results, &ground_truths);
 
     println!("\n=== SIFT Sample Recall Benchmark ===");
-    println!("Dataset: {} training vectors, {}D", sample.train_vectors.len(), dimension);
+    println!(
+        "Dataset: {} training vectors, {}D",
+        sample.train_vectors.len(),
+        dimension
+    );
     println!("Queries: {}", sample.test_queries.len());
     println!("{}", stats.format_percent());
 

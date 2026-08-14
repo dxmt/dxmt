@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-use crate::embeddings::{EmbeddingFunction, EmbeddingError};
+use crate::embeddings::{EmbeddingError, EmbeddingFunction};
 use crate::types::DenseVector;
 
 /// Configuration for Sentence Transformers
@@ -41,7 +41,7 @@ impl SentenceTransformersEmbedding {
             // backend: Arc::new(RwLock::new(None)),
         }
     }
-    
+
     pub async fn load_model(&self) -> Result<(), EmbeddingError> {
         // Temporarily return success for compilation
         Ok(())
@@ -53,23 +53,24 @@ impl EmbeddingFunction for SentenceTransformersEmbedding {
     fn name(&self) -> &str {
         "sentence-transformers"
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.config.dimension
     }
-    
+
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
         // Simplified implementation for compilation - returns dummy vector
         Ok(vec![0.1; self.config.dimension])
     }
-    
+
     async fn embed_batch(&self, inputs: &[String]) -> Result<Vec<DenseVector>, EmbeddingError> {
         // Simplified implementation for compilation - returns dummy vectors
-        let dummy_vectors: Vec<DenseVector> = inputs.iter()
+        let dummy_vectors: Vec<DenseVector> = inputs
+            .iter()
             .map(|_| vec![0.1; self.config.dimension])
             .collect();
         Ok(dummy_vectors)

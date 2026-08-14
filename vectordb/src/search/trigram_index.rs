@@ -55,14 +55,17 @@ impl TrigramIndex {
 
         if pat_trigrams.is_empty() {
             // Short pattern: brute-force scan
-            return self.texts.iter()
+            return self
+                .texts
+                .iter()
                 .filter(|(_, text)| text.contains(pattern))
                 .map(|(id, _)| id.clone())
                 .collect();
         }
 
         // Start with the posting list of the first trigram
-        let mut candidates: HashSet<RecordId> = self.index
+        let mut candidates: HashSet<RecordId> = self
+            .index
             .get(&pat_trigrams[0])
             .cloned()
             .unwrap_or_default();
@@ -77,10 +80,9 @@ impl TrigramIndex {
         }
 
         // Verify (eliminate false positives)
-        candidates.into_iter()
-            .filter(|id| {
-                self.texts.get(id).is_some_and(|t| t.contains(pattern))
-            })
+        candidates
+            .into_iter()
+            .filter(|id| self.texts.get(id).is_some_and(|t| t.contains(pattern)))
             .collect()
     }
 
@@ -113,9 +115,7 @@ fn trigrams(s: &str) -> Vec<[u8; 3]> {
     if bytes.len() < 3 {
         return vec![];
     }
-    bytes.windows(3)
-        .map(|w| [w[0], w[1], w[2]])
-        .collect()
+    bytes.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
 }
 
 #[cfg(test)]
@@ -181,7 +181,10 @@ mod tests {
     fn test_trigram_memory_usage() {
         let mut idx = TrigramIndex::new();
         for i in 0..100 {
-            idx.insert(format!("doc{i}"), &format!("text number {i} with some words"));
+            idx.insert(
+                format!("doc{i}"),
+                &format!("text number {i} with some words"),
+            );
         }
         assert!(idx.memory_usage() > 0);
         assert_eq!(idx.len(), 100);

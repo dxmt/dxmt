@@ -1,13 +1,13 @@
 //! Write-Ahead Log (WAL) implementation for crash recovery
-//! 
+//!
 //! Provides basic WAL functionality for ensuring data consistency
 //! across crashes and restarts.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Write, Read};
-use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize};
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 /// WAL entry types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,15 +74,14 @@ impl WalManager {
         compression_level: i32,
     ) -> Result<Self> {
         let wal_path = wal_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&wal_path)
-            .map_err(Error::Io)?;
+        std::fs::create_dir_all(&wal_path).map_err(Error::Io)?;
 
         let mut manager = WalManager {
             wal_path,
             current_file: None,
             sequence_number: 0,
             write_buffer: Vec::with_capacity(1024 * 1024), // 1MB buffer
-            batch_threshold: 256 * 1024, // 256KB threshold
+            batch_threshold: 256 * 1024,                   // 256KB threshold
             compression_enabled: enable_compression,
             compression_level,
         };
@@ -90,15 +89,15 @@ impl WalManager {
         manager.open_current_file()?;
         Ok(manager)
     }
-    
+
     /// Write an entry to the WAL (using MessagePack + optional compression + batch flush)
     pub fn write_entry(&mut self, entry: WalEntry) -> Result<u64> {
         let seq = self.sequence_number;
         self.sequence_number += 1;
 
         // Serialize using MessagePack (supports dynamic types like serde_json::Value)
-        let entry_bytes = rmp_serde::to_vec(&entry)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let entry_bytes =
+            rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Compress if enabled (zstd: -80% size)
         let compressed = if self.compression_enabled {
@@ -111,8 +110,10 @@ impl WalManager {
         // Write format: [seq: u64][compressed_flag: u8][len: u32][data: bytes]
         // Append to buffer instead of immediate write
         self.write_buffer.extend_from_slice(&seq.to_le_bytes());
-        self.write_buffer.push(if self.compression_enabled { 1 } else { 0 });
-        self.write_buffer.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        self.write_buffer
+            .push(if self.compression_enabled { 1 } else { 0 });
+        self.write_buffer
+            .extend_from_slice(&(compressed.len() as u32).to_le_bytes());
         self.write_buffer.extend_from_slice(&compressed);
 
         // Batch flush: only flush when buffer exceeds threshold
@@ -132,8 +133,8 @@ impl WalManager {
             self.sequence_number += 1;
 
             // Serialize using MessagePack
-            let entry_bytes = rmp_serde::to_vec(&entry)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let entry_bytes =
+                rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
 
             // Compress if enabled
             let compressed = if self.compression_enabled {
@@ -145,8 +146,10 @@ impl WalManager {
 
             // Append to buffer
             self.write_buffer.extend_from_slice(&seq.to_le_bytes());
-            self.write_buffer.push(if self.compression_enabled { 1 } else { 0 });
-            self.write_buffer.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            self.write_buffer
+                .push(if self.compression_enabled { 1 } else { 0 });
+            self.write_buffer
+                .extend_from_slice(&(compressed.len() as u32).to_le_bytes());
             self.write_buffer.extend_from_slice(&compressed);
 
             seq_numbers.push(seq);
@@ -165,14 +168,12 @@ impl WalManager {
         }
 
         if let Some(ref mut file) = self.current_file {
-            file.write_all(&self.write_buffer)
-                .map_err(Error::Io)?;
+            file.write_all(&self.write_buffer).map_err(Error::Io)?;
             // `Write::flush` on a File is a no-op — it only drains a userspace buffer, and File
             // has none. Without sync_data the entries sit in the page cache, which survives
             // `kill -9` but not power loss. A write-ahead log that loses acknowledged writes on
             // power loss is not doing its job, so pay for the fsync here.
-            file.sync_data()
-                .map_err(Error::Io)?;
+            file.sync_data().map_err(Error::Io)?;
         }
 
         self.write_buffer.clear();
@@ -191,7 +192,7 @@ impl WalManager {
     pub fn next_sequence(&self) -> u64 {
         self.sequence_number
     }
-    
+
     /// Replay WAL entries from a given sequence number (supports compression)
     pub fn replay_from(&self, from_seq: u64) -> Result<Vec<(u64, WalEntry)>> {
         let wal_file_path = self.wal_path.join("wal.log");
@@ -199,8 +200,7 @@ impl WalManager {
             return Ok(Vec::new());
         }
 
-        let mut file = File::open(&wal_file_path)
-            .map_err(Error::Io)?;
+        let mut file = File::open(&wal_file_path).map_err(Error::Io)?;
 
         let mut entries = Vec::new();
 
@@ -208,7 +208,7 @@ impl WalManager {
             // Read sequence number (8 bytes)
             let mut seq_bytes = [0u8; 8];
             match file.read_exact(&mut seq_bytes) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(Error::Io(e)),
             }
@@ -216,20 +216,17 @@ impl WalManager {
 
             // Read compression flag (1 byte)
             let mut compressed_flag = [0u8; 1];
-            file.read_exact(&mut compressed_flag)
-                .map_err(Error::Io)?;
+            file.read_exact(&mut compressed_flag).map_err(Error::Io)?;
             let is_compressed = compressed_flag[0] == 1;
 
             // Read length (4 bytes)
             let mut len_bytes = [0u8; 4];
-            file.read_exact(&mut len_bytes)
-                .map_err(Error::Io)?;
+            file.read_exact(&mut len_bytes).map_err(Error::Io)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
             // Read data
             let mut data = vec![0u8; len];
-            file.read_exact(&mut data)
-                .map_err(Error::Io)?;
+            file.read_exact(&mut data).map_err(Error::Io)?;
 
             // Decompress if needed
             let decompressed = if is_compressed {
@@ -249,7 +246,7 @@ impl WalManager {
 
         Ok(entries)
     }
-    
+
     /// Create a checkpoint and truncate old entries
     pub fn checkpoint(&mut self) -> Result<u64> {
         // Flush any pending writes before checkpoint
@@ -260,7 +257,7 @@ impl WalManager {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
         })?;
 
         // Ensure checkpoint is written to disk
@@ -268,26 +265,25 @@ impl WalManager {
 
         Ok(checkpoint_seq)
     }
-    
+
     /// Get the current sequence number
     pub fn current_sequence(&self) -> u64 {
         self.sequence_number
     }
-    
+
     fn open_current_file(&mut self) -> Result<()> {
         let wal_file_path = self.wal_path.join("wal.log");
 
         // If file exists, find the last sequence number (with compression support)
         if wal_file_path.exists() {
-            let mut file = File::open(&wal_file_path)
-                .map_err(Error::Io)?;
+            let mut file = File::open(&wal_file_path).map_err(Error::Io)?;
 
             let mut last_seq = 0u64;
             loop {
                 // Read sequence number (8 bytes)
                 let mut seq_bytes = [0u8; 8];
                 match file.read_exact(&mut seq_bytes) {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(_) => break, // Corrupted file, stop reading
                 }
@@ -338,25 +334,29 @@ impl Drop for WalManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_wal_basic_operations() {
         let temp_dir = TempDir::new().unwrap();
         let mut wal = WalManager::new(temp_dir.path()).unwrap();
-        
+
         // Write some entries
-        let seq1 = wal.write_entry(WalEntry::CreateTable {
-            table: "test".to_string(),
-            dimension: 128,
-        }).unwrap();
-        
-        let seq2 = wal.write_entry(WalEntry::Insert {
-            table: "test".to_string(),
-            record_id: "rec1".to_string(),
-            vector: vec![1.0, 2.0, 3.0],
-            payload: None,
-        }).unwrap();
-        
+        let seq1 = wal
+            .write_entry(WalEntry::CreateTable {
+                table: "test".to_string(),
+                dimension: 128,
+            })
+            .unwrap();
+
+        let seq2 = wal
+            .write_entry(WalEntry::Insert {
+                table: "test".to_string(),
+                record_id: "rec1".to_string(),
+                vector: vec![1.0, 2.0, 3.0],
+                payload: None,
+            })
+            .unwrap();
+
         assert_eq!(seq1, 0);
         assert_eq!(seq2, 1);
 
@@ -367,25 +367,26 @@ mod tests {
         let entries = wal.replay_from(0).unwrap();
         assert_eq!(entries.len(), 2);
     }
-    
+
     #[test]
     fn test_wal_recovery() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // First WAL instance
         {
             let mut wal = WalManager::new(temp_dir.path()).unwrap();
             wal.write_entry(WalEntry::CreateTable {
                 table: "test".to_string(),
                 dimension: 128,
-            }).unwrap();
+            })
+            .unwrap();
         }
-        
+
         // Second WAL instance (simulating restart)
         {
             let wal = WalManager::new(temp_dir.path()).unwrap();
             assert_eq!(wal.current_sequence(), 1);
-            
+
             let entries = wal.replay_from(0).unwrap();
             assert_eq!(entries.len(), 1);
         }

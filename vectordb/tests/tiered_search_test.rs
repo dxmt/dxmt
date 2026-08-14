@@ -8,11 +8,11 @@
 
 use dxmt_vectordb::{
     storage::{
-        memory::MemoryStorage, tiered::TieredStorage, tier_promotion::TierPromotionConfig, Storage,
+        memory::MemoryStorage, tier_promotion::TierPromotionConfig, tiered::TieredStorage, Storage,
         StorageConfig,
     },
     types::{
-        record::{CreateRecordRequest, SearchQuery, SearchMode},
+        record::{CreateRecordRequest, SearchMode, SearchQuery},
         table::TableConfig,
         DistanceMetric, IndexType,
     },
@@ -43,12 +43,10 @@ fn create_test_vectors(count: usize, dimension: usize) -> Vec<CreateRecordReques
             id: format!("vec_{}", i),
             vector: vec![(i + 1) as f32 / count as f32; dimension],
             sparse_vector: None,
-            payload: Some(
-                serde_json::json!({
-                    "index": i,
-                    "category": if i % 2 == 0 { "even" } else { "odd" }
-                }),
-            ),
+            payload: Some(serde_json::json!({
+                "index": i,
+                "category": if i % 2 == 0 { "even" } else { "odd" }
+            })),
             named_vectors: None,
         })
         .collect()
@@ -143,12 +141,10 @@ async fn test_tiered_search_with_warm_tier() {
             id: format!("vec_{}", i),
             vector: vec![i as f32 / 100.0; 128],
             sparse_vector: None,
-            payload: Some(
-                serde_json::json!({
-                    "index": i,
-                    "tier": "warm"
-                }),
-            ),
+            payload: Some(serde_json::json!({
+                "index": i,
+                "tier": "warm"
+            })),
             named_vectors: None,
         })
         .collect();
@@ -169,7 +165,10 @@ async fn test_tiered_search_with_warm_tier() {
         vector_name: None,
     };
 
-    let result = tiered_storage.search("test_warm_tier", query).await.unwrap();
+    let result = tiered_storage
+        .search("test_warm_tier", query)
+        .await
+        .unwrap();
 
     // Assertions
     assert_eq!(result.hits.len(), 20); // Should get results from both tiers
@@ -247,7 +246,10 @@ async fn test_tiered_search_all_tiers() {
         vector_name: None,
     };
 
-    let result = tiered_storage.search("test_all_tiers", query).await.unwrap();
+    let result = tiered_storage
+        .search("test_all_tiers", query)
+        .await
+        .unwrap();
 
     // Assertions
     assert_eq!(result.hits.len(), 30); // Should get all vectors from all tiers
@@ -406,7 +408,10 @@ async fn test_search_result_reranking() {
         vector_name: None,
     };
 
-    let result = tiered_storage.search("test_reranking", query).await.unwrap();
+    let result = tiered_storage
+        .search("test_reranking", query)
+        .await
+        .unwrap();
 
     // Verify reranking: warm_1 should be first (closest to query)
     assert_eq!(result.hits.len(), 3);

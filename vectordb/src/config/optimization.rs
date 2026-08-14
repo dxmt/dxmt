@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 性能优化配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptimizationConfig {
     /// 查询优化设置
     pub query: QueryOptimizationConfig,
@@ -79,7 +78,6 @@ pub struct SimdOptimizationConfig {
     /// 启用向量归一化优化
     pub enable_normalized_vectors: bool,
 }
-
 
 impl Default for QueryOptimizationConfig {
     fn default() -> Self {

@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
+use crossbeam_channel::{bounded, Receiver, Sender};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
-use crossbeam_channel::{bounded, Receiver, Sender};
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct WorkerPoolConfig {
@@ -46,7 +46,7 @@ impl OptimizedWorkerPool {
                 .thread_name("io-worker")
                 .enable_all()
                 .build()
-                .expect("Failed to create IO runtime")
+                .expect("Failed to create IO runtime"),
         );
 
         let cpu_pool = CpuWorkerPool::new(
@@ -64,27 +64,28 @@ impl OptimizedWorkerPool {
 
             let handle = thread::Builder::new()
                 .name(format!("continuation-worker-{}", i))
-                .spawn(move || {
-                    loop {
-                        let task = {
-                            let rx = rx.lock();
-                            rx.recv()
-                        };
+                .spawn(move || loop {
+                    let task = {
+                        let rx = rx.lock();
+                        rx.recv()
+                    };
 
-                        match task {
-                            Ok(ContinuationTask::IoToCompute { task, response_tx }) => {
-                                let result = task();
-                                let _ = response_tx.send(result);
-                            }
-                            Ok(ContinuationTask::ComputeToIo { future, response_tx }) => {
-                                rt.spawn(async move {
-                                    let result = future.await;
-                                    let _ = response_tx.send(result);
-                                });
-                            }
-                            Ok(ContinuationTask::Shutdown) => break,
-                            Err(_) => break,
+                    match task {
+                        Ok(ContinuationTask::IoToCompute { task, response_tx }) => {
+                            let result = task();
+                            let _ = response_tx.send(result);
                         }
+                        Ok(ContinuationTask::ComputeToIo {
+                            future,
+                            response_tx,
+                        }) => {
+                            rt.spawn(async move {
+                                let result = future.await;
+                                let _ = response_tx.send(result);
+                            });
+                        }
+                        Ok(ContinuationTask::Shutdown) => break,
+                        Err(_) => break,
                     }
                 })
                 .expect("Failed to spawn continuation worker");
@@ -123,26 +124,25 @@ impl OptimizedWorkerPool {
         R: Send + 'static,
     {
         match task {
-            HybridTask::CpuBound(f) => {
-                self.cpu_pool.execute(f).await
-            }
-            HybridTask::IoBound(future) => {
-                Ok(self.io_runtime.spawn(future).await.unwrap())
-            }
+            HybridTask::CpuBound(f) => self.cpu_pool.execute(f).await,
+            HybridTask::IoBound(future) => Ok(self.io_runtime.spawn(future).await.unwrap()),
             HybridTask::Mixed { cpu_part, io_part } => {
                 let cpu_result = self.cpu_pool.execute(cpu_part).await?;
 
                 let (tx, rx) = oneshot::channel();
-                self.continuation_tx.send(ContinuationTask::ComputeToIo {
-                    future: Box::pin(async move {
-                        let result = io_part(cpu_result).await;
-                        Box::new(result) as Box<dyn std::any::Any + Send>
-                    }),
-                    response_tx: tx,
-                }).map_err(|_| WorkerError::QueueFull)?;
+                self.continuation_tx
+                    .send(ContinuationTask::ComputeToIo {
+                        future: Box::pin(async move {
+                            let result = io_part(cpu_result).await;
+                            Box::new(result) as Box<dyn std::any::Any + Send>
+                        }),
+                        response_tx: tx,
+                    })
+                    .map_err(|_| WorkerError::QueueFull)?;
 
                 let boxed_result = rx.await.map_err(|_| WorkerError::TaskCancelled)?;
-                let result = *boxed_result.downcast::<R>()
+                let result = *boxed_result
+                    .downcast::<R>()
                     .map_err(|_| WorkerError::TypeMismatch)?;
                 Ok(result)
             }
@@ -212,14 +212,17 @@ impl CpuWorkerPool {
     {
         let (tx, rx) = oneshot::channel();
 
-        self.tx.send(CpuTask::Execute {
-            task: Box::new(move || Box::new(task()) as Box<dyn std::any::Any + Send>),
-            response_tx: tx,
-        }).map_err(|_| WorkerError::QueueFull)?;
+        self.tx
+            .send(CpuTask::Execute {
+                task: Box::new(move || Box::new(task()) as Box<dyn std::any::Any + Send>),
+                response_tx: tx,
+            })
+            .map_err(|_| WorkerError::QueueFull)?;
 
         let result = rx.await.map_err(|_| WorkerError::TaskCancelled)?;
 
-        result.downcast::<R>()
+        result
+            .downcast::<R>()
             .map(|boxed| *boxed)
             .map_err(|_| WorkerError::TypeMismatch)
     }
@@ -245,7 +248,9 @@ enum ContinuationTask {
         response_tx: oneshot::Sender<Box<dyn std::any::Any + Send>>,
     },
     ComputeToIo {
-        future: std::pin::Pin<Box<dyn std::future::Future<Output = Box<dyn std::any::Any + Send>> + Send>>,
+        future: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Box<dyn std::any::Any + Send>> + Send>,
+        >,
         response_tx: oneshot::Sender<Box<dyn std::any::Any + Send>>,
     },
     Shutdown,
@@ -292,13 +297,16 @@ mod tests {
     async fn test_cpu_task_execution() {
         let pool = OptimizedWorkerPool::new(WorkerPoolConfig::default());
 
-        let result = pool.execute_cpu_task(|| {
-            let mut sum = 0;
-            for i in 1..=100 {
-                sum += i;
-            }
-            sum
-        }).await.unwrap();
+        let result = pool
+            .execute_cpu_task(|| {
+                let mut sum = 0;
+                for i in 1..=100 {
+                    sum += i;
+                }
+                sum
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result, 5050);
     }
@@ -307,10 +315,12 @@ mod tests {
     async fn test_io_task_execution() {
         let pool = OptimizedWorkerPool::new(WorkerPoolConfig::default());
 
-        let result = pool.execute_io_task(async {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            "io task completed"
-        }).await;
+        let result = pool
+            .execute_io_task(async {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                "io task completed"
+            })
+            .await;
 
         assert_eq!(result, "io task completed");
     }

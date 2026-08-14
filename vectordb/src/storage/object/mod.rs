@@ -49,36 +49,26 @@ mod tests {
             .await?;
 
         // 测试检查对象存在
-        assert!(storage
-            .object_exists(key)
-            .await?);
+        assert!(storage.object_exists(key).await?);
 
         // 测试下载对象
         let downloaded = storage.get_object(key).await?;
         assert_eq!(downloaded, data);
 
         // 测试获取对象元数据
-        let metadata = storage
-            .head_object(key)
-            .await?;
+        let metadata = storage.head_object(key).await?;
         assert_eq!(metadata.key, key);
         assert_eq!(metadata.size, data.len() as u64);
 
         // 测试列出对象
         let list_options = types::ListObjectsOptions::default();
-        let result = storage
-            .list_objects(&list_options)
-            .await?;
+        let result = storage.list_objects(&list_options).await?;
         assert!(!result.objects.is_empty());
 
         // 测试删除对象
-        storage
-            .delete_object(key)
-            .await?;
+        storage.delete_object(key).await?;
 
-        assert!(!storage
-            .object_exists(key)
-            .await?);
+        assert!(!storage.object_exists(key).await?);
         Ok(())
     }
 
@@ -91,20 +81,14 @@ mod tests {
         let key = "multipart/test.dat";
 
         // 开始分片上传
-        let upload_id = storage
-            .create_multipart_upload(key, None)
-            .await?;
+        let upload_id = storage.create_multipart_upload(key, None).await?;
 
         // 上传分片
         let part1_data = b"Part 1 data";
         let part2_data = b"Part 2 data";
 
-        let part1 = storage
-            .upload_part(key, &upload_id, 1, part1_data)
-            .await?;
-        let part2 = storage
-            .upload_part(key, &upload_id, 2, part2_data)
-            .await?;
+        let part1 = storage.upload_part(key, &upload_id, 1, part1_data).await?;
+        let part2 = storage.upload_part(key, &upload_id, 2, part2_data).await?;
 
         // 完成分片上传
         let parts = vec![part1, part2];
@@ -113,9 +97,7 @@ mod tests {
             .await?;
 
         // 验证合并后的文件
-        let downloaded = storage
-            .get_object(key)
-            .await?;
+        let downloaded = storage.get_object(key).await?;
 
         let mut expected = Vec::new();
         expected.extend_from_slice(part1_data);
@@ -152,9 +134,7 @@ mod tests {
             .put_object(small_key, Bytes::from(&small_data[..]), None)
             .await?;
 
-        let retrieved_small = tiered_storage
-            .get_object(small_key)
-            .await?;
+        let retrieved_small = tiered_storage.get_object(small_key).await?;
         assert_eq!(retrieved_small, small_data);
 
         // 测试大对象（应该直接存储到对象存储）
@@ -164,23 +144,15 @@ mod tests {
             .put_object(large_key, Bytes::from(large_data.clone()), None)
             .await?;
 
-        let retrieved_large = tiered_storage
-            .get_object(large_key)
-            .await?;
+        let retrieved_large = tiered_storage.get_object(large_key).await?;
         assert_eq!(retrieved_large, large_data);
 
         // 测试对象存在性检查
-        assert!(tiered_storage
-            .object_exists(small_key)
-            .await?);
-        assert!(tiered_storage
-            .object_exists(large_key)
-            .await?);
+        assert!(tiered_storage.object_exists(small_key).await?);
+        assert!(tiered_storage.object_exists(large_key).await?);
 
         // 获取分层统计信息
-        let stats = tiered_storage
-            .get_tier_stats()
-            .await?;
+        let stats = tiered_storage.get_tier_stats().await?;
 
         // 验证分层工作正常：小对象在内存，大对象在SSD
 
@@ -192,12 +164,8 @@ mod tests {
         ); // 至少有两个对象
 
         // 测试删除
-        tiered_storage
-            .delete_object(small_key)
-            .await?;
-        assert!(!tiered_storage
-            .object_exists(small_key)
-            .await?);
+        tiered_storage.delete_object(small_key).await?;
+        assert!(!tiered_storage.object_exists(small_key).await?);
         Ok(())
     }
 }

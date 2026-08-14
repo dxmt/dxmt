@@ -82,7 +82,10 @@ async fn records_survive_a_restart() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 4, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
         storage
             .insert_records(
                 "t",
@@ -99,14 +102,27 @@ async fn records_survive_a_restart() {
     let recovered = open(&wal_dir).await;
     let tables = recovered.list_tables().await.unwrap();
     assert_eq!(tables.len(), 1, "the table itself should come back");
-    assert_eq!(tables[0].record_count, 3, "record_count should be rebuilt, not left at 0");
+    assert_eq!(
+        tables[0].record_count, 3,
+        "record_count should be rebuilt, not left at 0"
+    );
 
     // Searching, not just reading the map: a replay that populates `records` but skips the
     // index leaves the map correct and every query empty, and that is the failure mode worth
     // guarding against.
-    let hits = recovered.search("t", query(vec![1.0, 0.0, 0.0, 0.0], 3)).await.unwrap();
-    assert_eq!(hits.hits.len(), 3, "the index must be repopulated, not just the record map");
-    assert_eq!(hits.hits[0].id, "a", "nearest neighbour should be unchanged by the restart");
+    let hits = recovered
+        .search("t", query(vec![1.0, 0.0, 0.0, 0.0], 3))
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.hits.len(),
+        3,
+        "the index must be repopulated, not just the record map"
+    );
+    assert_eq!(
+        hits.hits[0].id, "a",
+        "nearest neighbour should be unchanged by the restart"
+    );
 }
 
 #[tokio::test]
@@ -116,7 +132,10 @@ async fn table_config_survives_a_restart() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 8, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .create_table(table("t", 8, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
     }
 
     let recovered = open(&wal_dir).await;
@@ -136,18 +155,37 @@ async fn deletes_are_replayed() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 2, DistanceMetric::Cosine)).await.unwrap();
         storage
-            .insert_records("t", vec![record("keep", vec![1.0, 0.0]), record("gone", vec![0.0, 1.0])])
+            .create_table(table("t", 2, DistanceMetric::Cosine))
             .await
             .unwrap();
-        storage.delete_records("t", vec!["gone".to_string()]).await.unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("keep", vec![1.0, 0.0]),
+                    record("gone", vec![0.0, 1.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage
+            .delete_records("t", vec!["gone".to_string()])
+            .await
+            .unwrap();
     }
 
     let recovered = open(&wal_dir).await;
-    let hits = recovered.search("t", query(vec![1.0, 0.0], 10)).await.unwrap();
+    let hits = recovered
+        .search("t", query(vec![1.0, 0.0], 10))
+        .await
+        .unwrap();
     let ids: Vec<_> = hits.hits.iter().map(|h| h.id.as_str()).collect();
-    assert_eq!(ids, vec!["keep"], "a deleted record must not be resurrected by replay");
+    assert_eq!(
+        ids,
+        vec!["keep"],
+        "a deleted record must not be resurrected by replay"
+    );
 }
 
 #[tokio::test]
@@ -157,8 +195,14 @@ async fn dropped_tables_are_replayed() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("keep", 2, DistanceMetric::Cosine)).await.unwrap();
-        storage.create_table(table("gone", 2, DistanceMetric::Cosine)).await.unwrap();
+        storage
+            .create_table(table("keep", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("gone", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
         storage.delete_table("gone").await.unwrap();
     }
 
@@ -180,9 +224,18 @@ async fn upsert_converges_to_the_last_write() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 2, DistanceMetric::Euclidean)).await.unwrap();
-        storage.insert_records("t", vec![record("x", vec![1.0, 0.0])]).await.unwrap();
-        storage.insert_records("t", vec![record("x", vec![0.0, 1.0])]).await.unwrap();
+        storage
+            .create_table(table("t", 2, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("x", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("x", vec![0.0, 1.0])])
+            .await
+            .unwrap();
     }
 
     // Two Insert entries share an id. There is no Update variant in the log: replay relies on
@@ -190,7 +243,10 @@ async fn upsert_converges_to_the_last_write() {
     let recovered = open(&wal_dir).await;
     assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
 
-    let hits = recovered.search("t", query(vec![0.0, 1.0], 1)).await.unwrap();
+    let hits = recovered
+        .search("t", query(vec![0.0, 1.0], 1))
+        .await
+        .unwrap();
     assert_eq!(hits.hits.len(), 1);
     assert_eq!(hits.hits[0].id, "x");
     assert!(
@@ -207,8 +263,14 @@ async fn replay_is_idempotent() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 2, DistanceMetric::Cosine)).await.unwrap();
-        storage.insert_records("t", vec![record("a", vec![1.0, 0.0])]).await.unwrap();
+        storage
+            .create_table(table("t", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
     }
 
     // Three restarts in a row. Replay must not append what it reads, or the log grows on every
@@ -237,9 +299,17 @@ async fn without_a_wal_directory_nothing_is_persisted() {
         // `new()` is the constructor the other ~40 call sites use. It must stay non-persistent,
         // otherwise every unit test and benchmark starts writing a log and replaying each
         // other's entries.
-        let storage = IntelligentIndexedStorage::new(&storage_config()).await.unwrap();
-        storage.create_table(table("t", 2, DistanceMetric::Cosine)).await.unwrap();
-        storage.insert_records("t", vec![record("a", vec![1.0, 0.0])]).await.unwrap();
+        let storage = IntelligentIndexedStorage::new(&storage_config())
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
     }
 
     let recovered = open(&wal_dir).await;
@@ -256,11 +326,16 @@ async fn a_snapshot_lets_recovery_skip_the_log_it_covers() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 4, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
         storage
             .insert_records(
                 "t",
-                (0..50).map(|i| record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0])).collect(),
+                (0..50)
+                    .map(|i| record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0]))
+                    .collect(),
             )
             .await
             .unwrap();
@@ -270,8 +345,14 @@ async fn a_snapshot_lets_recovery_skip_the_log_it_covers() {
     let recovered = open(&wal_dir).await;
     assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 50);
 
-    let hits = recovered.search("t", query(vec![7.0, 0.0, 0.0, 0.0], 1)).await.unwrap();
-    assert_eq!(hits.hits[0].id, "r7", "the restored index must answer, not just exist");
+    let hits = recovered
+        .search("t", query(vec![7.0, 0.0, 0.0, 0.0], 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.hits[0].id, "r7",
+        "the restored index must answer, not just exist"
+    );
 }
 
 #[tokio::test]
@@ -281,11 +362,17 @@ async fn writes_after_a_snapshot_are_replayed_on_top_of_it() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 4, DistanceMetric::Euclidean)).await.unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
         storage
             .insert_records(
                 "t",
-                vec![record("keep", vec![1.0, 0.0, 0.0, 0.0]), record("gone", vec![2.0, 0.0, 0.0, 0.0])],
+                vec![
+                    record("keep", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("gone", vec![2.0, 0.0, 0.0, 0.0]),
+                ],
             )
             .await
             .unwrap();
@@ -294,12 +381,21 @@ async fn writes_after_a_snapshot_are_replayed_on_top_of_it() {
         // Both edits land after the snapshot, so they exist only in the WAL tail. If recovery
         // stopped at the snapshot, `late` would vanish and `gone` would come back — and the
         // record count alone would not reveal it, since the two errors cancel out.
-        storage.insert_records("t", vec![record("late", vec![3.0, 0.0, 0.0, 0.0])]).await.unwrap();
-        storage.delete_records("t", vec!["gone".to_string()]).await.unwrap();
+        storage
+            .insert_records("t", vec![record("late", vec![3.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage
+            .delete_records("t", vec!["gone".to_string()])
+            .await
+            .unwrap();
     }
 
     let recovered = open(&wal_dir).await;
-    let hits = recovered.search("t", query(vec![0.0, 0.0, 0.0, 0.0], 10)).await.unwrap();
+    let hits = recovered
+        .search("t", query(vec![0.0, 0.0, 0.0, 0.0], 10))
+        .await
+        .unwrap();
     let mut ids: Vec<_> = hits.hits.iter().map(|h| h.id.as_str()).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec!["keep", "late"]);
@@ -312,8 +408,14 @@ async fn a_corrupt_snapshot_falls_back_to_full_replay() {
 
     {
         let storage = open(&wal_dir).await;
-        storage.create_table(table("t", 2, DistanceMetric::Cosine)).await.unwrap();
-        storage.insert_records("t", vec![record("a", vec![1.0, 0.0])]).await.unwrap();
+        storage
+            .create_table(table("t", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0])])
+            .await
+            .unwrap();
         storage.snapshot().await.unwrap();
     }
 
@@ -323,6 +425,9 @@ async fn a_corrupt_snapshot_falls_back_to_full_replay() {
 
     let recovered = open(&wal_dir).await;
     assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 1);
-    let hits = recovered.search("t", query(vec![1.0, 0.0], 1)).await.unwrap();
+    let hits = recovered
+        .search("t", query(vec![1.0, 0.0], 1))
+        .await
+        .unwrap();
     assert_eq!(hits.hits[0].id, "a");
 }

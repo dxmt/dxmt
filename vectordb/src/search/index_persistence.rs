@@ -118,8 +118,14 @@ mod tests {
 
         // The whole point: loading an hnsw file as hnsw-pq must fail loudly rather than
         // deserialize into a structurally valid but wrong index.
-        let err = read_index::<Vec<u32>>(&path, "hnsw-pq").unwrap_err().to_string();
-        assert!(err.contains("holds a 'hnsw' index"), "unhelpful error: {}", err);
+        let err = read_index::<Vec<u32>>(&path, "hnsw-pq")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("holds a 'hnsw' index"),
+            "unhelpful error: {}",
+            err
+        );
     }
 
     #[test]
@@ -128,8 +134,14 @@ mod tests {
         let path = tmp.path().join("idx.bin");
         std::fs::write(&path, b"this is not an index at all").unwrap();
 
-        let err = read_index::<Vec<u32>>(&path, "hnsw").unwrap_err().to_string();
-        assert!(err.contains("not a DXMT index file"), "unhelpful error: {}", err);
+        let err = read_index::<Vec<u32>>(&path, "hnsw")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a DXMT index file"),
+            "unhelpful error: {}",
+            err
+        );
     }
 
     #[test]
@@ -140,7 +152,14 @@ mod tests {
         write_index(&path, "test", &vec![9u32]).unwrap();
 
         let back: Vec<u32> = read_index(&path, "test").unwrap();
-        assert_eq!(back, vec![9], "rewrite should replace, not append or corrupt");
-        assert!(!path.with_extension("tmp").exists(), "temp file should be renamed away");
+        assert_eq!(
+            back,
+            vec![9],
+            "rewrite should replace, not append or corrupt"
+        );
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "temp file should be renamed away"
+        );
     }
 }

@@ -7,10 +7,10 @@
 
 #![allow(dead_code)]
 
+use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::embeddings::EmbeddingError;
 
@@ -66,45 +66,51 @@ impl ClipPyTorch {
     pub fn initialize(&mut self) -> Result<(), EmbeddingError> {
         Python::with_gil(|py| {
             // Import open_clip using PyO3 v0.22 API
-            let open_clip = PyModule::import_bound(py, "open_clip")
-                .map_err(|e| EmbeddingError::ModelLoadError(
-                    format!("Failed to import open_clip: {}. Please install: pip install open-clip-torch", e)
-                ))?;
+            let open_clip = PyModule::import_bound(py, "open_clip").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!(
+                    "Failed to import open_clip: {}. Please install: pip install open-clip-torch",
+                    e
+                ))
+            })?;
 
             // Create model and transforms
             // Returns: (model, _, preprocess)
-            let create_result = open_clip.call_method(
-                "create_model_and_transforms",
-                (&self.model_name,),
-                None,
-            ).map_err(|e| EmbeddingError::ModelLoadError(
-                format!("Failed to create model {}: {}", self.model_name, e)
-            ))?;
+            let create_result = open_clip
+                .call_method("create_model_and_transforms", (&self.model_name,), None)
+                .map_err(|e| {
+                    EmbeddingError::ModelLoadError(format!(
+                        "Failed to create model {}: {}",
+                        self.model_name, e
+                    ))
+                })?;
 
             // Extract model, preprocess from tuple
-            let model = create_result.get_item(0)
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to get model: {}", e)))?;
-            let preprocess = create_result.get_item(2)
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to get preprocess: {}", e)))?;
+            let model = create_result.get_item(0).map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to get model: {}", e))
+            })?;
+            let preprocess = create_result.get_item(2).map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to get preprocess: {}", e))
+            })?;
 
             // Move model to device
-            model.call_method1("to", (&self.device,))
-                .map_err(|e| EmbeddingError::ModelLoadError(
-                    format!("Failed to move model to device {}: {}", self.device, e)
-                ))?;
+            model.call_method1("to", (&self.device,)).map_err(|e| {
+                EmbeddingError::ModelLoadError(format!(
+                    "Failed to move model to device {}: {}",
+                    self.device, e
+                ))
+            })?;
 
             // Set model to eval mode
-            model.call_method0("eval")
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to set eval mode: {}", e)))?;
+            model.call_method0("eval").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to set eval mode: {}", e))
+            })?;
 
             // Get tokenizer
-            let tokenizer = open_clip.call_method(
-                "get_tokenizer",
-                (&self.model_name,),
-                None,
-            ).map_err(|e| EmbeddingError::ModelLoadError(
-                format!("Failed to get tokenizer: {}", e)
-            ))?;
+            let tokenizer = open_clip
+                .call_method("get_tokenizer", (&self.model_name,), None)
+                .map_err(|e| {
+                    EmbeddingError::ModelLoadError(format!("Failed to get tokenizer: {}", e))
+                })?;
 
             // Cache Python objects (convert to PyObject)
             self.py_module = Some(open_clip.unbind().into());
@@ -114,7 +120,9 @@ impl ClipPyTorch {
 
             tracing::info!(
                 "Initialized CLIP model {} on device {} (dimension: {})",
-                self.model_name, self.device, self.dimension
+                self.model_name,
+                self.device,
+                self.dimension
             );
 
             Ok(())
@@ -131,98 +139,131 @@ impl ClipPyTorch {
     pub fn encode_image(&self, image_bytes: &[u8]) -> Result<Vec<f32>, EmbeddingError> {
         if self.py_model.is_none() {
             return Err(EmbeddingError::ModelLoadError(
-                "Model not initialized. Call initialize() first.".to_string()
+                "Model not initialized. Call initialize() first.".to_string(),
             ));
         }
 
         Python::with_gil(|py| {
             // Load image from bytes using PIL
-            let pil = PyModule::import_bound(py, "PIL.Image")
-                .map_err(|e| EmbeddingError::ModelLoadError(
-                    format!("Failed to import PIL: {}. Please install: pip install pillow", e)
-                ))?;
+            let pil = PyModule::import_bound(py, "PIL.Image").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!(
+                    "Failed to import PIL: {}. Please install: pip install pillow",
+                    e
+                ))
+            })?;
 
-            let io = PyModule::import_bound(py, "io")
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to import io: {}", e)))?;
+            let io = PyModule::import_bound(py, "io").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to import io: {}", e))
+            })?;
 
             // Create BytesIO object from image bytes
-            let bytes_io = io.call_method1("BytesIO", (PyBytes::new_bound(py, image_bytes),))
-                .map_err(|e| EmbeddingError::InvalidInput(format!("Failed to create BytesIO: {}", e)))?;
+            let bytes_io = io
+                .call_method1("BytesIO", (PyBytes::new_bound(py, image_bytes),))
+                .map_err(|e| {
+                    EmbeddingError::InvalidInput(format!("Failed to create BytesIO: {}", e))
+                })?;
 
             // Open image
-            let image = pil.call_method1("open", (bytes_io,))
-                .map_err(|e| EmbeddingError::InvalidInput(format!("Failed to open image: {}", e)))?;
+            let image = pil.call_method1("open", (bytes_io,)).map_err(|e| {
+                EmbeddingError::InvalidInput(format!("Failed to open image: {}", e))
+            })?;
 
             // Convert to RGB (in case of RGBA, grayscale, etc.)
-            let image_rgb = image.call_method0("convert")
+            let image_rgb = image
+                .call_method0("convert")
                 .and_then(|m| m.call1(("RGB",)))
-                .map_err(|e| EmbeddingError::InvalidInput(format!("Failed to convert to RGB: {}", e)))?;
+                .map_err(|e| {
+                    EmbeddingError::InvalidInput(format!("Failed to convert to RGB: {}", e))
+                })?;
 
             // Preprocess image
             let preprocess = self.py_preprocess.as_ref().unwrap().bind(py);
-            let preprocessed = preprocess.call1((image_rgb,))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to preprocess: {}", e)))?;
+            let preprocessed = preprocess.call1((image_rgb,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to preprocess: {}", e))
+            })?;
 
             // Add batch dimension: unsqueeze(0)
-            let batched = preprocessed.call_method1("unsqueeze", (0,))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to unsqueeze: {}", e)))?;
+            let batched = preprocessed.call_method1("unsqueeze", (0,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to unsqueeze: {}", e))
+            })?;
 
             // Move to device
-            let tensor = batched.call_method1("to", (&self.device,))
-                .map_err(|e| EmbeddingError::InferenceError(
-                    format!("Failed to move tensor to device: {}", e)
-                ))?;
+            let tensor = batched.call_method1("to", (&self.device,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to move tensor to device: {}", e))
+            })?;
 
             // Encode with torch.no_grad() context
-            let torch = PyModule::import_bound(py, "torch")
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to import torch: {}", e)))?;
+            let torch = PyModule::import_bound(py, "torch").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to import torch: {}", e))
+            })?;
 
             let model = self.py_model.as_ref().unwrap().bind(py);
 
             // Run inference with no_grad
-            let features = torch.call_method0("no_grad")
+            let features = torch
+                .call_method0("no_grad")
                 .and_then(|no_grad_ctx| {
                     // Enter context and encode
                     no_grad_ctx.call_method0("__enter__")?;
                     let result = model.call_method1("encode_image", (tensor,));
-                    let _ = no_grad_ctx.call_method("__exit__", (py.None(), py.None(), py.None()), None);
+                    let _ = no_grad_ctx.call_method(
+                        "__exit__",
+                        (py.None(), py.None(), py.None()),
+                        None,
+                    );
                     result
                 })
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to encode image: {}", e)))?;
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to encode image: {}", e))
+                })?;
 
             // Normalize: features / features.norm(dim=-1, keepdim=True)
             let norm_kwargs = pyo3::types::PyDict::new_bound(py);
-            norm_kwargs.set_item("dim", -1)
+            norm_kwargs
+                .set_item("dim", -1)
                 .map_err(|e| EmbeddingError::InferenceError(format!("Failed to set dim: {}", e)))?;
-            norm_kwargs.set_item("keepdim", true)
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to set keepdim: {}", e)))?;
+            norm_kwargs.set_item("keepdim", true).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to set keepdim: {}", e))
+            })?;
 
-            let norm = features.call_method("norm", (), Some(&norm_kwargs))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to compute norm: {}", e)))?;
+            let norm = features
+                .call_method("norm", (), Some(&norm_kwargs))
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to compute norm: {}", e))
+                })?;
 
-            let normalized = features.call_method1("div", (norm,))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to normalize: {}", e)))?;
+            let normalized = features.call_method1("div", (norm,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to normalize: {}", e))
+            })?;
 
             // Convert to CPU numpy array
-            let cpu_tensor = normalized.call_method0("cpu")
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to move to CPU: {}", e)))?;
+            let cpu_tensor = normalized.call_method0("cpu").map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to move to CPU: {}", e))
+            })?;
 
-            let numpy_array = cpu_tensor.call_method0("numpy")
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to convert to numpy: {}", e)))?;
+            let numpy_array = cpu_tensor.call_method0("numpy").map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to convert to numpy: {}", e))
+            })?;
 
             // Flatten and extract as Vec<f32>
-            let flattened = numpy_array.call_method0("flatten")
+            let flattened = numpy_array
+                .call_method0("flatten")
                 .map_err(|e| EmbeddingError::InferenceError(format!("Failed to flatten: {}", e)))?;
 
-            let embedding: Vec<f32> = flattened.call_method0("tolist")
+            let embedding: Vec<f32> = flattened
+                .call_method0("tolist")
                 .and_then(|list| list.extract())
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to extract embedding: {}", e)))?;
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to extract embedding: {}", e))
+                })?;
 
             // Validate dimension
             if embedding.len() != self.dimension {
-                return Err(EmbeddingError::InferenceError(
-                    format!("Expected dimension {}, got {}", self.dimension, embedding.len())
-                ));
+                return Err(EmbeddingError::InferenceError(format!(
+                    "Expected dimension {}, got {}",
+                    self.dimension,
+                    embedding.len()
+                )));
             }
 
             Ok(embedding)
@@ -239,71 +280,93 @@ impl ClipPyTorch {
     pub fn encode_text(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         if self.py_model.is_none() {
             return Err(EmbeddingError::ModelLoadError(
-                "Model not initialized. Call initialize() first.".to_string()
+                "Model not initialized. Call initialize() first.".to_string(),
             ));
         }
 
         Python::with_gil(|py| {
             // Tokenize text
             let tokenizer = self.py_tokenizer.as_ref().unwrap().bind(py);
-            let tokens = tokenizer.call1((vec![text],))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to tokenize: {}", e)))?;
+            let tokens = tokenizer.call1((vec![text],)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to tokenize: {}", e))
+            })?;
 
             // Move to device
-            let tensor = tokens.call_method1("to", (&self.device,))
-                .map_err(|e| EmbeddingError::InferenceError(
-                    format!("Failed to move tokens to device: {}", e)
-                ))?;
+            let tensor = tokens.call_method1("to", (&self.device,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to move tokens to device: {}", e))
+            })?;
 
             // Encode with torch.no_grad() context
-            let torch = PyModule::import_bound(py, "torch")
-                .map_err(|e| EmbeddingError::ModelLoadError(format!("Failed to import torch: {}", e)))?;
+            let torch = PyModule::import_bound(py, "torch").map_err(|e| {
+                EmbeddingError::ModelLoadError(format!("Failed to import torch: {}", e))
+            })?;
 
             let model = self.py_model.as_ref().unwrap().bind(py);
 
             // Run inference with no_grad
-            let features = torch.call_method0("no_grad")
+            let features = torch
+                .call_method0("no_grad")
                 .and_then(|no_grad_ctx| {
                     no_grad_ctx.call_method0("__enter__")?;
                     let result = model.call_method1("encode_text", (tensor,));
-                    let _ = no_grad_ctx.call_method("__exit__", (py.None(), py.None(), py.None()), None);
+                    let _ = no_grad_ctx.call_method(
+                        "__exit__",
+                        (py.None(), py.None(), py.None()),
+                        None,
+                    );
                     result
                 })
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to encode text: {}", e)))?;
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to encode text: {}", e))
+                })?;
 
             // Normalize
             let norm_kwargs = pyo3::types::PyDict::new_bound(py);
-            norm_kwargs.set_item("dim", -1)
+            norm_kwargs
+                .set_item("dim", -1)
                 .map_err(|e| EmbeddingError::InferenceError(format!("Failed to set dim: {}", e)))?;
-            norm_kwargs.set_item("keepdim", true)
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to set keepdim: {}", e)))?;
+            norm_kwargs.set_item("keepdim", true).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to set keepdim: {}", e))
+            })?;
 
-            let norm = features.call_method("norm", (), Some(&norm_kwargs))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to compute norm: {}", e)))?;
+            let norm = features
+                .call_method("norm", (), Some(&norm_kwargs))
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to compute norm: {}", e))
+                })?;
 
-            let normalized = features.call_method1("div", (norm,))
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to normalize: {}", e)))?;
+            let normalized = features.call_method1("div", (norm,)).map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to normalize: {}", e))
+            })?;
 
             // Convert to CPU numpy array
-            let cpu_tensor = normalized.call_method0("cpu")
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to move to CPU: {}", e)))?;
+            let cpu_tensor = normalized.call_method0("cpu").map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to move to CPU: {}", e))
+            })?;
 
-            let numpy_array = cpu_tensor.call_method0("numpy")
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to convert to numpy: {}", e)))?;
+            let numpy_array = cpu_tensor.call_method0("numpy").map_err(|e| {
+                EmbeddingError::InferenceError(format!("Failed to convert to numpy: {}", e))
+            })?;
 
             // Flatten and extract
-            let flattened = numpy_array.call_method0("flatten")
+            let flattened = numpy_array
+                .call_method0("flatten")
                 .map_err(|e| EmbeddingError::InferenceError(format!("Failed to flatten: {}", e)))?;
 
-            let embedding: Vec<f32> = flattened.call_method0("tolist")
+            let embedding: Vec<f32> = flattened
+                .call_method0("tolist")
                 .and_then(|list| list.extract())
-                .map_err(|e| EmbeddingError::InferenceError(format!("Failed to extract embedding: {}", e)))?;
+                .map_err(|e| {
+                    EmbeddingError::InferenceError(format!("Failed to extract embedding: {}", e))
+                })?;
 
             // Validate dimension
             if embedding.len() != self.dimension {
-                return Err(EmbeddingError::InferenceError(
-                    format!("Expected dimension {}, got {}", self.dimension, embedding.len())
-                ));
+                return Err(EmbeddingError::InferenceError(format!(
+                    "Expected dimension {}, got {}",
+                    self.dimension,
+                    embedding.len()
+                )));
             }
 
             Ok(embedding)
@@ -371,7 +434,10 @@ mod tests {
         // Will fail if Python/open_clip not installed, which is expected
         match result {
             Ok(_) => println!("Successfully initialized CLIP PyTorch"),
-            Err(e) => println!("Failed to initialize (expected if Python not configured): {}", e),
+            Err(e) => println!(
+                "Failed to initialize (expected if Python not configured): {}",
+                e
+            ),
         }
     }
 

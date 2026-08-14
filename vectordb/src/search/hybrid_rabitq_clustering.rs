@@ -236,16 +236,11 @@ impl HybridRaBitQClusteringIndex {
         distance_metric: DistanceMetric,
         dimension: usize,
     ) -> Self {
-        let clustering = HierarchicalClusteringIndex::new(
-            config.clustering_config.clone(),
-            distance_metric,
-        );
+        let clustering =
+            HierarchicalClusteringIndex::new(config.clustering_config.clone(), distance_metric);
 
-        let quantizer = RaBitQQuantizer::new(
-            config.rabitq_config.clone(),
-            distance_metric,
-            dimension,
-        );
+        let quantizer =
+            RaBitQQuantizer::new(config.rabitq_config.clone(), distance_metric, dimension);
 
         Self {
             config,
@@ -354,14 +349,10 @@ impl HybridRaBitQClusteringIndex {
     }
 
     /// Search for nearest neighbors
-    pub fn search(
-        &mut self,
-        query: &DenseVector,
-        k: usize,
-    ) -> crate::Result<Vec<(String, f32)>> {
+    pub fn search(&mut self, query: &DenseVector, k: usize) -> crate::Result<Vec<(String, f32)>> {
         if !self.is_trained {
             return Err(crate::error::Error::InvalidInput(
-                "Index must be trained before search".to_string()
+                "Index must be trained before search".to_string(),
             ));
         }
 
@@ -582,7 +573,11 @@ mod tests {
         println!("  Fine clusters: {}", stats.num_fine_clusters);
         println!("  Binary codes: {}", stats.num_binary_codes);
         println!("  Training time: {}ms", stats.training_time_ms);
-        println!("  Memory: {} bytes ({:.2} MB)", stats.memory_bytes, stats.memory_bytes as f64 / 1_048_576.0);
+        println!(
+            "  Memory: {} bytes ({:.2} MB)",
+            stats.memory_bytes,
+            stats.memory_bytes as f64 / 1_048_576.0
+        );
 
         assert_eq!(stats.total_vectors, 100);
         assert!(stats.num_binary_codes > 0);
@@ -703,7 +698,8 @@ mod tests {
         assert!(!results.is_empty(), "Should find some results");
 
         let stats = index.stats();
-        println!("  Memory (no reranking): {} bytes ({:.2} MB)",
+        println!(
+            "  Memory (no reranking): {} bytes ({:.2} MB)",
             stats.memory_bytes,
             stats.memory_bytes as f64 / 1_048_576.0
         );
@@ -736,30 +732,38 @@ mod tests {
         let vectors = create_test_vectors(100, 64);
 
         // Index with reranking
-        let mut index_with = HybridRaBitQClusteringIndex::new(
-            config_with_reranking,
-            DistanceMetric::Euclidean,
-            64
-        );
+        let mut index_with =
+            HybridRaBitQClusteringIndex::new(config_with_reranking, DistanceMetric::Euclidean, 64);
         index_with.train(&vectors).expect("Training should succeed");
 
         // Index without reranking
         let mut index_without = HybridRaBitQClusteringIndex::new(
             config_without_reranking,
             DistanceMetric::Euclidean,
-            64
+            64,
         );
-        index_without.train(&vectors).expect("Training should succeed");
+        index_without
+            .train(&vectors)
+            .expect("Training should succeed");
 
         let mem_with = index_with.stats().memory_bytes;
         let mem_without = index_without.stats().memory_bytes;
 
         println!("\nMemory Usage Comparison:");
         println!("  With reranking: {:.2} MB", mem_with as f64 / 1_048_576.0);
-        println!("  Without reranking: {:.2} MB", mem_without as f64 / 1_048_576.0);
-        println!("  Savings: {:.1}%", (1.0 - mem_without as f64 / mem_with as f64) * 100.0);
+        println!(
+            "  Without reranking: {:.2} MB",
+            mem_without as f64 / 1_048_576.0
+        );
+        println!(
+            "  Savings: {:.1}%",
+            (1.0 - mem_without as f64 / mem_with as f64) * 100.0
+        );
 
-        assert!(mem_without < mem_with, "Memory without reranking should be less");
+        assert!(
+            mem_without < mem_with,
+            "Memory without reranking should be less"
+        );
     }
 
     #[test]

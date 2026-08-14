@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use zstd;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -9,10 +8,11 @@ use std::time::Duration;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use zstd;
 
 use crate::storage::object::traits::ObjectStorage;
+use crate::types::table::Table;
 use crate::wal::WalManager;
-use crate::types::{table::Table};
 
 /// 备份恢复管理器
 pub struct BackupManager {
@@ -68,8 +68,7 @@ impl Default for BackupConfig {
 }
 
 /// 备份状态
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackupState {
     /// 最后全量备份时间
     pub last_full_backup: Option<DateTime<Utc>>,
@@ -80,7 +79,6 @@ pub struct BackupState {
     /// 备份历史记录
     pub backup_history: Vec<BackupRecord>,
 }
-
 
 /// 备份任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,7 +181,8 @@ impl BackupManager {
         primary_storage: Arc<dyn ObjectStorage>,
         backup_storages: Vec<Arc<dyn ObjectStorage>>,
         config: BackupConfig,
-        wal: Arc<WalManager>) -> Self {
+        wal: Arc<WalManager>,
+    ) -> Self {
         Self {
             primary_storage,
             backup_storages,
@@ -200,7 +199,7 @@ impl BackupManager {
         // 启动全量备份任务
         tokio::spawn(async move {
             let mut full_backup_interval = interval(Duration::from_secs(
-                manager.config.full_backup_interval_hours * 3600
+                manager.config.full_backup_interval_hours * 3600,
             ));
 
             loop {
@@ -217,7 +216,7 @@ impl BackupManager {
         // 启动增量备份任务
         tokio::spawn(async move {
             let mut incremental_backup_interval = interval(Duration::from_secs(
-                manager.config.incremental_backup_interval_minutes * 60
+                manager.config.incremental_backup_interval_minutes * 60,
             ));
 
             loop {
@@ -241,23 +240,29 @@ impl BackupManager {
     /// 创建增量备份
     pub async fn create_incremental_backup(&self) -> crate::Result<Uuid> {
         let since_time = {
-            let state = self.backup_state.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let state = self
+                .backup_state
+                .read()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             state.last_incremental_backup.or(state.last_full_backup)
         };
 
-        self.create_backup(BackupType::Incremental, since_time).await
+        self.create_backup(BackupType::Incremental, since_time)
+            .await
     }
 
     /// 创建手动备份
     pub async fn create_manual_backup(&self, tables: Option<Vec<String>>) -> crate::Result<Uuid> {
-        self.create_backup_for_tables(BackupType::Manual, tables).await
+        self.create_backup_for_tables(BackupType::Manual, tables)
+            .await
     }
 
     /// 创建备份
     async fn create_backup(
         &self,
         backup_type: BackupType,
-        since_time: Option<DateTime<Utc>>) -> crate::Result<Uuid> {
+        since_time: Option<DateTime<Utc>>,
+    ) -> crate::Result<Uuid> {
         let task_id = Uuid::new_v4();
         let backup_task = BackupTask {
             id: task_id,
@@ -272,7 +277,10 @@ impl BackupManager {
 
         // 注册备份任务
         {
-            let mut state = self.backup_state.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut state = self
+                .backup_state
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             state.active_backups.insert(task_id, backup_task);
         }
 
@@ -314,7 +322,8 @@ impl BackupManager {
     async fn create_backup_for_tables(
         &self,
         backup_type: BackupType,
-        tables: Option<Vec<String>>) -> crate::Result<Uuid> {
+        tables: Option<Vec<String>>,
+    ) -> crate::Result<Uuid> {
         // If no table filter, fall through to full backup
         let Some(table_filter) = tables else {
             return self.create_backup(backup_type, None).await;
@@ -333,7 +342,9 @@ impl BackupManager {
         };
 
         {
-            let mut state = self.backup_state.write()
+            let mut state = self
+                .backup_state
+                .write()
                 .map_err(|_| crate::Error::Internal("Backup state lock poisoned".to_string()))?;
             state.active_backups.insert(task_id, backup_task);
         }
@@ -367,18 +378,21 @@ impl BackupManager {
         task_id: Uuid,
         backup_type: BackupType,
         since_time: Option<DateTime<Utc>>,
-        table_filter: Vec<String>) -> crate::Result<BackupRecord> {
+        table_filter: Vec<String>,
+    ) -> crate::Result<BackupRecord> {
         // Collect all data then filter to the requested tables
         let mut backup_data = self.collect_backup_data(since_time, task_id).await?;
-        backup_data.tables.retain(|t| table_filter.contains(&t.table.name));
-        backup_data.total_records = backup_data.tables.iter()
+        backup_data
+            .tables
+            .retain(|t| table_filter.contains(&t.table.name));
+        backup_data.total_records = backup_data
+            .tables
+            .iter()
             .map(|t| t.records.len() as u64)
             .sum();
 
         let checksum = self.calculate_checksum(&backup_data)?;
-        let backup_path = format!(
-            "backups/filtered/{}", Utc::now().format("%Y%m%d_%H%M%S")
-        );
+        let backup_path = format!("backups/filtered/{}", Utc::now().format("%Y%m%d_%H%M%S"));
         let serialized_data = if self.config.enable_compression {
             self.compress_backup_data(&backup_data)?
         } else {
@@ -397,7 +411,11 @@ impl BackupManager {
 
         let backup_key = format!("{}/data.bin", backup_path);
         self.primary_storage
-            .put_object(&backup_key, bytes::Bytes::from(serialized_data.clone()), Some("application/octet-stream"))
+            .put_object(
+                &backup_key,
+                bytes::Bytes::from(serialized_data.clone()),
+                Some("application/octet-stream"),
+            )
             .await
             .map_err(|e| crate::Error::Storage(e.to_string()))?;
 
@@ -414,7 +432,9 @@ impl BackupManager {
         };
 
         {
-            let mut state = self.backup_state.write()
+            let mut state = self
+                .backup_state
+                .write()
                 .map_err(|_| crate::Error::Internal("Backup state lock poisoned".to_string()))?;
             state.backup_history.push(record.clone());
             if let Some(task) = state.active_backups.get_mut(&task_id) {
@@ -432,7 +452,8 @@ impl BackupManager {
         &self,
         task_id: Uuid,
         backup_type: BackupType,
-        since_time: Option<DateTime<Utc>>) -> crate::Result<BackupRecord> {
+        since_time: Option<DateTime<Utc>>,
+    ) -> crate::Result<BackupRecord> {
         let backup_start = Utc::now();
         let backup_path = format!(
             "backups/{}/{}",
@@ -449,13 +470,23 @@ impl BackupManager {
         // 获取需要备份的数据
         let backup_data = match self.collect_backup_data(since_time, task_id).await {
             Ok(data) => data,
-            Err(e) => return Err(crate::Error::Internal(format!("Backup data collection failed: {:?}", e))),
+            Err(e) => {
+                return Err(crate::Error::Internal(format!(
+                    "Backup data collection failed: {:?}",
+                    e
+                )))
+            }
         };
 
         // 计算校验和
         let checksum = match self.calculate_checksum(&backup_data) {
             Ok(sum) => sum,
-            Err(e) => return Err(crate::Error::Internal(format!("Checksum calculation failed: {:?}", e))),
+            Err(e) => {
+                return Err(crate::Error::Internal(format!(
+                    "Checksum calculation failed: {:?}",
+                    e
+                )))
+            }
         };
 
         // 备份到所有存储后端
@@ -465,7 +496,8 @@ impl BackupManager {
         for (i, storage) in self.backup_storages.iter().enumerate() {
             match self
                 .write_backup_to_storage(storage.as_ref(), &backup_path, &backup_data, i + 1)
-                .await {
+                .await
+            {
                 Ok(size) => {
                     total_size = size;
                     backup_succeeded = true;
@@ -487,12 +519,17 @@ impl BackupManager {
         }
 
         if !backup_succeeded {
-            return Err(crate::error::Error::Internal("All backup storage backends failed".to_string()));
+            return Err(crate::error::Error::Internal(
+                "All backup storage backends failed".to_string(),
+            ));
         }
 
         // 更新备份状态
         {
-            let mut state = self.backup_state.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut state = self
+                .backup_state
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             match backup_type {
                 BackupType::Full => state.last_full_backup = Some(backup_start),
                 BackupType::Incremental => state.last_incremental_backup = Some(backup_start),
@@ -531,7 +568,8 @@ impl BackupManager {
     async fn collect_backup_data(
         &self,
         since_time: Option<DateTime<Utc>>,
-        task_id: Uuid) -> crate::Result<BackupData> {
+        task_id: Uuid,
+    ) -> crate::Result<BackupData> {
         info!("Collecting backup data since: {:?}", since_time);
 
         let mut backup_data = BackupData {
@@ -555,10 +593,7 @@ impl BackupManager {
             ..Default::default()
         };
 
-        let objects = match self
-            .primary_storage
-            .list_objects(&list_options)
-            .await {
+        let objects = match self.primary_storage.list_objects(&list_options).await {
             Ok(objs) => objs,
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
@@ -581,12 +616,10 @@ impl BackupManager {
             if let Some(table_name) = self.extract_table_name_from_path(&obj.key) {
                 // 获取对象数据
                 match self.primary_storage.get_object(&obj.key).await {
-                    Ok(data) => {
-                        table_data_map
-                            .entry(table_name)
-                            .or_default()
-                            .push((obj.key.clone(), data))
-                    }
+                    Ok(data) => table_data_map
+                        .entry(table_name)
+                        .or_default()
+                        .push((obj.key.clone(), data)),
                     Err(e) => {
                         warn!("Failed to get object {}: {}", obj.key, e);
                     }
@@ -602,7 +635,8 @@ impl BackupManager {
         for (table_name, table_objects) in table_data_map {
             match self
                 .reconstruct_table_backup(&table_name, table_objects)
-                .await {
+                .await
+            {
                 Ok(table_backup) => {
                     backup_data.total_records += table_backup.records.len() as u64;
                     backup_data.tables.push(table_backup);
@@ -700,14 +734,21 @@ impl BackupManager {
         storage: &dyn ObjectStorage,
         path: &str,
         data: &BackupData,
-        storage_index: usize) -> crate::Result<u64> {
+        storage_index: usize,
+    ) -> crate::Result<u64> {
         let serialized_data = if self.config.enable_compression {
             match self.compress_backup_data(data) {
                 Ok(data) => data,
-                Err(e) => return Err(crate::Error::Internal(format!("Compression failed: {:?}", e))),
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Compression failed: {:?}",
+                        e
+                    )))
+                }
             }
         } else {
-            bincode::serialize(data).map_err(|e| crate::error::Error::Serialization(e.to_string()))?
+            bincode::serialize(data)
+                .map_err(|e| crate::error::Error::Serialization(e.to_string()))?
         };
 
         let checksum = self.calculate_checksum(data)?;
@@ -723,8 +764,9 @@ impl BackupManager {
                 Bytes::from(serialized_data.clone()),
                 Some("application/octet-stream"),
             )
-            .await {
-            Ok(_) => {},
+            .await
+        {
+            Ok(_) => {}
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
 
@@ -735,23 +777,25 @@ impl BackupManager {
                 Bytes::from(checksum_data),
                 Some("text/plain"),
             )
-            .await {
-            Ok(_) => {},
+            .await
+        {
+            Ok(_) => {}
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
 
         // 写入元数据文件
         let metadata_key = format!("{}/metadata_{}.json", path, storage_index);
-        let metadata_json =
-            serde_json::to_string(&data.payload).map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
+        let metadata_json = serde_json::to_string(&data.payload)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
         match storage
             .put_object(
                 &metadata_key,
                 Bytes::from(metadata_json.into_bytes()),
                 Some("application/json"),
             )
-            .await {
-            Ok(_) => {},
+            .await
+        {
+            Ok(_) => {}
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
 
@@ -760,14 +804,16 @@ impl BackupManager {
 
     /// 压缩备份数据（zstd level 3）
     fn compress_backup_data(&self, data: &BackupData) -> crate::Result<Vec<u8>> {
-        let serialized = bincode::serialize(data).map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
+        let serialized = bincode::serialize(data)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
         zstd::encode_all(serialized.as_slice(), 3)
             .map_err(|e| crate::error::Error::Internal(format!("Compression failed: {}", e)))
     }
 
     /// 计算校验和
     fn calculate_checksum(&self, data: &BackupData) -> crate::Result<String> {
-        let serialized = bincode::serialize(data).map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
+        let serialized = bincode::serialize(data)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let checksum = format!("{:x}", hasher.finalize());
@@ -784,7 +830,11 @@ impl BackupManager {
     }
 
     /// 恢复备份
-    pub async fn restore_backup(&self, backup_id: Uuid, options: RestoreOptions) -> crate::Result<()> {
+    pub async fn restore_backup(
+        &self,
+        backup_id: Uuid,
+        options: RestoreOptions,
+    ) -> crate::Result<()> {
         info!(
             "Starting restore for backup: {} with _options: {:?}",
             backup_id, options
@@ -792,12 +842,15 @@ impl BackupManager {
 
         // 如果指定了时间点恢复，需要找到最佳的备份组合
         if let Some(point_in_time) = options.point_in_time {
-            return self.restore_point_in_time(point_in_time, options).await
+            return self.restore_point_in_time(point_in_time, options).await;
         }
 
         // 查找备份记录
         let backup_record = {
-            let state = self.backup_state.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let state = self
+                .backup_state
+                .read()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             state
                 .backup_history
                 .iter()
@@ -805,26 +858,37 @@ impl BackupManager {
                 .cloned()
         };
 
-        let backup_record = backup_record.ok_or_else(|| crate::error::Error::InvalidInput(format!("Backup {} not found", backup_id)))?;
+        let backup_record = backup_record.ok_or_else(|| {
+            crate::error::Error::InvalidInput(format!("Backup {} not found", backup_id))
+        })?;
 
         // 从备份存储读取数据
         // Load backup data from storage
-        let backup_data = match self.primary_storage.get_object(&backup_record.backup_path).await {
+        let backup_data = match self
+            .primary_storage
+            .get_object(&backup_record.backup_path)
+            .await
+        {
             Ok(data) => data,
-            Err(_) => return Err(crate::error::Error::InvalidInput("Backup data not found".to_string())),
+            Err(_) => {
+                return Err(crate::error::Error::InvalidInput(
+                    "Backup data not found".to_string(),
+                ))
+            }
         };
 
         // 验证数据完整性
         if options.verify_integrity {
-
-            let parsed_backup_data: BackupData = serde_json::from_slice(&backup_data).map_err(|e| crate::Error::Internal(format!("Failed to parse backup data: {}", e)))?;
+            let parsed_backup_data: BackupData =
+                serde_json::from_slice(&backup_data).map_err(|e| {
+                    crate::Error::Internal(format!("Failed to parse backup data: {}", e))
+                })?;
             self.verify_backup_integrity(&parsed_backup_data, &backup_record.checksum)?;
             // Implementation placeholder
-
-
         }
         // 执行恢复
-        let parsed_backup_data: BackupData = serde_json::from_slice(&backup_data).map_err(|e| crate::Error::Internal(format!("Failed to parse backup data: {}", e)))?;
+        let parsed_backup_data: BackupData = serde_json::from_slice(&backup_data)
+            .map_err(|e| crate::Error::Internal(format!("Failed to parse backup data: {}", e)))?;
         self.execute_restore(&parsed_backup_data, &options).await?;
 
         info!("Restore completed for backup: {}", backup_id);
@@ -835,12 +899,16 @@ impl BackupManager {
     pub async fn restore_point_in_time(
         &self,
         target_time: DateTime<Utc>,
-        options: RestoreOptions) -> crate::Result<()> {
+        options: RestoreOptions,
+    ) -> crate::Result<()> {
         info!("Starting point-in-time restore to: {}", target_time);
 
         // 从锁中提取所需数据
         let (base_full_backup, incremental_backups) = {
-            let state = self.backup_state.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let state = self
+                .backup_state
+                .read()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
             // 找到目标时间点之前的最新全量备份
             let base_full_backup = state
@@ -850,7 +918,12 @@ impl BackupManager {
                     record.backup_type == BackupType::Full && record.created_at <= target_time
                 })
                 .max_by_key(|record| record.created_at)
-                .ok_or_else(|| crate::error::Error::InvalidInput(format!("No full backup found before target time: {}", target_time)))?
+                .ok_or_else(|| {
+                    crate::error::Error::InvalidInput(format!(
+                        "No full backup found before target time: {}",
+                        target_time
+                    ))
+                })?
                 .clone();
 
             // 找到全量备份之后、目标时间之前的所有增量备份
@@ -883,38 +956,50 @@ impl BackupManager {
         // 应用基础全量备份
         let full_backup_data = match self
             .read_backup_from_storage(&base_full_backup.backup_path)
-            .await {
+            .await
+        {
             Ok(data) => data,
-            Err(e) => return Err(crate::Error::Internal(format!("Backup read failed: {:?}", e))),
+            Err(e) => {
+                return Err(crate::Error::Internal(format!(
+                    "Backup read failed: {:?}",
+                    e
+                )))
+            }
         };
 
         if options.verify_integrity {
-
-
             match self.verify_backup_integrity(&full_backup_data, &base_full_backup.checksum) {
-                Ok(_) => {},
-                Err(e) => return Err(crate::Error::Internal(format!("Integrity verification failed: {:?}", e))),
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Integrity verification failed: {:?}",
+                        e
+                    )))
+                }
             };
-
-
-
-
         }
         // 先清理目标表（如果允许覆盖）
         if options.overwrite_existing {
-
             info!("Clearing existing data before point-in-time restore");
             match self.clear_target_tables(&options.target_tables).await {
-                Ok(_) => {},
-                Err(e) => return Err(crate::Error::Internal(format!("Table clear failed: {:?}", e))),
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Table clear failed: {:?}",
+                        e
+                    )))
+                }
             };
-
-
         }
         // 恢复全量备份
         match self.execute_restore(&full_backup_data, &options).await {
-            Ok(_) => {},
-            Err(e) => return Err(crate::Error::Internal(format!("Restore execution failed: {:?}", e))),
+            Ok(_) => {}
+            Err(e) => {
+                return Err(crate::Error::Internal(format!(
+                    "Restore execution failed: {:?}",
+                    e
+                )))
+            }
         };
 
         // 依次应用增量备份
@@ -928,27 +1013,41 @@ impl BackupManager {
 
             let incremental_data = match self
                 .read_backup_from_storage(&incremental_record.backup_path)
-                .await {
+                .await
+            {
                 Ok(data) => data,
-                Err(e) => return Err(crate::Error::Internal(format!("Incremental backup read failed: {:?}", e))),
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Incremental backup read failed: {:?}",
+                        e
+                    )))
+                }
             };
 
             if options.verify_integrity {
-
-
-                match self.verify_backup_integrity(&incremental_data, &incremental_record.checksum) {
-                    Ok(_) => {},
-                    Err(e) => return Err(crate::Error::Internal(format!("Incremental integrity verification failed: {:?}", e))),
+                match self.verify_backup_integrity(&incremental_data, &incremental_record.checksum)
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(crate::Error::Internal(format!(
+                            "Incremental integrity verification failed: {:?}",
+                            e
+                        )))
+                    }
                 };
-
-
-
-
             }
             // 应用增量变更（使用WAL重放）
-            match self.apply_incremental_changes(&incremental_data, &options).await {
-                Ok(_) => {},
-                Err(e) => return Err(crate::Error::Internal(format!("Incremental changes application failed: {:?}", e))),
+            match self
+                .apply_incremental_changes(&incremental_data, &options)
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Incremental changes application failed: {:?}",
+                        e
+                    )))
+                }
             };
         }
 
@@ -963,10 +1062,7 @@ impl BackupManager {
             ..Default::default()
         };
 
-        let objects = match self
-            .primary_storage
-            .list_objects(&list_options)
-            .await {
+        let objects = match self.primary_storage.list_objects(&list_options).await {
             Ok(objs) => objs,
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
@@ -982,7 +1078,7 @@ impl BackupManager {
 
                 // 删除对象
                 match self.primary_storage.delete_object(&obj.key).await {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         warn!("Failed to delete object {}: {}", obj.key, e);
                     }
@@ -996,7 +1092,8 @@ impl BackupManager {
     async fn apply_incremental_changes(
         &self,
         incremental_data: &BackupData,
-        options: &RestoreOptions) -> crate::Result<()> {
+        options: &RestoreOptions,
+    ) -> crate::Result<()> {
         info!(
             "Applying incremental changes with {} tables",
             incremental_data.tables.len()
@@ -1016,9 +1113,17 @@ impl BackupManager {
 
         // 应用每个表的增量变更
         for table_backup in tables_to_apply {
-            match self.apply_table_incremental_changes(table_backup, options).await {
-                Ok(_) => {},
-                Err(e) => return Err(crate::Error::Internal(format!("Table incremental changes failed: {:?}", e))),
+            match self
+                .apply_table_incremental_changes(table_backup, options)
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Table incremental changes failed: {:?}",
+                        e
+                    )))
+                }
             };
         }
         Ok(())
@@ -1028,39 +1133,44 @@ impl BackupManager {
     async fn apply_table_incremental_changes(
         &self,
         table_backup: &TableBackup,
-        _options: &RestoreOptions) -> crate::Result<()> {
+        _options: &RestoreOptions,
+    ) -> crate::Result<()> {
         let table_name = &table_backup.table.name;
         info!("Applying incremental changes for table: {}", table_name);
 
         // 更新表元数据（如果有变更）
         let table_path = format!("tables/{}/metadata", table_name);
-        let table_metadata =
-            bincode::serialize(&table_backup.table).map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
-        match self.primary_storage
+        let table_metadata = bincode::serialize(&table_backup.table)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
+        match self
+            .primary_storage
             .put_object(
                 &table_path,
                 Bytes::from(table_metadata),
                 Some("application/octet-stream"),
             )
-            .await {
-            Ok(_) => {},
+            .await
+        {
+            Ok(_) => {}
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
 
         // 应用记录变更（增量备份中的记录是新增或修改的）
         for record in &table_backup.records {
             let record_path = format!("tables/{}/records/{}", table_name, record.id);
-            let record_data =
-                bincode::serialize(record).map_err(|e| crate::Error::Serialization(e.to_string()))?;
+            let record_data = bincode::serialize(record)
+                .map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
-            match self.primary_storage
+            match self
+                .primary_storage
                 .put_object(
                     &record_path,
                     Bytes::from(record_data),
                     Some("application/octet-stream"),
                 )
-                .await {
-                Ok(_) => {},
+                .await
+            {
+                Ok(_) => {}
                 Err(e) => return Err(crate::Error::Storage(e.to_string())),
             };
         }
@@ -1068,14 +1178,16 @@ impl BackupManager {
         // 更新索引（如果有）
         if let Some(ref index_data) = table_backup.index_data {
             let index_path = format!("tables/{}/index", table_name);
-            match self.primary_storage
+            match self
+                .primary_storage
                 .put_object(
                     &index_path,
                     Bytes::from(index_data.clone()),
                     Some("application/octet-stream"),
                 )
-                .await {
-                Ok(_) => {},
+                .await
+            {
+                Ok(_) => {}
                 Err(e) => return Err(crate::Error::Storage(e.to_string())),
             };
         }
@@ -1114,9 +1226,9 @@ impl BackupManager {
         }
 
         Err(crate::Error::Storage(format!(
-                "Failed to read backup from all storage backends: {:?}",
-                last_error
-            )))
+            "Failed to read backup from all storage backends: {:?}",
+            last_error
+        )))
     }
 
     /// 反序列化备份数据
@@ -1124,7 +1236,8 @@ impl BackupManager {
         if self.config.enable_compression {
             self.decompress_backup_data(data)
         } else {
-            bincode::deserialize(data).map_err(|e| crate::error::Error::Serialization(e.to_string()))
+            bincode::deserialize(data)
+                .map_err(|e| crate::error::Error::Serialization(e.to_string()))
         }
     }
 
@@ -1132,18 +1245,23 @@ impl BackupManager {
     fn decompress_backup_data(&self, data: &[u8]) -> crate::Result<BackupData> {
         let decompressed = zstd::decode_all(data)
             .map_err(|e| crate::error::Error::Internal(format!("Decompression failed: {}", e)))?;
-        bincode::deserialize(&decompressed).map_err(|e| crate::error::Error::Serialization(e.to_string()))
+        bincode::deserialize(&decompressed)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))
     }
 
     /// 验证备份完整性
-    fn verify_backup_integrity(&self, data: &BackupData, expected_checksum: &str) -> crate::Result<()> {
+    fn verify_backup_integrity(
+        &self,
+        data: &BackupData,
+        expected_checksum: &str,
+    ) -> crate::Result<()> {
         let actual_checksum = self.calculate_checksum(data)?;
 
         if actual_checksum != expected_checksum {
             return Err(crate::error::Error::InvalidInput(format!(
-                    "Backup checksum mismatch: expected {}, got {}",
-                    expected_checksum, actual_checksum
-                )));
+                "Backup checksum mismatch: expected {}, got {}",
+                expected_checksum, actual_checksum
+            )));
         }
 
         info!("Backup integrity verification passed");
@@ -1154,7 +1272,8 @@ impl BackupManager {
     async fn execute_restore(
         &self,
         backup_data: &BackupData,
-        options: &RestoreOptions) -> crate::Result<()> {
+        options: &RestoreOptions,
+    ) -> crate::Result<()> {
         info!("Executing restore with {} tables", backup_data.tables.len());
 
         // 并行恢复每个表
@@ -1183,7 +1302,12 @@ impl BackupManager {
             let task = tokio::spawn(async move {
                 let _permit = match semaphore.acquire().await {
                     Ok(permit) => permit,
-                    Err(e) => return Err(crate::Error::Internal(format!("Semaphore acquire failed: {:?}", e))),
+                    Err(e) => {
+                        return Err(crate::Error::Internal(format!(
+                            "Semaphore acquire failed: {:?}",
+                            e
+                        )))
+                    }
                 };
                 match Self::restore_single_table(
                     &primary_storage,
@@ -1191,9 +1315,14 @@ impl BackupManager {
                     &options,
                     i + 1,
                     total_tables,
-                ).await {
+                )
+                .await
+                {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(crate::Error::Internal(format!("Table restore failed: {:?}", e))),
+                    Err(e) => Err(crate::Error::Internal(format!(
+                        "Table restore failed: {:?}",
+                        e
+                    ))),
                 }
             });
             tasks.push(task);
@@ -1223,7 +1352,8 @@ impl BackupManager {
         table_backup: &TableBackup,
         options: &RestoreOptions,
         table_index: usize,
-        total_tables: usize) -> crate::Result<()> {
+        total_tables: usize,
+    ) -> crate::Result<()> {
         let table_name = &table_backup.table.name;
         info!(
             "Restoring table {} ({}/{})",
@@ -1232,9 +1362,7 @@ impl BackupManager {
 
         // 检查表是否已存在
         let table_path = format!("tables/{}/metadata", table_name);
-        let table_exists = match storage
-                .object_exists(&table_path)
-                .await {
+        let table_exists = match storage.object_exists(&table_path).await {
             Ok(exists) => exists,
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
@@ -1248,16 +1376,17 @@ impl BackupManager {
         }
 
         // 恢复表元数据
-        let table_metadata =
-            bincode::serialize(&table_backup.table).map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
+        let table_metadata = bincode::serialize(&table_backup.table)
+            .map_err(|e| crate::error::Error::Serialization(e.to_string()))?;
         match storage
             .put_object(
                 &table_path,
                 Bytes::from(table_metadata),
                 Some("application/octet-stream"),
             )
-            .await {
-            Ok(_) => {},
+            .await
+        {
+            Ok(_) => {}
             Err(e) => return Err(crate::Error::Storage(e.to_string())),
         };
 
@@ -1279,7 +1408,8 @@ impl BackupManager {
                             Bytes::from(record_data),
                             Some("application/octet-stream"),
                         )
-                        .await {
+                        .await
+                    {
                         Ok(_) => Ok(()),
                         Err(e) => Err(crate::Error::Storage(e.to_string())),
                     }
@@ -1289,8 +1419,13 @@ impl BackupManager {
 
             // 并行执行批次内的记录恢复
             match futures::future::try_join_all(batch_tasks).await {
-                Ok(_) => {},
-                Err(e) => return Err(crate::Error::Internal(format!("Batch task failed: {:?}", e))),
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "Batch task failed: {:?}",
+                        e
+                    )))
+                }
             };
 
             debug!(
@@ -1310,8 +1445,9 @@ impl BackupManager {
                     Bytes::from(index_data.clone()),
                     Some("application/octet-stream"),
                 )
-                .await {
-                Ok(_) => {},
+                .await
+            {
+                Ok(_) => {}
                 Err(e) => return Err(crate::Error::Storage(e.to_string())),
             };
 
@@ -1346,7 +1482,10 @@ impl BackupManager {
     /// 删除备份
     pub async fn delete_backup(&self, backup_id: Uuid) -> crate::Result<()> {
         let backup_record = {
-            let mut state = self.backup_state.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut state = self
+                .backup_state
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             state
                 .backup_history
                 .iter()
@@ -1354,7 +1493,9 @@ impl BackupManager {
                 .map(|index| state.backup_history.remove(index))
         };
 
-        let backup_record = backup_record.ok_or_else(|| crate::error::Error::InvalidInput(format!("Backup {} not found", backup_id)))?;
+        let backup_record = backup_record.ok_or_else(|| {
+            crate::error::Error::InvalidInput(format!("Backup {} not found", backup_id))
+        })?;
 
         // 从所有存储后端删除备份文件
         for (i, storage) in self.backup_storages.iter().enumerate() {
@@ -1439,9 +1580,6 @@ impl std::fmt::Display for BackupType {
 
 #[cfg(test)]
 mod tests {
-    
-    
-    
 
     // Commented out - WalConfig no longer exists, needs rewrite
     // #[tokio::test]

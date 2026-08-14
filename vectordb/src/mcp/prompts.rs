@@ -21,25 +21,25 @@ impl PromptRegistry {
         registry.register_default_prompts();
         registry
     }
-    
+
     /// Register all default prompts
     fn register_default_prompts(&mut self) {
         // RAG prompts
         self.register_rag_prompts();
-        
+
         // Analysis prompts
         self.register_analysis_prompts();
-        
+
         // Data management prompts
         self.register_data_prompts();
-        
+
         // Optimization prompts
         self.register_optimization_prompts();
-        
+
         // Troubleshooting prompts
         self.register_troubleshooting_prompts();
     }
-    
+
     /// Register RAG-related prompts
     fn register_rag_prompts(&mut self) {
         self.prompts.push(Prompt {
@@ -63,7 +63,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "rag_with_reranking".to_string(),
             description: Some("RAG with reranking step".to_string()),
@@ -90,7 +90,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "conversational_rag".to_string(),
             description: Some("RAG with conversation history".to_string()),
@@ -113,7 +113,7 @@ impl PromptRegistry {
             ]),
         });
     }
-    
+
     /// Register analysis prompts
     fn register_analysis_prompts(&mut self) {
         self.prompts.push(Prompt {
@@ -137,7 +137,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "similarity_matrix".to_string(),
             description: Some("Generate similarity matrix analysis".to_string()),
@@ -159,7 +159,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "outlier_detection".to_string(),
             description: Some("Detect and analyze outliers".to_string()),
@@ -177,7 +177,7 @@ impl PromptRegistry {
             ]),
         });
     }
-    
+
     /// Register data management prompts
     fn register_data_prompts(&mut self) {
         self.prompts.push(Prompt {
@@ -201,7 +201,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "embedding_selection".to_string(),
             description: Some("Choose optimal embedding model".to_string()),
@@ -223,7 +223,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "data_quality_check".to_string(),
             description: Some("Analyze data quality".to_string()),
@@ -241,7 +241,7 @@ impl PromptRegistry {
             ]),
         });
     }
-    
+
     /// Register optimization prompts
     fn register_optimization_prompts(&mut self) {
         self.prompts.push(Prompt {
@@ -265,7 +265,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "performance_tuning".to_string(),
             description: Some("Tune system performance".to_string()),
@@ -288,7 +288,7 @@ impl PromptRegistry {
             ]),
         });
     }
-    
+
     /// Register troubleshooting prompts
     fn register_troubleshooting_prompts(&mut self) {
         self.prompts.push(Prompt {
@@ -312,7 +312,7 @@ impl PromptRegistry {
                 },
             ]),
         });
-        
+
         self.prompts.push(Prompt {
             name: "performance_diagnosis".to_string(),
             description: Some("Diagnose performance problems".to_string()),
@@ -335,17 +335,17 @@ impl PromptRegistry {
             ]),
         });
     }
-    
+
     /// Get all prompts
     pub fn get_prompts(&self) -> Vec<Prompt> {
         self.prompts.clone()
     }
-    
+
     /// Get prompt by name
     pub fn get_prompt(&self, name: &str) -> Option<&Prompt> {
         self.prompts.iter().find(|p| p.name == name)
     }
-    
+
     /// Generate prompt messages
     pub fn generate_prompt_messages(
         &self,
@@ -366,29 +366,31 @@ impl PromptRegistry {
             _ => self.generate_default_prompt(name, args),
         }
     }
-    
+
     fn generate_rag_basic(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let question = args.as_ref()
+        let question = args
+            .as_ref()
             .and_then(|a| a.get("question"))
             .map(|s| s.as_str())
             .unwrap_or("[User question]");
-        let table = args.as_ref()
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("documents");
-        let top_k = args.as_ref()
+        let top_k = args
+            .as_ref()
             .and_then(|a| a.get("top_k"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(5);
-        
+
         GetPromptResult {
             description: Some("Basic RAG pipeline execution".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
-                    content: MessageContent::Text(
-                        format!(
-                            "You are an AI assistant with access to a vector database. \
+                    content: MessageContent::Text(format!(
+                        "You are an AI assistant with access to a vector database. \
                              Follow these steps to answer the user's question:\n\
                              1. Use the 'vector_search' tool to search the '{}' table\n\
                              2. Retrieve the top {} most relevant documents\n\
@@ -396,9 +398,8 @@ impl PromptRegistry {
                              4. Generate a comprehensive answer based on the context\n\
                              5. Cite specific sources when making claims\n\
                              If the context doesn't contain relevant information, say so clearly.",
-                            table, top_k
-                        )
-                    ),
+                        table, top_k
+                    )),
                 },
                 PromptMessage {
                     role: MessageRole::User,
@@ -407,25 +408,29 @@ impl PromptRegistry {
             ],
         }
     }
-    
+
     fn generate_rag_reranking(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let question = args.as_ref()
+        let question = args
+            .as_ref()
             .and_then(|a| a.get("question"))
             .map(|s| s.as_str())
             .unwrap_or("[User question]");
-        let table = args.as_ref()
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("documents");
-        let initial_k = args.as_ref()
+        let initial_k = args
+            .as_ref()
             .and_then(|a| a.get("initial_k"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(20);
-        let final_k = args.as_ref()
+        let final_k = args
+            .as_ref()
             .and_then(|a| a.get("final_k"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(5);
-        
+
         GetPromptResult {
             description: Some("RAG with reranking for improved relevance".to_string()),
             messages: vec![
@@ -465,29 +470,34 @@ impl PromptRegistry {
             ],
         }
     }
-    
-    fn generate_conversational_rag(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let question = args.as_ref()
+
+    fn generate_conversational_rag(
+        &self,
+        args: Option<HashMap<String, String>>,
+    ) -> GetPromptResult {
+        let question = args
+            .as_ref()
             .and_then(|a| a.get("question"))
             .map(|s| s.as_str())
             .unwrap_or("[Current question]");
-        let history = args.as_ref()
+        let history = args
+            .as_ref()
             .and_then(|a| a.get("history"))
             .map(|s| s.as_str())
             .unwrap_or("");
-        let table = args.as_ref()
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("documents");
-        
+
         GetPromptResult {
             description: Some("Conversational RAG with context awareness".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
-                    content: MessageContent::Text(
-                        format!(
-                            "You are a conversational AI assistant with vector database access. \n\
+                    content: MessageContent::Text(format!(
+                        "You are a conversational AI assistant with vector database access. \n\
                              \n\
                              Conversation Management:\n\
                              1. Consider the conversation history for context\n\
@@ -504,19 +514,16 @@ impl PromptRegistry {
                              - Avoid repeating information unless asked\n\
                              - Acknowledge when changing or correcting previous statements\n\
                              - Maintain a conversational tone",
-                            table
-                        )
-                    ),
+                        table
+                    )),
                 },
                 PromptMessage {
                     role: MessageRole::Assistant,
-                    content: MessageContent::Text(
-                        if history.is_empty() {
-                            "I'm ready to help you. What would you like to know?".to_string()
-                        } else {
-                            format!("Previous conversation:\n{}", history)
-                        }
-                    ),
+                    content: MessageContent::Text(if history.is_empty() {
+                        "I'm ready to help you. What would you like to know?".to_string()
+                    } else {
+                        format!("Previous conversation:\n{}", history)
+                    }),
                 },
                 PromptMessage {
                     role: MessageRole::User,
@@ -525,16 +532,21 @@ impl PromptRegistry {
             ],
         }
     }
-    
-    fn generate_semantic_clustering(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let table = args.as_ref()
+
+    fn generate_semantic_clustering(
+        &self,
+        args: Option<HashMap<String, String>>,
+    ) -> GetPromptResult {
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("vectors");
-        let num_clusters = args.as_ref()
+        let num_clusters = args
+            .as_ref()
             .and_then(|a| a.get("num_clusters"))
             .and_then(|s| s.parse::<usize>().ok());
-        
+
         GetPromptResult {
             description: Some("Perform semantic clustering analysis".to_string()),
             messages: vec![
@@ -542,49 +554,51 @@ impl PromptRegistry {
                     role: MessageRole::System,
                     content: MessageContent::Text(
                         "You are an AI assistant specialized in semantic analysis. \
-                         Use the vector database tools to perform clustering and provide insights.".to_string()
+                         Use the vector database tools to perform clustering and provide insights."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Perform semantic clustering on the '{}' table:\n\
+                    content: MessageContent::Text(format!(
+                        "Perform semantic clustering on the '{}' table:\n\
                              1. Use the 'cluster_vectors' tool{}\n\
                              2. Analyze the resulting clusters\n\
                              3. Identify key themes for each cluster\n\
                              4. Find representative examples\n\
                              5. Suggest meaningful labels\n\
                              6. Identify any outliers or anomalies",
-                            table,
-                            num_clusters.map(|n| format!(" with {} clusters", n)).unwrap_or_default()
-                        )
-                    ),
+                        table,
+                        num_clusters
+                            .map(|n| format!(" with {} clusters", n))
+                            .unwrap_or_default()
+                    )),
                 },
             ],
         }
     }
-    
+
     fn generate_similarity_matrix(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let items = args.as_ref()
+        let items = args
+            .as_ref()
             .and_then(|a| a.get("items"))
             .map(|s| s.as_str())
             .unwrap_or("[items to compare]");
-        
+
         GetPromptResult {
             description: Some("Generate and analyze similarity matrix".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are analyzing similarities between items using vector embeddings.".to_string()
+                        "You are analyzing similarities between items using vector embeddings."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Create a similarity analysis for: {}\n\
+                    content: MessageContent::Text(format!(
+                        "Create a similarity analysis for: {}\n\
                              1. Generate or retrieve embeddings for each item\n\
                              2. Calculate pairwise similarities\n\
                              3. Create a similarity matrix\n\
@@ -592,72 +606,72 @@ impl PromptRegistry {
                              5. Find dissimilar items\n\
                              6. Detect similarity clusters\n\
                              7. Provide insights and patterns",
-                            items
-                        )
-                    ),
+                        items
+                    )),
                 },
             ],
         }
     }
-    
+
     fn generate_outlier_detection(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let table = args.as_ref()
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("vectors");
-        
+
         GetPromptResult {
             description: Some("Detect and analyze outliers".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are performing outlier detection analysis on vector data.".to_string()
+                        "You are performing outlier detection analysis on vector data.".to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Detect outliers in the '{}' table:\n\
+                    content: MessageContent::Text(format!(
+                        "Detect outliers in the '{}' table:\n\
                              1. Use the 'detect_anomalies' tool\n\
                              2. Analyze detected outliers\n\
                              3. Categorize outlier types\n\
                              4. Investigate potential causes\n\
                              5. Assess if outliers are errors or legitimate edge cases\n\
                              6. Provide recommendations for handling",
-                            table
-                        )
-                    ),
+                        table
+                    )),
                 },
             ],
         }
     }
-    
+
     fn generate_import_guide(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let data_type = args.as_ref()
+        let data_type = args
+            .as_ref()
             .and_then(|a| a.get("data_type"))
             .map(|s| s.as_str())
             .unwrap_or("text documents");
-        let source_format = args.as_ref()
+        let source_format = args
+            .as_ref()
             .and_then(|a| a.get("source_format"))
             .map(|s| s.as_str())
             .unwrap_or("JSON");
-        
+
         GetPromptResult {
             description: Some("Guide for data import".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are guiding a user through data import into the vector database.".to_string()
+                        "You are guiding a user through data import into the vector database."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "I need to import {} in {} format. Please guide me through:\n\
+                    content: MessageContent::Text(format!(
+                        "I need to import {} in {} format. Please guide me through:\n\
                              1. Data preparation and cleaning\n\
                              2. Choosing the right embedding model\n\
                              3. Table configuration (dimension, metric, index)\n\
@@ -665,34 +679,37 @@ impl PromptRegistry {
                              5. Metadata extraction\n\
                              6. Import validation\n\
                              7. Post-import optimization",
-                            data_type, source_format
-                        )
-                    ),
+                        data_type, source_format
+                    )),
                 },
             ],
         }
     }
-    
-    fn generate_embedding_selection(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let use_case = args.as_ref()
+
+    fn generate_embedding_selection(
+        &self,
+        args: Option<HashMap<String, String>>,
+    ) -> GetPromptResult {
+        let use_case = args
+            .as_ref()
             .and_then(|a| a.get("use_case"))
             .map(|s| s.as_str())
             .unwrap_or("semantic search");
-        
+
         GetPromptResult {
             description: Some("Select optimal embedding model".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are helping select the best embedding model for the use case.".to_string()
+                        "You are helping select the best embedding model for the use case."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Help me choose an embedding model for {}:\n\
+                    content: MessageContent::Text(format!(
+                        "Help me choose an embedding model for {}:\n\
                              1. List available models with their characteristics\n\
                              2. Compare dimension sizes and performance\n\
                              3. Consider language support requirements\n\
@@ -700,34 +717,37 @@ impl PromptRegistry {
                              5. Recommend the best model\n\
                              6. Provide configuration settings\n\
                              7. Suggest evaluation metrics",
-                            use_case
-                        )
-                    ),
+                        use_case
+                    )),
                 },
             ],
         }
     }
-    
-    fn generate_index_optimization(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let table = args.as_ref()
+
+    fn generate_index_optimization(
+        &self,
+        args: Option<HashMap<String, String>>,
+    ) -> GetPromptResult {
+        let table = args
+            .as_ref()
             .and_then(|a| a.get("table"))
             .map(|s| s.as_str())
             .unwrap_or("vectors");
-        
+
         GetPromptResult {
             description: Some("Optimize index configuration".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are optimizing vector index configuration for performance.".to_string()
+                        "You are optimizing vector index configuration for performance."
+                            .to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Optimize the index for table '{}':\n\
+                    content: MessageContent::Text(format!(
+                        "Optimize the index for table '{}':\n\
                              1. Analyze current index statistics\n\
                              2. Review query patterns and performance\n\
                              3. Compare index algorithms (HNSW, IVF, etc.)\n\
@@ -735,34 +755,33 @@ impl PromptRegistry {
                              5. Test different configurations\n\
                              6. Measure improvements\n\
                              7. Provide final recommendations",
-                            table
-                        )
-                    ),
+                        table
+                    )),
                 },
             ],
         }
     }
-    
+
     fn generate_debug_search(&self, args: Option<HashMap<String, String>>) -> GetPromptResult {
-        let problem = args.as_ref()
+        let problem = args
+            .as_ref()
             .and_then(|a| a.get("problem_description"))
             .map(|s| s.as_str())
             .unwrap_or("Search results are not relevant");
-        
+
         GetPromptResult {
             description: Some("Debug search quality issues".to_string()),
             messages: vec![
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are debugging vector search quality issues.".to_string()
+                        "You are debugging vector search quality issues.".to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!(
-                            "Debug this search issue: {}\n\
+                    content: MessageContent::Text(format!(
+                        "Debug this search issue: {}\n\
                              \n\
                              Diagnostic steps:\n\
                              1. Verify embedding model consistency\n\
@@ -775,14 +794,13 @@ impl PromptRegistry {
                              8. Compare different search methods\n\
                              \n\
                              Provide diagnosis and solutions.",
-                            problem
-                        )
-                    ),
+                        problem
+                    )),
                 },
             ],
         }
     }
-    
+
     fn generate_default_prompt(
         &self,
         name: &str,
@@ -794,14 +812,15 @@ impl PromptRegistry {
                 PromptMessage {
                     role: MessageRole::System,
                     content: MessageContent::Text(
-                        "You are an AI assistant with access to a vector database.".to_string()
+                        "You are an AI assistant with access to a vector database.".to_string(),
                     ),
                 },
                 PromptMessage {
                     role: MessageRole::User,
-                    content: MessageContent::Text(
-                        format!("Execute the '{}' prompt with arguments: {:?}", name, args)
-                    ),
+                    content: MessageContent::Text(format!(
+                        "Execute the '{}' prompt with arguments: {:?}",
+                        name, args
+                    )),
                 },
             ],
         }

@@ -9,19 +9,21 @@
 pub mod gpu;
 pub mod gpu_distance;
 pub mod gpu_kernels;
-pub mod simd;
-pub mod parallel;
 pub mod memory;
+pub mod parallel;
+pub mod simd;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 // Re-export main types
-pub use gpu::{GpuAccelerator, GpuConfig, GpuDevice, GpuMetrics, GpuBackendType, is_cuda_available};
+pub use gpu::{
+    is_cuda_available, GpuAccelerator, GpuBackendType, GpuConfig, GpuDevice, GpuMetrics,
+};
 pub use gpu_distance::{GpuDistanceCalculator, GpuDistanceConfig};
-pub use simd::{SimdAccelerator, SimdLevel, VectorOps};
+pub use memory::{CacheLineAligned, MemoryOptimizer, MemoryPool};
 pub use parallel::{ParallelExecutor, ThreadPool, WorkStealing};
-pub use memory::{MemoryOptimizer, CacheLineAligned, MemoryPool};
+pub use simd::{SimdAccelerator, SimdLevel, VectorOps};
 
 /// Hardware capabilities detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,21 +165,21 @@ impl PerformanceOptimizer {
                 } else {
                     Backend::Cpu
                 }
-            },
+            }
             Operation::MatrixMultiply { rows, cols } => {
                 if self.gpu_distance.is_some() && rows * cols > 500_000 {
                     Backend::Gpu
                 } else {
                     Backend::SimdCpu
                 }
-            },
+            }
             Operation::Embedding { batch_size, .. } => {
                 if self.gpu_distance.is_some() && batch_size > 32 {
                     Backend::Gpu
                 } else {
                     Backend::SimdCpu
                 }
-            },
+            }
         }
     }
 }

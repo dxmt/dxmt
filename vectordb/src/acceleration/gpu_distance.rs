@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 #[cfg(feature = "gpu")]
-use cudarc::driver::{CudaDevice, CudaSlice, LaunchConfig, LaunchAsync};
+use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
 
 #[cfg(feature = "gpu")]
 use super::gpu_kernels;
@@ -114,7 +114,10 @@ impl GpuDistanceCalculator {
         let device = match CudaDevice::new(config.device_id) {
             Ok(dev) => dev,
             Err(e) => {
-                info!("CUDA device {} not available: {}. GPU acceleration disabled.", config.device_id, e);
+                info!(
+                    "CUDA device {} not available: {}. GPU acceleration disabled.",
+                    config.device_id, e
+                );
                 return None;
             }
         };
@@ -132,7 +135,10 @@ impl GpuDistanceCalculator {
                 gpu_kernels::DOT_PRODUCT_KERNEL,
             ],
         ) {
-            warn!("Failed to load CUDA PTX kernels: {}. GPU acceleration disabled.", e);
+            warn!(
+                "Failed to load CUDA PTX kernels: {}. GPU acceleration disabled.",
+                e
+            );
             return None;
         }
 
@@ -141,7 +147,9 @@ impl GpuDistanceCalculator {
             .map(|(_, total)| total)
             .unwrap_or(4 * 1024 * 1024 * 1024);
 
-        let device_name = device.name().unwrap_or_else(|_| "Unknown CUDA Device".to_string());
+        let device_name = device
+            .name()
+            .unwrap_or_else(|_| "Unknown CUDA Device".to_string());
         info!(
             "GPU acceleration enabled: {} (device {}), {:.1} GB memory, batch threshold: {}",
             device_name,
@@ -218,10 +226,24 @@ impl GpuDistanceCalculator {
 
         // Process in chunks if num_vectors > max_batch_size
         if num_vectors > self.config.max_batch_size {
-            return self.batch_distances_chunked(metric, &queries_flat, &vectors_flat, num_queries, num_vectors, dimension);
+            return self.batch_distances_chunked(
+                metric,
+                &queries_flat,
+                &vectors_flat,
+                num_queries,
+                num_vectors,
+                dimension,
+            );
         }
 
-        self.compute_distances_gpu(metric, &queries_flat, &vectors_flat, num_queries, num_vectors, dimension)
+        self.compute_distances_gpu(
+            metric,
+            &queries_flat,
+            &vectors_flat,
+            num_queries,
+            num_vectors,
+            dimension,
+        )
     }
 
     /// Compute distances for a single query against multiple vectors.
@@ -247,14 +269,20 @@ impl GpuDistanceCalculator {
         dimension: usize,
     ) -> crate::Result<Vec<Vec<f32>>> {
         // Upload to GPU
-        let d_queries: CudaSlice<f32> = self.device.htod_sync_copy(queries_flat)
+        let d_queries: CudaSlice<f32> = self
+            .device
+            .htod_sync_copy(queries_flat)
             .map_err(|e| crate::Error::Internal(format!("GPU upload queries failed: {}", e)))?;
-        let d_vectors: CudaSlice<f32> = self.device.htod_sync_copy(vectors_flat)
+        let d_vectors: CudaSlice<f32> = self
+            .device
+            .htod_sync_copy(vectors_flat)
             .map_err(|e| crate::Error::Internal(format!("GPU upload vectors failed: {}", e)))?;
 
         // Allocate output on GPU
         let output_size = num_queries * num_vectors;
-        let d_output: CudaSlice<f32> = self.device.alloc_zeros(output_size)
+        let d_output: CudaSlice<f32> = self
+            .device
+            .alloc_zeros(output_size)
             .map_err(|e| crate::Error::Internal(format!("GPU alloc output failed: {}", e)))?;
 
         // Select kernel based on distance metric
@@ -266,8 +294,12 @@ impl GpuDistanceCalculator {
             _ => gpu_kernels::EUCLIDEAN_KERNEL,
         };
 
-        let func = self.device.get_func(gpu_kernels::MODULE_NAME, kernel_name)
-            .ok_or_else(|| crate::Error::Internal(format!("GPU kernel '{}' not found", kernel_name)))?;
+        let func = self
+            .device
+            .get_func(gpu_kernels::MODULE_NAME, kernel_name)
+            .ok_or_else(|| {
+                crate::Error::Internal(format!("GPU kernel '{}' not found", kernel_name))
+            })?;
 
         // Launch configuration
         // Each thread handles one (query, vector) pair
@@ -282,19 +314,24 @@ impl GpuDistanceCalculator {
 
         // Launch kernel
         unsafe {
-            func.launch(cfg, (
-                &d_queries,
-                &d_vectors,
-                &d_output,
-                num_queries as u32,
-                num_vectors as u32,
-                dimension as u32,
-            ))
+            func.launch(
+                cfg,
+                (
+                    &d_queries,
+                    &d_vectors,
+                    &d_output,
+                    num_queries as u32,
+                    num_vectors as u32,
+                    dimension as u32,
+                ),
+            )
         }
         .map_err(|e| crate::Error::Internal(format!("GPU kernel launch failed: {}", e)))?;
 
         // Copy results back to host
-        let output_flat: Vec<f32> = self.device.dtoh_sync_copy(&d_output)
+        let output_flat: Vec<f32> = self
+            .device
+            .dtoh_sync_copy(&d_output)
             .map_err(|e| crate::Error::Internal(format!("GPU download output failed: {}", e)))?;
 
         // Reshape flat output into Q x N matrix
@@ -351,7 +388,9 @@ impl GpuDistanceCalculator {
     pub fn device_name(&self) -> String {
         #[cfg(feature = "gpu")]
         {
-            self.device.name().unwrap_or_else(|_| "Unknown GPU".to_string())
+            self.device
+                .name()
+                .unwrap_or_else(|_| "Unknown GPU".to_string())
         }
         #[cfg(not(feature = "gpu"))]
         {
@@ -379,7 +418,9 @@ impl GpuDistanceCalculator {
         _queries: &[DenseVector],
         _vectors: &[DenseVector],
     ) -> crate::Result<Vec<Vec<f32>>> {
-        Err(crate::Error::Internal("GPU feature not enabled".to_string()))
+        Err(crate::Error::Internal(
+            "GPU feature not enabled".to_string(),
+        ))
     }
 
     pub fn single_query_distances(
@@ -388,7 +429,9 @@ impl GpuDistanceCalculator {
         _query: &DenseVector,
         _vectors: &[DenseVector],
     ) -> crate::Result<Vec<f32>> {
-        Err(crate::Error::Internal("GPU feature not enabled".to_string()))
+        Err(crate::Error::Internal(
+            "GPU feature not enabled".to_string(),
+        ))
     }
 }
 

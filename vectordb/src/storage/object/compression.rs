@@ -7,7 +7,9 @@ use super::errors::ObjectStorageError;
 use super::traits::ObjectStorageResult;
 
 /// 压缩算法类型
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum CompressionType {
     /// 无压缩
     None,
@@ -125,11 +127,11 @@ impl ZstdCompressor {
 
 impl Compressor for ZstdCompressor {
     fn compress(&self, data: &[u8]) -> ObjectStorageResult<Vec<u8>> {
-        let mut encoder = Encoder::new(Vec::new(), self.compression_level).map_err(|e| 
+        let mut encoder = Encoder::new(Vec::new(), self.compression_level).map_err(|e| {
             ObjectStorageError::CompressionError {
                 message: format!("Zstd encoder creation _failed: {}", e),
             }
-        )?;
+        })?;
 
         encoder
             .write_all(data)
@@ -160,11 +162,11 @@ impl Compressor for ZstdCompressor {
         })?;
 
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).map_err(|e| 
+        decoder.read_to_end(&mut decompressed).map_err(|e| {
             ObjectStorageError::CompressionError {
                 message: format!("Zstd decompression _failed: {}", e),
             }
-        )?;
+        })?;
 
         Ok(decompressed)
     }
@@ -217,7 +219,8 @@ impl CompressionManager {
     pub fn smart_compress(
         &self,
         data: &[u8],
-        access_frequency: f64) -> ObjectStorageResult<(Vec<u8>, CompressionType)> {
+        access_frequency: f64,
+    ) -> ObjectStorageResult<(Vec<u8>, CompressionType)> {
         // 尝试不同压缩算法，选择最优的
         let candidates = if access_frequency > 1.0 {
             // 高频访问：优先考虑速度
@@ -246,7 +249,7 @@ impl CompressionManager {
                 if ratio >= 0.95 {
                     continue;
                 }
-                
+
                 if ratio < best_ratio {
                     best_ratio = ratio;
                     best_result = Some(compressed);
@@ -274,7 +277,8 @@ impl CompressionManager {
     pub fn decompress(
         &self,
         data: &[u8],
-        compression_type: CompressionType) -> ObjectStorageResult<Vec<u8>> {
+        compression_type: CompressionType,
+    ) -> ObjectStorageResult<Vec<u8>> {
         let compressor = self.get_compressor(compression_type);
         compressor.decompress(data)
     }
@@ -295,9 +299,7 @@ impl CompressionManager {
 
         for &sample in &samples {
             if sample.len() < 512 {
-
                 continue;
-
             }
             // 测试LZ4
             if let Ok(lz4_compressed) = self.lz4_compressor.compress(sample) {
@@ -348,7 +350,8 @@ impl CompressionMetadata {
     pub fn new(
         compression_type: CompressionType,
         original_size: u64,
-        compressed_size: u64) -> Self {
+        compressed_size: u64,
+    ) -> Self {
         let compression_ratio = if original_size > 0 {
             compressed_size as f64 / original_size as f64
         } else {
@@ -410,8 +413,7 @@ mod tests {
 
         // 测试小数据（应该不压缩）
         let small_data = b"Small data";
-        let (compressed_small, compression_type_small) =
-            manager.smart_compress(small_data, 2.0)?;
+        let (compressed_small, compression_type_small) = manager.smart_compress(small_data, 2.0)?;
         assert_eq!(compression_type_small, CompressionType::None);
         assert_eq!(compressed_small, small_data);
 

@@ -1,17 +1,17 @@
+use dxmt_vectordb::{
+    config::{MemoryConfig, StorageConfig},
+    storage::IntelligentIndexedStorage,
+    types::{
+        record::{CreateRecordRequest, SearchQuery},
+        table::{TableConfig, VectorSpaceConfig},
+        vector::DistanceMetric,
+    },
+};
 /// T3 — Named Vectors integration tests
 ///
 /// Verifies that a table with multiple vector spaces (text_embedding + image_embedding)
 /// routes inserts and searches independently per named space.
 use std::collections::HashMap;
-use dxmt_vectordb::{
-    config::{StorageConfig, MemoryConfig},
-    storage::IntelligentIndexedStorage,
-    types::{
-        table::{TableConfig, VectorSpaceConfig},
-        record::{CreateRecordRequest, SearchQuery},
-        vector::DistanceMetric,
-    },
-};
 
 fn make_config() -> StorageConfig {
     StorageConfig {
@@ -36,51 +36,61 @@ async fn test_named_vectors_independent_search() {
     const DIM_IMAGE: usize = 8;
     const N: usize = 20;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
 
-    let table = storage.create_table(TableConfig {
-        name: "multimodal".to_string(),
-        dimension: DIM_TEXT,
-        distance_metric: DistanceMetric::Euclidean,
-        description: Some("multi-vector test table".to_string()),
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: Some(vec![
-            VectorSpaceConfig {
-                name: "text_embedding".to_string(),
-                dimension: DIM_TEXT,
-                distance_metric: DistanceMetric::Euclidean,
-            },
-            VectorSpaceConfig {
-                name: "image_embedding".to_string(),
-                dimension: DIM_IMAGE,
-                distance_metric: DistanceMetric::Euclidean,
-            },
-        ]),
-    }).await.unwrap();
+    let table = storage
+        .create_table(TableConfig {
+            name: "multimodal".to_string(),
+            dimension: DIM_TEXT,
+            distance_metric: DistanceMetric::Euclidean,
+            description: Some("multi-vector test table".to_string()),
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: Some(vec![
+                VectorSpaceConfig {
+                    name: "text_embedding".to_string(),
+                    dimension: DIM_TEXT,
+                    distance_metric: DistanceMetric::Euclidean,
+                },
+                VectorSpaceConfig {
+                    name: "image_embedding".to_string(),
+                    dimension: DIM_IMAGE,
+                    distance_metric: DistanceMetric::Euclidean,
+                },
+            ]),
+        })
+        .await
+        .unwrap();
 
     assert_eq!(table.named_vectors.as_ref().unwrap().len(), 2);
 
     // Insert N records.
     // Record i text_embedding: [i, 0, 0, 0] — distinct by L2 distance
     // Record i image_embedding: [0, 0, 0, 0, i, 0, 0, 0]
-    let records: Vec<CreateRecordRequest> = (0..N).map(|i| {
-        let t = i as f32;
-        let mut named = HashMap::new();
-        named.insert("text_embedding".to_string(), vec![t, 0.0, 0.0, 0.0]);
-        named.insert("image_embedding".to_string(), vec![0.0, 0.0, 0.0, 0.0, t, 0.0, 0.0, 0.0]);
-        CreateRecordRequest {
-            id: format!("rec-{}", i),
-            vector: vec![t, 0.0, 0.0, 0.0],
-            sparse_vector: None,
-            named_vectors: Some(named),
-            payload: Some(serde_json::json!({"idx": i})),
-        }
-    }).collect();
+    let records: Vec<CreateRecordRequest> = (0..N)
+        .map(|i| {
+            let t = i as f32;
+            let mut named = HashMap::new();
+            named.insert("text_embedding".to_string(), vec![t, 0.0, 0.0, 0.0]);
+            named.insert(
+                "image_embedding".to_string(),
+                vec![0.0, 0.0, 0.0, 0.0, t, 0.0, 0.0, 0.0],
+            );
+            CreateRecordRequest {
+                id: format!("rec-{}", i),
+                vector: vec![t, 0.0, 0.0, 0.0],
+                sparse_vector: None,
+                named_vectors: Some(named),
+                payload: Some(serde_json::json!({"idx": i})),
+            }
+        })
+        .collect();
 
     storage.insert_records("multimodal", records).await.unwrap();
 
@@ -93,9 +103,16 @@ async fn test_named_vectors_independent_search() {
         ..Default::default()
     };
     let text_result = storage.search("multimodal", text_query).await.unwrap();
-    assert_eq!(text_result.hits.len(), 3, "text search should return 3 hits");
+    assert_eq!(
+        text_result.hits.len(),
+        3,
+        "text search should return 3 hits"
+    );
     let top_text_id = &text_result.hits[0].id;
-    assert_eq!(top_text_id, "rec-19", "top text hit should be rec-19 (L2 closest)");
+    assert_eq!(
+        top_text_id, "rec-19",
+        "top text hit should be rec-19 (L2 closest)"
+    );
 
     // Image search: query = [0,0,0,0,19.5,0,0,0] → closest is rec-19 in image space
     let image_query = SearchQuery {
@@ -106,9 +123,16 @@ async fn test_named_vectors_independent_search() {
         ..Default::default()
     };
     let image_result = storage.search("multimodal", image_query).await.unwrap();
-    assert_eq!(image_result.hits.len(), 3, "image search should return 3 hits");
+    assert_eq!(
+        image_result.hits.len(),
+        3,
+        "image search should return 3 hits"
+    );
     let top_image_id = &image_result.hits[0].id;
-    assert_eq!(top_image_id, "rec-19", "top image hit should be rec-19 (L2 closest)");
+    assert_eq!(
+        top_image_id, "rec-19",
+        "top image hit should be rec-19 (L2 closest)"
+    );
 
     // Cross-check: text search should NOT find by image coordinate and vice versa
     // The text index has dim=4; a dim-8 vector for image space can't be searched through the text index.
@@ -121,7 +145,10 @@ async fn test_named_vectors_independent_search() {
         ..Default::default()
     };
     let low_result = storage.search("multimodal", text_low_query).await.unwrap();
-    assert_eq!(low_result.hits[0].id, "rec-0", "closest to [0.5,…] in text space should be rec-0 ([0,…])");
+    assert_eq!(
+        low_result.hits[0].id, "rec-0",
+        "closest to [0.5,…] in text space should be rec-0 ([0,…])"
+    );
 }
 
 /// Verify that an unknown vector_name falls back to the default index gracefully.
@@ -129,29 +156,40 @@ async fn test_named_vectors_independent_search() {
 async fn test_named_vectors_fallback_to_default() {
     const DIM: usize = 4;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
 
-    storage.create_table(TableConfig {
-        name: "fallback_test".to_string(),
-        dimension: DIM,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await.unwrap();
+    storage
+        .create_table(TableConfig {
+            name: "fallback_test".to_string(),
+            dimension: DIM,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await
+        .unwrap();
 
-    storage.insert_records("fallback_test", vec![CreateRecordRequest {
-        id: "r1".to_string(),
-        vector: vec![1.0, 0.0, 0.0, 0.0],
-        sparse_vector: None,
-        named_vectors: None,
-        payload: None,
-    }]).await.unwrap();
+    storage
+        .insert_records(
+            "fallback_test",
+            vec![CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+                sparse_vector: None,
+                named_vectors: None,
+                payload: None,
+            }],
+        )
+        .await
+        .unwrap();
 
     // Query with a vector_name not in the table → falls back to default index
     let q = SearchQuery {

@@ -63,7 +63,10 @@ fn initialize_accepts_the_wire_format_clients_send() {
         "initialize was rejected: {}",
         replies[0]
     );
-    assert!(replies[0]["result"]["serverInfo"].is_object(), "expected camelCase serverInfo");
+    assert!(
+        replies[0]["result"]["serverInfo"].is_object(),
+        "expected camelCase serverInfo"
+    );
 }
 
 #[test]
@@ -71,18 +74,38 @@ fn every_tool_is_listed_not_just_the_one_that_won_a_race() {
     let tmp = TempDir::new().unwrap();
     let replies = exchange(
         &tmp.path().join("wal"),
-        &[initialize(), r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#],
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        ],
     );
 
-    let tools = replies[1]["result"]["tools"].as_array().expect("no tools array");
+    let tools = replies[1]["result"]["tools"]
+        .as_array()
+        .expect("no tools array");
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
     // The catalogue used to be filled by a tokio::spawn from the constructor, so a tools/list
     // arriving first saw whatever that task had managed to push — one tool, in practice.
-    assert!(names.contains(&"vector_search"), "missing vector_search: {:?}", names);
-    assert!(names.contains(&"create_table"), "missing create_table: {:?}", names);
-    assert!(names.len() >= 7, "expected the full catalogue, got {:?}", names);
-    assert!(tools[0]["inputSchema"].is_object(), "schema field must be inputSchema");
+    assert!(
+        names.contains(&"vector_search"),
+        "missing vector_search: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"create_table"),
+        "missing create_table: {:?}",
+        names
+    );
+    assert!(
+        names.len() >= 7,
+        "expected the full catalogue, got {:?}",
+        names
+    );
+    assert!(
+        tools[0]["inputSchema"].is_object(),
+        "schema field must be inputSchema"
+    );
 }
 
 #[test]
@@ -90,7 +113,10 @@ fn a_response_never_carries_both_result_and_error() {
     let tmp = TempDir::new().unwrap();
     let replies = exchange(
         &tmp.path().join("wal"),
-        &[initialize(), r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#],
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        ],
     );
 
     for reply in &replies {
@@ -118,7 +144,12 @@ fn tools_reach_the_storage_layer_and_persist() {
         ],
     );
     for r in &replies[1..] {
-        assert_eq!(r["result"]["isError"], serde_json::json!(false), "tool call failed: {}", r);
+        assert_eq!(
+            r["result"]["isError"],
+            serde_json::json!(false),
+            "tool call failed: {}",
+            r
+        );
     }
 
     // Second process, same WAL directory: the MCP server has to be backed by the same durable
@@ -131,5 +162,9 @@ fn tools_reach_the_storage_layer_and_persist() {
         ],
     );
     let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("\"id\": \"a\""), "vector did not survive the restart: {}", text);
+    assert!(
+        text.contains("\"id\": \"a\""),
+        "vector did not survive the restart: {}",
+        text
+    );
 }

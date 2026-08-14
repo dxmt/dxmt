@@ -1,6 +1,6 @@
+use crate::types::{DenseVector, Payload, RecordId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::types::{DenseVector, RecordId, Payload};
 
 use crate::types::{sparse_vector::SparseVector, vector::VectorValidator};
 
@@ -462,14 +462,15 @@ impl Record {
         sparse_vector: Option<SparseVector>,
         payload: Option<Payload>,
         dimension: usize,
-        expected_version: Option<u64>) -> crate::Result<()> {
+        expected_version: Option<u64>,
+    ) -> crate::Result<()> {
         // 乐观锁检查
         if let Some(expected) = expected_version {
             if self.version != expected {
                 return Err(crate::error::Error::InvalidInput(format!(
-                        "Version mismatch: expected {}, current {}",
-                        expected, self.version
-                    )));
+                    "Version mismatch: expected {}, current {}",
+                    expected, self.version
+                )));
             }
         }
 
@@ -497,9 +498,9 @@ impl Record {
         if let Some(expected) = expected_version {
             if self.version != expected {
                 return Err(crate::error::Error::InvalidInput(format!(
-                        "Version mismatch: expected {}, current {}",
-                        expected, self.version
-                    )));
+                    "Version mismatch: expected {}, current {}",
+                    expected, self.version
+                )));
             }
         }
 
@@ -536,15 +537,13 @@ impl Record {
 
         // 应该满足的条件（至少一个）
         if let Some(should_conditions) = &filter.should {
-
             if !should_conditions.is_empty() {
                 let mut any_match = false;
                 for condition in should_conditions {
                     if self.matches_condition(condition) {
                         any_match = true;
                         break;
-
-        }
+                    }
                 }
                 if !any_match {
                     return false;
@@ -639,7 +638,6 @@ impl Default for SearchQuery {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_record_creation() -> Result<(), Box<dyn std::error::Error>> {
         let request = CreateRecordRequest {
@@ -675,7 +673,7 @@ mod tests {
             must: Some(vec![Condition {
                 key: "category".to_string(),
                 operation: FilterOperation::Equal(serde_json::Value::String(
-                    "electronics".to_string()
+                    "electronics".to_string(),
                 )),
             }]),
             must_not: None,
@@ -688,13 +686,16 @@ mod tests {
 
     #[test]
     fn test_filter_matching_by_id() -> Result<(), Box<dyn std::error::Error>> {
-        let record = Record::new(CreateRecordRequest {
-            id: "rec-42".to_string(),
-            vector: vec![1.0, 0.0],
-            sparse_vector: None,
-            payload: Some(serde_json::json!({"x": 1})),
-            named_vectors: None,
-        }, 2)?;
+        let record = Record::new(
+            CreateRecordRequest {
+                id: "rec-42".to_string(),
+                vector: vec![1.0, 0.0],
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"x": 1})),
+                named_vectors: None,
+            },
+            2,
+        )?;
 
         let match_filter = Filter {
             must: Some(vec![Condition {
@@ -714,19 +715,25 @@ mod tests {
             must_not: None,
             should: None,
         };
-        assert!(!record.matches_filter(&no_match_filter), "should not match different id");
+        assert!(
+            !record.matches_filter(&no_match_filter),
+            "should not match different id"
+        );
         Ok(())
     }
 
     #[test]
     fn test_filter_must_not_and_should() -> Result<(), Box<dyn std::error::Error>> {
-        let record = Record::new(CreateRecordRequest {
-            id: "r1".to_string(),
-            vector: vec![1.0, 0.0],
-            sparse_vector: None,
-            payload: Some(serde_json::json!({"category": "food", "price": 5.0})),
-            named_vectors: None,
-        }, 2)?;
+        let record = Record::new(
+            CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: vec![1.0, 0.0],
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"category": "food", "price": 5.0})),
+                named_vectors: None,
+            },
+            2,
+        )?;
 
         // must_not: should exclude record with category "food"
         let must_not = Filter {
@@ -737,28 +744,44 @@ mod tests {
             }]),
             should: None,
         };
-        assert!(!record.matches_filter(&must_not), "must_not: category=food should exclude this record");
+        assert!(
+            !record.matches_filter(&must_not),
+            "must_not: category=food should exclude this record"
+        );
 
         // should: at least one must match — "food" OR "drink"
         let should_match = Filter {
             must: None,
             must_not: None,
             should: Some(vec![
-                Condition { key: "category".to_string(), operation: FilterOperation::Equal(serde_json::json!("food")) },
-                Condition { key: "category".to_string(), operation: FilterOperation::Equal(serde_json::json!("drink")) },
+                Condition {
+                    key: "category".to_string(),
+                    operation: FilterOperation::Equal(serde_json::json!("food")),
+                },
+                Condition {
+                    key: "category".to_string(),
+                    operation: FilterOperation::Equal(serde_json::json!("drink")),
+                },
             ]),
         };
-        assert!(record.matches_filter(&should_match), "should: 'food' satisfies the OR condition");
+        assert!(
+            record.matches_filter(&should_match),
+            "should: 'food' satisfies the OR condition"
+        );
 
         // should: none match → excluded
         let should_no_match = Filter {
             must: None,
             must_not: None,
-            should: Some(vec![
-                Condition { key: "category".to_string(), operation: FilterOperation::Equal(serde_json::json!("drink")) },
-            ]),
+            should: Some(vec![Condition {
+                key: "category".to_string(),
+                operation: FilterOperation::Equal(serde_json::json!("drink")),
+            }]),
         };
-        assert!(!record.matches_filter(&should_no_match), "should: no match should exclude");
+        assert!(
+            !record.matches_filter(&should_no_match),
+            "should: no match should exclude"
+        );
 
         // numeric GreaterThan
         let gt_filter = Filter {
@@ -769,7 +792,10 @@ mod tests {
             must_not: None,
             should: None,
         };
-        assert!(record.matches_filter(&gt_filter), "price 5.0 > 3.0 should match");
+        assert!(
+            record.matches_filter(&gt_filter),
+            "price 5.0 > 3.0 should match"
+        );
 
         let gt_no_match = Filter {
             must: Some(vec![Condition {
@@ -779,7 +805,10 @@ mod tests {
             must_not: None,
             should: None,
         };
-        assert!(!record.matches_filter(&gt_no_match), "price 5.0 > 10.0 should not match");
+        assert!(
+            !record.matches_filter(&gt_no_match),
+            "price 5.0 > 10.0 should not match"
+        );
         Ok(())
     }
 
@@ -805,25 +834,44 @@ mod tests {
         let configured_ef = 100;
 
         // Auto with no filter (selectivity=1.0): ef = 8*k/1.0, capped at 4*configured_ef
-        assert_eq!(SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 1.0), 80); // 8*10=80
+        assert_eq!(
+            SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 1.0),
+            80
+        ); // 8*10=80
 
         // Auto with 10% selectivity: ef = 8*10/0.1 = 800, capped at 400
-        assert_eq!(SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.1), 400);
+        assert_eq!(
+            SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.1),
+            400
+        );
 
         // Auto with 1% selectivity: ef = 8*10/0.01 = 8000, capped at 400
-        assert_eq!(SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.01), 400);
+        assert_eq!(
+            SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.01),
+            400
+        );
 
         // Auto with 50% selectivity: ef = 8*10/0.5 = 160, capped at 400
-        assert_eq!(SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.5), 160);
+        assert_eq!(
+            SearchMode::Auto.ef_search_adaptive(configured_ef, 10, 0.5),
+            160
+        );
 
         // Auto with large top_k: ef must be at least top_k
-        assert_eq!(SearchMode::Auto.ef_search_adaptive(configured_ef, 500, 1.0), 400); // 8*500=4000 → capped at 400
+        assert_eq!(
+            SearchMode::Auto.ef_search_adaptive(configured_ef, 500, 1.0),
+            400
+        ); // 8*500=4000 → capped at 400
 
         // Non-Auto modes delegate to ef_search (selectivity param ignored)
-        assert_eq!(SearchMode::Normal.ef_search_adaptive(configured_ef, 10, 0.01),
-                   SearchMode::Normal.ef_search(configured_ef, 10));
-        assert_eq!(SearchMode::Fast.ef_search_adaptive(configured_ef, 10, 0.01),
-                   SearchMode::Fast.ef_search(configured_ef, 10));
+        assert_eq!(
+            SearchMode::Normal.ef_search_adaptive(configured_ef, 10, 0.01),
+            SearchMode::Normal.ef_search(configured_ef, 10)
+        );
+        assert_eq!(
+            SearchMode::Fast.ef_search_adaptive(configured_ef, 10, 0.01),
+            SearchMode::Fast.ef_search(configured_ef, 10)
+        );
     }
 
     #[test]

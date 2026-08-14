@@ -4,8 +4,8 @@
 //
 // Integration tests verify multi-component interactions.
 
-mod fixtures;
 mod common;
+mod fixtures;
 
 // Include integration test modules
 #[cfg(feature = "text-bm25")]

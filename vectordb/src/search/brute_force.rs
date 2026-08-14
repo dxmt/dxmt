@@ -1,13 +1,13 @@
+use crate::precomputed_query::PrecomputedQuery;
 use crate::search::index_traits::VectorIndex;
 use crate::search::simd_distance::SimdDistance;
 use crate::types::vector::{DenseVector, DistanceMetric};
 use crate::types::RecordId;
-use crate::precomputed_query::PrecomputedQuery;
 use async_trait::async_trait;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 #[cfg(feature = "gpu")]
@@ -70,7 +70,11 @@ impl BruteForceIndex {
     /// 插入向量 - 延迟索引构建，只标记为 dirty
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
         // 检查是否已存在（线性搜索，但对小数据集很快）
-        if let Some(pos) = self.vectors.iter().position(|(existing_id, _)| existing_id == &id) {
+        if let Some(pos) = self
+            .vectors
+            .iter()
+            .position(|(existing_id, _)| existing_id == &id)
+        {
             // 更新现有向量
             self.vectors[pos].1 = vector;
         } else {
@@ -95,7 +99,11 @@ impl BruteForceIndex {
 
     /// 搜索 - Vec 的顺序遍历比 HashMap 更快（缓存友好）
     /// 对于大数据集 (>1000 vectors)，自动使用并行搜索
-    pub fn search_sync(&self, query: &DenseVector, k: usize) -> crate::Result<Vec<(RecordId, f32)>> {
+    pub fn search_sync(
+        &self,
+        query: &DenseVector,
+        k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         // Ensure index is built (deferred indexing optimization)
         self.ensure_index_built();
 
@@ -112,13 +120,18 @@ impl BruteForceIndex {
         if k >= self.vectors.len() {
             // Return all results, sorted
             // Vec 的迭代器遍历利用了缓存预取，比 HashMap 快
-            let mut results: Vec<(RecordId, f32)> = self.vectors
+            let mut results: Vec<(RecordId, f32)> = self
+                .vectors
                 .iter()
                 .map(|(id, vector)| {
                     let distance = if use_simd {
-                        self.distance_metric.calculate_simd(query, vector).unwrap_or(f32::MAX)
+                        self.distance_metric
+                            .calculate_simd(query, vector)
+                            .unwrap_or(f32::MAX)
                     } else {
-                        self.distance_metric.calculate(query, vector).unwrap_or(f32::MAX)
+                        self.distance_metric
+                            .calculate(query, vector)
+                            .unwrap_or(f32::MAX)
                     };
                     (id.clone(), distance)
                 })
@@ -167,9 +180,13 @@ impl BruteForceIndex {
 
             for (id, vector) in self.vectors.iter() {
                 let distance = if use_simd {
-                    self.distance_metric.calculate_simd(query, vector).unwrap_or(f32::MAX)
+                    self.distance_metric
+                        .calculate_simd(query, vector)
+                        .unwrap_or(f32::MAX)
                 } else {
-                    self.distance_metric.calculate(query, vector).unwrap_or(f32::MAX)
+                    self.distance_metric
+                        .calculate(query, vector)
+                        .unwrap_or(f32::MAX)
                 };
 
                 heap.push(HeapItem {
@@ -201,14 +218,19 @@ impl BruteForceIndex {
 
     /// 并行搜索 - 使用 Rayon 多线程加速距离计算
     /// 适用于大数据集 (>1000 vectors)，可实现近线性加速
-    fn search_parallel(&self, query: &DenseVector, k: usize) -> crate::Result<Vec<(RecordId, f32)>> {
+    fn search_parallel(
+        &self,
+        query: &DenseVector,
+        k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         let use_simd = self.distance_metric.supports_simd();
         let metric = &self.distance_metric;
 
         // Parallel distance calculation using Rayon
         // Each thread processes a chunk of vectors independently
-        let mut results: Vec<(RecordId, f32)> = self.vectors
-            .par_iter()  // Parallel iterator - distributes work across CPU cores
+        let mut results: Vec<(RecordId, f32)> = self
+            .vectors
+            .par_iter() // Parallel iterator - distributes work across CPU cores
             .map(|(id, vector)| {
                 let distance = if use_simd {
                     metric.calculate_simd(query, vector).unwrap_or(f32::MAX)
@@ -222,16 +244,13 @@ impl BruteForceIndex {
         // Efficient top-k selection using partial sort
         // Only sorts the first k elements, rest remain unsorted
         if k < results.len() {
-            results.select_nth_unstable_by(k, |a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            });
+            results
+                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
             results.truncate(k);
         }
 
         // Final sort of top-k results
-        results.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-        });
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
         Ok(results)
     }
@@ -252,7 +271,8 @@ impl BruteForceIndex {
         let distances = gpu.single_query_distances(&self.distance_metric, query, &db_vectors)?;
 
         // Pair distances with IDs and find top-k
-        let mut results: Vec<(RecordId, f32)> = self.vectors
+        let mut results: Vec<(RecordId, f32)> = self
+            .vectors
             .iter()
             .zip(distances.iter())
             .map(|((id, _), &dist)| (id.clone(), dist))
@@ -260,15 +280,12 @@ impl BruteForceIndex {
 
         // Efficient top-k selection
         if k < results.len() {
-            results.select_nth_unstable_by(k, |a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            });
+            results
+                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
             results.truncate(k);
         }
 
-        results.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-        });
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
         Ok(results)
     }
@@ -278,7 +295,11 @@ impl BruteForceIndex {
     /// 适用于需要多次搜索同一查询向量的场景
     /// - Cosine 距离: 避免重复计算查询向量范数
     /// - Euclidean 距离: 避免重复计算平方范数
-    pub fn search_with_precomputed(&self, query: &PrecomputedQuery, k: usize) -> crate::Result<Vec<(RecordId, f32)>> {
+    pub fn search_with_precomputed(
+        &self,
+        query: &PrecomputedQuery,
+        k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         self.ensure_index_built();
 
         // Use parallel search for large datasets
@@ -288,7 +309,8 @@ impl BruteForceIndex {
 
         // Serial search for small datasets
         if k >= self.vectors.len() {
-            let mut results: Vec<(RecordId, f32)> = self.vectors
+            let mut results: Vec<(RecordId, f32)> = self
+                .vectors
                 .iter()
                 .map(|(id, vector)| {
                     let distance = query.distance_to(vector).unwrap_or(f32::MAX);
@@ -296,9 +318,7 @@ impl BruteForceIndex {
                 })
                 .collect();
 
-            results.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            });
+            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
             Ok(results)
         } else {
             // Heap-based selection for small k
@@ -349,16 +369,19 @@ impl BruteForceIndex {
                 .map(|item| (item.id, item.distance))
                 .collect();
 
-            results.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            });
+            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
             Ok(results)
         }
     }
 
     /// 并行搜索（使用预计算查询）
-    fn search_parallel_precomputed(&self, query: &PrecomputedQuery, k: usize) -> crate::Result<Vec<(RecordId, f32)>> {
-        let mut results: Vec<(RecordId, f32)> = self.vectors
+    fn search_parallel_precomputed(
+        &self,
+        query: &PrecomputedQuery,
+        k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
+        let mut results: Vec<(RecordId, f32)> = self
+            .vectors
             .par_iter()
             .map(|(id, vector)| {
                 let distance = query.distance_to(vector).unwrap_or(f32::MAX);
@@ -367,23 +390,24 @@ impl BruteForceIndex {
             .collect();
 
         if k < results.len() {
-            results.select_nth_unstable_by(k, |a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            });
+            results
+                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
             results.truncate(k);
         }
 
-        results.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-        });
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
         Ok(results)
     }
 
     /// 删除向量 - Vec 的 swap_remove 是 O(1)
     pub fn remove(&mut self, id: &RecordId) -> crate::Result<()> {
-        if let Some(pos) = self.vectors.iter().position(|(existing_id, _)| existing_id == id) {
-            self.vectors.swap_remove(pos);  // O(1), 不保持顺序但更快
+        if let Some(pos) = self
+            .vectors
+            .iter()
+            .position(|(existing_id, _)| existing_id == id)
+        {
+            self.vectors.swap_remove(pos); // O(1), 不保持顺序但更快
         }
         Ok(())
     }

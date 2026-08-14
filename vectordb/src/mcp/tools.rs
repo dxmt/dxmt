@@ -20,25 +20,25 @@ impl ToolRegistry {
         registry.register_default_tools();
         registry
     }
-    
+
     /// Register all default tools
     fn register_default_tools(&mut self) {
         // Vector operations
         self.register_vector_tools();
-        
+
         // Table management
         self.register_table_tools();
-        
+
         // Advanced search
         self.register_search_tools();
-        
+
         // Analytics
         self.register_analytics_tools();
-        
+
         // Import/Export
         self.register_data_tools();
     }
-    
+
     /// Register vector operation tools
     fn register_vector_tools(&mut self) {
         // Batch insert tool
@@ -77,7 +77,7 @@ impl ToolRegistry {
                 "required": ["table", "vectors"]
             }),
         });
-        
+
         // Update vector tool
         self.tools.push(Tool {
             name: "update_vector".to_string(),
@@ -101,7 +101,7 @@ impl ToolRegistry {
                 "required": ["table", "id"]
             }),
         });
-        
+
         // Get vector tool
         self.tools.push(Tool {
             name: "get_vector".to_string(),
@@ -124,7 +124,7 @@ impl ToolRegistry {
             }),
         });
     }
-    
+
     /// Register table management tools
     fn register_table_tools(&mut self) {
         // Clone table tool
@@ -148,7 +148,7 @@ impl ToolRegistry {
                 "required": ["source_table", "target_table"]
             }),
         });
-        
+
         // Optimize table tool
         self.tools.push(Tool {
             name: "optimize_table".to_string(),
@@ -173,7 +173,7 @@ impl ToolRegistry {
                 "required": ["table"]
             }),
         });
-        
+
         // Table statistics tool
         self.tools.push(Tool {
             name: "get_table_stats".to_string(),
@@ -195,7 +195,7 @@ impl ToolRegistry {
             }),
         });
     }
-    
+
     /// Register advanced search tools
     fn register_search_tools(&mut self) {
         // KNN search tool
@@ -226,7 +226,7 @@ impl ToolRegistry {
                 "required": ["table", "vector", "k"]
             }),
         });
-        
+
         // Range search tool
         self.tools.push(Tool {
             name: "range_search".to_string(),
@@ -253,7 +253,7 @@ impl ToolRegistry {
                 "required": ["table", "vector", "radius"]
             }),
         });
-        
+
         // Multi-vector search tool
         self.tools.push(Tool {
             name: "multi_vector_search".to_string(),
@@ -288,11 +288,13 @@ impl ToolRegistry {
                 "required": ["table", "vectors"]
             }),
         });
-        
+
         // Recommendation tool
         self.tools.push(Tool {
             name: "recommend".to_string(),
-            description: Some("Get recommendations based on positive and negative examples".to_string()),
+            description: Some(
+                "Get recommendations based on positive and negative examples".to_string(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -317,7 +319,7 @@ impl ToolRegistry {
             }),
         });
     }
-    
+
     /// Register analytics tools
     fn register_analytics_tools(&mut self) {
         // Clustering tool
@@ -351,7 +353,7 @@ impl ToolRegistry {
                 "required": ["table", "algorithm"]
             }),
         });
-        
+
         // Diversity analysis tool
         self.tools.push(Tool {
             name: "analyze_diversity".to_string(),
@@ -377,7 +379,7 @@ impl ToolRegistry {
                 "required": ["table"]
             }),
         });
-        
+
         // Anomaly detection tool
         self.tools.push(Tool {
             name: "detect_anomalies".to_string(),
@@ -404,7 +406,7 @@ impl ToolRegistry {
             }),
         });
     }
-    
+
     /// Register data import/export tools
     fn register_data_tools(&mut self) {
         // Import from file tool
@@ -435,7 +437,7 @@ impl ToolRegistry {
                 "required": ["table", "file_path"]
             }),
         });
-        
+
         // Export to file tool
         self.tools.push(Tool {
             name: "export_data".to_string(),
@@ -464,7 +466,7 @@ impl ToolRegistry {
                 "required": ["table", "file_path"]
             }),
         });
-        
+
         // Generate embeddings tool
         self.tools.push(Tool {
             name: "generate_embeddings".to_string(),
@@ -491,17 +493,17 @@ impl ToolRegistry {
             }),
         });
     }
-    
+
     /// Get all registered tools
     pub fn get_tools(&self) -> Vec<Tool> {
         self.tools.clone()
     }
-    
+
     /// Find tool by name
     pub fn find_tool(&self, name: &str) -> Option<&Tool> {
         self.tools.iter().find(|t| t.name == name)
     }
-    
+
     /// Register custom tool
     pub fn register_tool(&mut self, tool: Tool) {
         self.tools.push(tool);

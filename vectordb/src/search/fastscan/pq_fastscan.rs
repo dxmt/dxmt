@@ -8,7 +8,6 @@ use crate::types::vector::DenseVector;
 use anyhow::Result;
 use rayon::prelude::*;
 
-
 /// Configuration for PQFastScan
 #[derive(Debug, Clone)]
 pub struct PQFastScanConfig {
@@ -122,13 +121,13 @@ impl PQFastScan {
             let block_end = ((block_idx + 1) * self.config.block_size).min(codes.len());
 
             for subq in 0..self.config.num_subquantizers {
-                let packed_val = codes[block_start..block_end]
-                    .iter()
-                    .enumerate()
-                    .fold(0u64, |acc, (i, vec_codes)| {
+                let packed_val = codes[block_start..block_end].iter().enumerate().fold(
+                    0u64,
+                    |acc, (i, vec_codes)| {
                         let code = vec_codes[subq] as u64;
                         acc | (code & 0xF) << (i * 4)
-                    });
+                    },
+                );
                 packed.push(packed_val);
             }
         }
@@ -163,10 +162,7 @@ impl PQFastScan {
     /// Compute L2 distance between two vectors
     #[inline]
     fn compute_l2_distance(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum()
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
     }
 
     /// Search with SIMD optimization
@@ -184,7 +180,8 @@ impl PQFastScan {
 
             // Compute distances for this block
             for subq in 0..self.config.num_subquantizers {
-                let packed_code = self.packed_codes[block_idx * self.config.num_subquantizers + subq];
+                let packed_code =
+                    self.packed_codes[block_idx * self.config.num_subquantizers + subq];
                 let lut_offset = subq * (1 << self.config.bits_per_subquantizer);
 
                 // Unpack and accumulate distances
@@ -267,7 +264,8 @@ impl PQFastScan {
             let block_size = block_end - block_start;
 
             for subq in 0..self.config.num_subquantizers {
-                let packed_code = self.packed_codes[block_idx * self.config.num_subquantizers + subq];
+                let packed_code =
+                    self.packed_codes[block_idx * self.config.num_subquantizers + subq];
                 let lut_offset = subq * (1 << self.config.bits_per_subquantizer);
 
                 for i in 0..block_size {

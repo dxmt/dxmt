@@ -1,20 +1,20 @@
 // 批量操作优化 - 高效的批量插入和搜索实现
 // 包含并行处理、内存池管理和流水线优化
 
+use crate::types::record::Filter;
 use crate::types::{vector::DenseVector, DistanceMetric};
+use crate::Result;
+use futures;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Semaphore};
-use futures;
-use crate::types::record::Filter;
-use crate::Result;
-use rayon::prelude::*;
 
 use crate::search::VectorIndex;
 // use crate::search::adaptive_simd // Removed::AdaptiveSimdEngine;
-use crate::types::{vector::RecordId};
+use crate::types::vector::RecordId;
 
 /// 批量操作配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,7 +197,8 @@ impl BatchOperationEngine {
         &self,
         id: RecordId,
         vector: DenseVector,
-        payload: Option<serde_json::Value>) -> crate::Result<()> {
+        payload: Option<serde_json::Value>,
+    ) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         let request = BatchInsertRequest {
             id,
@@ -212,8 +213,14 @@ impl BatchOperationEngine {
         }
 
         match rx.await {
-            Ok(result) => result.map_err(|_| crate::Error::Internal("Operation failed".to_string()))?,
-            Err(_) => return Err(crate::Error::InvalidInput("Insert request cancelled".to_string())),
+            Ok(result) => {
+                result.map_err(|_| crate::Error::Internal("Operation failed".to_string()))?
+            }
+            Err(_) => {
+                return Err(crate::Error::InvalidInput(
+                    "Insert request cancelled".to_string(),
+                ))
+            }
         };
         Ok(())
     }
@@ -224,7 +231,8 @@ impl BatchOperationEngine {
         query: DenseVector,
         k: usize,
         metric: DistanceMetric,
-        filter: Option<Filter>) -> crate::Result<Vec<(RecordId, f32)>> {
+        filter: Option<Filter>,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         let (tx, rx) = oneshot::channel();
         let request = BatchSearchRequest {
             query,
@@ -240,8 +248,13 @@ impl BatchOperationEngine {
         }
 
         let result = match rx.await {
-            Ok(result) => result.map_err(|_| crate::Error::InvalidInput("Search request cancelled".to_string()))?,
-            Err(_) => return Err(crate::Error::InvalidInput("Search request cancelled".to_string())),
+            Ok(result) => result
+                .map_err(|_| crate::Error::InvalidInput("Search request cancelled".to_string()))?,
+            Err(_) => {
+                return Err(crate::Error::InvalidInput(
+                    "Search request cancelled".to_string(),
+                ))
+            }
         };
         Ok(result)
     }
@@ -252,7 +265,8 @@ impl BatchOperationEngine {
         queries: &[DenseVector],
         k: usize,
         metric: &DistanceMetric,
-        targets: &[DenseVector]) -> crate::Result<Vec<Vec<(usize, f32)>>> {
+        targets: &[DenseVector],
+    ) -> crate::Result<Vec<Vec<(usize, f32)>>> {
         let start_time = Instant::now();
 
         // 计算距离矩阵
@@ -261,9 +275,7 @@ impl BatchOperationEngine {
             .map(|query| {
                 targets
                     .iter()
-                    .map(|target| {
-                        metric.calculate(query, target).unwrap_or(f32::MAX)
-                    })
+                    .map(|target| metric.calculate(query, target).unwrap_or(f32::MAX))
                     .collect()
             })
             .collect();
@@ -291,7 +303,8 @@ impl BatchOperationEngine {
             .collect();
 
         // 更新统计信息
-        self.update_search_statistics(queries.len(), start_time.elapsed(), 0).await;
+        self.update_search_statistics(queries.len(), start_time.elapsed(), 0)
+            .await;
 
         Ok(results)
     }
@@ -302,12 +315,13 @@ impl BatchOperationEngine {
     pub async fn pipeline_insert<I: VectorIndex + Send + Sync>(
         &self,
         index: Arc<RwLock<I>>,
-        requests: Vec<BatchInsertRequest>) -> crate::Result<BatchProcessingResult> {
+        requests: Vec<BatchInsertRequest>,
+    ) -> crate::Result<BatchProcessingResult> {
         let start_time = Instant::now();
         let total_requests = requests.len();
 
         if !self.config.enable_pipelining {
-            return self.sequential_insert(index, requests).await
+            return self.sequential_insert(index, requests).await;
         }
 
         // 分批处理
@@ -315,7 +329,7 @@ impl BatchOperationEngine {
             self.calculate_adaptive_batch_size(total_requests)
         } else {
             self.config.max_batch_size
-};
+        };
 
         let batches: Vec<_> = requests.chunks(batch_size).collect();
         let mut successful_count = 0;
@@ -329,15 +343,24 @@ impl BatchOperationEngine {
             let semaphore = self.processing_semaphore.clone();
 
             let future = async move {
-                let _permit = semaphore.acquire().await.map_err(|_| crate::Error::InvalidInput("Processing capacity exceeded".to_string()))?;
+                let _permit = semaphore.acquire().await.map_err(|_| {
+                    crate::Error::InvalidInput("Processing capacity exceeded".to_string())
+                })?;
 
                 let mut batch_successful = 0;
                 for request in batch {
                     let result = async {
-                        let mut index_write = index_clone.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
-                        index_write.add(request.id.clone(), request.vector.clone()).await
-                    }.await;
-                    if result.is_ok() { batch_successful += 1; }
+                        let mut index_write = index_clone
+                            .write()
+                            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+                        index_write
+                            .add(request.id.clone(), request.vector.clone())
+                            .await
+                    }
+                    .await;
+                    if result.is_ok() {
+                        batch_successful += 1;
+                    }
                 }
                 Ok(batch_successful)
             };
@@ -386,16 +409,22 @@ impl BatchOperationEngine {
     async fn sequential_insert<I: VectorIndex + Send + Sync>(
         &self,
         index: Arc<RwLock<I>>,
-        requests: Vec<BatchInsertRequest>) -> crate::Result<BatchProcessingResult> {
+        requests: Vec<BatchInsertRequest>,
+    ) -> crate::Result<BatchProcessingResult> {
         let start_time = Instant::now();
         let mut successful_count = 0;
         let mut failed_count = 0;
 
         for request in requests {
             let result = async {
-                let mut index_write = index.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
-                index_write.add(request.id.clone(), request.vector.clone()).await
-            }.await;
+                let mut index_write = index
+                    .write()
+                    .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+                index_write
+                    .add(request.id.clone(), request.vector.clone())
+                    .await
+            }
+            .await;
             match result {
                 Ok(_) => {
                     successful_count += 1;
@@ -438,19 +467,15 @@ impl BatchOperationEngine {
                     while let Some(request) = queue_lock.pop_front() {
                         batch.push(request);
                         if batch.len() >= config.max_batch_size {
-
                             break;
-
-
                         }
                     }
                 }
 
                 // 检查是否需要处理批次
-                let should_process = !batch.is_empty()
-                    && batch.len() >= config.max_batch_size
-                        || last_process_time.elapsed()
-                            >= Duration::from_millis(config.batch_timeout_ms);
+                let should_process = !batch.is_empty() && batch.len() >= config.max_batch_size
+                    || last_process_time.elapsed()
+                        >= Duration::from_millis(config.batch_timeout_ms);
 
                 if should_process {
                     // 这里实际处理插入操作
@@ -483,19 +508,15 @@ impl BatchOperationEngine {
                     while let Some(request) = queue_lock.pop_front() {
                         batch.push(request);
                         if batch.len() >= config.max_batch_size {
-
                             break;
-
-
                         }
                     }
                 }
 
                 // 检查是否需要处理批次
-                let should_process = !batch.is_empty()
-                    && batch.len() >= config.max_batch_size
-                        || last_process_time.elapsed()
-                            >= Duration::from_millis(config.batch_timeout_ms);
+                let should_process = !batch.is_empty() && batch.len() >= config.max_batch_size
+                    || last_process_time.elapsed()
+                        >= Duration::from_millis(config.batch_timeout_ms);
 
                 if should_process {
                     // 这里实际处理搜索操作
@@ -532,7 +553,12 @@ impl BatchOperationEngine {
     }
 
     /// 更新搜索统计信息
-    async fn update_search_statistics(&self, query_count: usize, processing_time: Duration, _failed_operations: usize) {
+    async fn update_search_statistics(
+        &self,
+        query_count: usize,
+        processing_time: Duration,
+        _failed_operations: usize,
+    ) {
         let mut stats = self.statistics.write().unwrap();
         stats.total_batches += 1;
 
@@ -598,10 +624,7 @@ impl MemoryPool {
     fn return_vector(&self, vector: Vec<f32>) {
         let mut pool = self.vector_pool.lock().unwrap();
         if pool.len() < self.config.memory_pool_size {
-
             pool.push(vector);
-
-
         }
     }
 
@@ -651,7 +674,6 @@ impl Default for BatchStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[tokio::test]
     async fn test_batch_engine_creation() {

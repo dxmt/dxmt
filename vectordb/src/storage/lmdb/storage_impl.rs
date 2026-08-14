@@ -8,15 +8,15 @@ use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::error::{Error, Result};
 use crate::storage::traits::_Storage;
 use crate::types::{
     record::{CreateRecordRequest, Record, SearchQuery, SearchResult},
-    table::{Table, TableAlterRequest, TableConfig, IndexType},
+    table::{IndexType, Table, TableAlterRequest, TableConfig},
     vector::RecordId,
 };
-use crate::error::{Error, Result};
 
-use super::{LmdbStorage, VectorRecord, TableMetadata};
+use super::{LmdbStorage, TableMetadata, VectorRecord};
 
 /// LMDB-backed storage implementation
 pub struct LmdbStorageImpl {
@@ -36,8 +36,8 @@ impl LmdbStorageImpl {
 
     /// Helper to convert between internal VectorRecord and public Record
     fn vector_record_to_record(vr: VectorRecord, _table_name: &str) -> Record {
-        use chrono::Utc;
         use crate::types::record::RecordStatus;
+        use chrono::Utc;
 
         Record {
             id: vr.id,
@@ -126,7 +126,9 @@ impl _Storage for LmdbStorageImpl {
         }
 
         // Try to load the full persisted config first (new path)
-        let full_table_opt = self.inner.load_full_table(name)
+        let full_table_opt = self
+            .inner
+            .load_full_table(name)
             .map_err(|e| Error::storage(format!("Failed to load full table config: {}", e)))?;
         if let Some(mut table) = full_table_opt {
             // Sync record_count from legacy metadata for accuracy
@@ -139,7 +141,8 @@ impl _Storage for LmdbStorageImpl {
         }
 
         // Fallback: legacy minimal metadata (tables created before full-config persistence)
-        let metadata = self.inner
+        let metadata = self
+            .inner
             .get_table_metadata(name)
             .map_err(|e| Error::storage(format!("Failed to get table metadata: {}", e)))?
             .ok_or_else(|| Error::NotFound(format!("Table not found: {}", name)))?;
@@ -220,7 +223,8 @@ impl _Storage for LmdbStorageImpl {
             .map_err(|e| Error::storage(format!("Failed to insert record: {}", e)))?;
 
         // Update table metadata
-        if let Ok(Some(mut meta)) = self.inner
+        if let Ok(Some(mut meta)) = self
+            .inner
             .get_table_metadata(tablename)
             .map_err(|e| Error::storage(format!("Failed to get metadata: {}", e)))
         {
@@ -270,7 +274,8 @@ impl _Storage for LmdbStorageImpl {
         // Verify table exists
         self.get_table(tablename).await?;
 
-        let vector_record = self.inner
+        let vector_record = self
+            .inner
             .get_vector(record_id)
             .map_err(|e| Error::storage(format!("Failed to get record: {}", e)))?
             .ok_or_else(|| Error::NotFound(format!("Record not found: {}", record_id)))?;
@@ -349,11 +354,15 @@ impl _Storage for LmdbStorageImpl {
     }
 
     async fn backup(&self, _tablename: &str, _backup_path: &str) -> Result<()> {
-        Err(Error::NotImplemented("Backup not yet implemented for LMDB".to_string()))
+        Err(Error::NotImplemented(
+            "Backup not yet implemented for LMDB".to_string(),
+        ))
     }
 
     async fn restore(&self, _tablename: &str, _backup_path: &str) -> Result<()> {
-        Err(Error::NotImplemented("Restore not yet implemented for LMDB".to_string()))
+        Err(Error::NotImplemented(
+            "Restore not yet implemented for LMDB".to_string(),
+        ))
     }
 }
 
@@ -425,10 +434,7 @@ mod tests {
         let record_id = record.id.clone();
 
         // Get record
-        let retrieved = storage
-            .get_record("test_table", &record_id)
-            .await
-            .unwrap();
+        let retrieved = storage.get_record("test_table", &record_id).await.unwrap();
         assert_eq!(retrieved.id, record_id);
         assert_eq!(retrieved.vector.len(), 128);
     }

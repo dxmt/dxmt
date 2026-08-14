@@ -23,15 +23,15 @@ use std::sync::Arc;
 use tokio::sync::Barrier;
 
 use dxmt_vectordb::{
-    config::{StorageConfig, MemoryConfig},
+    config::{MemoryConfig, StorageConfig},
     search::{
-        hnsw::{HnswIndex, HnswConfig},
         brute_force::BruteForceIndex,
+        hnsw::{HnswConfig, HnswIndex},
         VectorIndex,
     },
     storage::IntelligentIndexedStorage,
     types::{
-        record::{CreateRecordRequest, SearchQuery, Filter, Condition, FilterOperation},
+        record::{Condition, CreateRecordRequest, Filter, FilterOperation, SearchQuery},
         table::TableConfig,
         vector::DistanceMetric,
     },
@@ -109,7 +109,10 @@ fn recall_at_k(retrieved: &[String], ground_truth_indices: &[usize], all_ids: &[
         .iter()
         .map(|&i| all_ids[i].as_str())
         .collect();
-    let hits = retrieved.iter().filter(|id| gt_ids.contains(id.as_str())).count();
+    let hits = retrieved
+        .iter()
+        .filter(|id| gt_ids.contains(id.as_str()))
+        .count();
     if ground_truth_indices.is_empty() {
         1.0
     } else {
@@ -181,10 +184,8 @@ async fn test_hnsw_matches_brute_force() {
             .unwrap();
         let bf_res = bf.search(&vectors[qi], TOP_K).await.unwrap();
 
-        let hnsw_ids: HashSet<&str> =
-            hnsw_res.iter().map(|(id, _)| id.as_str()).collect();
-        let bf_ids: HashSet<&str> =
-            bf_res.iter().map(|(id, _)| id.as_str()).collect();
+        let hnsw_ids: HashSet<&str> = hnsw_res.iter().map(|(id, _)| id.as_str()).collect();
+        let bf_ids: HashSet<&str> = bf_res.iter().map(|(id, _)| id.as_str()).collect();
 
         total_match += hnsw_ids.intersection(&bf_ids).count();
         total_expected += TOP_K;
@@ -227,12 +228,10 @@ async fn test_filtered_recall_varying_selectivity() {
 
     // 10% selectivity: group == 0 (30 records)
     let group: i64 = 0;
-    let passing_indices: Vec<usize> =
-        (0..N).filter(|&i| (i % 10) as i64 == group).collect();
+    let passing_indices: Vec<usize> = (0..N).filter(|&i| (i % 10) as i64 == group).collect();
     let k = 5.min(passing_indices.len());
 
-    let passing_ids_set: HashSet<&str> =
-        passing_indices.iter().map(|&i| ids[i].as_str()).collect();
+    let passing_ids_set: HashSet<&str> = passing_indices.iter().map(|&i| ids[i].as_str()).collect();
 
     let filter = Filter {
         must: Some(vec![Condition {
@@ -269,8 +268,10 @@ async fn test_filtered_recall_varying_selectivity() {
     }
 
     // RECALL vs brute-force filtered ground truth
-    let filtered_vecs: Vec<Vec<f32>> =
-        passing_indices.iter().map(|&i| vectors[i].clone()).collect();
+    let filtered_vecs: Vec<Vec<f32>> = passing_indices
+        .iter()
+        .map(|&i| vectors[i].clone())
+        .collect();
     let gt_local = brute_force_top_k(&vectors[qi], &filtered_vecs, k);
     let gt_global: Vec<usize> = gt_local.iter().map(|&li| passing_indices[li]).collect();
     let retrieved: Vec<String> = result.hits.iter().map(|h| h.id.clone()).collect();
@@ -289,7 +290,10 @@ async fn test_filtered_recall_varying_selectivity() {
         must: Some(vec![Condition {
             key: "group".to_string(),
             operation: FilterOperation::In(
-                [0i64, 2, 4, 6, 8].iter().map(|&v| serde_json::json!(v)).collect(),
+                [0i64, 2, 4, 6, 8]
+                    .iter()
+                    .map(|&v| serde_json::json!(v))
+                    .collect(),
             ),
         }]),
         must_not: None,
@@ -310,8 +314,7 @@ async fn test_filtered_recall_varying_selectivity() {
         .await
         .unwrap();
 
-    let passing_50_ids: HashSet<&str> =
-        passing_50.iter().map(|&i| ids[i].as_str()).collect();
+    let passing_50_ids: HashSet<&str> = passing_50.iter().map(|&i| ids[i].as_str()).collect();
     for hit in &result_50.hits {
         assert!(
             passing_50_ids.contains(hit.id.as_str()),
@@ -321,8 +324,7 @@ async fn test_filtered_recall_varying_selectivity() {
     }
 
     let retrieved_50: Vec<String> = result_50.hits.iter().map(|h| h.id.clone()).collect();
-    let filtered_vecs_50: Vec<Vec<f32>> =
-        passing_50.iter().map(|&i| vectors[i].clone()).collect();
+    let filtered_vecs_50: Vec<Vec<f32>> = passing_50.iter().map(|&i| vectors[i].clone()).collect();
     let gt_50 = brute_force_top_k(&vectors[0], &filtered_vecs_50, k50);
     let gt_50g: Vec<usize> = gt_50.iter().map(|&li| passing_50[li]).collect();
     let recall_50 = recall_at_k(&retrieved_50, &gt_50g, &ids);
@@ -354,9 +356,7 @@ async fn test_filter_excludes_nearer_non_matching() {
 
     // Even-indexed → category "A", odd-indexed → category "B"
     let payloads: Vec<serde_json::Value> = (0..100)
-        .map(|i| {
-            serde_json::json!({ "category": if i % 2 == 0 { "A" } else { "B" } })
-        })
+        .map(|i| serde_json::json!({ "category": if i % 2 == 0 { "A" } else { "B" } }))
         .collect();
     insert_batch(&storage, "filt_correct", &ids, &vectors, Some(&payloads)).await;
 
@@ -395,7 +395,11 @@ async fn test_filter_excludes_nearer_non_matching() {
         );
     }
 
-    assert_eq!(result.hits.len(), 10, "expected 10 results for category-A filter");
+    assert_eq!(
+        result.hits.len(),
+        10,
+        "expected 10 results for category-A filter"
+    );
 
     // No duplicate IDs
     let unique: HashSet<&str> = result.hits.iter().map(|h| h.id.as_str()).collect();
@@ -609,7 +613,8 @@ async fn test_distance_metric_ordering() {
             .await
             .unwrap();
         assert_eq!(
-            res.hits[0].id, "near",
+            res.hits[0].id,
+            "near",
             "euclidean: nearest vector should be first, got {:?}",
             res.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>()
         );
@@ -716,7 +721,10 @@ async fn test_concurrent_insert_and_query() {
         .await
         .unwrap();
 
-    assert!(!result.hits.is_empty(), "post-concurrent search returned empty");
+    assert!(
+        !result.hits.is_empty(),
+        "post-concurrent search returned empty"
+    );
     let unique_ids: HashSet<&str> = result.hits.iter().map(|h| h.id.as_str()).collect();
     assert_eq!(
         unique_ids.len(),

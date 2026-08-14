@@ -7,12 +7,15 @@ pub mod vector;
 
 pub use error::*;
 pub use multimodal::{
-    FusionStrategy, ModalityType, MultimodalContent, MultimodalData,
-    MultiVectorRecord, CreateMultiVectorRequest, CrossModalSearchQuery,
-    MultimodalInput, MultimodalSearchResult, MultimodalSearchHit,
-    EmbeddingConfig, EmbeddingRequest, EmbeddingResponse, EmbeddingResult
+    CreateMultiVectorRequest, CrossModalSearchQuery, EmbeddingConfig, EmbeddingRequest,
+    EmbeddingResponse, EmbeddingResult, FusionStrategy, ModalityType, MultiVectorRecord,
+    MultimodalContent, MultimodalData, MultimodalInput, MultimodalSearchHit,
+    MultimodalSearchResult,
 };
-pub use record::{Record, RecordStatus, CreateRecordRequest, SearchQuery, SearchResult, UpdateRecordRequest, SearchHit, Filter};
+pub use record::{
+    CreateRecordRequest, Filter, Record, RecordStatus, SearchHit, SearchQuery, SearchResult,
+    UpdateRecordRequest,
+};
 pub use sparse_vector::*;
 pub use table::*;
 pub use vector::*;

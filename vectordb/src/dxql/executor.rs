@@ -9,7 +9,7 @@
 // executor_impl is a sibling module, not a submodule
 pub use crate::dxql::executor_impl::StorageAwareExecutor;
 
-use crate::dxql::{DxqlError, QueryResult, QueryMetadata, compiler::QueryPlan};
+use crate::dxql::{compiler::QueryPlan, DxqlError, QueryMetadata, QueryResult};
 use std::time::Instant;
 
 #[derive(Debug, Clone)]

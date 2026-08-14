@@ -2,10 +2,13 @@
 // 支持大规模向量数据的高效索引和搜索
 
 use crate::search::brute_force::calculate_distance;
-use crate::search::index_traits::{VectorIndex, SerializableIndex, IndexStats};
+use crate::search::index_traits::{IndexStats, SerializableIndex, VectorIndex};
 use async_trait::async_trait;
 
-use crate::types::{vector::{RecordId, DenseVector}, DistanceMetric};
+use crate::types::{
+    vector::{DenseVector, RecordId},
+    DistanceMetric,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +75,9 @@ impl IvfIndex {
     /// 训练聚类中心（K-means算法）
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Training vectors cannot be empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Training vectors cannot be empty".to_string(),
+            ));
         }
 
         let dimension = training_vectors[0].len();
@@ -84,7 +89,7 @@ impl IvfIndex {
                 return Err(crate::Error::DimensionMismatch {
                     expected: dimension,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -123,7 +128,10 @@ impl IvfIndex {
     }
 
     /// K-means++初始化算法
-    fn initialize_centroids_plus_plus(&self, vectors: &[DenseVector]) -> crate::Result<Vec<DenseVector>> {
+    fn initialize_centroids_plus_plus(
+        &self,
+        vectors: &[DenseVector],
+    ) -> crate::Result<Vec<DenseVector>> {
         let mut centroids = Vec::new();
         let mut rng = rand::thread_rng();
 
@@ -140,9 +148,7 @@ impl IvfIndex {
                     // 计算到最近聚类中心的距离
                     centroids
                         .iter()
-                        .map(|c| {
-                            calculate_distance(&self.distance_metric, v, c)
-                        })
+                        .map(|c| calculate_distance(&self.distance_metric, v, c))
                         .fold(f32::INFINITY, f32::min)
                 })
                 .collect();
@@ -161,10 +167,8 @@ impl IvfIndex {
             for (i, &weight) in weights.iter().enumerate() {
                 cumulative += weight;
                 if cumulative >= random_value {
-
                     centroids.push(vectors[i].clone());
                     break;
-
                 }
             }
         }
@@ -176,7 +180,8 @@ impl IvfIndex {
     fn assign_vectors_to_centroids(
         &self,
         vectors: &[DenseVector],
-        centroids: &[DenseVector]) -> crate::Result<Vec<Vec<DenseVector>>> {
+        centroids: &[DenseVector],
+    ) -> crate::Result<Vec<Vec<DenseVector>>> {
         let mut assignments = vec![Vec::new(); centroids.len()];
 
         for vector in vectors {
@@ -201,16 +206,15 @@ impl IvfIndex {
     fn update_centroids(
         &self,
         assignments: &[Vec<DenseVector>],
-        dimension: usize) -> crate::Result<Vec<DenseVector>> {
+        dimension: usize,
+    ) -> crate::Result<Vec<DenseVector>> {
         let mut new_centroids = Vec::new();
 
         for cluster_vectors in assignments {
             if cluster_vectors.is_empty() {
-
                 // 如果聚类为空，保持原来的中心点
                 new_centroids.push(vec![0.0; dimension]);
                 continue;
-
             }
             // 计算平均值作为新的聚类中心
             let mut centroid = vec![0.0; dimension];
@@ -235,7 +239,8 @@ impl IvfIndex {
     fn calculate_convergence(
         &self,
         old_centroids: &[DenseVector],
-        new_centroids: &[DenseVector]) -> crate::Result<f32> {
+        new_centroids: &[DenseVector],
+    ) -> crate::Result<f32> {
         let mut total_movement = 0.0;
 
         for (old, new) in old_centroids.iter().zip(new_centroids.iter()) {
@@ -247,7 +252,11 @@ impl IvfIndex {
     }
 
     /// 找到最近的聚类中心
-    fn find_nearest_centroids(&self, query: &DenseVector, nprobe: usize) -> crate::Result<Vec<usize>> {
+    fn find_nearest_centroids(
+        &self,
+        query: &DenseVector,
+        nprobe: usize,
+    ) -> crate::Result<Vec<usize>> {
         let mut distances: Vec<(usize, f32)> = self
             .centroids
             .iter()
@@ -299,7 +308,9 @@ impl SerializableIndex for IvfIndex {
 impl VectorIndex for IvfIndex {
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("IVF index must be trained before insertion".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "IVF index must be trained before insertion".to_string(),
+            ));
         }
 
         // 验证向量维度
@@ -308,7 +319,7 @@ impl VectorIndex for IvfIndex {
                 return Err(crate::Error::DimensionMismatch {
                     expected: expected_dim,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -323,7 +334,9 @@ impl VectorIndex for IvfIndex {
 
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("IVF index must be trained before searching".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "IVF index must be trained before searching".to_string(),
+            ));
         }
 
         // 找到最近的nprobe个聚类中心
@@ -361,7 +374,10 @@ impl VectorIndex for IvfIndex {
             }
         }
 
-        Err(crate::Error::NotFound(format!("Vector with id {} not found", id)))
+        Err(crate::Error::NotFound(format!(
+            "Vector with id {} not found",
+            id
+        )))
     }
 
     fn len(&self) -> usize {

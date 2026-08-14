@@ -1,12 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dxmt_vectordb::benchmarks::{AnnBenchmark, BenchmarkConfig, HnswParams, IndexType};
+use dxmt_vectordb::types::DistanceMetric;
 use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use dxmt_vectordb::benchmarks::{
-    AnnBenchmark, BenchmarkConfig, HnswParams, IndexType,
-};
-use dxmt_vectordb::types::DistanceMetric;
 
 /// DXMT VectorDB Benchmark CLI
 #[derive(Parser, Debug)]
@@ -23,71 +21,71 @@ enum Commands {
         /// Path to HDF5 dataset file
         #[arg(short, long)]
         dataset: PathBuf,
-        
+
         /// Index type to benchmark
         #[arg(short = 'i', long, default_value = "hnsw")]
         index_type: String,
-        
+
         /// Number of neighbors to retrieve
         #[arg(short = 'k', long, default_value = "10")]
         k: usize,
-        
+
         /// Number of queries to run
         #[arg(short = 'n', long, default_value = "1000")]
         num_queries: usize,
-        
+
         /// Output file for results (JSON)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        
+
         /// HNSW M parameter
         #[arg(long, default_value = "16")]
         hnsw_m: usize,
-        
+
         /// HNSW ef_construction parameter
         #[arg(long, default_value = "200")]
         hnsw_ef_construction: usize,
-        
+
         /// HNSW ef_search parameter
         #[arg(long, default_value = "100")]
         hnsw_ef_search: usize,
-        
+
         /// Distance metric (euclidean, cosine, dot_product)
         #[arg(long)]
         metric: Option<String>,
-        
+
         /// Number of threads for parallel queries
         #[arg(short = 't', long, default_value = "4")]
         threads: usize,
-        
+
         /// Measure index build time
         #[arg(long)]
         measure_build_time: bool,
     },
-    
+
     /// List available datasets
     List,
-    
+
     /// Download ANN-Benchmarks datasets
     Download {
         /// Dataset to download (sift, gist, glove-25, glove-50, glove-100, glove-200, all)
         dataset: String,
-        
+
         /// Output directory for datasets
         #[arg(short, long, default_value = "./datasets")]
         output_dir: PathBuf,
     },
-    
+
     /// Analyze benchmark results
     Analyze {
         /// Directory containing benchmark results
         #[arg(short, long, default_value = "./benchmark_results")]
         results_dir: PathBuf,
-        
+
         /// Generate plots
         #[arg(short, long)]
         plot: bool,
-        
+
         /// Output format (json, csv)
         #[arg(short = 'f', long)]
         format: Option<String>,
@@ -99,13 +97,12 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    
+
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::Run {
             dataset,
@@ -121,17 +118,17 @@ async fn main() -> Result<()> {
             measure_build_time,
         } => {
             info!("Running ANN-Benchmarks on {:?}", dataset);
-            
+
             // Parse index type
             let idx_type = match index_type.as_str() {
                 "brute_force" | "bruteforce" => IndexType::BruteForce,
-                "hnsw" | "optimal_hnsw" => IndexType::Hnsw,  // All HNSW variants map to OptimalHnsw
+                "hnsw" | "optimal_hnsw" => IndexType::Hnsw, // All HNSW variants map to OptimalHnsw
                 _ => {
                     warn!("Unknown index type: {}, using HNSW", index_type);
                     IndexType::Hnsw
                 }
             };
-            
+
             // Determine distance metric
             let distance_metric = if let Some(m) = metric {
                 match m.as_str() {
@@ -146,17 +143,15 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // Try to infer from dataset name
-                let filename = dataset.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                
+                let filename = dataset.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
                 if filename.contains("angular") || filename.contains("glove") {
                     DistanceMetric::Cosine
                 } else {
                     DistanceMetric::Euclidean
                 }
             };
-            
+
             // Create benchmark configuration
             let config = BenchmarkConfig {
                 distance_metric,
@@ -174,22 +169,22 @@ async fn main() -> Result<()> {
                 measure_build_time,
                 num_threads: threads,
             };
-            
+
             // Run benchmark
             let benchmark = AnnBenchmark::new(config);
             let result = benchmark.run(&dataset).await?;
-            
+
             // Save results
             let output_path = output.unwrap_or_else(|| {
                 let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
                 PathBuf::from(format!("benchmark_result_{}.json", timestamp))
             });
-            
+
             let json = serde_json::to_string_pretty(&result)?;
             std::fs::write(&output_path, json)?;
-            
+
             info!("Results saved to {:?}", output_path);
-            
+
             // Print summary
             println!("\n=== Benchmark Results ===");
             println!("Dataset: {}", result.dataset);
@@ -199,14 +194,20 @@ async fn main() -> Result<()> {
             println!("\nPerformance:");
             println!("  Recall@{}: {:.4}", k, result.query_metrics.recall_at_k);
             println!("  QPS: {:.2}", result.query_metrics.qps);
-            println!("  Mean Latency: {:.2}ms", result.query_metrics.mean_latency_ms);
-            println!("  P99 Latency: {:.2}ms", result.query_metrics.p99_latency_ms);
-            
+            println!(
+                "  Mean Latency: {:.2}ms",
+                result.query_metrics.mean_latency_ms
+            );
+            println!(
+                "  P99 Latency: {:.2}ms",
+                result.query_metrics.p99_latency_ms
+            );
+
             if let Some(build_time_ms) = result.dataset_metrics.index_build_time_ms {
                 println!("  Build Time: {:.2}s", build_time_ms as f64 / 1000.0);
             }
         }
-        
+
         Commands::List => {
             println!("Available ANN-Benchmarks datasets:");
             println!();
@@ -220,26 +221,33 @@ async fn main() -> Result<()> {
             println!("Download datasets using:");
             println!("  ./scripts/download_datasets.sh <dataset>");
         }
-        
-        Commands::Download { dataset, output_dir } => {
+
+        Commands::Download {
+            dataset,
+            output_dir,
+        } => {
             println!("Downloading dataset: {}", dataset);
             println!("Output directory: {:?}", output_dir);
             println!();
             println!("Please use the download script:");
             println!("  ./scripts/download_datasets.sh {}", dataset);
         }
-        
-        Commands::Analyze { results_dir, plot, format } => {
+
+        Commands::Analyze {
+            results_dir,
+            plot,
+            format,
+        } => {
             println!("Analyzing results in: {:?}", results_dir);
-            
+
             if plot {
                 println!("Generating plots...");
             }
-            
+
             if let Some(ref fmt) = format {
                 println!("Export format: {}", fmt);
             }
-            
+
             println!();
             println!("Please use the Python analysis script:");
             println!("  python3 scripts/benchmark_analysis.py \\");
@@ -253,6 +261,6 @@ async fn main() -> Result<()> {
             println!("    --summary");
         }
     }
-    
+
     Ok(())
 }

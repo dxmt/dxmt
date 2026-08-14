@@ -8,17 +8,17 @@
 // - Async I/O for better throughput
 // - Batch operations for efficient disk access
 
+use lru::LruCache;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use lru::LruCache;
-use std::num::NonZeroUsize;
 
-use crate::search::quantization::product_quantization::{ProductQuantizer, PQCode};
+use crate::search::quantization::product_quantization::{PQCode, ProductQuantizer};
 use crate::types::vector::{DenseVector, DistanceMetric};
 use crate::types::RecordId;
 
@@ -92,13 +92,13 @@ impl Default for EnhancedDiskANNConfig {
             max_degree: 64,
             search_list_size: 100,
             alpha: 1.2,
-            use_pq_compression: true,       // Enable PQ by default
-            num_pq_subvectors: 120,          // For 960-dim
-            num_pq_centroids: 256,           // 8-bit encoding
-            cache_size: 10_000,              // Cache 10K vectors
+            use_pq_compression: true, // Enable PQ by default
+            num_pq_subvectors: 120,   // For 960-dim
+            num_pq_centroids: 256,    // 8-bit encoding
+            cache_size: 10_000,       // Cache 10K vectors
             beam_width: 8,
-            sector_size: 4096,               // 4KB sectors (SSD standard)
-            write_batch_size: 1000,          // Write 1000 vectors at a time
+            sector_size: 4096,      // 4KB sectors (SSD standard)
+            write_batch_size: 1000, // Write 1000 vectors at a time
         }
     }
 }
@@ -243,7 +243,9 @@ impl VectorStorage {
 
     /// Load vector from disk
     fn load_from_disk(&mut self, offset: u64) -> crate::Result<CachedVector> {
-        let file = self.vector_file.as_mut()
+        let file = self
+            .vector_file
+            .as_mut()
             .ok_or(crate::Error::Internal("Vector file not open".to_string()))?;
 
         file.seek(SeekFrom::Start(offset))
@@ -252,14 +254,12 @@ impl VectorStorage {
         if self.use_pq {
             // Load PQ code
             let mut code = vec![0u8; self.pq_code_size];
-            file.read_exact(&mut code)
-                .map_err(crate::Error::Io)?;
+            file.read_exact(&mut code).map_err(crate::Error::Io)?;
             Ok(CachedVector::Compressed(PQCode { codes: code }))
         } else {
             // Load full vector
             let mut buffer = vec![0u8; self.dimension * 4]; // f32 = 4 bytes
-            file.read_exact(&mut buffer)
-                .map_err(crate::Error::Io)?;
+            file.read_exact(&mut buffer).map_err(crate::Error::Io)?;
 
             let vector: Vec<f32> = buffer
                 .chunks_exact(4)
@@ -301,8 +301,7 @@ impl EnhancedDiskANNIndex {
         let config = config.unwrap_or_default();
 
         // Create index directory if it doesn't exist
-        std::fs::create_dir_all(&index_dir)
-            .map_err(crate::Error::Io)?;
+        std::fs::create_dir_all(&index_dir).map_err(crate::Error::Io)?;
 
         // Initialize PQ if enabled
         let pq = if config.use_pq_compression {
@@ -389,7 +388,10 @@ impl EnhancedDiskANNIndex {
         };
 
         // Store vector
-        self.vector_storage.write().unwrap().insert(id.clone(), cached_data)?;
+        self.vector_storage
+            .write()
+            .unwrap()
+            .insert(id.clone(), cached_data)?;
 
         // Build graph connections using Vamana algorithm
         self.vamana_insert(id, vector)?;
@@ -430,11 +432,8 @@ impl EnhancedDiskANNIndex {
             // Prune if exceeds max degree
             if neighbor_edges.len() > self.config.max_degree {
                 let neighbor_vec = self.get_vector(&neighbor_id)?;
-                let pruned = self.robust_prune(
-                    &neighbor_vec,
-                    neighbor_edges,
-                    self.config.max_degree,
-                )?;
+                let pruned =
+                    self.robust_prune(&neighbor_vec, neighbor_edges, self.config.max_degree)?;
                 *neighbor_edges = pruned;
             }
         }
@@ -453,7 +452,9 @@ impl EnhancedDiskANNIndex {
                 if let Some(ref pq) = self.pq {
                     pq.decode(&code)
                 } else {
-                    Err(crate::Error::Internal("PQ not available but vector is compressed".to_string()))
+                    Err(crate::Error::Internal(
+                        "PQ not available but vector is compressed".to_string(),
+                    ))
                 }
             }
             None => Err(crate::Error::NotFound(format!("Vector {} not found", id))),
@@ -532,9 +533,7 @@ impl EnhancedDiskANNIndex {
             .collect::<crate::Result<Vec<_>>>()?;
 
         // Sort by distance
-        dist_candidates.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        dist_candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Greedy selection with alpha-robust pruning
         for (dist, id) in dist_candidates {
@@ -548,7 +547,8 @@ impl EnhancedDiskANNIndex {
                 result.iter().all(|existing_id| {
                     let existing_vec = self.get_vector(existing_id).unwrap();
                     let candidate_vec = self.get_vector(&id).unwrap();
-                    let candidate_to_existing = self.compute_distance(&candidate_vec, &existing_vec);
+                    let candidate_to_existing =
+                        self.compute_distance(&candidate_vec, &existing_vec);
                     // Alpha condition: ensures diverse neighbors
                     query_to_candidate <= self.config.alpha * candidate_to_existing
                 })
@@ -608,15 +608,13 @@ impl EnhancedDiskANNIndex {
         let metadata_path = self.index_dir.join("metadata.json");
         let metadata_json = serde_json::to_string_pretty(&*self.metadata.read().unwrap())
             .map_err(|e| crate::Error::Internal(format!("Metadata serialization failed: {}", e)))?;
-        std::fs::write(metadata_path, metadata_json)
-            .map_err(crate::Error::Io)?;
+        std::fs::write(metadata_path, metadata_json).map_err(crate::Error::Io)?;
 
         // Save graph
         let graph_path = self.index_dir.join("graph.bin");
         let graph_data = bincode::serialize(&*self.graph.read().unwrap())
             .map_err(|e| crate::Error::Internal(format!("Graph serialization failed: {}", e)))?;
-        std::fs::write(graph_path, graph_data)
-            .map_err(crate::Error::Io)?;
+        std::fs::write(graph_path, graph_data).map_err(crate::Error::Io)?;
 
         tracing::info!("Enhanced DiskANN index saved successfully");
         Ok(())
@@ -705,7 +703,8 @@ mod tests {
             DistanceMetric::Euclidean,
             dir.path().to_path_buf(),
             Some(config),
-        ).unwrap();
+        )
+        .unwrap();
 
         let stats = index.stats();
         assert_eq!(stats.total_vectors, 0);
@@ -725,12 +724,19 @@ mod tests {
             DistanceMetric::Euclidean,
             dir.path().to_path_buf(),
             Some(config),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Insert vectors
-        index.insert("v1".to_string(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.insert("v2".to_string(), vec![0.0, 1.0, 0.0, 0.0]).unwrap();
-        index.insert("v3".to_string(), vec![0.0, 0.0, 1.0, 0.0]).unwrap();
+        index
+            .insert("v1".to_string(), vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .insert("v2".to_string(), vec![0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .insert("v3".to_string(), vec![0.0, 0.0, 1.0, 0.0])
+            .unwrap();
 
         // Search
         let query = vec![1.0, 0.1, 0.0, 0.0];

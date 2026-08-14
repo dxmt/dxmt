@@ -11,8 +11,8 @@
 //!
 //! Reference: turbopuffer blog post on RaBitQ
 
-use crate::types::{vector::DenseVector, DistanceMetric};
 use crate::search::quantization::QuantizationStats;
+use crate::types::{vector::DenseVector, DistanceMetric};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -74,7 +74,7 @@ impl Codebook {
     pub fn train(&mut self, vectors: &[DenseVector], iterations: usize) -> crate::Result<()> {
         if vectors.is_empty() {
             return Err(crate::Error::InvalidInput(
-                "Cannot train codebook with empty vectors".to_string()
+                "Cannot train codebook with empty vectors".to_string(),
             ));
         }
 
@@ -197,7 +197,7 @@ impl RaBitQQuantizer {
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
             return Err(crate::Error::InvalidInput(
-                "Training vectors cannot be empty".to_string()
+                "Training vectors cannot be empty".to_string(),
             ));
         }
 
@@ -219,7 +219,11 @@ impl RaBitQQuantizer {
         let mut residual_vectors = training_vectors.to_vec();
 
         for codebook_idx in 0..self.config.num_codebooks {
-            tracing::debug!("Training codebook {}/{}", codebook_idx + 1, self.config.num_codebooks);
+            tracing::debug!(
+                "Training codebook {}/{}",
+                codebook_idx + 1,
+                self.config.num_codebooks
+            );
 
             let mut codebook = Codebook::new(dimension, self.config.codebook_size);
             codebook.train(&residual_vectors, self.config.training_iterations)?;
@@ -250,7 +254,7 @@ impl RaBitQQuantizer {
     pub fn quantize(&self, vector: &DenseVector) -> crate::Result<Vec<u8>> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(
-                "Quantizer must be trained before quantization".to_string()
+                "Quantizer must be trained before quantization".to_string(),
             ));
         }
 
@@ -281,9 +285,11 @@ impl RaBitQQuantizer {
     /// Decode binary codes back to approximate vector
     pub fn decode(&self, codes: &[u8]) -> crate::Result<DenseVector> {
         if codes.len() != self.config.num_codebooks {
-            return Err(crate::Error::InvalidInput(
-                format!("Expected {} codes, got {}", self.config.num_codebooks, codes.len())
-            ));
+            return Err(crate::Error::InvalidInput(format!(
+                "Expected {} codes, got {}",
+                self.config.num_codebooks,
+                codes.len()
+            )));
         }
 
         let mut reconstructed = vec![0.0; self.dimension];
@@ -422,10 +428,7 @@ fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Subtract two vectors
 #[inline]
 fn subtract_vectors(a: &[f32], b: &[f32]) -> Vec<f32> {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| x - y)
-        .collect()
+    a.iter().zip(b.iter()).map(|(x, y)| x - y).collect()
 }
 
 /// Hamming distance (scalar implementation)
@@ -501,7 +504,8 @@ mod tests {
         let dimension = 128;
         let training_vectors = create_test_vectors(500, dimension);
 
-        let mut quantizer = RaBitQQuantizer::new(config.clone(), DistanceMetric::Euclidean, dimension);
+        let mut quantizer =
+            RaBitQQuantizer::new(config.clone(), DistanceMetric::Euclidean, dimension);
         quantizer.train(&training_vectors).unwrap();
 
         let test_vector = create_test_vectors(1, dimension)[0].clone();
@@ -589,7 +593,10 @@ mod tests {
         let quantizer = RaBitQQuantizer::new(config, DistanceMetric::Euclidean, dimension);
 
         let ratio = quantizer.compression_ratio();
-        println!("Compression ratio for {}-dim vectors: {:.1}x", dimension, ratio);
+        println!(
+            "Compression ratio for {}-dim vectors: {:.1}x",
+            dimension, ratio
+        );
 
         // 768 * 4 bytes / 2 bytes = 1536x
         assert!(ratio > 1000.0);

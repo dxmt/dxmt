@@ -2,9 +2,7 @@
 //!
 //! Provides a single interface to evaluate all quality metrics together.
 
-use super::{
-    MetricStatistics, NdcgEvaluator, PrecisionEvaluator, MapEvaluator,
-};
+use super::{MapEvaluator, MetricStatistics, NdcgEvaluator, PrecisionEvaluator};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -188,12 +186,10 @@ mod tests {
 
     #[test]
     fn test_evaluate_multi() {
-        let results = vec![
-            (
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-            ),
-        ];
+        let results = vec![(
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+        )];
 
         let reports = MetricsEvaluator::evaluate_multi(&results, &[1, 3, 5]);
 
@@ -205,12 +201,10 @@ mod tests {
 
     #[test]
     fn test_generate_report() {
-        let results = vec![
-            (
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-            ),
-        ];
+        let results = vec![(
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+        )];
 
         let report = MetricsEvaluator::generate_report(&results, &[1, 3, 5], "HNSW");
 
@@ -222,12 +216,10 @@ mod tests {
 
     #[test]
     fn test_print_report() {
-        let results = vec![
-            (
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-                ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
-            ),
-        ];
+        let results = vec![(
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+            ["1", "2", "3"].iter().map(|s| s.to_string()).collect(),
+        )];
 
         let report = MetricsEvaluator::evaluate(&results, 3);
         report.print(); // Should not panic

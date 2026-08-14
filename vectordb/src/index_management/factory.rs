@@ -7,9 +7,9 @@
 //! - Error handling for invalid requests
 
 use crate::adaptive_index::AdaptiveConfig;
+use crate::error::{Error, Result};
 use crate::search::IndexWrapper;
 use crate::types::table::IndexType;
-use crate::error::{Error, Result};
 
 /// Factory for creating index instances
 pub struct IndexFactory {
@@ -44,11 +44,11 @@ impl IndexFactory {
             IndexType::Lsh => {
                 // LSH not yet implemented, fallback to BruteForce
                 self.create_bruteforce_index()
-            },
+            }
             IndexType::IvfPq => {
                 // IVF-PQ not yet implemented, fallback to IVF
                 self.create_ivf_index()
-            },
+            }
         }
     }
 
@@ -60,20 +60,22 @@ impl IndexFactory {
 
         // Validate HNSW parameters
         if !(4..=64).contains(&m) {
-            return Err(Error::InvalidConfig(
-                format!("HNSW M must be between 4 and 64, got {}", m)
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "HNSW M must be between 4 and 64, got {}",
+                m
+            )));
         }
 
         if ef_construction < 100 {
-            return Err(Error::InvalidConfig(
-                format!("HNSW ef_construction must be at least 100, got {}", ef_construction)
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "HNSW ef_construction must be at least 100, got {}",
+                ef_construction
+            )));
         }
 
         // Import necessary types
-        use crate::search::HnswIndex;
         use crate::search::hnsw::HnswConfig;
+        use crate::search::HnswIndex;
 
         // Create HNSW index with configuration
         let hnsw_config = HnswConfig::from_params(m, ef_construction, self.config.hnsw_ef_search);
@@ -85,7 +87,7 @@ impl IndexFactory {
 
     /// Create IVF index with adaptive parameters
     fn create_ivf_index(&self) -> Result<IndexWrapper> {
-        use crate::search::ivf::{IvfIndex, IvfConfig};
+        use crate::search::ivf::{IvfConfig, IvfIndex};
 
         // Extract IVF parameters from config
         let nlist = self.config.ivf_n_lists;
@@ -93,15 +95,17 @@ impl IndexFactory {
 
         // Validate IVF parameters
         if nlist < 100 {
-            return Err(Error::InvalidConfig(
-                format!("IVF nlist must be at least 100, got {}", nlist)
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "IVF nlist must be at least 100, got {}",
+                nlist
+            )));
         }
 
         if nprobe < 1 || nprobe > nlist {
-            return Err(Error::InvalidConfig(
-                format!("IVF nprobe must be between 1 and {}, got {}", nlist, nprobe)
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "IVF nprobe must be between 1 and {}, got {}",
+                nlist, nprobe
+            )));
         }
 
         // Create IVF configuration
@@ -153,9 +157,10 @@ impl IndexFactory {
 
         // Validate HNSW parameters
         if self.config.hnsw_m < 4 || self.config.hnsw_m > 64 {
-            return Err(Error::InvalidConfig(
-                format!("HNSW M must be between 4 and 64, got {}", self.config.hnsw_m),
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "HNSW M must be between 4 and 64, got {}",
+                self.config.hnsw_m
+            )));
         }
 
         if self.config.hnsw_ef_construction < 100 {

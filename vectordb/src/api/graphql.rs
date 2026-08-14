@@ -1,20 +1,14 @@
 use async_graphql::{
-    Context, EmptySubscription, Object, Result, Schema, SimpleObject, ID,
-    InputObject,
+    Context, EmptySubscription, InputObject, Object, Result, Schema, SimpleObject, ID,
 };
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{
-    extract::Extension,
-    response::IntoResponse,
-    routing::post,
-    Router,
-};
+use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
     api::handlers::AppState,
-    types::{table::Table, record::Record},
+    types::{record::Record, table::Table},
 };
 
 /// GraphQL schema type
@@ -105,10 +99,15 @@ impl QueryRoot {
     }
 
     /// Get record by ID
-    async fn record(&self, ctx: &Context<'_>, table_name: String, id: String) -> Result<Option<RecordType>> {
+    async fn record(
+        &self,
+        ctx: &Context<'_>,
+        table_name: String,
+        id: String,
+    ) -> Result<Option<RecordType>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&table_name).await?;
-        
+
         match state.storage.get_record(&table.name, &id).await {
             Ok(record) => Ok(Some(record_to_graphql(record, table.id))),
             Err(_) => Ok(None),
@@ -119,7 +118,7 @@ impl QueryRoot {
     async fn search(&self, ctx: &Context<'_>, input: SearchInput) -> Result<Vec<RecordType>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&input.table_name).await?;
-        
+
         if input.vector.len() != table.dimension {
             return Err("Vector dimension mismatch".into());
         }
@@ -150,13 +149,13 @@ impl MutationRoot {
     /// Create a new table
     async fn create_table(&self, ctx: &Context<'_>, input: CreateTableInput) -> Result<TableType> {
         let state = ctx.data::<Arc<AppState>>()?;
-        
+
         // Create table config - this would need to be adapted based on actual TableConfig structure
         let config = crate::types::table::TableConfig {
             name: input.name,
             dimension: input.dimension as usize,
             distance_metric: crate::types::vector::DistanceMetric::Cosine, // Default
-            index_type: Some(crate::types::table::IndexType::Hnsw), // Default
+            index_type: Some(crate::types::table::IndexType::Hnsw),        // Default
             description: None,
             text_fields: None,
             enable_full_text_search: false,
@@ -165,26 +164,35 @@ impl MutationRoot {
             schema_version: 1,
             named_vectors: None,
         };
-        
+
         let table = state.storage.create_table(config).await?;
         Ok(table_to_graphql(table))
     }
 
     /// Insert a record
-    async fn insert_record(&self, ctx: &Context<'_>, input: InsertRecordInput) -> Result<RecordType> {
+    async fn insert_record(
+        &self,
+        ctx: &Context<'_>,
+        input: InsertRecordInput,
+    ) -> Result<RecordType> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&input.table_name).await?;
-        
+
         let request = crate::types::record::CreateRecordRequest {
             id: Uuid::new_v4().to_string(),
             vector: input.vector,
             sparse_vector: None,
-            payload: input.payload.map(|p| serde_json::from_str(&p).unwrap_or_default()),
+            payload: input
+                .payload
+                .map(|p| serde_json::from_str(&p).unwrap_or_default()),
             named_vectors: None,
         };
 
         // Insert single record by wrapping in Vec
-        let records = state.storage.insert_records(&table.name, vec![request]).await?;
+        let records = state
+            .storage
+            .insert_records(&table.name, vec![request])
+            .await?;
         if let Some(record) = records.into_iter().next() {
             Ok(record_to_graphql(record, table.id))
         } else {
@@ -193,22 +201,33 @@ impl MutationRoot {
     }
 
     /// Batch insert records
-    async fn batch_insert(&self, ctx: &Context<'_>, input: BatchInsertInput) -> Result<Vec<RecordType>> {
+    async fn batch_insert(
+        &self,
+        ctx: &Context<'_>,
+        input: BatchInsertInput,
+    ) -> Result<Vec<RecordType>> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&input.table_name).await?;
 
-        let requests: Vec<_> = input.records.into_iter().map(|r| {
-            crate::types::record::CreateRecordRequest {
+        let requests: Vec<_> = input
+            .records
+            .into_iter()
+            .map(|r| crate::types::record::CreateRecordRequest {
                 id: Uuid::new_v4().to_string(),
                 vector: r.vector,
                 sparse_vector: None,
-                payload: r.payload.map(|p| serde_json::from_str(&p).unwrap_or_default()),
+                payload: r
+                    .payload
+                    .map(|p| serde_json::from_str(&p).unwrap_or_default()),
                 named_vectors: None,
-            }
-        }).collect();
+            })
+            .collect();
 
         let records = state.storage.insert_records(&table.name, requests).await?;
-        Ok(records.into_iter().map(|r| record_to_graphql(r, table.id)).collect())
+        Ok(records
+            .into_iter()
+            .map(|r| record_to_graphql(r, table.id))
+            .collect())
     }
 
     /// Delete a table
@@ -219,7 +238,11 @@ impl MutationRoot {
     }
 
     /// Update a record
-    async fn update_record(&self, ctx: &Context<'_>, input: UpdateRecordInput) -> Result<RecordType> {
+    async fn update_record(
+        &self,
+        ctx: &Context<'_>,
+        input: UpdateRecordInput,
+    ) -> Result<RecordType> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&input.table_name).await?;
 
@@ -227,19 +250,29 @@ impl MutationRoot {
             id: input.id.clone(),
             vector: input.vector.unwrap_or_default(),
             sparse_vector: None,
-            payload: input.payload.map(|p| serde_json::from_str(&p).unwrap_or_default()),
+            payload: input
+                .payload
+                .map(|p| serde_json::from_str(&p).unwrap_or_default()),
             named_vectors: None,
         };
 
-        let record = state.storage.update_record(&table.name, &input.id, request).await?;
+        let record = state
+            .storage
+            .update_record(&table.name, &input.id, request)
+            .await?;
         Ok(record_to_graphql(record, table.id))
     }
 
     /// Delete a record
-    async fn delete_record(&self, ctx: &Context<'_>, table_name: String, id: String) -> Result<bool> {
+    async fn delete_record(
+        &self,
+        ctx: &Context<'_>,
+        table_name: String,
+        id: String,
+    ) -> Result<bool> {
         let state = ctx.data::<Arc<AppState>>()?;
         let table = state.storage.get_table(&table_name).await?;
-        
+
         // Use delete_records method which exists
         state.storage.delete_records(&table.name, vec![id]).await?;
         Ok(true)
@@ -278,8 +311,7 @@ pub async fn graphql_handler(
 
 /// Create GraphQL router
 pub fn create_graphql_router() -> Router<AppState> {
-    let schema = Schema::build(QueryRoot, MutationRoot, EmptySubscription)
-        .finish();
+    let schema = Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish();
 
     Router::new()
         .route("/graphql", post(graphql_handler))

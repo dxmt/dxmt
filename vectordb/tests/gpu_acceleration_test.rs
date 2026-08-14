@@ -12,7 +12,9 @@ use dxmt_vectordb::search::index_traits::VectorIndex;
 use dxmt_vectordb::types::vector::DistanceMetric;
 
 #[cfg(feature = "gpu")]
-use dxmt_vectordb::acceleration::{GpuDistanceCalculator, GpuDistanceConfig, GpuDevice, is_cuda_available};
+use dxmt_vectordb::acceleration::{
+    is_cuda_available, GpuDevice, GpuDistanceCalculator, GpuDistanceConfig,
+};
 
 use rand::Rng;
 
@@ -32,7 +34,10 @@ fn test_gpu_device_enumeration_safe() {
         let devices = GpuDevice::enumerate();
         println!("Found {} GPU device(s)", devices.len());
         for dev in &devices {
-            println!("  [{:?}] {} - {:.1} GB", dev.backend, dev.name, dev.memory_gb);
+            println!(
+                "  [{:?}] {} - {:.1} GB",
+                dev.backend, dev.name, dev.memory_gb
+            );
         }
     }
 }
@@ -94,8 +99,12 @@ async fn test_brute_force_cpu_search() {
 
     // Results should be sorted by distance (ascending)
     for i in 1..results.len() {
-        assert!(results[i].1 >= results[i - 1].1,
-            "Results not sorted: {} >= {}", results[i].1, results[i - 1].1);
+        assert!(
+            results[i].1 >= results[i - 1].1,
+            "Results not sorted: {} >= {}",
+            results[i].1,
+            results[i - 1].1
+        );
     }
 }
 
@@ -148,10 +157,16 @@ async fn test_brute_force_gpu_search_correctness() {
     let cpu_ids: Vec<&str> = cpu_results.iter().map(|(id, _)| id.as_str()).collect();
 
     // At minimum, the closest result should match
-    assert_eq!(gpu_ids[0], cpu_ids[0],
-        "Nearest neighbor mismatch: GPU={} vs CPU={}", gpu_ids[0], cpu_ids[0]);
+    assert_eq!(
+        gpu_ids[0], cpu_ids[0],
+        "Nearest neighbor mismatch: GPU={} vs CPU={}",
+        gpu_ids[0], cpu_ids[0]
+    );
 
-    println!("GPU search results match CPU for top-{} (nearest: {})", k, gpu_ids[0]);
+    println!(
+        "GPU search results match CPU for top-{} (nearest: {})",
+        k, gpu_ids[0]
+    );
 }
 
 /// Test that GPU path is NOT used when below batch threshold
@@ -194,7 +209,9 @@ async fn test_gpu_cosine_distance_accuracy() {
     let queries = random_vectors(2, dim);
     let vectors = random_vectors(1500, dim);
 
-    let gpu_result = calc.batch_distances(&DistanceMetric::Cosine, &queries, &vectors).unwrap();
+    let gpu_result = calc
+        .batch_distances(&DistanceMetric::Cosine, &queries, &vectors)
+        .unwrap();
 
     assert_eq!(gpu_result.len(), 2);
     assert_eq!(gpu_result[0].len(), 1500);
@@ -202,8 +219,11 @@ async fn test_gpu_cosine_distance_accuracy() {
     // Verify distances are in valid range for cosine: [0, 2]
     for distances in &gpu_result {
         for &d in distances {
-            assert!(d >= -0.01 && d <= 2.01,
-                "Cosine distance out of range: {}", d);
+            assert!(
+                d >= -0.01 && d <= 2.01,
+                "Cosine distance out of range: {}",
+                d
+            );
         }
     }
 
@@ -214,9 +234,15 @@ async fn test_gpu_cosine_distance_accuracy() {
             let cpu_dist = metric.calculate(&queries[q_idx], &vectors[v_idx]).unwrap();
             let gpu_dist = gpu_result[q_idx][v_idx];
             let diff = (cpu_dist - gpu_dist).abs();
-            assert!(diff < 0.01,
+            assert!(
+                diff < 0.01,
                 "Distance mismatch at ({}, {}): CPU={}, GPU={}, diff={}",
-                q_idx, v_idx, cpu_dist, gpu_dist, diff);
+                q_idx,
+                v_idx,
+                cpu_dist,
+                gpu_dist,
+                diff
+            );
         }
     }
 
@@ -233,7 +259,10 @@ async fn test_gpu_distance_diagnostic() {
     };
     let calc = match GpuDistanceCalculator::try_new(config) {
         Some(c) => c,
-        None => { println!("No GPU"); return; }
+        None => {
+            println!("No GPU");
+            return;
+        }
     };
 
     // Fixed query: all-ones normalized
@@ -241,79 +270,119 @@ async fn test_gpu_distance_diagnostic() {
     let query = vec![0.5f32; dim];
     // Fixed vectors
     let vectors = vec![
-        vec![1.0f32, 0.0, 0.0, 0.0],  // v0: orthogonal to query
-        vec![0.5f32, 0.5, 0.5, 0.5],  // v1: identical to query (cosine dist = 0)
+        vec![1.0f32, 0.0, 0.0, 0.0],     // v0: orthogonal to query
+        vec![0.5f32, 0.5, 0.5, 0.5],     // v1: identical to query (cosine dist = 0)
         vec![-0.5f32, -0.5, -0.5, -0.5], // v2: opposite (cosine dist = 2)
-        vec![0.0f32, 0.0, 0.0, 1.0],  // v3: mostly orthogonal
+        vec![0.0f32, 0.0, 0.0, 1.0],     // v3: mostly orthogonal
     ];
 
-    let gpu_dists = calc.batch_distances(
-        &DistanceMetric::Cosine,
-        &[query.clone()],
-        &vectors,
-    ).unwrap();
+    let gpu_dists = calc
+        .batch_distances(&DistanceMetric::Cosine, &[query.clone()], &vectors)
+        .unwrap();
     let gpu_dists = &gpu_dists[0];
 
     println!("GPU cosine distances:");
     for (i, (v, d)) in vectors.iter().zip(gpu_dists.iter()).enumerate() {
         let cpu_d = DistanceMetric::Cosine.calculate(&query, v).unwrap();
-        println!("  v{}: GPU={:.6} CPU={:.6} diff={:.6}", i, d, cpu_d, (d - cpu_d).abs());
+        println!(
+            "  v{}: GPU={:.6} CPU={:.6} diff={:.6}",
+            i,
+            d,
+            cpu_d,
+            (d - cpu_d).abs()
+        );
     }
-    
+
     // v1 should be closest (distance = 0)
     // v2 should be farthest (distance = 2)
-    assert!((gpu_dists[1] - 0.0).abs() < 0.01, "v1 (identical) should have dist ~0, got {}", gpu_dists[1]);
-    assert!((gpu_dists[2] - 2.0).abs() < 0.01, "v2 (opposite) should have dist ~2, got {}", gpu_dists[2]);
+    assert!(
+        (gpu_dists[1] - 0.0).abs() < 0.01,
+        "v1 (identical) should have dist ~0, got {}",
+        gpu_dists[1]
+    );
+    assert!(
+        (gpu_dists[2] - 2.0).abs() < 0.01,
+        "v2 (opposite) should have dist ~2, got {}",
+        gpu_dists[2]
+    );
 }
 
 /// Thorough GPU distance comparison: all 200 distances, fixed seed
 #[cfg(feature = "gpu")]
 #[tokio::test]
 async fn test_gpu_vs_cpu_all_distances() {
-    use rand::SeedableRng;
     use rand::rngs::SmallRng;
+    use rand::SeedableRng;
     let mut rng = SmallRng::seed_from_u64(42);
-    
-    let config = GpuDistanceConfig { batch_threshold: 1, ..Default::default() };
+
+    let config = GpuDistanceConfig {
+        batch_threshold: 1,
+        ..Default::default()
+    };
     let calc = match GpuDistanceCalculator::try_new(config) {
         Some(c) => c,
-        None => { println!("No GPU"); return; }
+        None => {
+            println!("No GPU");
+            return;
+        }
     };
-    
+
     let dim = 128;
     let n = 200;
     let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect();
-    let vectors: Vec<Vec<f32>> = (0..n).map(|_| {
-        (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect()
-    }).collect();
-    
-    let gpu_result = calc.batch_distances(
-        &DistanceMetric::Cosine,
-        &[query.clone()],
-        &vectors,
-    ).unwrap();
+    let vectors: Vec<Vec<f32>> = (0..n)
+        .map(|_| (0..dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect())
+        .collect();
+
+    let gpu_result = calc
+        .batch_distances(&DistanceMetric::Cosine, &[query.clone()], &vectors)
+        .unwrap();
     let gpu_dists = &gpu_result[0];
-    
+
     let mut max_diff = 0.0f32;
     let mut max_diff_idx = 0;
     let mut mismatches = 0;
     for (i, v) in vectors.iter().enumerate() {
         let cpu_d = DistanceMetric::Cosine.calculate(&query, v).unwrap();
         let diff = (gpu_dists[i] - cpu_d).abs();
-        if diff > max_diff { max_diff = diff; max_diff_idx = i; }
-        if diff > 0.01 { mismatches += 1; }
+        if diff > max_diff {
+            max_diff = diff;
+            max_diff_idx = i;
+        }
+        if diff > 0.01 {
+            mismatches += 1;
+        }
     }
-    
+
     println!("Max diff: {:.6} at idx {}", max_diff, max_diff_idx);
     println!("Mismatches (>0.01): {}/{}", mismatches, n);
-    
+
     // Find top-1 by GPU and CPU
-    let gpu_min_idx = gpu_dists.iter().enumerate().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i,_)| i).unwrap();
-    let cpu_dists: Vec<f32> = vectors.iter().map(|v| DistanceMetric::Cosine.calculate(&query, v).unwrap()).collect();
-    let cpu_min_idx = cpu_dists.iter().enumerate().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i,_)| i).unwrap();
-    
-    println!("GPU nearest: vec_{} (dist={:.6})", gpu_min_idx, gpu_dists[gpu_min_idx]);
-    println!("CPU nearest: vec_{} (dist={:.6})", cpu_min_idx, cpu_dists[cpu_min_idx]);
-    
+    let gpu_min_idx = gpu_dists
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let cpu_dists: Vec<f32> = vectors
+        .iter()
+        .map(|v| DistanceMetric::Cosine.calculate(&query, v).unwrap())
+        .collect();
+    let cpu_min_idx = cpu_dists
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    println!(
+        "GPU nearest: vec_{} (dist={:.6})",
+        gpu_min_idx, gpu_dists[gpu_min_idx]
+    );
+    println!(
+        "CPU nearest: vec_{} (dist={:.6})",
+        cpu_min_idx, cpu_dists[cpu_min_idx]
+    );
+
     assert_eq!(mismatches, 0, "Too many GPU/CPU mismatches");
 }

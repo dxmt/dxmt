@@ -3,12 +3,12 @@
 //! Provides asynchronous WAL functionality with background flushing
 //! to minimize write latency and improve throughput.
 
-use std::path::{Path, PathBuf};
-use tokio::sync::{mpsc, oneshot};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
 use crate::error::{Error, Result};
 use crate::wal::WalEntry;
+use std::path::{Path, PathBuf};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, oneshot};
 
 /// Async WAL write request
 enum WalRequest {
@@ -79,7 +79,7 @@ impl AsyncWalManager {
             current_file: None,
             sequence_number: 0,
             write_buffer: Vec::with_capacity(1024 * 1024), // 1MB buffer
-            batch_threshold: 256 * 1024, // 256KB threshold
+            batch_threshold: 256 * 1024,                   // 256KB threshold
             compression_enabled: enable_compression,
             compression_level,
         };
@@ -100,17 +100,23 @@ impl AsyncWalManager {
         let (tx, rx) = oneshot::channel();
 
         self.sender
-            .send(WalRequest::WriteEntry { entry, response: tx })
-            .map_err(|_| Error::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "WAL writer task has stopped",
-            )))?;
+            .send(WalRequest::WriteEntry {
+                entry,
+                response: tx,
+            })
+            .map_err(|_| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "WAL writer task has stopped",
+                ))
+            })?;
 
-        rx.await
-            .map_err(|_| Error::Io(std::io::Error::new(
+        rx.await.map_err(|_| {
+            Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "WAL writer response channel closed",
-            )))?
+            ))
+        })?
     }
 
     /// Write multiple entries in a batch asynchronously
@@ -118,17 +124,23 @@ impl AsyncWalManager {
         let (tx, rx) = oneshot::channel();
 
         self.sender
-            .send(WalRequest::WriteBatch { entries, response: tx })
-            .map_err(|_| Error::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "WAL writer task has stopped",
-            )))?;
+            .send(WalRequest::WriteBatch {
+                entries,
+                response: tx,
+            })
+            .map_err(|_| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "WAL writer task has stopped",
+                ))
+            })?;
 
-        rx.await
-            .map_err(|_| Error::Io(std::io::Error::new(
+        rx.await.map_err(|_| {
+            Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "WAL writer response channel closed",
-            )))?
+            ))
+        })?
     }
 
     /// Force flush any pending writes
@@ -137,26 +149,29 @@ impl AsyncWalManager {
 
         self.sender
             .send(WalRequest::ForceFlush { response: tx })
-            .map_err(|_| Error::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "WAL writer task has stopped",
-            )))?;
+            .map_err(|_| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "WAL writer task has stopped",
+                ))
+            })?;
 
-        rx.await
-            .map_err(|_| Error::Io(std::io::Error::new(
+        rx.await.map_err(|_| {
+            Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "WAL writer response channel closed",
-            )))?
+            ))
+        })?
     }
 
     /// Shutdown the async WAL writer gracefully
     pub async fn shutdown(&self) -> Result<()> {
-        self.sender
-            .send(WalRequest::Shutdown)
-            .map_err(|_| Error::Io(std::io::Error::new(
+        self.sender.send(WalRequest::Shutdown).map_err(|_| {
+            Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "WAL writer task has stopped",
-            )))?;
+            ))
+        })?;
 
         Ok(())
     }
@@ -194,8 +209,8 @@ impl WalWriter {
         self.sequence_number += 1;
 
         // Serialize using bincode
-        let entry_bytes = bincode::serialize(&entry)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let entry_bytes =
+            bincode::serialize(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Compress if enabled
         let compressed = if self.compression_enabled {
@@ -213,8 +228,10 @@ impl WalWriter {
 
         // Append to buffer
         self.write_buffer.extend_from_slice(&seq.to_le_bytes());
-        self.write_buffer.push(if self.compression_enabled { 1 } else { 0 });
-        self.write_buffer.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        self.write_buffer
+            .push(if self.compression_enabled { 1 } else { 0 });
+        self.write_buffer
+            .extend_from_slice(&(compressed.len() as u32).to_le_bytes());
         self.write_buffer.extend_from_slice(&compressed);
 
         // Batch flush: only flush when buffer exceeds threshold
@@ -234,8 +251,8 @@ impl WalWriter {
             self.sequence_number += 1;
 
             // Serialize using bincode
-            let entry_bytes = bincode::serialize(&entry)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let entry_bytes =
+                bincode::serialize(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
 
             // Compress if enabled (in blocking task to avoid blocking async runtime)
             let compressed = if self.compression_enabled {
@@ -253,8 +270,10 @@ impl WalWriter {
 
             // Append to buffer
             self.write_buffer.extend_from_slice(&seq.to_le_bytes());
-            self.write_buffer.push(if self.compression_enabled { 1 } else { 0 });
-            self.write_buffer.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            self.write_buffer
+                .push(if self.compression_enabled { 1 } else { 0 });
+            self.write_buffer
+                .extend_from_slice(&(compressed.len() as u32).to_le_bytes());
             self.write_buffer.extend_from_slice(&compressed);
 
             seq_numbers.push(seq);
@@ -276,9 +295,7 @@ impl WalWriter {
             file.write_all(&self.write_buffer)
                 .await
                 .map_err(Error::Io)?;
-            file.flush()
-                .await
-                .map_err(Error::Io)?;
+            file.flush().await.map_err(Error::Io)?;
         }
 
         self.write_buffer.clear();
@@ -326,17 +343,23 @@ mod tests {
         let wal = AsyncWalManager::new(temp_dir.path()).await.unwrap();
 
         // Write some entries
-        let seq1 = wal.write_entry(WalEntry::CreateTable {
-            table: "test".to_string(),
-            dimension: 128,
-        }).await.unwrap();
+        let seq1 = wal
+            .write_entry(WalEntry::CreateTable {
+                table: "test".to_string(),
+                dimension: 128,
+            })
+            .await
+            .unwrap();
 
-        let seq2 = wal.write_entry(WalEntry::Insert {
-            table: "test".to_string(),
-            record_id: "rec1".to_string(),
-            vector: vec![1.0, 2.0, 3.0],
-            payload: None,
-        }).await.unwrap();
+        let seq2 = wal
+            .write_entry(WalEntry::Insert {
+                table: "test".to_string(),
+                record_id: "rec1".to_string(),
+                vector: vec![1.0, 2.0, 3.0],
+                payload: None,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(seq1, 0);
         assert_eq!(seq2, 1);
@@ -383,7 +406,9 @@ mod tests {
         wal.write_entry(WalEntry::CreateTable {
             table: "test".to_string(),
             dimension: 128,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Shutdown gracefully (should flush pending writes)
         wal.shutdown().await.unwrap();

@@ -2,17 +2,17 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Serialize, Deserialize};
 
+use super::processor::{AudioProcessor, ImageProcessor, MultimodalProcessor, TextProcessor};
+use crate::embeddings::EmbeddingManager;
 use crate::types::{
-    multimodal::{ModalityType, MultimodalContent, MultimodalData, MultiVectorRecord},
+    multimodal::{ModalityType, MultiVectorRecord, MultimodalContent, MultimodalData},
     DenseVector, RecordId,
 };
-use crate::embeddings::EmbeddingManager;
-use super::processor::{MultimodalProcessor, TextProcessor, ImageProcessor, AudioProcessor};
 
 /// Configuration for multimodal processing
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,11 +59,11 @@ impl MultimodalManager {
             config,
         }
     }
-    
+
     /// Initialize default processors
     pub async fn initialize(&self) -> crate::Result<()> {
         let mut processors = self.processors.write().await;
-        
+
         // Initialize text processor
         if self.config.enable_text {
             if let Some(model_name) = &self.config.text_model {
@@ -73,30 +73,38 @@ impl MultimodalManager {
                 }
             }
         }
-        
+
         // Initialize image processor (placeholder)
         if self.config.enable_image {
             let image_processor = Arc::new(ImageProcessor::new(512)); // CLIP dimension
             processors.insert(ModalityType::Image, image_processor);
         }
-        
+
         // Initialize audio processor (placeholder)
         if self.config.enable_audio {
             let audio_processor = Arc::new(AudioProcessor::new(768)); // Whisper dimension
             processors.insert(ModalityType::Audio, audio_processor);
         }
-        
+
         Ok(())
     }
-    
+
     /// Register a custom processor
-    pub async fn register_processor(&self, modality: ModalityType, processor: Arc<dyn MultimodalProcessor>) {
+    pub async fn register_processor(
+        &self,
+        modality: ModalityType,
+        processor: Arc<dyn MultimodalProcessor>,
+    ) {
         let mut processors = self.processors.write().await;
         processors.insert(modality, processor);
     }
-    
+
     /// Register an embedder (alias for register_processor for compatibility)
-    pub async fn register_embedder(&self, modality: crate::multimodal::Modality, embedder: Arc<dyn crate::multimodal::MultimodalEmbedding>) {
+    pub async fn register_embedder(
+        &self,
+        modality: crate::multimodal::Modality,
+        embedder: Arc<dyn crate::multimodal::MultimodalEmbedding>,
+    ) {
         // Convert Modality to ModalityType for now
         let modality_type = match modality {
             crate::multimodal::Modality::Text => ModalityType::Text,
@@ -104,14 +112,17 @@ impl MultimodalManager {
             crate::multimodal::Modality::Audio => ModalityType::Audio,
             _ => ModalityType::Text, // Default fallback
         };
-        
+
         // For now, just store the modality type - actual embedder integration would be more complex
         let processors = self.processors.write().await;
         // processors.insert(modality_type, some_wrapper_processor);
     }
-    
+
     /// Embed content using registered embedders
-    pub async fn embed(&self, content: crate::multimodal::MultimodalContent) -> Result<DenseVector, crate::embeddings::EmbeddingError> {
+    pub async fn embed(
+        &self,
+        content: crate::multimodal::MultimodalContent,
+    ) -> Result<DenseVector, crate::embeddings::EmbeddingError> {
         // Convert MultimodalContent to MultimodalData
         let modality_type = match content.modality {
             crate::multimodal::Modality::Text => ModalityType::Text,
@@ -119,47 +130,60 @@ impl MultimodalManager {
             crate::multimodal::Modality::Audio => ModalityType::Audio,
             _ => ModalityType::Text,
         };
-        
+
         // Convert content.data to appropriate MultimodalContent variant
         let multimodal_content = match modality_type {
-            ModalityType::Text => MultimodalContent::Text(String::from_utf8_lossy(&content.data).to_string()),
-            ModalityType::Image => MultimodalContent::ImageBytes(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &content.data)),
-            ModalityType::Audio => MultimodalContent::AudioBytes(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &content.data)),
+            ModalityType::Text => {
+                MultimodalContent::Text(String::from_utf8_lossy(&content.data).to_string())
+            }
+            ModalityType::Image => MultimodalContent::ImageBytes(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &content.data,
+            )),
+            ModalityType::Audio => MultimodalContent::AudioBytes(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &content.data,
+            )),
             _ => MultimodalContent::Text(String::from_utf8_lossy(&content.data).to_string()),
         };
-        
+
         let data = MultimodalData {
             modality: modality_type,
             content: multimodal_content,
-            payload: Some(serde_json::Value::Object(content.metadata.into_iter().collect())),
+            payload: Some(serde_json::Value::Object(
+                content.metadata.into_iter().collect(),
+            )),
         };
-        
+
         // For now, return a dummy vector
         Ok(vec![0.1; 768])
     }
-    
+
     /// Process multimodal content
     pub async fn process(&self, data: &MultimodalData) -> crate::Result<DenseVector> {
         let processors = self.processors.read().await;
-        
-        let processor = processors.get(&data.modality)
-            .ok_or_else(|| crate::Error::InvalidInput(
-                format!("No processor for modality: {}", data.modality)
-            ))?;
-        
+
+        let processor = processors.get(&data.modality).ok_or_else(|| {
+            crate::Error::InvalidInput(format!("No processor for modality: {}", data.modality))
+        })?;
+
         processor.validate(&data.content)?;
         processor.process(&data.content).await
     }
-    
+
     /// Process multiple modalities and create multi-vector record
-    pub async fn process_multi(&self, id: RecordId, data: Vec<MultimodalData>) -> crate::Result<MultiVectorRecord> {
+    pub async fn process_multi(
+        &self,
+        id: RecordId,
+        data: Vec<MultimodalData>,
+    ) -> crate::Result<MultiVectorRecord> {
         let mut vectors = HashMap::new();
-        
+
         for modal_data in &data {
             let vector = self.process(modal_data).await?;
             vectors.insert(modal_data.modality.to_string(), vector);
         }
-        
+
         Ok(MultiVectorRecord {
             id,
             vectors,
@@ -172,7 +196,7 @@ impl MultimodalManager {
             status: crate::types::RecordStatus::Active,
         })
     }
-    
+
     /// Cross-modal search - search with one modality across another
     pub async fn cross_modal_search(
         &self,
@@ -187,24 +211,24 @@ impl MultimodalManager {
             content: query_content,
             payload: None,
         };
-        
+
         let query_vector = self.process(&query_data).await?;
-        
+
         // TODO: Implement actual cross-modal search
         // This would require:
         // 1. A cross-modal projection layer
         // 2. Or shared embedding space (like CLIP)
         // 3. Search in the target modality index
-        
+
         Ok(vec![])
     }
-    
+
     /// Get available processors
     pub async fn list_processors(&self) -> Vec<ModalityType> {
         let processors = self.processors.read().await;
         processors.keys().cloned().collect()
     }
-    
+
     /// Check if a modality is supported
     pub async fn supports_modality(&self, modality: ModalityType) -> bool {
         let processors = self.processors.read().await;

@@ -248,7 +248,10 @@ pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
     });
 
     Ok(Router::new()
-        .route("/collections", post(create_collection).get(list_collections))
+        .route(
+            "/collections",
+            post(create_collection).get(list_collections),
+        )
         .route("/collections/:name", delete(delete_collection))
         .route("/collections/:name/add", post(add_documents))
         .route("/collections/:name/query", post(query))
@@ -466,7 +469,11 @@ async fn add_documents(
     {
         Ok(inserted) => {
             let inserted_ids: Vec<String> = inserted.iter().map(|r| r.id.clone()).collect();
-            debug!("Inserted {} records into '{}'", inserted_ids.len(), collection_name);
+            debug!(
+                "Inserted {} records into '{}'",
+                inserted_ids.len(),
+                collection_name
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -558,7 +565,14 @@ async fn query(
             Ok(r) => r.hits,
             Err(_) => {
                 // Fallback to plain vector search if hybrid fails (e.g. no text engine)
-                plain_search(&state, &collection_name, &req.query, req.limit, filter_none()).await
+                plain_search(
+                    &state,
+                    &collection_name,
+                    &req.query,
+                    req.limit,
+                    filter_none(),
+                )
+                .await
             }
         }
     } else {
@@ -650,7 +664,9 @@ mod tests {
         let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { return 0.0; }
+        if na < 1e-8 || nb < 1e-8 {
+            return 0.0;
+        }
         dot / (na * nb)
     }
 
@@ -675,12 +691,14 @@ mod tests {
         assert!(
             sim_fox > sim_weather,
             "fox doc1 ({:.3}) should beat weather ({:.3})",
-            sim_fox, sim_weather
+            sim_fox,
+            sim_weather
         );
         assert!(
             sim_fox2 > sim_weather,
             "fox doc2 ({:.3}) should beat weather ({:.3})",
-            sim_fox2, sim_weather
+            sim_fox2,
+            sim_weather
         );
     }
 
@@ -689,7 +707,10 @@ mod tests {
         let mut enc = CollectionBm25::new(64);
         let (_, sparse) = enc.encode_document("d1", "hello world hello");
 
-        assert!(!sparse.indices.is_empty(), "sparse vector must be non-empty");
+        assert!(
+            !sparse.indices.is_empty(),
+            "sparse vector must be non-empty"
+        );
         assert_eq!(sparse.indices.len(), sparse.values.len());
         // All indices must be in [0, dim)
         for &idx in &sparse.indices {
@@ -736,53 +757,73 @@ mod tests {
         // so instead test the storage + encoding path directly.
         let config = StorageConfig {
             r#type: "memory".to_string(),
-            memory: Some(MemoryConfig { max_size_mb: 64, eviction_policy: "lru".to_string() }),
+            memory: Some(MemoryConfig {
+                max_size_mb: 64,
+                eviction_policy: "lru".to_string(),
+            }),
             ssd: None,
             object_storage: None,
         };
         let storage = Arc::new(IntelligentIndexedStorage::new(&config).await.unwrap());
 
-        storage.create_table(TableConfig {
-            name: "test".to_string(),
-            dimension: 128,
-            distance_metric: crate::types::vector::DistanceMetric::Cosine,
-            description: None,
-            index_type: None,
-            text_fields: None,
-            enable_full_text_search: false,
-            memory_optimization: None,
-            payload_schema: None,
-            schema_version: 1,
-            named_vectors: None,
-        }).await.unwrap();
+        storage
+            .create_table(TableConfig {
+                name: "test".to_string(),
+                dimension: 128,
+                distance_metric: crate::types::vector::DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+            })
+            .await
+            .unwrap();
 
         let mut enc = CollectionBm25::new(128);
-        let docs = [("d1", "Rust is a systems programming language"),
+        let docs = [
+            ("d1", "Rust is a systems programming language"),
             ("d2", "Python is great for machine learning"),
-            ("d3", "Rust achieves memory safety without garbage collection")];
+            (
+                "d3",
+                "Rust achieves memory safety without garbage collection",
+            ),
+        ];
 
-        let records: Vec<CreateRecordRequest> = docs.iter().map(|(id, text)| {
-            let (dense, sparse) = enc.encode_document(id, text);
-            CreateRecordRequest {
-                id: id.to_string(),
-                vector: dense,
-                sparse_vector: Some(sparse),
-                payload: Some(serde_json::json!({ "text": text })),
-                named_vectors: None,
-            }
-        }).collect();
+        let records: Vec<CreateRecordRequest> = docs
+            .iter()
+            .map(|(id, text)| {
+                let (dense, sparse) = enc.encode_document(id, text);
+                CreateRecordRequest {
+                    id: id.to_string(),
+                    vector: dense,
+                    sparse_vector: Some(sparse),
+                    payload: Some(serde_json::json!({ "text": text })),
+                    named_vectors: None,
+                }
+            })
+            .collect();
 
         storage.insert_records("test", records).await.unwrap();
 
         // Query for Rust — the two Rust docs should outscore the Python doc
         let (query_dense, _) = enc.encode_text("Rust programming language");
-        let result = storage.search("test", SearchQuery {
-            vector: query_dense,
-            top_k: 3,
-            limit: 3,
-            with_payload: true,
-            ..Default::default()
-        }).await.unwrap();
+        let result = storage
+            .search(
+                "test",
+                SearchQuery {
+                    vector: query_dense,
+                    top_k: 3,
+                    limit: 3,
+                    with_payload: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(result.hits.len(), 3);
         // Top result should be a Rust document (d1 or d3)

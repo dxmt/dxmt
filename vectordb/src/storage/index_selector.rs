@@ -115,7 +115,9 @@ impl IntelligentIndexSelector {
         // For small datasets (< 5,000), use BruteForce (100% recall, simple)
         if config.dataset_size < 5_000 {
             return Ok(IndexDecision {
-                selected_algorithm: IndexAlgorithm::BruteForce { enable_parallel: true },
+                selected_algorithm: IndexAlgorithm::BruteForce {
+                    enable_parallel: true,
+                },
                 confidence: 0.95,
                 expected_performance: ExpectedPerformance {
                     recall: 1.0,
@@ -134,7 +136,11 @@ impl IntelligentIndexSelector {
         let graph_memory_mb = (config.dataset_size * m * 2 * 8) / 1024 / 1024;
         let hnsw_total_memory_mb = vector_memory_mb + graph_memory_mb;
 
-        let num_subvectors = if config.dimension.is_multiple_of(120) { 120 } else { config.dimension / 8 };
+        let num_subvectors = if config.dimension.is_multiple_of(120) {
+            120
+        } else {
+            config.dimension / 8
+        };
         let pq_codes_memory_mb = (config.dataset_size * num_subvectors) / 1024 / 1024;
         let codebook_memory_mb = 1;
         let hnswpq_total_memory_mb = pq_codes_memory_mb + graph_memory_mb + codebook_memory_mb;
@@ -147,7 +153,8 @@ impl IntelligentIndexSelector {
                 "Selecting Enhanced DiskANN: dataset_size={}, HNSW-PQ memory={}MB, budget={}MB",
                 config.dataset_size, hnswpq_total_memory_mb, config.memory_budget_mb
             );
-            let cache_size = (config.memory_budget_mb * 1024 * 1024 / (config.dimension * 4)).min(100_000);
+            let cache_size =
+                (config.memory_budget_mb * 1024 * 1024 / (config.dimension * 4)).min(100_000);
             return Ok(IndexDecision {
                 selected_algorithm: IndexAlgorithm::EnhancedDiskANN {
                     max_degree: 64,
@@ -195,7 +202,11 @@ impl IntelligentIndexSelector {
             config.dataset_size, hnsw_total_memory_mb, config.memory_budget_mb
         );
         Ok(IndexDecision {
-            selected_algorithm: IndexAlgorithm::HNSW { m, ef_construction, ef_search },
+            selected_algorithm: IndexAlgorithm::HNSW {
+                m,
+                ef_construction,
+                ef_search,
+            },
             confidence: 0.92,
             expected_performance: ExpectedPerformance {
                 recall: 0.98,

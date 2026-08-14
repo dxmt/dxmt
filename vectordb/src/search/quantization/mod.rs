@@ -2,15 +2,15 @@
 // 参考 Chroma、Qdrant、LanceDB 的实现
 
 pub mod binary;
+pub mod enhanced_pq;
 pub mod hybrid;
 pub mod product;
-pub mod rabitq;  // New: RaBitQ binary quantization
+pub mod product_quantization;
+pub mod product_quantizer;
+pub mod rabitq; // New: RaBitQ binary quantization
 pub mod scalar;
 pub mod storage;
 pub mod utils;
-pub mod enhanced_pq;
-pub mod product_quantizer;
-pub mod product_quantization;
 
 use crate::types::{vector::DenseVector, DistanceMetric};
 use serde::{Deserialize, Serialize};
@@ -75,13 +75,11 @@ impl Default for ProductQuantizationConfig {
 }
 
 /// 二进制量化配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BinaryQuantizationConfig {
     /// 是否始终存储在内存中
     pub always_ram: Option<bool>,
 }
-
 
 /// 混合量化配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,7 +241,7 @@ impl Default for QuantizationConfig {
 pub use binary::{BinaryQuantizedIndex, BinaryQuantizer};
 pub use hybrid::{HybridQuantizedIndex, HybridQuantizer};
 pub use product::{ProductQuantizedIndex, ProductQuantizer};
-pub use rabitq::{RaBitQConfig, RaBitQIndex, RaBitQQuantizer, RaBitQVector, Codebook};
+pub use rabitq::{Codebook, RaBitQConfig, RaBitQIndex, RaBitQQuantizer, RaBitQVector};
 pub use scalar::{ScalarQuantizedIndex, ScalarQuantizer};
 pub use storage::{QuantizedStorage, QuantizedStorageBuilder, QuantizedStorageConfig};
 pub use utils::{QuantizationError, QuantizationUtils};

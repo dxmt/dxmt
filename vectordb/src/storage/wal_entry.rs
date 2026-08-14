@@ -1,22 +1,18 @@
 // WAL (Write-Ahead Log) Entry Definitions
 // This module defines the structure for persisting operations to disk
 
-use serde::{Deserialize, Serialize};
 use crate::types::record::CreateRecordRequest;
 use crate::types::table::TableConfig;
 use crate::types::vector::RecordId;
+use serde::{Deserialize, Serialize};
 
 /// WAL operation types
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WalOperation {
     /// Create a new table
-    CreateTable {
-        config: TableConfig,
-    },
+    CreateTable { config: TableConfig },
     /// Delete a table
-    DeleteTable {
-        table_name: String,
-    },
+    DeleteTable { table_name: String },
     /// Insert a record
     Insert {
         table_name: String,
@@ -82,8 +78,8 @@ impl WalEntry {
 
     /// Calculate checksum for integrity verification
     pub fn calculate_checksum(&self) -> u32 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
         self.sequence_number.hash(&mut hasher);

@@ -15,8 +15,8 @@ use crate::types::table::IndexType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 /// Performance metrics for an index type
 #[derive(Debug, Clone, Default)]
@@ -47,7 +47,7 @@ impl AdaptiveIndex {
             config,
         }
     }
-    
+
     /// Adapt index based on current workload
     pub async fn adapt(&self) -> Result<AdaptationResult, AdaptiveError> {
         // Analyze current patterns
@@ -56,12 +56,9 @@ impl AdaptiveIndex {
         let current_type = *self.current_type.read().await;
 
         // Determine optimal index type
-        let recommendation = self.optimizer.recommend(
-            &patterns,
-            &distribution,
-            &current_type,
-            &self.config,
-        )?;
+        let recommendation =
+            self.optimizer
+                .recommend(&patterns, &distribution, &current_type, &self.config)?;
 
         // Check if switch is beneficial
         if recommendation.should_switch() {
@@ -73,7 +70,7 @@ impl AdaptiveIndex {
             );
 
             Ok(AdaptationResult {
-                switched: false,  // Would switch in production
+                switched: false, // Would switch in production
                 from_type: current_type,
                 to_type: recommendation.target_type,
                 reason: recommendation.reason,
@@ -101,12 +98,8 @@ impl AdaptiveIndex {
         let distribution = self.data_analyzer.analyze().await?;
         let current_type = *self.current_type.read().await;
 
-        self.optimizer.recommend(
-            &patterns,
-            &distribution,
-            &current_type,
-            &self.config,
-        )
+        self.optimizer
+            .recommend(&patterns, &distribution, &current_type, &self.config)
     }
 }
 
@@ -131,34 +124,34 @@ impl QueryPatternMonitor {
             window_size: 10000,
         }
     }
-    
+
     pub fn record_query(&self, query: QueryRecord) {
         tokio::spawn({
             let queries = self.queries.clone();
             let stats = self.stats.clone();
             let window_size = self.window_size;
-            
+
             async move {
                 let mut q = queries.write().await;
                 let mut s = stats.write().await;
-                
+
                 // Add query to window
                 q.push_back(query.clone());
                 if q.len() > window_size {
                     q.pop_front();
                 }
-                
+
                 // Update statistics
                 s.update(&query);
             }
         });
     }
-    
+
     pub fn get_patterns(&self) -> QueryPatterns {
         // Analyze query patterns
         let queries = self.queries.blocking_read();
         let stats = self.stats.blocking_read();
-        
+
         QueryPatterns {
             total_queries: stats.total_queries,
             avg_k: stats.total_k as f32 / stats.total_queries as f32,
@@ -168,7 +161,7 @@ impl QueryPatternMonitor {
             temporal_pattern: self.detect_temporal_pattern(&queries),
         }
     }
-    
+
     pub fn record_switch(&self, index_type: IndexType, duration: Duration) {
         // Record index switch event
         let mut stats = self.stats.blocking_write();
@@ -178,19 +171,16 @@ impl QueryPatternMonitor {
             duration,
         });
     }
-    
+
     fn detect_temporal_pattern(&self, queries: &VecDeque<QueryRecord>) -> TemporalPattern {
         // Detect if queries follow temporal patterns
         if queries.is_empty() {
             return TemporalPattern::Uniform;
         }
-        
+
         // Simplified pattern detection
-        let recent_count = queries.iter()
-            .rev()
-            .take(100)
-            .count();
-        
+        let recent_count = queries.iter().rev().take(100).count();
+
         if recent_count > 80 {
             TemporalPattern::Burst
         } else if recent_count < 20 {
@@ -220,7 +210,7 @@ impl IndexOptimizer {
             performance_history: HashMap::new(),
         }
     }
-    
+
     pub fn recommend(
         &self,
         patterns: &QueryPatterns,
@@ -229,43 +219,39 @@ impl IndexOptimizer {
         config: &AdaptiveConfig,
     ) -> Result<IndexRecommendation, AdaptiveError> {
         let mut scores = HashMap::new();
-        
+
         // Score each index type
         for index_type in &[IndexType::Hnsw, IndexType::Ivf, IndexType::BruteForce] {
-            let score = self.score_index(
-                index_type,
-                patterns,
-                distribution,
-                config,
-            )?;
+            let score = self.score_index(index_type, patterns, distribution, config)?;
             scores.insert(*index_type, score);
         }
-        
+
         // Find best index - handle NaN and empty cases gracefully
-        let (best_type, best_score) = match scores
-            .iter()
-            .max_by(|a, b| {
-                match a.1.partial_cmp(b.1) {
-                    Some(ord) => ord,
-                    None => std::cmp::Ordering::Equal, // Treat NaN as equal
-                }
-            }) {
+        let (best_type, best_score) = match scores.iter().max_by(|a, b| {
+            match a.1.partial_cmp(b.1) {
+                Some(ord) => ord,
+                None => std::cmp::Ordering::Equal, // Treat NaN as equal
+            }
+        }) {
             Some(entry) => entry,
             None => {
-                return Err(AdaptiveError::Optimization("No valid index scores found".to_string()));
+                return Err(AdaptiveError::Optimization(
+                    "No valid index scores found".to_string(),
+                ));
             }
         };
 
         let current_score = match scores.get(current_type) {
             Some(score) => score,
             None => {
-                return Err(AdaptiveError::Optimization(
-                    format!("Current index type {:?} not found in scores", current_type)
-                ));
+                return Err(AdaptiveError::Optimization(format!(
+                    "Current index type {:?} not found in scores",
+                    current_type
+                )));
             }
         };
         let improvement = (best_score - current_score) / current_score;
-        
+
         // Check if improvement is significant
         if improvement > config.switch_threshold {
             Ok(IndexRecommendation {
@@ -283,7 +269,7 @@ impl IndexOptimizer {
             })
         }
     }
-    
+
     fn score_index(
         &self,
         index_type: &IndexType,
@@ -292,15 +278,23 @@ impl IndexOptimizer {
         config: &AdaptiveConfig,
     ) -> Result<f64, AdaptiveError> {
         let mut score = 0.0;
-        
+
         match index_type {
             IndexType::Hnsw => {
                 // HNSW is good for:
                 // - High recall requirements
                 // - Moderate to large datasets
                 // - Frequent queries
-                score += if patterns.total_queries > 1000 { 10.0 } else { 5.0 };
-                score += if distribution.num_vectors > 100000 { 10.0 } else { 3.0 };
+                score += if patterns.total_queries > 1000 {
+                    10.0
+                } else {
+                    5.0
+                };
+                score += if distribution.num_vectors > 100000 {
+                    10.0
+                } else {
+                    3.0
+                };
                 score += if patterns.avg_k < 50.0 { 8.0 } else { 4.0 };
                 score -= self.cost_model.memory_cost(distribution.num_vectors, 128);
             }
@@ -309,9 +303,21 @@ impl IndexOptimizer {
                 // - Very large datasets
                 // - Memory constraints
                 // - Batch queries
-                score += if distribution.num_vectors > 1000000 { 15.0 } else { 5.0 };
-                score += if config.memory_limit_mb < 1000 { 10.0 } else { 3.0 };
-                score += if patterns.query_types.get("batch").unwrap_or(&0) > &50 { 8.0 } else { 2.0 };
+                score += if distribution.num_vectors > 1000000 {
+                    15.0
+                } else {
+                    5.0
+                };
+                score += if config.memory_limit_mb < 1000 {
+                    10.0
+                } else {
+                    3.0
+                };
+                score += if patterns.query_types.get("batch").unwrap_or(&0) > &50 {
+                    8.0
+                } else {
+                    2.0
+                };
                 score -= self.cost_model.index_build_cost(distribution.num_vectors);
             }
             IndexType::BruteForce => {
@@ -319,17 +325,27 @@ impl IndexOptimizer {
                 // - Small datasets
                 // - Exact search requirements
                 // - Infrequent queries
-                score += if distribution.num_vectors < 10000 { 12.0 } else { 2.0 };
-                score += if patterns.total_queries < 100 { 8.0 } else { 2.0 };
+                score += if distribution.num_vectors < 10000 {
+                    12.0
+                } else {
+                    2.0
+                };
+                score += if patterns.total_queries < 100 {
+                    8.0
+                } else {
+                    2.0
+                };
                 score += 10.0; // Perfect recall
-                score -= self.cost_model.compute_cost(distribution.num_vectors, patterns.avg_k as usize);
+                score -= self
+                    .cost_model
+                    .compute_cost(distribution.num_vectors, patterns.avg_k as usize);
             }
             _ => {}
         }
-        
+
         Ok(score)
     }
-    
+
     fn explain_recommendation(
         &self,
         index_type: &IndexType,
@@ -340,9 +356,7 @@ impl IndexOptimizer {
             IndexType::Hnsw => {
                 format!(
                     "HNSW recommended: {} queries/hour with avg k={}, {} vectors",
-                    patterns.total_queries,
-                    patterns.avg_k,
-                    distribution.num_vectors
+                    patterns.total_queries, patterns.avg_k, distribution.num_vectors
                 )
             }
             IndexType::Ivf => {
@@ -379,7 +393,7 @@ impl DataDistributionAnalyzer {
             samples: Vec::new(),
         }
     }
-    
+
     pub async fn analyze(&self) -> Result<DataDistribution, AdaptiveError> {
         // Analyze data distribution
         Ok(DataDistribution {
@@ -391,22 +405,22 @@ impl DataDistributionAnalyzer {
             outlier_ratio: self.detect_outliers(),
         })
     }
-    
+
     fn calculate_density(&self) -> f32 {
         // Calculate data density
         0.5 // Placeholder
     }
-    
+
     fn calculate_clustering(&self) -> f32 {
         // Calculate clustering coefficient
         0.7 // Placeholder
     }
-    
+
     fn calculate_entropy(&self) -> f32 {
         // Calculate data entropy
         0.8 // Placeholder
     }
-    
+
     fn detect_outliers(&self) -> f32 {
         // Detect outlier ratio
         0.05 // Placeholder
@@ -423,12 +437,12 @@ pub struct AdaptiveConfig {
     pub switch_threshold: f64,
     pub evaluation_interval_ms: u64,
     pub memory_limit_mb: usize,
-    
+
     // HNSW parameters
     pub hnsw_m: usize,
     pub hnsw_ef_construction: usize,
     pub hnsw_ef_search: usize,
-    
+
     // IVF parameters
     pub ivf_n_lists: usize,
     pub ivf_n_probes: usize,
@@ -441,7 +455,7 @@ impl Default for AdaptiveConfig {
             dimension: 768,
             distance_metric: crate::types::vector::DistanceMetric::Cosine,
             max_elements: 1000000,
-            switch_threshold: 0.2, // 20% improvement required
+            switch_threshold: 0.2,         // 20% improvement required
             evaluation_interval_ms: 60000, // Evaluate every minute
             memory_limit_mb: 4096,
             hnsw_m: 16,
@@ -507,7 +521,10 @@ impl QueryStatistics {
         if let Some(threshold) = query.similarity_threshold {
             self.total_similarity_threshold += threshold;
         }
-        *self.query_types.entry(query.query_type.clone()).or_insert(0) += 1;
+        *self
+            .query_types
+            .entry(query.query_type.clone())
+            .or_insert(0) += 1;
     }
 }
 
@@ -567,11 +584,11 @@ impl CostModel {
     fn memory_cost(&self, num_vectors: usize, bytes_per_vector: usize) -> f64 {
         (num_vectors * bytes_per_vector) as f64 * self.memory_cost_per_vector
     }
-    
+
     fn compute_cost(&self, num_vectors: usize, k: usize) -> f64 {
         (num_vectors * k) as f64 * self.compute_cost_per_comparison
     }
-    
+
     fn index_build_cost(&self, num_vectors: usize) -> f64 {
         num_vectors as f64 * self.index_build_cost_per_vector
     }
@@ -582,13 +599,13 @@ impl CostModel {
 pub enum AdaptiveError {
     #[error("Index creation failed: {0}")]
     IndexCreation(String),
-    
+
     #[error("Migration failed: {0}")]
     Migration(String),
-    
+
     #[error("Analysis failed: {0}")]
     Analysis(String),
-    
+
     #[error("Optimization failed: {0}")]
     Optimization(String),
 }

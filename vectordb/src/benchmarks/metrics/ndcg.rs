@@ -50,9 +50,7 @@ impl NdcgEvaluator {
 
         // Calculate IDCG (Ideal DCG) - assume all top-k are relevant
         let ideal_k = k.min(ground_truth.len());
-        let idcg: f64 = (0..ideal_k)
-            .map(|i| 1.0 / (i as f64 + 2.0).log2())
-            .sum();
+        let idcg: f64 = (0..ideal_k).map(|i| 1.0 / (i as f64 + 2.0).log2()).sum();
 
         if idcg == 0.0 {
             0.0

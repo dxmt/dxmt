@@ -71,7 +71,10 @@ struct IvfIndexBackend {
 
 impl HybridQuantizer {
     /// 创建新的混合量化器
-    pub fn new(config: HybridQuantizationConfig, distance_metric: DistanceMetric) -> crate::Result<Self> {
+    pub fn new(
+        config: HybridQuantizationConfig,
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<Self> {
         let base_quantizer =
             Self::create_base_quantizer(&config.base_quantization, distance_metric)?;
 
@@ -87,7 +90,9 @@ impl HybridQuantizer {
     /// 训练量化器
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Training vectors cannot be empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Training vectors cannot be empty".to_string(),
+            ));
         }
 
         self.base_quantizer.train(training_vectors)?;
@@ -98,7 +103,9 @@ impl HybridQuantizer {
     /// 量化向量
     pub fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before quantization".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before quantization".to_string(),
+            ));
         }
 
         let quantized_data = self.base_quantizer.quantize(vector)?;
@@ -119,7 +126,8 @@ impl HybridQuantizer {
 
     fn create_base_quantizer(
         quantization_type: &QuantizationType,
-        distance_metric: DistanceMetric) -> crate::Result<Box<dyn BaseQuantizer>> {
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<Box<dyn BaseQuantizer>> {
         match quantization_type {
             QuantizationType::Scalar(config) => {
                 let quantizer = ScalarQuantizer::new(config.clone(), distance_metric);
@@ -133,7 +141,9 @@ impl HybridQuantizer {
                 let quantizer = BinaryQuantizer::new(config.clone(), distance_metric);
                 Ok(Box::new(BinaryQuantizerWrapper { quantizer }))
             }
-            QuantizationType::Hybrid(_) => Err(crate::Error::InvalidInput("Nested hybrid quantization is not supported".to_string() ))
+            QuantizationType::Hybrid(_) => Err(crate::Error::InvalidInput(
+                "Nested hybrid quantization is not supported".to_string(),
+            )),
         }
     }
 
@@ -167,7 +177,10 @@ impl HybridQuantizer {
 
 impl HybridQuantizedIndex {
     /// 创建新的混合量化索引
-    pub fn new(config: HybridQuantizationConfig, distance_metric: DistanceMetric) -> crate::Result<Self> {
+    pub fn new(
+        config: HybridQuantizationConfig,
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<Self> {
         let quantizer = HybridQuantizer::new(config.clone(), distance_metric)?;
         let index = Self::create_index_backend(&config.index_type, distance_metric)?;
 
@@ -192,7 +205,8 @@ impl HybridQuantizedIndex {
 
     fn create_index_backend(
         index_type: &HybridIndexType,
-        distance_metric: DistanceMetric) -> crate::Result<Box<dyn HybridIndexBackend>> {
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<Box<dyn HybridIndexBackend>> {
         match index_type {
             HybridIndexType::Hnsw => {
                 // 创建HNSW索引配置
@@ -318,7 +332,9 @@ impl HybridIndexBackend for HnswIndexBackend {
         // 对于HNSW，我们需要原始向量进行插入
         // 这里简化处理，实际应该有反量化逻辑
         let data = match &quantized.data {
-            QuantizedData::Scalar(v) | QuantizedData::Product(v) | QuantizedData::Binary(v) => v.clone(),
+            QuantizedData::Scalar(v) | QuantizedData::Product(v) | QuantizedData::Binary(v) => {
+                v.clone()
+            }
         };
         self.quantized_vectors.insert(id, data);
         Ok(())
@@ -371,15 +387,23 @@ struct BruteForceIndexBackend {
 impl HybridIndexBackend for BruteForceIndexBackend {
     fn insert_quantized(&mut self, id: String, quantized: &QuantizedVector) -> crate::Result<()> {
         let data = match &quantized.data {
-            QuantizedData::Scalar(v) | QuantizedData::Product(v) | QuantizedData::Binary(v) => v.clone(),
+            QuantizedData::Scalar(v) | QuantizedData::Product(v) | QuantizedData::Binary(v) => {
+                v.clone()
+            }
         };
         self.quantized_vectors.insert(id, data);
         Ok(())
     }
 
-    fn search_quantized(&self, _query: &DenseVector, k: usize) -> crate::Result<Vec<(String, f32)>> {
+    fn search_quantized(
+        &self,
+        _query: &DenseVector,
+        k: usize,
+    ) -> crate::Result<Vec<(String, f32)>> {
         // Simple brute force search implementation
-        let mut results: Vec<_> = self.quantized_vectors.keys()
+        let mut results: Vec<_> = self
+            .quantized_vectors
+            .keys()
             .take(k)
             .map(|id| (id.clone(), 0.5))
             .collect();

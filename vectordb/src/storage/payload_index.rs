@@ -5,12 +5,12 @@
 //! - 倒排索引加速查找
 //! - 智能PRE-FILTERING决策
 
-use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 use crate::types::{
-    record::{Filter, Condition, FilterOperation},
+    record::{Condition, Filter, FilterOperation},
     vector::RecordId,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Payload索引 - 为每个字段维护倒排索引
 #[derive(Debug, Clone)]
@@ -52,8 +52,8 @@ struct FieldStats {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ValueKey {
     String(String),
-    Number(i64),        // 整数
-    Float(OrderedFloat),// 浮点数（需要特殊处理）
+    Number(i64),         // 整数
+    Float(OrderedFloat), // 浮点数（需要特殊处理）
     Bool(bool),
     Null,
 }
@@ -165,10 +165,13 @@ impl FieldStats {
                 }
                 // 计算有多少前缀匹配
                 let prefix_lower = prefix.to_lowercase();
-                let matching = self.string_prefixes
+                let matching = self
+                    .string_prefixes
                     .iter()
-                    .filter(|p| prefix_lower.starts_with(&p.to_lowercase()) ||
-                               p.to_lowercase().starts_with(&prefix_lower))
+                    .filter(|p| {
+                        prefix_lower.starts_with(&p.to_lowercase())
+                            || p.to_lowercase().starts_with(&prefix_lower)
+                    })
                     .count();
 
                 if matching == 0 {
@@ -319,21 +322,23 @@ impl PayloadIndex {
         let combined_exp = (must_estimate.exp as f64 * must_not_estimate.selectivity) as usize;
 
         // 如果有should条件，取并集（取最大值）
-        let final_estimate = if filter.should.is_some() && !filter.should.as_ref().unwrap().is_empty() {
-            CardinalityEstimate {
-                min: combined_min.max(should_estimate.min),
-                max: combined_max.max(should_estimate.max),
-                exp: combined_exp.max(should_estimate.exp),
-                selectivity: (combined_exp.max(should_estimate.exp) as f64 / self.total_records.max(1) as f64),
-            }
-        } else {
-            CardinalityEstimate {
-                min: combined_min,
-                max: combined_max,
-                exp: combined_exp,
-                selectivity: combined_exp as f64 / self.total_records.max(1) as f64,
-            }
-        };
+        let final_estimate =
+            if filter.should.is_some() && !filter.should.as_ref().unwrap().is_empty() {
+                CardinalityEstimate {
+                    min: combined_min.max(should_estimate.min),
+                    max: combined_max.max(should_estimate.max),
+                    exp: combined_exp.max(should_estimate.exp),
+                    selectivity: (combined_exp.max(should_estimate.exp) as f64
+                        / self.total_records.max(1) as f64),
+                }
+            } else {
+                CardinalityEstimate {
+                    min: combined_min,
+                    max: combined_max,
+                    exp: combined_exp,
+                    selectivity: combined_exp as f64 / self.total_records.max(1) as f64,
+                }
+            };
 
         final_estimate
     }
@@ -517,11 +522,16 @@ impl PayloadIndex {
                     selectivity: total_count as f64 / self.total_records.max(1) as f64,
                 }
             }
-            FilterOperation::GreaterThan(_) | FilterOperation::LessThan(_) |
-            FilterOperation::GreaterThanOrEqual(_) | FilterOperation::LessThanOrEqual(_) => {
+            FilterOperation::GreaterThan(_)
+            | FilterOperation::LessThan(_)
+            | FilterOperation::GreaterThanOrEqual(_)
+            | FilterOperation::LessThanOrEqual(_) => {
                 // 范围查询：使用统计信息进行智能估计
-                let selectivity = if let Some(field_index) = self.field_indices.get(&condition.key) {
-                    field_index.stats.estimate_range_selectivity(&condition.operation)
+                let selectivity = if let Some(field_index) = self.field_indices.get(&condition.key)
+                {
+                    field_index
+                        .stats
+                        .estimate_range_selectivity(&condition.operation)
                 } else {
                     0.3 // 字段不存在，使用保守估计
                 };
@@ -533,10 +543,15 @@ impl PayloadIndex {
                     selectivity,
                 }
             }
-            FilterOperation::Contains(_) | FilterOperation::StartsWith(_) | FilterOperation::EndsWith(_) => {
+            FilterOperation::Contains(_)
+            | FilterOperation::StartsWith(_)
+            | FilterOperation::EndsWith(_) => {
                 // 字符串匹配：使用统计信息进行智能估计
-                let selectivity = if let Some(field_index) = self.field_indices.get(&condition.key) {
-                    field_index.stats.estimate_string_selectivity(&condition.operation)
+                let selectivity = if let Some(field_index) = self.field_indices.get(&condition.key)
+                {
+                    field_index
+                        .stats
+                        .estimate_string_selectivity(&condition.operation)
                 } else {
                     0.2 // 字段不存在，使用保守估计
                 };
@@ -604,10 +619,8 @@ impl PayloadIndex {
             }
             FilterOperation::NotIn(values) => {
                 // NotIn: 收集所有不在列表中的记录ID
-                let exclude_keys: HashSet<_> = values
-                    .iter()
-                    .filter_map(Self::to_value_key)
-                    .collect();
+                let exclude_keys: HashSet<_> =
+                    values.iter().filter_map(Self::to_value_key).collect();
 
                 let mut result = HashSet::new();
                 for (value_key, ids) in &field_index.value_to_ids {
@@ -628,7 +641,7 @@ impl PayloadIndex {
                             ValueKey::Float(ordered_f) => {
                                 let v: f64 = (*ordered_f).into();
                                 v > target_f64
-                            },
+                            }
                             _ => false,
                         };
                         if value_matches {
@@ -649,7 +662,7 @@ impl PayloadIndex {
                             ValueKey::Float(ordered_f) => {
                                 let v: f64 = (*ordered_f).into();
                                 v >= target_f64
-                            },
+                            }
                             _ => false,
                         };
                         if value_matches {
@@ -669,7 +682,7 @@ impl PayloadIndex {
                             ValueKey::Float(ordered_f) => {
                                 let v: f64 = (*ordered_f).into();
                                 v < target_f64
-                            },
+                            }
                             _ => false,
                         };
                         if value_matches {
@@ -689,7 +702,7 @@ impl PayloadIndex {
                             ValueKey::Float(ordered_f) => {
                                 let v: f64 = (*ordered_f).into();
                                 v <= target_f64
-                            },
+                            }
                             _ => false,
                         };
                         if value_matches {
@@ -856,8 +869,14 @@ mod tests {
         assert_eq!(index.total_records, 100);
         println!("Total records: {}", index.total_records);
         if let Some(field_idx) = index.field_indices.get("category") {
-            println!("Category field distinct count: {}", field_idx.distinct_count);
-            println!("Category field value_to_ids keys: {:?}", field_idx.value_to_ids.keys().collect::<Vec<_>>());
+            println!(
+                "Category field distinct count: {}",
+                field_idx.distinct_count
+            );
+            println!(
+                "Category field value_to_ids keys: {:?}",
+                field_idx.value_to_ids.keys().collect::<Vec<_>>()
+            );
             for (key, ids) in &field_idx.value_to_ids {
                 println!("  {:?}: {} records", key, ids.len());
             }
@@ -874,7 +893,10 @@ mod tests {
         };
 
         let estimate = index.estimate_cardinality(&filter);
-        println!("Estimate: exp={}, selectivity={}", estimate.exp, estimate.selectivity);
+        println!(
+            "Estimate: exp={}, selectivity={}",
+            estimate.exp, estimate.selectivity
+        );
         assert_eq!(estimate.exp, 10);
         assert!((estimate.selectivity - 0.1).abs() < 0.01);
 

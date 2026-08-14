@@ -152,7 +152,8 @@ mod tests {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        let results = PrecisionEvaluator::precision_at_k_multi(&retrieved, &ground_truth, &[1, 3, 5]);
+        let results =
+            PrecisionEvaluator::precision_at_k_multi(&retrieved, &ground_truth, &[1, 3, 5]);
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, 1);

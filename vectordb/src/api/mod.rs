@@ -7,9 +7,9 @@ pub mod multimodal;
 pub mod rate_limiter;
 pub mod response;
 pub mod server;
-pub mod server_health;  // Server health monitoring and backpressure
-pub mod simple_core;  // Uses IntelligentIndexedStorage with auto-config
+pub mod server_health; // Server health monitoring and backpressure
 pub mod server_with_cluster;
+pub mod simple_core; // Uses IntelligentIndexedStorage with auto-config
 pub mod streaming_search;
 pub mod swagger;
 pub mod websocket;

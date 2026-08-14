@@ -3,14 +3,16 @@
 #![allow(unused_imports)]
 
 use crate::search::index_traits::VectorIndex;
+use crate::types::{
+    vector::{DenseVector, RecordId},
+    DistanceMetric,
+};
 use async_trait::async_trait;
-use crate::types::{vector::{RecordId, DenseVector}, DistanceMetric};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
-
 
 /// ScaNN (Scalable Nearest Neighbors) - Google's high-performance ANN algorithm
 ///
@@ -284,7 +286,10 @@ impl ScaNNIndex {
 
         // Store vectors
         {
-            let mut vec_store = self.vectors.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut vec_store = self
+                .vectors
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             for (id, vector) in &vectors {
                 vec_store.insert(id.clone(), vector.clone());
             }
@@ -350,7 +355,7 @@ impl ScaNNIndex {
         let projection_matrix = self.learn_projection(training_samples);
 
         let projection_matrix = projection_matrix?;
-        
+
         // Project training samples
         let projected_samples = self.project_vectors(training_samples, &projection_matrix)?;
 
@@ -362,7 +367,10 @@ impl ScaNNIndex {
 
         // Update partitioner
         {
-            let mut partitioner = self.partitioner.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut partitioner = self
+                .partitioner
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             partitioner.tree = tree;
             partitioner.projection_matrix = Some(projection_matrix);
             partitioner.centroids = centroids;
@@ -391,7 +399,8 @@ impl ScaNNIndex {
     fn project_vectors(
         &self,
         vectors: &[DenseVector],
-        projection: &[Vec<f32>]) -> crate::Result<Vec<DenseVector>> {
+        projection: &[Vec<f32>],
+    ) -> crate::Result<Vec<DenseVector>> {
         // Simplified matrix multiplication
         Ok(vectors
             .par_iter()
@@ -414,7 +423,8 @@ impl ScaNNIndex {
     fn build_balanced_tree(
         &self,
         samples: &[DenseVector],
-        num_leaves: usize) -> crate::Result<PartitionTree> {
+        num_leaves: usize,
+    ) -> crate::Result<PartitionTree> {
         let root = self.build_tree_recursive(samples, 0, num_leaves)?;
         Ok(PartitionTree { root, num_leaves })
     }
@@ -423,7 +433,8 @@ impl ScaNNIndex {
         &self,
         samples: &[DenseVector],
         nodeid: usize,
-        target_leaves: usize) -> crate::Result<TreeNode> {
+        target_leaves: usize,
+    ) -> crate::Result<TreeNode> {
         if samples.len() <= self.config.training_sample_size / target_leaves || target_leaves == 1 {
             // Leaf node
             return Ok(TreeNode {
@@ -433,7 +444,7 @@ impl ScaNNIndex {
                 right: None,
                 is_leaf: true,
                 leaf_id: Some(nodeid),
-            })
+            });
         }
 
         // Find best split using k-means
@@ -461,7 +472,8 @@ impl ScaNNIndex {
     /// Find best split using 2-means
     fn find_best_split(
         &self,
-        samples: &[DenseVector]) -> crate::Result<(Vec<DenseVector>, Vec<DenseVector>, SplitPlane)> {
+        samples: &[DenseVector],
+    ) -> crate::Result<(Vec<DenseVector>, Vec<DenseVector>, SplitPlane)> {
         // Simplified 2-means clustering
         let mut rng = rand::thread_rng();
 
@@ -533,7 +545,9 @@ impl ScaNNIndex {
     /// Compute centroid of vectors
     fn compute_centroid(&self, vectors: &[DenseVector]) -> crate::Result<DenseVector> {
         if vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Cannot compute centroid of empty vector set".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Cannot compute centroid of empty vector set".to_string(),
+            ));
         }
 
         let mut centroid = vec![0.0; self.dimension];
@@ -566,7 +580,8 @@ impl ScaNNIndex {
     fn compute_partition_centroids(
         &self,
         tree: &PartitionTree,
-        samples: &[DenseVector]) -> crate::Result<Vec<DenseVector>> {
+        samples: &[DenseVector],
+    ) -> crate::Result<Vec<DenseVector>> {
         let mut centroids = vec![vec![0.0; self.dimension]; tree.num_leaves];
         let mut counts = vec![0; tree.num_leaves];
 
@@ -594,13 +609,14 @@ impl ScaNNIndex {
     /// Find leaf node for a vector
     fn find_leaf(&self, node: &TreeNode, vector: &DenseVector) -> crate::Result<usize> {
         if node.is_leaf {
-            return node.leaf_id.ok_or_else(|| crate::Error::Internal("Leaf node without leaf_id".to_string()));
+            return node
+                .leaf_id
+                .ok_or_else(|| crate::Error::Internal("Leaf node without leaf_id".to_string()));
         }
 
-        let split_plane = node
-            .split_plane
-            .as_ref()
-            .ok_or_else(|| crate::Error::Internal("Internal node without split plane".to_string()))?;
+        let split_plane = node.split_plane.as_ref().ok_or_else(|| {
+            crate::Error::Internal("Internal node without split plane".to_string())
+        })?;
 
         if self.evaluate_split_plane(vector, split_plane) < 0.0 {
             self.find_leaf(node.left.as_ref().unwrap(), vector)
@@ -611,7 +627,10 @@ impl ScaNNIndex {
 
     /// Partition vectors into leaves
     fn partition_vectors(&self, vectors: &[(RecordId, DenseVector)]) -> crate::Result<()> {
-        let partitioner = self.partitioner.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let partitioner = self
+            .partitioner
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         let mut inverted_index: HashMap<usize, Vec<RecordId>> = HashMap::new();
 
         for (id, vector) in vectors {
@@ -634,15 +653,15 @@ impl ScaNNIndex {
             // Find partition
             let leaf_id = self.find_leaf(&partitioner.tree.root, &projected)?;
 
-            inverted_index
-                .entry(leaf_id)
-                .or_default()
-                .push(id.clone());
+            inverted_index.entry(leaf_id).or_default().push(id.clone());
         }
 
         // Update inverted index
         {
-            let mut index = self._inverted_index.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut index = self
+                ._inverted_index
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             *index = inverted_index
         }
 
@@ -683,7 +702,10 @@ impl ScaNNIndex {
 
         // Update quantizer
         {
-            let mut quantizer = self.quantizer.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut quantizer = self
+                .quantizer
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             quantizer.rotation_matrix = Some(rotation_matrix);
             quantizer.scaling_factors = Some(scaling_factors);
             quantizer.codebooks = codebooks
@@ -740,7 +762,8 @@ impl ScaNNIndex {
         &self,
         samples: &[DenseVector],
         rotation: &[Vec<f32>],
-        scaling: &DenseVector) -> crate::Result<Vec<Codebook>> {
+        scaling: &DenseVector,
+    ) -> crate::Result<Vec<Codebook>> {
         let num_subquantizers = self.config.num_subquantizers;
         let subvector_dim = self.dimension / num_subquantizers;
         let codebook_size = 1 << self.config.bits_per_subquantizer;
@@ -778,7 +801,8 @@ impl ScaNNIndex {
     fn train_single_codebook(
         &self,
         subvectors: &[DenseVector],
-        k: usize) -> crate::Result<Vec<DenseVector>> {
+        k: usize,
+    ) -> crate::Result<Vec<DenseVector>> {
         // Simplified k-means
         let mut rng = rand::thread_rng();
         let mut centroids: Vec<DenseVector> = Vec::new();
@@ -804,10 +828,8 @@ impl ScaNNIndex {
             for (i, &dist) in distances.iter().enumerate() {
                 cumsum += dist * dist;
                 if cumsum >= target {
-
                     centroids.push(subvectors[i].clone());
                     break;
-
                 }
             }
         }
@@ -866,7 +888,10 @@ impl ScaNNIndex {
             &vec![1.0; self.dimension],
         )?;
 
-        let mut quantizer = self.quantizer.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let mut quantizer = self
+            .quantizer
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         quantizer.codebooks = codebooks;
 
         Ok(())
@@ -877,7 +902,10 @@ impl ScaNNIndex {
         // In a real implementation, we would store quantized codes
         // For now, we just verify quantization works
 
-        let quantizer = self.quantizer.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let quantizer = self
+            .quantizer
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         for (_, vector) in vectors {
             let _ = self.quantize_vector(vector, &quantizer)?;
@@ -890,7 +918,8 @@ impl ScaNNIndex {
     fn quantize_vector(
         &self,
         vector: &DenseVector,
-        quantizer: &AsymmetricHashingQuantizer) -> crate::Result<Vec<u8>> {
+        quantizer: &AsymmetricHashingQuantizer,
+    ) -> crate::Result<Vec<u8>> {
         let mut codes = Vec::new();
 
         // Apply rotation if available
@@ -958,10 +987,10 @@ impl ScaNNIndex {
 
         // 1. Find nearest partitions
         let partitions = self.find_nearest_partitions(query, self.config.num_leaves_to_search)?;
-        
+
         // Collect candidates from partitions
         let candidates = self.collect_candidates(&partitions)?;
-        
+
         // Score candidates
         let mut scored_candidates = Vec::new();
         for candidate in candidates {
@@ -971,13 +1000,16 @@ impl ScaNNIndex {
 
         // Store candidates count before move
         let candidates_count = scored_candidates.len();
-        
+
         // 4. Reorder top candidates with exact distance
         let final_results = self.reorder_candidates(query, scored_candidates, top_k)?;
 
         // Update statistics
         {
-            let mut stats = self.stats.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut stats = self
+                .stats
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             stats.total_queries += 1;
             stats.avg_partitions_searched = (stats.avg_partitions_searched
                 * (stats.total_queries - 1) as f64
@@ -998,8 +1030,12 @@ impl ScaNNIndex {
     fn find_nearest_partitions(
         &self,
         query: &DenseVector,
-        num_partitions: usize) -> crate::Result<Vec<usize>> {
-        let partitioner = self.partitioner.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        num_partitions: usize,
+    ) -> crate::Result<Vec<usize>> {
+        let partitioner = self
+            .partitioner
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         // Project query if needed
         let projected = if let Some(ref proj_matrix) = partitioner.projection_matrix {
@@ -1044,7 +1080,10 @@ impl ScaNNIndex {
 
     /// Collect candidate vectors from partitions
     fn collect_candidates(&self, partitions: &[usize]) -> crate::Result<Vec<RecordId>> {
-        let inverted_index = self._inverted_index.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let inverted_index = self
+            ._inverted_index
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         let mut candidates = Vec::new();
 
         for &partition_id in partitions {
@@ -1060,9 +1099,16 @@ impl ScaNNIndex {
     fn score_candidates(
         &self,
         query: &DenseVector,
-        candidates: &[RecordId]) -> crate::Result<Vec<(RecordId, f32)>> {
-        let quantizer = self.quantizer.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
-        let vectors = self.vectors.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        candidates: &[RecordId],
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
+        let quantizer = self
+            .quantizer
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let vectors = self
+            .vectors
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         // Precompute query-to-codebook distances
         let query_distances = self.precompute_query_distances(query, &quantizer);
@@ -1093,7 +1139,8 @@ impl ScaNNIndex {
     fn precompute_query_distances(
         &self,
         query: &DenseVector,
-        quantizer: &AsymmetricHashingQuantizer) -> crate::Result<Vec<Vec<f32>>> {
+        quantizer: &AsymmetricHashingQuantizer,
+    ) -> crate::Result<Vec<Vec<f32>>> {
         let mut distances = Vec::new();
 
         let num_subquantizers = quantizer.codebooks.len();
@@ -1139,7 +1186,8 @@ impl ScaNNIndex {
         &self,
         query: &DenseVector,
         mut candidates: Vec<(RecordId, f32)>,
-        top_k: usize) -> crate::Result<Vec<(RecordId, f32)>> {
+        top_k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         // Sort by approximate distance
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1148,7 +1196,10 @@ impl ScaNNIndex {
         candidates.truncate(reorder_size);
 
         // Compute exact distances for top candidates
-        let vectors = self.vectors.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let vectors = self
+            .vectors
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         let mut exact_results: Vec<(RecordId, f32)> = candidates
             .into_iter()
             .filter_map(|(id, _)| {
@@ -1173,12 +1224,16 @@ impl ScaNNIndex {
 impl VectorIndex for ScaNNIndex {
     async fn add(&mut self, _id: String, _vector: Vec<f32>) -> crate::Result<()> {
         // ScaNN requires rebuild for optimal performance
-        Err(crate::Error::NotImplemented("Single insert for ScaNN. Use batch build instead.".to_string() ))
+        Err(crate::Error::NotImplemented(
+            "Single insert for ScaNN. Use batch build instead.".to_string(),
+        ))
     }
 
     async fn delete(&mut self, _id: &str) -> crate::Result<()> {
         // ScaNN requires rebuild for optimal performance
-        Err(crate::Error::NotImplemented("Single remove for ScaNN. Use batch rebuild instead.".to_string() ))
+        Err(crate::Error::NotImplemented(
+            "Single remove for ScaNN. Use batch rebuild instead.".to_string(),
+        ))
     }
 
     async fn search(&self, query: &[f32], top_k: usize) -> crate::Result<Vec<(String, f32)>> {
@@ -1198,7 +1253,7 @@ impl VectorIndex for ScaNNIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::RecordId;
+    use crate::RecordId;
 
     fn generate_random_vectors(num: usize, dim: usize) -> Vec<(RecordId, DenseVector)> {
         let mut rng = rand::thread_rng();

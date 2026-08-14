@@ -1,12 +1,17 @@
-use async_trait::async_trait;
 use crate::types::vector::DenseVector;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone)]
 pub enum EmbeddingError {
-    UnsupportedModality { modality: String, function_name: String },
-    ModelError { message: String },
+    UnsupportedModality {
+        modality: String,
+        function_name: String,
+    },
+    ModelError {
+        message: String,
+    },
     InternalError(String),
     ModelLoadError(String),
     InferenceError(String),
@@ -20,8 +25,15 @@ pub enum EmbeddingError {
 impl std::fmt::Display for EmbeddingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmbeddingError::UnsupportedModality { modality, function_name } => {
-                write!(f, "Unsupported modality {} for function {}", modality, function_name)
+            EmbeddingError::UnsupportedModality {
+                modality,
+                function_name,
+            } => {
+                write!(
+                    f,
+                    "Unsupported modality {} for function {}",
+                    modality, function_name
+                )
             }
             EmbeddingError::ModelError { message } => write!(f, "Model error: {}", message),
             EmbeddingError::InternalError(msg) => write!(f, "Internal error: {}", msg),
@@ -50,16 +62,16 @@ pub struct EmbeddingResult {
 pub trait EmbeddingFunction: Send + Sync {
     /// Get the name of the embedding function
     fn name(&self) -> &str;
-    
+
     /// Get the modality this function supports
     fn modality(&self) -> &str;
-    
+
     /// Get the dimension of embeddings produced
     fn dimension(&self) -> usize;
-    
+
     /// Embed a single input
     async fn embed(&self, input: &str) -> Result<DenseVector, EmbeddingError>;
-    
+
     /// Embed a batch of inputs
     async fn embed_batch(&self, inputs: &[String]) -> Result<Vec<DenseVector>, EmbeddingError> {
         let mut results = Vec::new();
@@ -87,15 +99,15 @@ impl EmbeddingFunction for TextEmbeddingFunction {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
-    
+
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
         // Return dummy embedding for now
         Ok(vec![0.0; self.dimension])

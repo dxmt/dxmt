@@ -4,11 +4,11 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use backoff::{future::retry, ExponentialBackoff};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use backoff::{ExponentialBackoff, future::retry};
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use crate::embeddings::compat::EmbeddingError;
 
@@ -32,7 +32,7 @@ impl CohereModel {
             Self::EmbedEnglishLightV3 | Self::EmbedMultilingualLightV3 => 384,
         }
     }
-    
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::EmbedEnglishV3 => "embed-english-v3.0",
@@ -138,7 +138,7 @@ impl CohereEmbedding {
             .timeout(config.timeout)
             .build()
             .expect("Failed to create HTTP client");
-            
+
         Self {
             config,
             client,
@@ -148,62 +148,71 @@ impl CohereEmbedding {
                 retry_after: None,
             })),
             cache: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(1000).unwrap()
+                std::num::NonZeroUsize::new(1000).unwrap(),
             ))),
         }
     }
-    
+
     pub fn with_api_key(api_key: String) -> Self {
-        Self::new(CohereConfig { api_key, ..Default::default() })
+        Self::new(CohereConfig {
+            api_key,
+            ..Default::default()
+        })
     }
-    
+
     async fn check_rate_limit(&self) -> Result<(), EmbeddingError> {
         let state = self.rate_limit.read().await;
-        
+
         if let Some(reset_time) = state.reset_time {
             if std::time::Instant::now() < reset_time {
                 let wait_time = reset_time - std::time::Instant::now();
-                return Err(EmbeddingError::RateLimitError(
-                    format!("Rate limited. Wait {:?}", wait_time)
-                ));
+                return Err(EmbeddingError::RateLimitError(format!(
+                    "Rate limited. Wait {:?}",
+                    wait_time
+                )));
             }
         }
-        
+
         if let Some(retry_after) = state.retry_after {
-            return Err(EmbeddingError::RateLimitError(
-                format!("Rate limited. Retry after {:?}", retry_after)
-            ));
+            return Err(EmbeddingError::RateLimitError(format!(
+                "Rate limited. Retry after {:?}",
+                retry_after
+            )));
         }
-        
+
         Ok(())
     }
-    
+
     async fn update_rate_limit(&self, headers: &reqwest::header::HeaderMap) {
         let mut state = self.rate_limit.write().await;
-        
+
         // Parse Cohere rate limit headers
         if let Some(remaining) = headers.get("x-ratelimit-remaining") {
             if let Ok(val) = remaining.to_str() {
                 state.requests_remaining = val.parse().ok();
             }
         }
-        
+
         if let Some(retry) = headers.get("retry-after") {
             if let Ok(val) = retry.to_str() {
                 if let Ok(seconds) = val.parse::<u64>() {
                     state.retry_after = Some(Duration::from_secs(seconds));
-                    state.reset_time = Some(std::time::Instant::now() + Duration::from_secs(seconds));
+                    state.reset_time =
+                        Some(std::time::Instant::now() + Duration::from_secs(seconds));
                 }
             }
         }
     }
-    
-    async fn embed_batch_with_retry(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    async fn embed_batch_with_retry(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let backoff = ExponentialBackoff {
             max_elapsed_time: Some(Duration::from_secs(60)),
             ..Default::default()
         };
-        
+
         retry(backoff, || async {
             self.embed_batch_internal(texts.clone()).await.map_err(|e| {
                 if matches!(e, EmbeddingError::RateLimitError(_)) {
@@ -212,19 +221,23 @@ impl CohereEmbedding {
                     backoff::Error::permanent(e)
                 }
             })
-        }).await
+        })
+        .await
     }
-    
-    async fn embed_batch_internal(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    async fn embed_batch_internal(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         // Check rate limit
         self.check_rate_limit().await?;
-        
+
         // Check cache
         let mut cache = self.cache.write().await;
         let mut cached_results = vec![None; texts.len()];
         let mut uncached_indices = Vec::new();
         let mut uncached_texts = Vec::new();
-        
+
         for (i, text) in texts.iter().enumerate() {
             let cache_key = format!("{}:{}", self.config.input_type.as_str(), text);
             if let Some(embedding) = cache.get(&cache_key) {
@@ -234,11 +247,11 @@ impl CohereEmbedding {
                 uncached_texts.push(text.clone());
             }
         }
-        
+
         if uncached_texts.is_empty() {
             return Ok(cached_results.into_iter().map(|r| r.unwrap()).collect());
         }
-        
+
         // Prepare request
         let request = EmbedRequest {
             texts: uncached_texts.clone(),
@@ -247,14 +260,18 @@ impl CohereEmbedding {
             truncate: self.config.truncate.clone(),
             embedding_types: Some(vec!["float".to_string()]),
         };
-        
-        let base_url = self.config.base_url.as_deref()
+
+        let base_url = self
+            .config
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.cohere.ai/v1");
-            
+
         let url = format!("{}/embed", base_url);
-        
+
         // Send request
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -263,71 +280,82 @@ impl CohereEmbedding {
             .send()
             .await
             .map_err(|e| EmbeddingError::NetworkError(e.to_string()))?;
-            
+
         // Update rate limit info
         self.update_rate_limit(response.headers()).await;
-        
+
         // Check status
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await
+            let error_text = response
+                .text()
+                .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-                
+
             if status.as_u16() == 429 {
                 return Err(EmbeddingError::RateLimitError(error_text));
             } else {
-                return Err(EmbeddingError::ApiError(
-                    format!("Status {}: {}", status, error_text)
-                ));
+                return Err(EmbeddingError::ApiError(format!(
+                    "Status {}: {}",
+                    status, error_text
+                )));
             }
         }
-        
+
         // Parse response
-        let embed_response: EmbedResponse = response.json().await
+        let embed_response: EmbedResponse = response
+            .json()
+            .await
             .map_err(|e| EmbeddingError::ApiError(e.to_string()))?;
-            
+
         // Update cache
         for (i, embedding) in embed_response.embeddings.iter().enumerate() {
             let text = &uncached_texts[i];
             let cache_key = format!("{}:{}", self.config.input_type.as_str(), text);
             cache.put(cache_key, embedding.clone());
         }
-        
+
         // Merge cached and new results
         let mut final_results = Vec::with_capacity(texts.len());
         let mut uncached_iter = embed_response.embeddings.into_iter();
-        
+
         for cached in cached_results {
             if let Some(embedding) = cached {
                 final_results.push(embedding);
             } else {
-                let embedding = uncached_iter.next()
+                let embedding = uncached_iter
+                    .next()
                     .ok_or_else(|| EmbeddingError::ApiError("Missing embedding".to_string()))?;
                 final_results.push(embedding);
             }
         }
-        
+
         Ok(final_results)
     }
-    
-    pub async fn embed_documents(&self, documents: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+
+    pub async fn embed_documents(
+        &self,
+        documents: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let mut all_embeddings = Vec::new();
-        
+
         // Process in batches
         for chunk in documents.chunks(self.config.batch_size) {
             let batch_embeddings = self.embed_batch_with_retry(chunk.to_vec()).await?;
             all_embeddings.extend(batch_embeddings);
         }
-        
+
         Ok(all_embeddings)
     }
-    
+
     pub async fn embed_query(&self, query: String) -> Result<Vec<f32>, EmbeddingError> {
-        // For queries, we should ideally use SearchQuery input type, 
+        // For queries, we should ideally use SearchQuery input type,
         // but since we can't mutate self, we'll use the configured input type
         let embeddings = self.embed_batch_with_retry(vec![query]).await?;
-        
-        embeddings.into_iter().next()
+
+        embeddings
+            .into_iter()
+            .next()
             .ok_or_else(|| EmbeddingError::ApiError("No embedding returned".to_string()))
     }
 }
@@ -372,7 +400,7 @@ impl EmbeddingFunction for CohereEmbedding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_model_dimensions() {
         assert_eq!(CohereModel::EmbedEnglishV3.dimension(), 1024);
@@ -380,7 +408,7 @@ mod tests {
         assert_eq!(CohereModel::EmbedEnglishLightV3.dimension(), 384);
         assert_eq!(CohereModel::EmbedMultilingualLightV3.dimension(), 384);
     }
-    
+
     #[test]
     fn test_config_serialization() {
         let config = CohereConfig::default();

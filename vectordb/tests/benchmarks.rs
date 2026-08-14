@@ -4,8 +4,8 @@
 //
 // Benchmark tests measure performance and validate against thresholds.
 
-mod fixtures;
 mod common;
+mod fixtures;
 
 // Include benchmark test modules
 mod wal_performance_test {
@@ -18,12 +18,12 @@ mod recall_benchmark {
 
 mod hnsw_performance_benchmark {
     use dxmt_vectordb::{
-        search::hnsw::{HnswIndex, HnswConfig},
         search::brute_force::BruteForceIndex,
+        search::hnsw::{HnswConfig, HnswIndex},
         types::vector::DistanceMetric,
     };
-    use std::time::Instant;
     use rand::Rng;
+    use std::time::Instant;
 
     fn generate_random_vectors(num_vectors: usize, dimension: usize) -> Vec<Vec<f32>> {
         let mut rng = rand::thread_rng();
@@ -74,9 +74,11 @@ mod hnsw_performance_benchmark {
             hnsw_index.insert(format!("v{}", i), vec.clone()).unwrap();
         }
         let build_time = start.elapsed();
-        println!("  Built in {:.2}s ({:.0} vectors/sec)",
+        println!(
+            "  Built in {:.2}s ({:.0} vectors/sec)",
             build_time.as_secs_f64(),
-            num_vectors as f64 / build_time.as_secs_f64());
+            num_vectors as f64 / build_time.as_secs_f64()
+        );
 
         // Benchmark HNSW search
         println!("\n[3/5] Benchmarking HNSW search...");
@@ -102,7 +104,9 @@ mod hnsw_performance_benchmark {
         println!("\n[4/5] Benchmarking brute force search (baseline)...");
         let mut brute_force_index = BruteForceIndex::new(DistanceMetric::Cosine);
         for (i, vec) in vectors.iter().enumerate() {
-            brute_force_index.insert(format!("v{}", i), vec.clone()).unwrap();
+            brute_force_index
+                .insert(format!("v{}", i), vec.clone())
+                .unwrap();
         }
 
         let start = Instant::now();
@@ -123,24 +127,35 @@ mod hnsw_performance_benchmark {
         let speedup = qps / brute_force_qps;
         println!("\n[5/5] Performance Analysis:");
         println!("  Speedup:        {:.1}x faster than brute force", speedup);
-        println!("  Efficiency:     {:.1}% of brute force latency",
-            (brute_force_latency_ms / avg_latency_ms) * 100.0);
+        println!(
+            "  Efficiency:     {:.1}% of brute force latency",
+            (brute_force_latency_ms / avg_latency_ms) * 100.0
+        );
 
         // Performance assertions
         println!("\n{}", "=".repeat(70));
         println!("Performance Validation:");
         println!("{}", "=".repeat(70));
 
-        assert!(qps > 1_000.0,
-            "HNSW QPS should be > 1,000 for 10K vectors, got {:.0}", qps);
+        assert!(
+            qps > 1_000.0,
+            "HNSW QPS should be > 1,000 for 10K vectors, got {:.0}",
+            qps
+        );
         println!("  ✓ QPS > 1,000: {:.0}", qps);
 
-        assert!(avg_latency_ms < 10.0,
-            "HNSW latency should be < 10ms, got {:.3}ms", avg_latency_ms);
+        assert!(
+            avg_latency_ms < 10.0,
+            "HNSW latency should be < 10ms, got {:.3}ms",
+            avg_latency_ms
+        );
         println!("  ✓ Latency < 10ms: {:.3}ms", avg_latency_ms);
 
-        assert!(speedup > 5.0,
-            "HNSW should be > 5x faster than brute force, got {:.1}x", speedup);
+        assert!(
+            speedup > 5.0,
+            "HNSW should be > 5x faster than brute force, got {:.1}x",
+            speedup
+        );
         println!("  ✓ Speedup > 5x: {:.1}x", speedup);
 
         println!("\n{}", "=".repeat(70));

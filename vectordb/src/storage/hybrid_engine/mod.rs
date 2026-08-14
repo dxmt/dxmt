@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
-use crate::types::{RecordId, DenseVector};
 use crate::storage::lmdb::{LmdbStorage, VectorRecord};
+use crate::types::{DenseVector, RecordId};
 
 /// A raw key/value pair as returned by a prefix scan.
 type KeyValue = (Vec<u8>, Vec<u8>);
@@ -44,17 +44,17 @@ pub struct HybridConfig {
     pub rocksdb_max_write_buffers: u32,
 
     /// 混合策略配置
-    pub write_buffer_threshold: usize,  // 触发刷新的缓冲区大小
-    pub compaction_interval: Duration,  // 压缩间隔
-    pub migration_batch_size: usize,    // 批量迁移大小
+    pub write_buffer_threshold: usize, // 触发刷新的缓冲区大小
+    pub compaction_interval: Duration,   // 压缩间隔
+    pub migration_batch_size: usize,     // 批量迁移大小
     pub read_preference: ReadPreference, // 读取偏好
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadPreference {
-    LmdbFirst,      // 优先从 LMDB 读取
-    RocksDbFirst,   // 优先从 RocksDB 读取
-    Parallel,       // 并行读取，返回最快的
+    LmdbFirst,    // 优先从 LMDB 读取
+    RocksDbFirst, // 优先从 RocksDB 读取
+    Parallel,     // 并行读取，返回最快的
 }
 
 /// RocksDB 存储实现
@@ -113,15 +113,25 @@ impl RocksDbStorage {
         })
     }
 
-    pub fn write_batch(&self, _batch: WriteBatch) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn write_batch(
+        &self,
+        _batch: WriteBatch,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get(
+        &self,
+        _key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(None)
     }
 
-    pub fn scan_prefix(&self, _prefix: &[u8], _limit: usize) -> Result<Vec<KeyValue>, Box<dyn std::error::Error>> {
+    pub fn scan_prefix(
+        &self,
+        _prefix: &[u8],
+        _limit: usize,
+    ) -> Result<Vec<KeyValue>, Box<dyn std::error::Error>> {
         Ok(Vec::new())
     }
 
@@ -140,7 +150,7 @@ pub struct RocksDbConfig {
 impl Default for RocksDbConfig {
     fn default() -> Self {
         Self {
-            write_buffer_size: 128 * 1024 * 1024,  // 128MB
+            write_buffer_size: 128 * 1024 * 1024, // 128MB
             max_write_buffers: 4,
             target_file_size_base: 64 * 1024 * 1024, // 64MB
         }
@@ -175,9 +185,9 @@ impl WriteBuffer {
     }
 
     pub fn should_flush(&self, threshold: usize) -> bool {
-        self.size_bytes >= threshold ||
-        self.operations.len() >= 10000 ||
-        self.last_flush.elapsed() > Duration::from_secs(5)
+        self.size_bytes >= threshold
+            || self.operations.len() >= 10000
+            || self.last_flush.elapsed() > Duration::from_secs(5)
     }
 
     pub fn take_batch(&mut self) -> WriteBatch {
@@ -249,9 +259,12 @@ impl HybridStorageEngine {
     }
 
     /// 高性能写入接口
-    pub async fn write(&self, id: RecordId, vector: DenseVector, payload: Option<serde_json::Value>)
-        -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    {
+    pub async fn write(
+        &self,
+        id: RecordId,
+        vector: DenseVector,
+        payload: Option<serde_json::Value>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
 
         let record = VectorRecord {
@@ -268,7 +281,7 @@ impl HybridStorageEngine {
             let mut buffer = self.write_buffer.write().await;
             buffer.add_operation(WriteOp::Put {
                 key: key.to_vec(),
-                value: value.clone()
+                value: value.clone(),
             });
 
             // 检查是否需要刷新
@@ -284,25 +297,28 @@ impl HybridStorageEngine {
         // 更新统计
         let mut stats = self.stats.write().await;
         stats.total_writes += 1;
-        stats.avg_write_latency_us =
-            (stats.avg_write_latency_us * (stats.total_writes - 1) as f64 +
-             start.elapsed().as_micros() as f64) / stats.total_writes as f64;
+        stats.avg_write_latency_us = (stats.avg_write_latency_us * (stats.total_writes - 1) as f64
+            + start.elapsed().as_micros() as f64)
+            / stats.total_writes as f64;
 
         Ok(())
     }
 
     /// 高性能批量写入
-    pub async fn write_batch(&self, records: Vec<VectorRecord>)
-        -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    {
-        let mut batch = WriteBatch { operations: Vec::with_capacity(records.len()) };
+    pub async fn write_batch(
+        &self,
+        records: Vec<VectorRecord>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut batch = WriteBatch {
+            operations: Vec::with_capacity(records.len()),
+        };
 
         for record in records {
             let key = record.id.as_bytes();
             let value = bincode::serialize(&record)?;
             batch.operations.push(WriteOp::Put {
                 key: key.to_vec(),
-                value
+                value,
             });
         }
 
@@ -317,14 +333,18 @@ impl HybridStorageEngine {
     }
 
     /// 高性能读取接口
-    pub async fn read(&self, id: &RecordId) -> Result<Option<VectorRecord>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn read(
+        &self,
+        id: &RecordId,
+    ) -> Result<Option<VectorRecord>, Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
         let key = id.as_bytes();
 
         // First check write buffer for unflushed writes
         {
             let buffer = self.write_buffer.read().await;
-            for op in buffer.operations.iter().rev() {  // Check in reverse for most recent
+            for op in buffer.operations.iter().rev() {
+                // Check in reverse for most recent
                 if let WriteOp::Put { key: op_key, value } = op {
                     if op_key == key {
                         let record: VectorRecord = bincode::deserialize(value)?;
@@ -403,20 +423,21 @@ impl HybridStorageEngine {
         // 更新统计
         let mut stats = self.stats.write().await;
         stats.total_reads += 1;
-        stats.avg_read_latency_us =
-            (stats.avg_read_latency_us * (stats.total_reads - 1) as f64 +
-             start.elapsed().as_micros() as f64) / stats.total_reads as f64;
+        stats.avg_read_latency_us = (stats.avg_read_latency_us * (stats.total_reads - 1) as f64
+            + start.elapsed().as_micros() as f64)
+            / stats.total_reads as f64;
 
         Ok(result)
     }
 
     /// 刷新到 RocksDB
-    async fn flush_to_rocksdb(&self, batch: WriteBatch) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn flush_to_rocksdb(
+        &self,
+        batch: WriteBatch,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let rocksdb = self.rocksdb.clone();
 
-        tokio::task::spawn_blocking(move || {
-            rocksdb.write_batch(batch)
-        }).await??;
+        tokio::task::spawn_blocking(move || rocksdb.write_batch(batch)).await??;
 
         let mut stats = self.stats.write().await;
         stats.buffer_flushes += 1;
@@ -462,7 +483,10 @@ impl HybridStorageEngine {
             interval.tick().await;
 
             // 扫描 RocksDB 中的旧数据
-            let candidates = match self.rocksdb.scan_prefix(b"", self.config.migration_batch_size) {
+            let candidates = match self
+                .rocksdb
+                .scan_prefix(b"", self.config.migration_batch_size)
+            {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Migration scan error: {}", e);
@@ -531,7 +555,10 @@ mod tests {
         // 测试写入
         let id = uuid::Uuid::new_v4().to_string();
         let vector = vec![1.0, 2.0, 3.0];
-        engine.write(id.clone(), vector.clone(), None).await.unwrap();
+        engine
+            .write(id.clone(), vector.clone(), None)
+            .await
+            .unwrap();
 
         // 测试读取
         let record = engine.read(&id).await.unwrap();

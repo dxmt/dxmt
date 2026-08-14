@@ -10,7 +10,9 @@
 //! - Adaptive strategy selection
 //! - Performance monitoring
 
-use crate::search::hierarchical_clustering::{HierarchicalClusteringIndex, HierarchicalClusteringConfig};
+use crate::search::hierarchical_clustering::{
+    HierarchicalClusteringConfig, HierarchicalClusteringIndex,
+};
 use crate::types::{vector::DenseVector, DistanceMetric};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -112,14 +114,9 @@ pub struct ClusterAwareSearchResult {
 
 impl ClusterAwareSearchIndex {
     /// Create new cluster-aware search index
-    pub fn new(
-        config: ClusterAwareSearchConfig,
-        distance_metric: DistanceMetric,
-    ) -> Self {
-        let clustering = HierarchicalClusteringIndex::new(
-            config.clustering_config.clone(),
-            distance_metric,
-        );
+    pub fn new(config: ClusterAwareSearchConfig, distance_metric: DistanceMetric) -> Self {
+        let clustering =
+            HierarchicalClusteringIndex::new(config.clustering_config.clone(), distance_metric);
 
         Self {
             config,
@@ -135,7 +132,7 @@ impl ClusterAwareSearchIndex {
     pub fn train(&mut self, training_data: &[(String, DenseVector)]) -> crate::Result<()> {
         if training_data.is_empty() {
             return Err(crate::Error::InvalidInput(
-                "Training data cannot be empty".to_string()
+                "Training data cannot be empty".to_string(),
             ));
         }
 
@@ -176,7 +173,7 @@ impl ClusterAwareSearchIndex {
     ) -> crate::Result<Vec<ClusterAwareSearchResult>> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(
-                "Index must be trained before search".to_string()
+                "Index must be trained before search".to_string(),
             ));
         }
 
@@ -241,7 +238,8 @@ impl ClusterAwareSearchIndex {
     ) -> crate::Result<Vec<ClusterAwareSearchResult>> {
         // For this implementation, we'll do a brute-force search
         // In a real system, this would use HNSW or another index
-        let mut all_results: Vec<_> = self.vectors
+        let mut all_results: Vec<_> = self
+            .vectors
             .iter()
             .map(|(id, meta)| {
                 let distance = self.compute_distance(query, &meta.vector);
@@ -254,7 +252,11 @@ impl ClusterAwareSearchIndex {
             })
             .collect();
 
-        all_results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        all_results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         all_results.truncate(k);
 
         Ok(all_results)
@@ -274,7 +276,8 @@ impl ClusterAwareSearchIndex {
 
         // Merge and deduplicate
         let mut merged = cluster_results;
-        let cluster_ids: std::collections::HashSet<String> = merged.iter().map(|r| r.id.clone()).collect();
+        let cluster_ids: std::collections::HashSet<String> =
+            merged.iter().map(|r| r.id.clone()).collect();
 
         for result in index_results {
             if !cluster_ids.contains(&result.id) {
@@ -283,7 +286,11 @@ impl ClusterAwareSearchIndex {
         }
 
         // Re-sort and truncate
-        merged.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        merged.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         merged.truncate(k);
 
         Ok(merged)
@@ -326,7 +333,10 @@ impl ClusterAwareSearchIndex {
             self.config.clustering_config.num_fine_probes *= 2;
 
             // Limit to maximum
-            self.config.clustering_config.num_coarse_probes = self.config.clustering_config.num_coarse_probes
+            self.config.clustering_config.num_coarse_probes = self
+                .config
+                .clustering_config
+                .num_coarse_probes
                 .min(self.config.max_clusters_to_probe);
 
             // Retry search
@@ -374,7 +384,11 @@ impl ClusterAwareSearchIndex {
     /// Get cluster info for a vector
     pub fn get_cluster_info(&self, vector_id: &str) -> Option<(usize, usize, usize)> {
         self.vectors.get(vector_id).map(|meta| {
-            (meta.coarse_cluster_id, meta.fine_cluster_id, meta.access_count)
+            (
+                meta.coarse_cluster_id,
+                meta.fine_cluster_id,
+                meta.access_count,
+            )
         })
     }
 }
@@ -490,9 +504,14 @@ mod tests {
         assert_eq!(results.len(), 10);
         println!("\nHierarchical-First Search Results:");
         for (i, result) in results.iter().take(5).enumerate() {
-            println!("  {}. {} (cluster {}/{}): {:.4}",
-                i + 1, result.id, result.coarse_cluster_id,
-                result.fine_cluster_id, result.distance);
+            println!(
+                "  {}. {} (cluster {}/{}): {:.4}",
+                i + 1,
+                result.id,
+                result.coarse_cluster_id,
+                result.fine_cluster_id,
+                result.distance
+            );
         }
 
         // First result should be query itself
@@ -506,7 +525,7 @@ mod tests {
             clustering_config: HierarchicalClusteringConfig {
                 num_coarse_clusters: 20,
                 num_fine_clusters_per_coarse: 20,
-                num_coarse_probes: 1,  // Very limited probing
+                num_coarse_probes: 1, // Very limited probing
                 num_fine_probes: 1,
                 max_iterations: 10,
                 tolerance: 1e-4,
@@ -531,11 +550,17 @@ mod tests {
         println!("\nAdaptive Probing Search:");
         println!("  Results found: {}", results.len());
         if !results.is_empty() {
-            println!("  First result: {} ({:.4})", results[0].id, results[0].distance);
+            println!(
+                "  First result: {} ({:.4})",
+                results[0].id, results[0].distance
+            );
         }
 
         // With very limited initial probing (1x1), even adaptive may not find many results
-        assert!(!results.is_empty(), "Adaptive probing should find at least some results");
+        assert!(
+            !results.is_empty(),
+            "Adaptive probing should find at least some results"
+        );
     }
 
     #[test]

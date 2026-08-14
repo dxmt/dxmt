@@ -82,16 +82,16 @@ pub struct DiskANNConfig {
 impl Default for DiskANNConfig {
     fn default() -> Self {
         Self {
-            max_degree: 64,              // R = 64 (good balance)
-            search_list_size: 100,        // L = 100 during construction
-            num_entry_points: 1,          // Single medoid entry point
-            alpha: 1.2,                   // Robust pruning parameter
-            use_pq_compression: false,    // Disable PQ by default
-            num_pq_chunks: 8,             // 8 chunks if PQ enabled
-            prune_iterations: 2,          // 2 iterations for graph pruning
-            cache_size_mb: 512,           // 512MB cache
-            ssd_optimized: true,          // Enable SSD optimizations
-            beam_width: 4,                // Beam search width
+            max_degree: 64,            // R = 64 (good balance)
+            search_list_size: 100,     // L = 100 during construction
+            num_entry_points: 1,       // Single medoid entry point
+            alpha: 1.2,                // Robust pruning parameter
+            use_pq_compression: false, // Disable PQ by default
+            num_pq_chunks: 8,          // 8 chunks if PQ enabled
+            prune_iterations: 2,       // 2 iterations for graph pruning
+            cache_size_mb: 512,        // 512MB cache
+            ssd_optimized: true,       // Enable SSD optimizations
+            beam_width: 4,             // Beam search width
         }
     }
 }
@@ -114,11 +114,7 @@ struct NodeMetadata {
 
 impl DiskANNIndex {
     /// Create a new DiskANN index
-    pub fn new(
-        dimension: usize,
-        distance_metric: DistanceMetric,
-        config: DiskANNConfig,
-    ) -> Self {
+    pub fn new(dimension: usize, distance_metric: DistanceMetric, config: DiskANNConfig) -> Self {
         info!(
             "Creating DiskANN index with dimension={}, max_degree={}, search_list_size={}",
             dimension, config.max_degree, config.search_list_size
@@ -147,7 +143,10 @@ impl DiskANNIndex {
         }
 
         // Add vector to storage
-        self.vectors.write().unwrap().insert(id.clone(), vector.clone());
+        self.vectors
+            .write()
+            .unwrap()
+            .insert(id.clone(), vector.clone());
 
         // Initialize node metadata
         self.node_metadata.write().unwrap().insert(
@@ -195,11 +194,8 @@ impl DiskANNIndex {
             // Prune if exceeds max degree
             if neighbor_edges.len() > self.config.max_degree {
                 let neighbor_vec = self.vectors.read().unwrap()[&neighbor_id].clone();
-                let pruned = self.robust_prune(
-                    &neighbor_vec,
-                    neighbor_edges,
-                    self.config.max_degree,
-                )?;
+                let pruned =
+                    self.robust_prune(&neighbor_vec, neighbor_edges, self.config.max_degree)?;
                 *neighbor_edges = pruned;
             }
         }
@@ -223,7 +219,10 @@ impl DiskANNIndex {
         // Start from entry points
         for ep in entry_points.iter() {
             if let Some(vec) = vectors.get(ep) {
-                let dist = self.distance_metric.calculate(query, vec).unwrap_or(f32::MAX);
+                let dist = self
+                    .distance_metric
+                    .calculate(query, vec)
+                    .unwrap_or(f32::MAX);
                 candidates.push(std::cmp::Reverse((
                     ordered_float::OrderedFloat(dist),
                     ep.clone(),
@@ -248,7 +247,10 @@ impl DiskANNIndex {
                         visited.insert(neighbor_id.clone());
 
                         if let Some(neighbor_vec) = vectors.get(neighbor_id) {
-                            let neighbor_dist = self.distance_metric.calculate(query, neighbor_vec).unwrap_or(f32::MAX);
+                            let neighbor_dist = self
+                                .distance_metric
+                                .calculate(query, neighbor_vec)
+                                .unwrap_or(f32::MAX);
                             candidates.push(std::cmp::Reverse((
                                 ordered_float::OrderedFloat(neighbor_dist),
                                 neighbor_id.clone(),
@@ -277,16 +279,17 @@ impl DiskANNIndex {
             .iter()
             .filter_map(|id| {
                 vectors.get(id).map(|vec| {
-                    let dist = self.distance_metric.calculate(query, vec).unwrap_or(f32::MAX);
+                    let dist = self
+                        .distance_metric
+                        .calculate(query, vec)
+                        .unwrap_or(f32::MAX);
                     (dist, id.clone())
                 })
             })
             .collect();
 
         // Sort by distance
-        dist_candidates.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        dist_candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Greedy selection with alpha-robust pruning
         for (dist, id) in dist_candidates {
@@ -300,8 +303,10 @@ impl DiskANNIndex {
                 result.iter().all(|existing_id| {
                     if let Some(existing_vec) = vectors.get(existing_id) {
                         if let Some(candidate_vec) = vectors.get(&id) {
-                            let candidate_to_existing =
-                                self.distance_metric.calculate(candidate_vec, existing_vec).unwrap_or(f32::MAX);
+                            let candidate_to_existing = self
+                                .distance_metric
+                                .calculate(candidate_vec, existing_vec)
+                                .unwrap_or(f32::MAX);
                             // Alpha condition: ensures diverse neighbors
                             query_to_candidate <= self.config.alpha * candidate_to_existing
                         } else {
@@ -341,7 +346,10 @@ impl DiskANNIndex {
             .iter()
             .filter_map(|id| {
                 vectors.get(id).map(|vec| {
-                    let dist = self.distance_metric.calculate(query, vec).unwrap_or(f32::MAX);
+                    let dist = self
+                        .distance_metric
+                        .calculate(query, vec)
+                        .unwrap_or(f32::MAX);
                     (id.clone(), dist)
                 })
             })
@@ -422,7 +430,9 @@ impl DiskANNIndex {
 
         // Placeholder - would load memory-mapped data in full implementation
 
-        Err(crate::Error::Internal("Load not yet implemented".to_string()))
+        Err(crate::Error::Internal(
+            "Load not yet implemented".to_string(),
+        ))
     }
 }
 
@@ -462,10 +472,18 @@ mod tests {
         let mut index = DiskANNIndex::new(4, DistanceMetric::Euclidean, config);
 
         // Insert some vectors
-        index.insert("v1".to_string(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.insert("v2".to_string(), vec![0.0, 1.0, 0.0, 0.0]).unwrap();
-        index.insert("v3".to_string(), vec![0.0, 0.0, 1.0, 0.0]).unwrap();
-        index.insert("v4".to_string(), vec![1.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .insert("v1".to_string(), vec![1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .insert("v2".to_string(), vec![0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .insert("v3".to_string(), vec![0.0, 0.0, 1.0, 0.0])
+            .unwrap();
+        index
+            .insert("v4".to_string(), vec![1.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Search
         let query = vec![1.0, 0.1, 0.0, 0.0];

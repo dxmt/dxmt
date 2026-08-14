@@ -108,7 +108,10 @@ impl std::fmt::Debug for TieredStorage {
             .field("object_storage", &"<Box<dyn ObjectStorage>>")
             .field("stats", &"<Arc<RwLock<HashMap>>>")
             .field("memory_usage", &self.memory_usage)
-            .field("memory_hits", &self.memory_hit_count.load(Ordering::Relaxed))
+            .field(
+                "memory_hits",
+                &self.memory_hit_count.load(Ordering::Relaxed),
+            )
             .field("ssd_hits", &self.ssd_hit_count.load(Ordering::Relaxed))
             .finish()
     }
@@ -118,9 +121,15 @@ impl TieredStorage {
     /// 创建新的三层存储实例
     pub fn new(
         config: TieredStorageConfig,
-        object_storage: Box<dyn ObjectStorage + Send + Sync>) -> ObjectStorageResult<Self> {
+        object_storage: Box<dyn ObjectStorage + Send + Sync>,
+    ) -> ObjectStorageResult<Self> {
         let memory_cache = Arc::new(RwLock::new(LruCache::new(
-            NonZeroUsize::new(config.memory_cache_capacity).ok_or_else(|| ObjectStorageError::ConfigurationError { message: "Invalid memory cache capacity".to_string() })?)));
+            NonZeroUsize::new(config.memory_cache_capacity).ok_or_else(|| {
+                ObjectStorageError::ConfigurationError {
+                    message: "Invalid memory cache capacity".to_string(),
+                }
+            })?,
+        )));
 
         let ssd_storage = FilesystemStorage::new(&config.ssd_cache_dir, &config.bucket_name)?;
 
@@ -140,7 +149,8 @@ impl TieredStorage {
     }
 
     pub async fn new_from_config(
-        config: &crate::config::StorageConfig) -> ObjectStorageResult<Self> {
+        config: &crate::config::StorageConfig,
+    ) -> ObjectStorageResult<Self> {
         // 对于纯内存模式，只需要内存配置
         let memory_config =
             config
@@ -176,7 +186,7 @@ impl TieredStorage {
             ssd_cache_dir: ssd_cache_dir.clone(),
             ssd_cache_size,
             bucket_name,
-            stats_interval_secs: 300,   // Default, can be made configurable
+            stats_interval_secs: 300, // Default, can be made configurable
             auto_tiering_enabled: config.ssd.is_some(), // 只有配置了 SSD 才启用自动分层
         };
 
@@ -254,8 +264,7 @@ impl TieredStorage {
                 // 将被驱逐的数据移动到 SSD
                 drop(cache);
                 drop(memory_usage);
-                self
-                    .ssd_storage
+                self.ssd_storage
                     .put_object(&evicted_key, Bytes::from(evicted_data), None)
                     .await?;
                 cache = self.memory_cache.write().await;
@@ -269,7 +278,10 @@ impl TieredStorage {
         *memory_usage += data_size;
 
         self.update_stats(key, data_size as u64, StorageTier::Memory)
-            .await.map_err(|e| ObjectStorageError::InternalError { message: format!("Stats update failed: {:?}", e) })?;
+            .await
+            .map_err(|e| ObjectStorageError::InternalError {
+                message: format!("Stats update failed: {:?}", e),
+            })?;
         Ok(())
     }
 
@@ -278,13 +290,14 @@ impl TieredStorage {
         match self.ssd_storage.get_object(key).await {
             Ok(data) => {
                 self.update_stats(key, data.len() as u64, StorageTier::Ssd)
-                    .await.map_err(|e| ObjectStorageError::InternalError { message: format!("Stats update failed: {:?}", e) })?;
+                    .await
+                    .map_err(|e| ObjectStorageError::InternalError {
+                        message: format!("Stats update failed: {:?}", e),
+                    })?;
 
                 // 将热数据提升到内存
                 if data.len() <= self.config.memory_cache_size / 10 {
-
                     self.put_to_memory(key, &Bytes::from(data.clone())).await?;
-
                 }
                 Ok(Some(data))
             }
@@ -299,7 +312,10 @@ impl TieredStorage {
             .put_object(key, Bytes::from(data.to_vec()), None)
             .await?;
         self.update_stats(key, data.len() as u64, StorageTier::Ssd)
-            .await.map_err(|e| ObjectStorageError::InternalError { message: format!("Stats update failed: {:?}", e) })?;
+            .await
+            .map_err(|e| ObjectStorageError::InternalError {
+                message: format!("Stats update failed: {:?}", e),
+            })?;
         Ok(())
     }
 
@@ -307,7 +323,10 @@ impl TieredStorage {
     async fn get_from_object_storage(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {
         let data = self.object_storage.get_object(key).await?;
         self.update_stats(key, data.len() as u64, StorageTier::ObjectStorage)
-            .await.map_err(|e| ObjectStorageError::InternalError { message: format!("Stats update failed: {:?}", e) })?;
+            .await
+            .map_err(|e| ObjectStorageError::InternalError {
+                message: format!("Stats update failed: {:?}", e),
+            })?;
 
         // 将数据缓存到上层
         if data.len() <= self.config.memory_cache_size / 5 {
@@ -375,21 +394,28 @@ impl ObjectStorage for TieredStorage {
         &self,
         key: &str,
         data: Bytes,
-        content_type: Option<&str>) -> ObjectStorageResult<()> {
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         self.object_storage
             .put_object(key, data.clone(), content_type)
             .await?;
         if data.len() <= self.config.memory_cache_size / 10 {
             self.put_to_memory(key, &data).await?;
         } else if data.len() <= self.config.ssd_cache_size as usize / 100 {
-    self.put_to_ssd(key, &data).await?;
-}
+            self.put_to_ssd(key, &data).await?;
+        }
         Ok(())
     }
 
     async fn get_object(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {
         // 尝试从内存获取
-        if let Some(data) = self.get_from_memory(key).await.map_err(|e| ObjectStorageError::InternalError { message: e.to_string() })? {
+        if let Some(data) =
+            self.get_from_memory(key)
+                .await
+                .map_err(|e| ObjectStorageError::InternalError {
+                    message: e.to_string(),
+                })?
+        {
             self.memory_hit_count.fetch_add(1, Ordering::Relaxed);
             return Ok(data);
         }
@@ -403,7 +429,8 @@ impl ObjectStorage for TieredStorage {
         self.ssd_miss_count.fetch_add(1, Ordering::Relaxed);
 
         // 从对象存储获取
-        self.object_storage_access_count.fetch_add(1, Ordering::Relaxed);
+        self.object_storage_access_count
+            .fetch_add(1, Ordering::Relaxed);
         self.get_from_object_storage(key).await
     }
 
@@ -411,7 +438,8 @@ impl ObjectStorage for TieredStorage {
         &self,
         key: &str,
         start: u64,
-        end: u64) -> ObjectStorageResult<Vec<u8>> {
+        end: u64,
+    ) -> ObjectStorageResult<Vec<u8>> {
         self.object_storage.get_object_range(key, start, end).await
     }
 
@@ -471,7 +499,8 @@ impl ObjectStorage for TieredStorage {
 
     async fn list_objects(
         &self,
-        options: &ListObjectsOptions) -> ObjectStorageResult<ListObjectsResult> {
+        options: &ListObjectsOptions,
+    ) -> ObjectStorageResult<ListObjectsResult> {
         self.object_storage.list_objects(options).await
     }
 
@@ -487,9 +516,7 @@ impl ObjectStorage for TieredStorage {
 
         for (key, data) in objects {
             if self.put_object(&key, Bytes::from(data), None).await.is_ok() {
-
                 uploaded.push(key);
-
             }
         }
 
@@ -513,7 +540,8 @@ impl ObjectStorage for TieredStorage {
         key: &str,
         stream: BoxStream<'static, Result<Bytes, std::io::Error>>,
         content_length: Option<u64>,
-        content_type: Option<&str>) -> ObjectStorageResult<()> {
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         self.object_storage
             .put_stream(key, stream, content_length, content_type)
             .await
@@ -521,16 +549,19 @@ impl ObjectStorage for TieredStorage {
 
     async fn get_stream(
         &self,
-        key: &str) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
+        key: &str,
+    ) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
         self.object_storage.get_stream(key).await
     }
 
     async fn create_multipart_upload(
         &self,
         key: &str,
-        content_type: Option<&str>) -> ObjectStorageResult<String> {
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<String> {
         self.object_storage
-            .create_multipart_upload(key, content_type).await
+            .create_multipart_upload(key, content_type)
+            .await
     }
 
     async fn upload_part(
@@ -538,7 +569,8 @@ impl ObjectStorage for TieredStorage {
         key: &str,
         upload_id: &str,
         part_number: u32,
-        data: &[u8]) -> ObjectStorageResult<PartInfo> {
+        data: &[u8],
+    ) -> ObjectStorageResult<PartInfo> {
         self.object_storage
             .upload_part(key, upload_id, part_number, data)
             .await
@@ -548,7 +580,8 @@ impl ObjectStorage for TieredStorage {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[PartInfo]) -> ObjectStorageResult<()> {
+        parts: &[PartInfo],
+    ) -> ObjectStorageResult<()> {
         self.object_storage
             .complete_multipart_upload(key, upload_id, parts)
             .await

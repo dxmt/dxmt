@@ -7,17 +7,17 @@
 //! - NDCG@k: Normalized Discounted Cumulative Gain (ranking quality)
 //! - MAP@k: Mean Average Precision (precision + recall balance)
 
-pub mod recall;
-pub mod precision;
-pub mod ndcg;
-pub mod map;
 pub mod evaluator;
+pub mod map;
+pub mod ndcg;
+pub mod precision;
+pub mod recall;
 
-pub use recall::{RecallEvaluator, RecallStatistics};
-pub use precision::PrecisionEvaluator;
-pub use ndcg::NdcgEvaluator;
-pub use map::MapEvaluator;
 pub use evaluator::{MetricsEvaluator, MetricsReport};
+pub use map::MapEvaluator;
+pub use ndcg::NdcgEvaluator;
+pub use precision::PrecisionEvaluator;
+pub use recall::{RecallEvaluator, RecallStatistics};
 
 /// Unified statistics structure for all metrics
 #[derive(Debug, Clone, Default)]

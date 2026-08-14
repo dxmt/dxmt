@@ -1,4 +1,4 @@
-use crate::dxql::{DxqlError, compiler::QueryPlan};
+use crate::dxql::{compiler::QueryPlan, DxqlError};
 
 #[derive(Debug, Clone)]
 pub struct Optimizer {
@@ -23,7 +23,10 @@ impl Optimizer {
         }
     }
 
-    fn optimize_select(&self, mut select: crate::dxql::compiler::SelectPlan) -> Result<QueryPlan, DxqlError> {
+    fn optimize_select(
+        &self,
+        mut select: crate::dxql::compiler::SelectPlan,
+    ) -> Result<QueryPlan, DxqlError> {
         self.push_down_filters(&mut select);
 
         self.optimize_projections(&mut select);

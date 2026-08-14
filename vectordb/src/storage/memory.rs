@@ -1,15 +1,15 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::info;
-use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
 
+use crate::storage::traits::_Storage;
 use crate::types::{
     record::{CreateRecordRequest, Record, SearchHit, SearchQuery, SearchResult},
     table::{Table, TableConfig},
     vector::{DenseVector, RecordId},
 };
-use crate::storage::traits::_Storage;
 
 /// 内存存储引擎
 #[derive(Debug)]
@@ -34,7 +34,10 @@ impl MemoryStorage {
 
     /// 创建表
     pub fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         if tables.contains_key(&config.name) {
             return Err(crate::Error::TableAlreadyExists(config.name.clone()));
@@ -54,7 +57,10 @@ impl MemoryStorage {
 
     /// 获取表信息
     pub fn get_table(&self, name: &str) -> crate::Result<Table> {
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         tables
             .get(name)
@@ -64,14 +70,20 @@ impl MemoryStorage {
 
     /// 列出所有表
     pub fn list_tables(&self) -> crate::Result<Vec<Table>> {
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         Ok(tables.values().map(|data| data.table.clone()).collect())
     }
 
     /// 删除表
     pub fn delete_table(&self, name: &str) -> crate::Result<()> {
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         if tables.remove(name).is_some() {
             info!("Deleted table: {}", name);
@@ -85,13 +97,16 @@ impl MemoryStorage {
     pub fn insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<RecordId>> {
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<RecordId>> {
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get_mut(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let mut inserted_ids = Vec::new();
 
@@ -116,12 +131,14 @@ impl MemoryStorage {
 
     /// 获取单个记录
     pub fn get_record(&self, tablename: &str, id: &RecordId) -> crate::Result<Record> {
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         table_data
             .records
@@ -132,12 +149,14 @@ impl MemoryStorage {
 
     /// 批量获取记录
     pub fn get_records(&self, tablename: &str, ids: &[RecordId]) -> crate::Result<Vec<Record>> {
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let mut records = Vec::new();
         for id in ids {
@@ -155,13 +174,16 @@ impl MemoryStorage {
         tablename: &str,
         id: &RecordId,
         vector: Option<DenseVector>,
-        payload: Option<serde_json::Value>) -> crate::Result<()> {
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        payload: Option<serde_json::Value>,
+    ) -> crate::Result<()> {
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get_mut(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let record = table_data
             .records
@@ -176,12 +198,14 @@ impl MemoryStorage {
 
     /// 删除记录
     pub fn delete_records(&self, tablename: &str, ids: &[RecordId]) -> crate::Result<usize> {
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get_mut(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let mut deleted_count = 0;
         for id in ids {
@@ -197,8 +221,7 @@ impl MemoryStorage {
 
         info!(
             "Deleted {} records from table: {}",
-            deleted_count,
-            tablename
+            deleted_count, tablename
         );
         Ok(deleted_count)
     }
@@ -206,19 +229,21 @@ impl MemoryStorage {
     /// 搜索向量
     pub fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         let start_time = std::time::Instant::now();
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let table_data = tables
             .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string())
-            )?;
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 验证查询向量维度
         if query.vector.len() != table_data.table.dimension {
             return Err(crate::Error::DimensionMismatch {
                 expected: table_data.table.dimension,
                 actual: query.vector.len(),
-            })
+            });
         }
 
         let mut candidates: Vec<(RecordId, f32)> = Vec::new();
@@ -227,11 +252,9 @@ impl MemoryStorage {
         for (id, record) in &table_data.records {
             // 应用过滤条件
             if let Some(filter) = &query.filter {
-
                 if !record.matches_filter(filter) {
                     continue;
-
-            }
+                }
             }
 
             // 计算距离
@@ -279,7 +302,10 @@ impl MemoryStorage {
 
     /// 获取存储统计信息
     pub fn get_stats(&self) -> crate::Result<StorageStats> {
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
 
         let total_tables = tables.len();
         let total_records: u64 = tables.values().map(|data| data.records.len() as u64).sum();
@@ -346,16 +372,22 @@ impl _Storage for MemoryStorage {
         Ok(self.delete_table(name)?)
     }
 
-    async fn insert_record(&self, tablename: &str, request: CreateRecordRequest) -> crate::Result<Record> {
+    async fn insert_record(
+        &self,
+        tablename: &str,
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         let ids = self.insert_records(tablename, vec![request.clone()])?;
-        let id = ids.first().ok_or_else(|| crate::Error::Internal("Failed to insert record".to_string()))?;
+        let id = ids
+            .first()
+            .ok_or_else(|| crate::Error::Internal("Failed to insert record".to_string()))?;
         self.get_record(tablename, id)
     }
 
     async fn batch_insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>
+        requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
         let ids = self.insert_records(tablename, requests)?;
         Ok(self.get_records(tablename, &ids)?)
@@ -373,17 +405,13 @@ impl _Storage for MemoryStorage {
         &self,
         tablename: &str,
         record_id: &RecordId,
-        request: CreateRecordRequest
+        request: CreateRecordRequest,
     ) -> crate::Result<Record> {
         self.update_record(tablename, record_id, Some(request.vector), request.payload)?;
         self.get_record(tablename, record_id)
     }
 
-    async fn delete_record(
-        &self,
-        tablename: &str,
-        record_id: &RecordId
-    ) -> crate::Result<()> {
+    async fn delete_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<()> {
         self.delete_records(tablename, std::slice::from_ref(record_id))?;
         Ok(())
     }
@@ -391,16 +419,20 @@ impl _Storage for MemoryStorage {
     async fn insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>
+        requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
         self.batch_insert_records(tablename, requests).await
     }
 
-    async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>) -> crate::Result<()> {
+    async fn delete_records(
+        &self,
+        tablename: &str,
+        record_ids: Vec<RecordId>,
+    ) -> crate::Result<()> {
         let _ = self.delete_records(tablename, &record_ids)?;
         Ok(())
     }
-    
+
     async fn backup(&self, tablename: &str, backup_path: &str) -> crate::Result<()> {
         #[derive(Serialize)]
         struct TableSnapshot<'a> {
@@ -408,8 +440,12 @@ impl _Storage for MemoryStorage {
             records: Vec<&'a Record>,
         }
 
-        let tables = self.tables.read().map_err(|_| crate::Error::Internal("lock poisoned".to_string()))?;
-        let data = tables.get(tablename)
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| crate::Error::Internal("lock poisoned".to_string()))?;
+        let data = tables
+            .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
         let snapshot = TableSnapshot {
             table: &data.table,
@@ -433,14 +469,22 @@ impl _Storage for MemoryStorage {
             .map_err(|e| crate::Error::Internal(format!("backup read failed: {}", e)))?;
         let snapshot: TableSnapshot = serde_json::from_slice(&json)
             .map_err(|e| crate::Error::Serialization(e.to_string()))?;
-        let mut tables = self.tables.write().map_err(|_| crate::Error::Internal("lock poisoned".to_string()))?;
-        let record_map: HashMap<RecordId, Record> = snapshot.records.into_iter()
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|_| crate::Error::Internal("lock poisoned".to_string()))?;
+        let record_map: HashMap<RecordId, Record> = snapshot
+            .records
+            .into_iter()
             .map(|r| (r.id.clone(), r))
             .collect();
-        tables.insert(tablename.to_string(), TableData {
-            table: snapshot.table,
-            records: record_map,
-        });
+        tables.insert(
+            tablename.to_string(),
+            TableData {
+                table: snapshot.table,
+                records: record_map,
+            },
+        );
         Ok(())
     }
 }
@@ -448,11 +492,10 @@ impl _Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{table::TableConfig};
-use crate::SearchQuery;
-use crate::CreateRecordRequest;
-use crate::types::{DistanceMetric, table::IndexType};
-
+    use crate::types::table::TableConfig;
+    use crate::types::{table::IndexType, DistanceMetric};
+    use crate::CreateRecordRequest;
+    use crate::SearchQuery;
 
     fn create_test_table_config() -> TableConfig {
         TableConfig {

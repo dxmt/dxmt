@@ -91,9 +91,9 @@ impl Default for AccessPattern {
 /// 层级枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tier {
-    Hot,   // Memory
-    Warm,  // SSD
-    Cold,  // S3
+    Hot,  // Memory
+    Warm, // SSD
+    Cold, // S3
 }
 
 /// 向量提升策略配置
@@ -162,9 +162,7 @@ impl TierPromotionPolicy {
         let patterns = self.access_patterns.read().unwrap();
         patterns
             .get(vector_id)
-            .map(|p| {
-                p.hotness_score(Duration::seconds(self.config.time_window_secs))
-            })
+            .map(|p| p.hotness_score(Duration::seconds(self.config.time_window_secs)))
             .unwrap_or(0.0)
     }
 
@@ -191,9 +189,7 @@ impl TierPromotionPolicy {
 
         match current_tier {
             Some(Tier::Hot) => false, // 已经在热层
-            Some(Tier::Warm) | Some(Tier::Cold) | None => {
-                hotness >= self.config.hot_threshold
-            }
+            Some(Tier::Warm) | Some(Tier::Cold) | None => hotness >= self.config.hot_threshold,
         }
     }
 
@@ -373,8 +369,8 @@ mod tests {
         policy.set_current_tier("vec1", Tier::Cold);
 
         // 检查是否应该提升
-        let should_promote = policy.should_promote_to_hot("vec1")
-            || policy.should_promote_to_warm("vec1");
+        let should_promote =
+            policy.should_promote_to_hot("vec1") || policy.should_promote_to_warm("vec1");
         assert!(should_promote);
     }
 

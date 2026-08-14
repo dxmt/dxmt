@@ -39,7 +39,10 @@ impl ProductQuantizer {
 
     pub fn encode_batch(&self, vectors: &[DenseVector]) -> Result<Vec<Vec<u8>>> {
         // Simplified encoding
-        Ok(vectors.iter().map(|_| vec![0u8; self.num_subquantizers]).collect())
+        Ok(vectors
+            .iter()
+            .map(|_| vec![0u8; self.num_subquantizers])
+            .collect())
     }
 
     pub fn is_trained(&self) -> bool {

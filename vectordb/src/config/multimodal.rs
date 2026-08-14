@@ -398,7 +398,8 @@ impl MultimodalConfig {
                     ),
                     (
                         "transcription_enabled".to_string(),
-                        serde_json::Value::Bool(true)),
+                        serde_json::Value::Bool(true),
+                    ),
                 ]),
                 modalities: vec!["audio".to_string()],
                 dimension: 512,
@@ -414,13 +415,15 @@ impl MultimodalConfig {
     /// Load configuration from file
     pub fn load_from_file(path: &str) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&content).map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let config: Self = toml::from_str(&content)
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         Ok(config)
     }
 
     /// Save configuration to file
     pub fn save_to_file(&self, path: &str) -> crate::Result<()> {
-        let content = toml::to_string_pretty(self).map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -429,24 +432,30 @@ impl MultimodalConfig {
     pub fn validate(&self) -> crate::Result<()> {
         // Check if at least one model is enabled
         if !self.models.values().any(|m| m.auto_load) {
-            return Err(crate::Error::Internal("At least one model must be set to auto_load".to_string()));
+            return Err(crate::Error::Internal(
+                "At least one model must be set to auto_load".to_string(),
+            ));
         }
 
         // Check GPU configuration
         if self.gpu.enabled && (self.gpu.memory_fraction <= 0.0 || self.gpu.memory_fraction > 1.0) {
-            return Err(crate::Error::Internal("GPU memory_fraction must be between 0.0 and 1.0".to_string()));
+            return Err(crate::Error::Internal(
+                "GPU memory_fraction must be between 0.0 and 1.0".to_string(),
+            ));
         }
 
         // Check performance limits
         if self.performance.concurrency.max_concurrent_requests == 0 {
-            return Err(crate::Error::Internal("max_concurrent_requests must be greater than 0".to_string()));
+            return Err(crate::Error::Internal(
+                "max_concurrent_requests must be greater than 0".to_string(),
+            ));
         }
 
         // Check cache configuration
         if self.cache.enabled && self.cache.l1.capacity == 0 {
             return Err(crate::Error::Internal(
-                "L1 cache capacity must be greater than 0 when caching is enabled".to_string()
-            ))
+                "L1 cache capacity must be greater than 0 when caching is enabled".to_string(),
+            ));
         }
 
         Ok(())

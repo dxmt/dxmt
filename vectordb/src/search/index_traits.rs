@@ -8,7 +8,12 @@ pub trait VectorIndex: Send + Sync {
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>>;
     /// Search with an explicit ef_search hint (only meaningful for graph-based indexes like HNSW).
     /// Default implementation ignores the hint and calls `search`.
-    async fn search_with_ef_hint(&self, query: &[f32], k: usize, _ef: usize) -> crate::Result<Vec<(String, f32)>> {
+    async fn search_with_ef_hint(
+        &self,
+        query: &[f32],
+        k: usize,
+        _ef: usize,
+    ) -> crate::Result<Vec<(String, f32)>> {
         self.search(query, k).await
     }
     /// Filter-in-graph search: only return results whose IDs are in `filter_ids`.
@@ -24,7 +29,8 @@ pub trait VectorIndex: Send + Sync {
         // Fallback: amplify k and post-filter
         let amplified_k = (k * 20).max(ef);
         let results = self.search_with_ef_hint(query, amplified_k, ef).await?;
-        let filtered: Vec<_> = results.into_iter()
+        let filtered: Vec<_> = results
+            .into_iter()
             .filter(|(id, _)| filter_ids.contains(id))
             .take(k)
             .collect();
@@ -48,7 +54,9 @@ pub trait VectorIndex: Send + Sync {
 
 pub trait SerializableIndex {
     fn save(&self, path: &std::path::Path) -> crate::Result<()>;
-    fn load(path: &std::path::Path) -> crate::Result<Self> where Self: Sized;
+    fn load(path: &std::path::Path) -> crate::Result<Self>
+    where
+        Self: Sized;
     fn stats(&self) -> IndexStats;
 }
 

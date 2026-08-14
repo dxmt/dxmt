@@ -1,5 +1,5 @@
 use crate::search::hnsw::{HnswConfig, HnswIndex};
-use crate::search::quantization::product_quantization::{ProductQuantizer, PQCode, AdcLookupTable};
+use crate::search::quantization::product_quantization::{AdcLookupTable, PQCode, ProductQuantizer};
 use crate::types::{DenseVector, DistanceMetric, RecordId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ impl Default for HnswPqConfig {
         Self {
             hnsw_config: HnswConfig::default(),
             num_subvectors: 120, // For 960-dim: 120 × 8 = 960
-            num_centroids: 256,   // 8-bit encoding
+            num_centroids: 256,  // 8-bit encoding
             enable_reranking: false,
             rerank_factor: 3,
         }
@@ -105,10 +105,7 @@ impl HnswPqIndex {
     ///
     /// Should be called before inserting vectors, with representative sample
     pub fn train(&mut self, training_data: &[DenseVector]) -> crate::Result<()> {
-        tracing::info!(
-            "Training PQ quantizer with {} vectors",
-            training_data.len()
-        );
+        tracing::info!("Training PQ quantizer with {} vectors", training_data.len());
 
         self.pq.train(training_data, 25)?;
 
@@ -222,9 +219,7 @@ impl HnswPqIndex {
                 let norm_b: f32 = b.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
                 1.0 - (dot / (norm_a * norm_b + 1e-8))
             }
-            DistanceMetric::Dot => {
-                -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
-            }
+            DistanceMetric::Dot => -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>(),
             _ => {
                 // Fallback to Euclidean
                 a.iter()
@@ -412,9 +407,7 @@ mod tests {
 
         // Insert vectors
         for (i, vec) in training_data.iter().take(50).enumerate() {
-            index
-                .insert(format!("vec_{}", i), vec.clone())
-                .unwrap();
+            index.insert(format!("vec_{}", i), vec.clone()).unwrap();
         }
 
         assert_eq!(index.len(), 50);

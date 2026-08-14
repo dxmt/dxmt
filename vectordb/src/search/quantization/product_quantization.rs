@@ -97,9 +97,15 @@ impl ProductQuantizer {
     /// # Arguments
     /// * `training_data` - Training vectors to build codebooks
     /// * `num_iterations` - Number of k-means iterations (default: 25)
-    pub fn train(&mut self, training_data: &[DenseVector], num_iterations: usize) -> crate::Result<()> {
+    pub fn train(
+        &mut self,
+        training_data: &[DenseVector],
+        num_iterations: usize,
+    ) -> crate::Result<()> {
         if training_data.is_empty() {
-            return Err(crate::Error::InvalidInput("Training data is empty".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Training data is empty".to_string(),
+            ));
         }
 
         let dimension = training_data[0].len();
@@ -355,10 +361,14 @@ impl ProductQuantizer {
         code: &PQCode,
     ) -> crate::Result<f32> {
         if query.len() != self.num_subvectors * self.subvector_dim {
-            return Err(crate::Error::InvalidInput("Query dimension mismatch".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Query dimension mismatch".to_string(),
+            ));
         }
         if code.codes.len() != self.num_subvectors {
-            return Err(crate::Error::InvalidInput("Code length mismatch".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Code length mismatch".to_string(),
+            ));
         }
 
         let mut total_distance = 0.0;
@@ -381,22 +391,19 @@ impl ProductQuantizer {
     /// Compute distance between two subvectors
     fn compute_subvector_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         match self.distance_metric {
-            DistanceMetric::Euclidean => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).powi(2))
-                    .sum::<f32>()
-                    .sqrt()
-            }
+            DistanceMetric::Euclidean => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt(),
             DistanceMetric::Cosine => {
                 let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                 let norm_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
                 let norm_b: f32 = b.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
                 1.0 - (dot / (norm_a * norm_b + 1e-8))
             }
-            DistanceMetric::Dot => {
-                -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
-            }
+            DistanceMetric::Dot => -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>(),
             _ => {
                 // Fallback to Euclidean for other metrics
                 a.iter()
@@ -411,9 +418,7 @@ impl ProductQuantizer {
     /// Check if two vectors are approximately equal
     fn vectors_equal(a: &[f32], b: &[f32]) -> bool {
         const EPSILON: f32 = 1e-6;
-        a.iter()
-            .zip(b.iter())
-            .all(|(x, y)| (x - y).abs() < EPSILON)
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < EPSILON)
     }
 
     /// Get memory usage in bytes
@@ -553,6 +558,9 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap();
 
-        assert_eq!(best_direct, best_lut, "Top-1 ranking must agree between direct ADC and LUT");
+        assert_eq!(
+            best_direct, best_lut,
+            "Top-1 ranking must agree between direct ADC and LUT"
+        );
     }
 }

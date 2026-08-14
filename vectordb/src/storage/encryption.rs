@@ -15,10 +15,14 @@ pub struct EncryptionManager {
 impl EncryptionManager {
     pub fn new(key: &[u8]) -> crate::Result<Self> {
         if key.len() != 32 {
-            return Err(crate::Error::Storage("Encryption key must be 32 bytes".to_string()));
+            return Err(crate::Error::Storage(
+                "Encryption key must be 32 bytes".to_string(),
+            ));
         }
 
-        let key_array: [u8; 32] = key.try_into().map_err(|_| crate::Error::Storage("Failed to convert key".to_string()))?;
+        let key_array: [u8; 32] = key
+            .try_into()
+            .map_err(|_| crate::Error::Storage("Failed to convert key".to_string()))?;
         let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from_slice(&key_array).clone());
 
         Ok(Self {
@@ -30,18 +34,18 @@ impl EncryptionManager {
     pub fn generate_key() -> Vec<u8> {
         let mut key = vec![0u8; 32];
         OsRng.fill_bytes(&mut key);
-        key}
+        key
+    }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> crate::Result<Vec<u8>> {
         let mut noncebytes = [0u8; 12];
         OsRng.fill_bytes(&mut noncebytes);
         let nonce = Nonce::from_slice(&noncebytes);
 
-        let ciphertext =
-            self.cipher
-                .encrypt(nonce, plaintext)
-                .map_err(|e| crate::Error::Storage(format!("Encryption failed: {}", e))
-                )?;
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| crate::Error::Storage(format!("Encryption failed: {}", e)))?;
 
         // Prepend nonce to ciphertext
         let mut result = noncebytes.to_vec();
@@ -58,10 +62,10 @@ impl EncryptionManager {
         let (noncebytes, encrypted) = ciphertext.split_at(12);
         let nonce = Nonce::from_slice(noncebytes);
 
-        let plaintext =
-            self.cipher
-                .decrypt(nonce, encrypted)
-                .map_err(|e| crate::Error::Storage(format!("Decryption failed: {}", e)))?;
+        let plaintext = self
+            .cipher
+            .decrypt(nonce, encrypted)
+            .map_err(|e| crate::Error::Storage(format!("Decryption failed: {}", e)))?;
 
         Ok(plaintext)
     }
@@ -72,12 +76,12 @@ impl EncryptionManager {
     }
 
     pub fn decrypt_string(&self, ciphertext: &str) -> crate::Result<String> {
-        let decoded =
-            general_purpose::STANDARD
-                .decode(ciphertext)
-                .map_err(|e| crate::Error::Storage(format!("Base64 decode failed: {}", e)))?;
+        let decoded = general_purpose::STANDARD
+            .decode(ciphertext)
+            .map_err(|e| crate::Error::Storage(format!("Base64 decode failed: {}", e)))?;
         let decrypted = self.decrypt(&decoded)?;
-        String::from_utf8(decrypted).map_err(|e| crate::Error::Storage(format!("UTF-8 decode failed: {}", e)))
+        String::from_utf8(decrypted)
+            .map_err(|e| crate::Error::Storage(format!("UTF-8 decode failed: {}", e)))
     }
 }
 
@@ -140,7 +144,9 @@ pub struct EnvelopeEncryption {
 impl EnvelopeEncryption {
     pub fn new(masterkey: &[u8]) -> crate::Result<Self> {
         if masterkey.len() != 32 {
-            return Err(crate::Error::Storage("Master key must be 32 bytes".to_string()));
+            return Err(crate::Error::Storage(
+                "Master key must be 32 bytes".to_string(),
+            ));
         }
         Ok(Self {
             key_encryption_key: masterkey.to_vec(),

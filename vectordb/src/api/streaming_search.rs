@@ -2,10 +2,10 @@
 #![allow(unused_imports)]
 
 use axum::{
+    body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    body::Body,
     routing::{get, post},
     Json, Router,
 };
@@ -146,20 +146,20 @@ pub struct SearchMetadata {
 // Default values
 fn default_k() -> usize {
     10
-    }
+}
 fn default_progressive() -> bool {
     true
-    }
+}
 fn default_chunk_size() -> usize {
     5
-    }
+}
 fn default_timeout() -> u64 {
     30
-    }
+}
 fn default_fusion_strategy() -> FusionStrategy {
     use std::collections::HashMap;
-    FusionStrategy::LateFusion { 
-        weights: HashMap::new() 
+    FusionStrategy::LateFusion {
+        weights: HashMap::new(),
     }
 }
 
@@ -178,7 +178,8 @@ impl SessionManager {
 
     async fn create_session(
         &self,
-        request: StreamingSearchRequest) -> (String, tokio::sync::mpsc::Receiver<StreamingEvent>) {
+        request: StreamingSearchRequest,
+    ) -> (String, tokio::sync::mpsc::Receiver<StreamingEvent>) {
         let sessionid = Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
@@ -217,7 +218,7 @@ impl SessionManager {
         if let Some(session) = sessions.get_mut(sessionid) {
             updater(session);
             Ok(())
-    } else {
+        } else {
             Err(crate::Error::RecordNotFound("Session".to_string()))
         }
     }
@@ -241,9 +242,9 @@ pub fn create_streaming_routes() -> Router<AppState> {
         .route("/search/stream/:sessionid", get(stream_results))
         .route(
             "/search/stream/:sessionid/cancel",
-            post(cancel_streaming_search)
+            post(cancel_streaming_search),
         )
-    }
+}
 
 /// Start a streaming search session
 async fn start_streaming_search(
@@ -335,8 +336,9 @@ async fn cancel_streaming_search(
         .update_session(&sessionid, |session| {
             session.completed = true;
         })
-        .await {
-        Ok(_) => {},
+        .await
+    {
+        Ok(_) => {}
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
@@ -352,11 +354,12 @@ async fn perform_streaming_search(
     _tablename: String,
     sessionid: String,
     _request: StreamingSearchRequest,
-    sessionmanager: SessionManager) -> crate::Result<()> {
+    sessionmanager: SessionManager,
+) -> crate::Result<()> {
     let session = sessionmanager
         .get_session(&sessionid)
         .await
-        .ok_or_else(|| crate::Error::RecordNotFound("Session".to_string() ))?;
+        .ok_or_else(|| crate::Error::RecordNotFound("Session".to_string()))?;
 
     let start_time = std::time::Instant::now();
 
@@ -397,7 +400,12 @@ async fn perform_streaming_search(
         let modality_start = std::time::Instant::now();
         let modality_results = match simulate_modality_search(modality, &session._request).await {
             Ok(results) => results,
-            Err(e) => return Err(crate::Error::Internal(format!("Modality search failed: {:?}", e))),
+            Err(e) => {
+                return Err(crate::Error::Internal(format!(
+                    "Modality search failed: {:?}",
+                    e
+                )))
+            }
         };
         let modality_time = modality_start.elapsed().as_millis() as u64;
 
@@ -460,17 +468,24 @@ async fn perform_streaming_search(
             session.results_sent = fused_results.results.len();
             session.completed = true
         })
-        .await {
-        Ok(_) => {},
-        Err(e) => return Err(crate::Error::Internal(format!("Session update failed: {:?}", e))),
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(crate::Error::Internal(format!(
+                "Session update failed: {:?}",
+                e
+            )))
+        }
     };
 
     Ok(())
-    }
+}
 
 /// Create SSE stream from receiver
 fn create_sse_stream(
-    mut receiver: tokio::sync::mpsc::Receiver<StreamingEvent>) -> impl Stream<Item = std::result::Result<String, std::io::Error>> {
+    mut receiver: tokio::sync::mpsc::Receiver<StreamingEvent>,
+) -> impl Stream<Item = std::result::Result<String, std::io::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
 
     tokio::spawn(async move {
@@ -478,10 +493,7 @@ fn create_sse_stream(
         while let Some(event) = receiver.recv().await {
             let sse_data = format_sse_event(&event);
             if tx.send(sse_data).await.is_err() {
-
                 break;
-
-
             }
         }
     });
@@ -507,7 +519,8 @@ fn format_sse_event(event: &StreamingEvent) -> String {
 
 /// Extract modalities from query
 fn extract_modalities(query: &serde_json::Value) -> crate::Result<Vec<String>> {
-    let contents = query.get("contents")
+    let contents = query
+        .get("contents")
         .and_then(|v| v.as_array())
         .ok_or_else(|| crate::Error::InvalidInput("Missing contents field".to_string()))?;
 
@@ -537,7 +550,8 @@ fn extract_modalities(query: &serde_json::Value) -> crate::Result<Vec<String>> {
 /// Simulate modality search (for demonstration)
 async fn simulate_modality_search(
     modality: &str,
-    request: &StreamingSearchRequest) -> crate::Result<Vec<StreamingSearchResult>> {
+    request: &StreamingSearchRequest,
+) -> crate::Result<Vec<StreamingSearchResult>> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
@@ -553,7 +567,11 @@ async fn simulate_modality_search(
             })),
             preview: Some(ContentPreview {
                 content_type: "text".to_string(),
-                previewtext: Some(format!("Result {}: Score {:.3}", i + 1, rng.gen_range(0.5..1.0))),
+                previewtext: Some(format!(
+                    "Result {}: Score {:.3}",
+                    i + 1,
+                    rng.gen_range(0.5..1.0)
+                )),
                 thumbnail_url: None,
                 duration_seconds: None,
             }),
@@ -561,16 +579,21 @@ async fn simulate_modality_search(
         .collect();
 
     Ok(results)
-    }
+}
 
 /// Fuse results from multiple modalities
 fn fuse_results(
     allresults: Vec<StreamingSearchResult>,
     strategy: &FusionStrategy,
-    k: usize) -> FusedResults {
+    k: usize,
+) -> FusedResults {
     // Simple fusion for demonstration
     let mut results = allresults;
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(k);
 
     let fusion_scores = results.iter().map(|r| (r.id.clone(), r.score)).collect();
@@ -622,7 +645,11 @@ pub mod websocket {
                             // Stream events to WebSocket
                             while let Some(event) = event_receiver.recv().await {
                                 let event_json = serde_json::to_string(&event);
-                                if sender.send(Message::Text(event_json.unwrap())).await.is_err() {
+                                if sender
+                                    .send(Message::Text(event_json.unwrap()))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }

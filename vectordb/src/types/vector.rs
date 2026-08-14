@@ -1,8 +1,8 @@
-use crate::types::error::{Error};
+use crate::types::error::Error;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 #[cfg(feature = "api-swagger")]
 use utoipa::ToSchema;
-use std::fmt;
 
 /// 密集向量类型
 pub type DenseVector = Vec<f32>;
@@ -19,7 +19,10 @@ pub type Payload = serde_json::Value;
 #[serde(tag = "type", content = "data")]
 pub enum Vector {
     Dense(Vec<f32>),
-    Sparse { indices: Vec<usize>, values: Vec<f32> },
+    Sparse {
+        indices: Vec<usize>,
+        values: Vec<f32>,
+    },
 }
 
 /// 距离度量枚举
@@ -55,7 +58,7 @@ impl DistanceMetric {
             return Err(crate::Error::DimensionMismatch {
                 expected: a.len(),
                 actual: b.len(),
-            })
+            });
         }
 
         match self {
@@ -98,7 +101,10 @@ impl std::str::FromStr for DistanceMetric {
             "euclidean" => Ok(DistanceMetric::Euclidean),
             "dot" => Ok(DistanceMetric::Dot),
             "manhattan" => Ok(DistanceMetric::Manhattan),
-            _ => Err(crate::Error::InvalidConfig(format!("Invalid distance metric: {}", s))),
+            _ => Err(crate::Error::InvalidConfig(format!(
+                "Invalid distance metric: {}",
+                s
+            ))),
         }
     }
 }
@@ -146,7 +152,7 @@ impl VectorValidator {
         // 1. Empty check
         if vector.is_empty() {
             return Err(crate::Error::InvalidVector(
-                "Vector cannot be empty".to_string()
+                "Vector cannot be empty".to_string(),
             ));
         }
 
@@ -169,7 +175,7 @@ impl VectorValidator {
             return Err(crate::Error::DimensionMismatch {
                 expected: expected_dimension,
                 actual: vector.len(),
-            })
+            });
         }
 
         // 3. NaN/Infinity/Range validation
@@ -177,13 +183,15 @@ impl VectorValidator {
         for (i, &value) in vector.iter().enumerate() {
             if value.is_nan() {
                 return Err(crate::Error::InvalidVector(format!(
-                    "NaN value at index {}", i
+                    "NaN value at index {}",
+                    i
                 )));
             }
 
             if value.is_infinite() {
                 return Err(crate::Error::InvalidVector(format!(
-                    "Infinite value at index {}: {}", i, value
+                    "Infinite value at index {}: {}",
+                    i, value
                 )));
             }
 
@@ -204,7 +212,7 @@ impl VectorValidator {
         // 4. Zero vector check
         if is_zero_vector && !config.allow_zero_vectors {
             return Err(crate::Error::InvalidVector(
-                "Zero vectors are not allowed".to_string()
+                "Zero vectors are not allowed".to_string(),
             ));
         }
 
@@ -216,7 +224,9 @@ impl VectorValidator {
         let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
 
         if norm == 0.0 {
-            return Err(crate::Error::InvalidVector("Cannot normalize zero vector".to_string()))
+            return Err(crate::Error::InvalidVector(
+                "Cannot normalize zero vector".to_string(),
+            ));
         }
 
         for value in vector.iter_mut() {

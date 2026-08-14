@@ -83,9 +83,7 @@ impl CpuAffinityManager {
         rayon::ThreadPoolBuilder::new()
             .num_threads(pool_size)
             .thread_name(|idx| format!("query-worker-{}", idx))
-            .start_handler(move |idx| {
-                affinity_manager.set_query_thread_affinity(idx)
-            })
+            .start_handler(move |idx| affinity_manager.set_query_thread_affinity(idx))
     }
 
     /// 创建索引线程池
@@ -96,9 +94,7 @@ impl CpuAffinityManager {
         rayon::ThreadPoolBuilder::new()
             .num_threads(pool_size)
             .thread_name(|idx| format!("index-worker-{}", idx))
-            .start_handler(move |idx| {
-                affinity_manager.set_index_thread_affinity(idx)
-            })
+            .start_handler(move |idx| affinity_manager.set_index_thread_affinity(idx))
     }
 
     /// 创建IO线程池
@@ -109,9 +105,7 @@ impl CpuAffinityManager {
         rayon::ThreadPoolBuilder::new()
             .num_threads(pool_size)
             .thread_name(|idx| format!("io-worker-{}", idx))
-            .start_handler(move |idx| {
-                affinity_manager.set_system_thread_affinity(idx)
-            })
+            .start_handler(move |idx| affinity_manager.set_system_thread_affinity(idx))
     }
 }
 

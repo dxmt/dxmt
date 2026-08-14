@@ -50,25 +50,20 @@ impl MmapIndexStorage {
 
     /// Load an existing index file using memory mapping
     pub fn load(&mut self) -> crate::Result<()> {
-        let file = File::open(&self.path)
-            .map_err(crate::Error::Io)?;
+        let file = File::open(&self.path).map_err(crate::Error::Io)?;
 
         // Read metadata from the beginning of the file
         let mut metadata_bytes = vec![0u8; 1024]; // Fixed metadata size
-        let mut file_copy = File::open(&self.path)
-            .map_err(crate::Error::Io)?;
-        file_copy.read_exact(&mut metadata_bytes)
+        let mut file_copy = File::open(&self.path).map_err(crate::Error::Io)?;
+        file_copy
+            .read_exact(&mut metadata_bytes)
             .map_err(crate::Error::Io)?;
 
         self.metadata = bincode::deserialize(&metadata_bytes)
             .map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
         // Memory map the file
-        let mmap = unsafe {
-            MmapOptions::new()
-                .map(&file)
-                .map_err(crate::Error::Io)?
-        };
+        let mmap = unsafe { MmapOptions::new().map(&file).map_err(crate::Error::Io)? };
 
         self.mmap = Some(Arc::new(mmap));
         Ok(())
@@ -92,8 +87,7 @@ impl MmapIndexStorage {
             .open(&self.path)
             .map_err(crate::Error::Io)?;
 
-        file.set_len(total_size as u64)
-            .map_err(crate::Error::Io)?;
+        file.set_len(total_size as u64).map_err(crate::Error::Io)?;
 
         // Write metadata
         let metadata_bytes = bincode::serialize(&self.metadata)
@@ -106,7 +100,8 @@ impl MmapIndexStorage {
             .write(true)
             .open(&self.path)
             .map_err(crate::Error::Io)?;
-        file_copy.write_all(&padded_metadata)
+        file_copy
+            .write_all(&padded_metadata)
             .map_err(crate::Error::Io)?;
 
         // Create mutable memory map
@@ -125,9 +120,10 @@ impl MmapIndexStorage {
     /// Read a vector at the given index
     pub fn read_vector(&self, index: usize) -> crate::Result<Vec<f32>> {
         if index >= self.metadata.num_vectors {
-            return Err(crate::Error::InvalidInput(
-                format!("Index {} out of bounds", index)
-            ));
+            return Err(crate::Error::InvalidInput(format!(
+                "Index {} out of bounds",
+                index
+            )));
         }
 
         let vector_size = self.metadata.dimensions * std::mem::size_of::<f32>();
@@ -141,22 +137,20 @@ impl MmapIndexStorage {
             for i in 0..self.metadata.dimensions {
                 let byte_offset = offset + (i * std::mem::size_of::<f32>());
                 let bytes = &mmap[byte_offset..byte_offset + std::mem::size_of::<f32>()];
-                let value = f32::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3]
-                ]);
+                let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 vector.push(value);
             }
         } else if let Some(mmap_mut) = self.mmap_mut.as_ref() {
             for i in 0..self.metadata.dimensions {
                 let byte_offset = offset + (i * std::mem::size_of::<f32>());
                 let bytes = &mmap_mut[byte_offset..byte_offset + std::mem::size_of::<f32>()];
-                let value = f32::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3]
-                ]);
+                let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 vector.push(value);
             }
         } else {
-            return Err(crate::Error::InvalidInput("Index not loaded or created".to_string()));
+            return Err(crate::Error::InvalidInput(
+                "Index not loaded or created".to_string(),
+            ));
         }
 
         Ok(vector)
@@ -165,21 +159,24 @@ impl MmapIndexStorage {
     /// Write a vector at the given index
     pub fn write_vector(&mut self, index: usize, vector: &[f32]) -> crate::Result<()> {
         if index >= self.metadata.num_vectors {
-            return Err(crate::Error::InvalidInput(
-                format!("Index {} out of bounds", index)
-            ));
+            return Err(crate::Error::InvalidInput(format!(
+                "Index {} out of bounds",
+                index
+            )));
         }
 
         if vector.len() != self.metadata.dimensions {
-            return Err(crate::Error::InvalidInput(
-                format!("Vector dimension mismatch: expected {}, got {}",
-                    self.metadata.dimensions, vector.len())
-            ));
+            return Err(crate::Error::InvalidInput(format!(
+                "Vector dimension mismatch: expected {}, got {}",
+                self.metadata.dimensions,
+                vector.len()
+            )));
         }
 
-        let mmap_mut = Arc::get_mut(self.mmap_mut.as_mut()
-            .ok_or_else(|| crate::Error::InvalidInput("Index not created for writing".to_string()))?)
-            .ok_or_else(|| crate::Error::InvalidInput("Cannot get mutable reference".to_string()))?;
+        let mmap_mut = Arc::get_mut(self.mmap_mut.as_mut().ok_or_else(|| {
+            crate::Error::InvalidInput("Index not created for writing".to_string())
+        })?)
+        .ok_or_else(|| crate::Error::InvalidInput("Cannot get mutable reference".to_string()))?;
 
         let vector_size = self.metadata.dimensions * std::mem::size_of::<f32>();
         let offset = self.metadata.data_offset + (index * vector_size);
@@ -188,8 +185,7 @@ impl MmapIndexStorage {
         for (i, &value) in vector.iter().enumerate() {
             let byte_offset = offset + (i * std::mem::size_of::<f32>());
             let bytes = value.to_le_bytes();
-            mmap_mut[byte_offset..byte_offset + std::mem::size_of::<f32>()]
-                .copy_from_slice(&bytes);
+            mmap_mut[byte_offset..byte_offset + std::mem::size_of::<f32>()].copy_from_slice(&bytes);
         }
 
         Ok(())
@@ -198,7 +194,7 @@ impl MmapIndexStorage {
     /// Flush changes to disk
     pub fn flush(&self) -> crate::Result<()> {
         if let Some(ref mmap_mut) = self.mmap_mut {
-            // Note: We can't directly flush Arc<MmapMut>, 
+            // Note: We can't directly flush Arc<MmapMut>,
             // but changes are automatically synced when dropped
             // Just ignore the reference as we can't drop it
             let _ = mmap_mut;
@@ -218,7 +214,9 @@ impl MmapIndexStorage {
 
     /// Prefetch vectors into memory
     pub fn prefetch(&self, indices: &[usize]) -> crate::Result<()> {
-        let mmap = self.mmap.as_ref()
+        let mmap = self
+            .mmap
+            .as_ref()
             .ok_or_else(|| crate::Error::InvalidInput("Index not loaded".to_string()))?;
 
         let vector_size = self.metadata.dimensions * std::mem::size_of::<f32>();
@@ -303,10 +301,7 @@ impl MmapHnswIndex {
     /// Prefetch vectors that are likely to be accessed
     pub fn prefetch_neighbors(&self, index: usize) -> crate::Result<()> {
         if index < self.graph.len() {
-            let neighbors: Vec<usize> = self.graph[index]
-                .iter()
-                .map(|&i| i as usize)
-                .collect();
+            let neighbors: Vec<usize> = self.graph[index].iter().map(|&i| i as usize).collect();
             self.storage.prefetch(&neighbors)?;
         }
         Ok(())

@@ -1,8 +1,8 @@
 // SIMD优化的距离计算
 // 使用硬件指令集加速向量运算
 
+use crate::types::vector::DenseVector;
 use crate::types::vector::DistanceMetric;
-use crate::types::{vector::DenseVector};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -22,7 +22,7 @@ impl SimdDistance for DistanceMetric {
             return Err(crate::Error::DimensionMismatch {
                 expected: a.len(),
                 actual: b.len(),
-            })
+            });
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -609,7 +609,8 @@ unsafe fn manhattan_distance_sse(a: &[f32], b: &[f32]) -> f32 {
 pub fn batch_distance_calculation(
     queries: &[DenseVector],
     targets: &[DenseVector],
-    metric: &DistanceMetric) -> crate::Result<Vec<Vec<f32>>> {
+    metric: &DistanceMetric,
+) -> crate::Result<Vec<Vec<f32>>> {
     let mut results = Vec::with_capacity(queries.len());
 
     for query in queries {
@@ -639,7 +640,9 @@ pub fn normalize_vector_simd(vector: &mut [f32]) -> crate::Result<()> {
             let norm = norm_sq.sqrt();
 
             if norm == 0.0 {
-                return Err(crate::Error::InvalidInput("Cannot normalize zero vector".to_string() ));
+                return Err(crate::Error::InvalidInput(
+                    "Cannot normalize zero vector".to_string(),
+                ));
             }
 
             let norm_vec = _mm256_set1_ps(norm);
@@ -666,7 +669,9 @@ pub fn normalize_vector_simd(vector: &mut [f32]) -> crate::Result<()> {
     let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if norm == 0.0 {
-        return Err(crate::Error::InvalidInput("Cannot normalize zero vector".to_string() ));
+        return Err(crate::Error::InvalidInput(
+            "Cannot normalize zero vector".to_string(),
+        ));
     }
 
     for value in vector.iter_mut() {

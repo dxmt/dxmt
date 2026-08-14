@@ -1,31 +1,39 @@
-use axum::{
-    extract::{Path, State, Query},
-    Json,
-    http::{StatusCode, header::{HeaderMap, HeaderValue}},
-    response::{IntoResponse, Response},
-};
 use crate::api::response::ApiResponse;
+use axum::{
+    extract::{Path, Query, State},
+    http::{
+        header::{HeaderMap, HeaderValue},
+        StatusCode,
+    },
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::storage::traits::_Storage as _;
 use crate::{
-    storage::{IntelligentIndexedStorage, BackupManager, RestoreOptions},
-    types::{
-        table::{TableAlterRequest, TableConfig}, record::CreateRecordRequest, record::SearchQuery,
-        record::HybridSearchQuery, record::SearchResult, vector::DistanceMetric, table::IndexType,
-        record::{FullTextSearchRequest, HybridSearchRequest},
-    },
     api::response::ApiError,
     api::server_health::ServerHealth,
-    utils::{validate_table_name, validate_record_id},
+    storage::{BackupManager, IntelligentIndexedStorage, RestoreOptions},
+    types::{
+        record::CreateRecordRequest,
+        record::HybridSearchQuery,
+        record::SearchQuery,
+        record::SearchResult,
+        record::{FullTextSearchRequest, HybridSearchRequest},
+        table::IndexType,
+        table::{TableAlterRequest, TableConfig},
+        vector::DistanceMetric,
+    },
+    utils::{validate_record_id, validate_table_name},
 };
 
 /// Helper function to convert Error into appropriate HTTP response
 /// Uses the error's status_code() method to return correct HTTP status codes
 fn error_response(err: crate::Error) -> Response {
-    let status = StatusCode::from_u16(err.status_code())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, ApiResponse::error(err.into())).into_response()
 }
 
@@ -109,7 +117,7 @@ fn default_insert_mode() -> BulkInsertMode {
 }
 
 // 添加验证常量
-const MAXBATCH_SIZE: usize = 10000;  // 增加到10000以支持更大批量
+const MAXBATCH_SIZE: usize = 10000; // 增加到10000以支持更大批量
 const MAX_TABLE_NAME_LENGTH: usize = 64;
 const MAX_RECORD_ID_LENGTH: usize = 128;
 const MAX_DIMENSION: usize = 4096;
@@ -120,8 +128,8 @@ fn validate_batch_insert(
     request: &BatchInsertRequest,
     table: &crate::types::table::Table,
 ) -> Result<(), String> {
-    use std::collections::HashSet;
     use crate::types::vector::VectorValidator;
+    use std::collections::HashSet;
 
     // 1. Batch size limits (max 10,000)
     if request.records.is_empty() {
@@ -162,10 +170,7 @@ fn validate_batch_insert(
         }
 
         if let Err(e) = validate_record_id(&record.id) {
-            return Err(format!(
-                "Invalid record ID at position {}: {}",
-                idx, e
-            ));
+            return Err(format!("Invalid record ID at position {}: {}", idx, e));
         }
 
         // Dense vector validation
@@ -256,15 +261,27 @@ pub async fn create_table(
 ) -> impl IntoResponse {
     // 增强输入验证
     if request.name.len() > MAX_TABLE_NAME_LENGTH {
-        let error = ApiError::new("INVALID_TABLE_NAME", &format!("Table name exceeds maximum length of {}", MAX_TABLE_NAME_LENGTH));
+        let error = ApiError::new(
+            "INVALID_TABLE_NAME",
+            &format!(
+                "Table name exceeds maximum length of {}",
+                MAX_TABLE_NAME_LENGTH
+            ),
+        );
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
     }
 
     if request.dimension > MAX_DIMENSION || request.dimension < MIN_DIMENSION {
-        let error = ApiError::new("INVALID_INPUT", &format!("Dimension must be between {} and {}", MIN_DIMENSION, MAX_DIMENSION));
+        let error = ApiError::new(
+            "INVALID_INPUT",
+            &format!(
+                "Dimension must be between {} and {}",
+                MIN_DIMENSION, MAX_DIMENSION
+            ),
+        );
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
     }
-    
+
     // 验证表名
     if let Err(e) = validate_table_name(&request.name) {
         let error = ApiError::new("INVALID_TABLE_NAME", &e.to_string());
@@ -272,20 +289,25 @@ pub async fn create_table(
     }
 
     // 解析距离度量
-    let distance_metric = match request.distance_metric
+    let distance_metric = match request
+        .distance_metric
         .as_deref()
         .unwrap_or("cosine")
         .parse::<DistanceMetric>()
     {
         Ok(metric) => metric,
         Err(e) => {
-            let error = ApiError::new("INVALID_DISTANCE_METRIC", &format!("Invalid distance metric: {}", e));
+            let error = ApiError::new(
+                "INVALID_DISTANCE_METRIC",
+                &format!("Invalid distance metric: {}", e),
+            );
             return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
         }
     };
 
     // 解析索引类型
-    let index_type = match request.index_type
+    let index_type = match request
+        .index_type
         .as_deref()
         .map(|s| s.parse::<IndexType>())
         .transpose()
@@ -315,8 +337,8 @@ pub async fn create_table(
         Ok(table) => {
             let value = serde_json::to_value(table).unwrap_or(serde_json::Value::Null);
             ApiResponse::success(value).into_response()
-        },
-        Err(e) => error_response(e)
+        }
+        Err(e) => error_response(e),
     }
 }
 
@@ -347,7 +369,7 @@ pub async fn get_table(
             let value = serde_json::to_value(resp).unwrap_or(serde_json::Value::Null);
             ApiResponse::success(value).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -371,19 +393,15 @@ pub async fn list_tables(
 ) -> impl IntoResponse {
     let tables = match state.storage.list_tables().await {
         Ok(tables) => tables,
-        Err(e) => return error_response(e)
+        Err(e) => return error_response(e),
     };
 
     // 应用分页
     let offset = pagination.offset.unwrap_or(0);
     let limit = pagination.limit.unwrap_or(50);
-    
+
     let total = tables.len();
-    let paginatedtables: Vec<_> = tables
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let paginatedtables: Vec<_> = tables.into_iter().skip(offset).take(limit).collect();
 
     let response = serde_json::json!({
         "tables": paginatedtables,
@@ -420,7 +438,7 @@ pub async fn delete_table(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -434,7 +452,9 @@ pub async fn alter_table(
     Json(req): Json<TableAlterRequest>,
 ) -> impl IntoResponse {
     match state.storage.alter_table(&table_name, req).await {
-        Ok(table) => ApiResponse::success(serde_json::to_value(table).unwrap_or_default()).into_response(),
+        Ok(table) => {
+            ApiResponse::success(serde_json::to_value(table).unwrap_or_default()).into_response()
+        }
         Err(e) => error_response(e),
     }
 }
@@ -522,7 +542,8 @@ pub async fn branch_table(
             return (
                 StatusCode::BAD_REQUEST,
                 ApiResponse::error(ApiError::new("BAD_REQUEST", "branch_name is required")),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -607,7 +628,11 @@ pub async fn insert_records(
     // Start tracking this operation
     let _guard = state.server_health.start_insert();
 
-    match state.storage.insert_records(&table_name, request.records).await {
+    match state
+        .storage
+        .insert_records(&table_name, request.records)
+        .await
+    {
         Ok(inserted_records) => {
             let ids: Vec<&str> = inserted_records.iter().map(|r| r.id.as_str()).collect();
             let response = serde_json::json!({
@@ -656,7 +681,7 @@ pub async fn get_record(
             let value = serde_json::to_value(record).unwrap_or(serde_json::Value::Null);
             ApiResponse::success(value).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -694,8 +719,12 @@ pub async fn update_record(
                     });
                     let error = ApiError::with_details(
                         "DIMENSION_MISMATCH",
-                        &format!("Vector dimension mismatch: expected {}, got {}", table.dimension, vector.len()),
-                        details
+                        &format!(
+                            "Vector dimension mismatch: expected {}, got {}",
+                            table.dimension,
+                            vector.len()
+                        ),
+                        details,
                     );
                     return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
                 }
@@ -718,7 +747,7 @@ pub async fn update_record(
         let error = ApiError::with_details(
             "RECORD_NOT_FOUND",
             &format!("Record '{}' does not exist", record_id),
-            details
+            details,
         );
         return (StatusCode::NOT_FOUND, ApiResponse::error(error)).into_response();
     }
@@ -727,7 +756,10 @@ pub async fn update_record(
     let existing_ok = existing_record.ok();
     let final_vector = match request.vector {
         Some(v) => v,
-        None => existing_ok.as_ref().map(|r: &crate::types::record::Record| r.vector.clone()).unwrap_or_default(),
+        None => existing_ok
+            .as_ref()
+            .map(|r: &crate::types::record::Record| r.vector.clone())
+            .unwrap_or_default(),
     };
 
     let final_payload = match request.merge_mode {
@@ -737,7 +769,9 @@ pub async fn update_record(
                 let mut merged = existing.payload.clone();
                 if let Some(new_payload) = request.payload {
                     // Merge new payload into existing
-                    if let (Some(merged_obj), Some(new_obj)) = (merged.as_object_mut(), new_payload.as_object()) {
+                    if let (Some(merged_obj), Some(new_obj)) =
+                        (merged.as_object_mut(), new_payload.as_object())
+                    {
                         for (key, value) in new_obj {
                             merged_obj.insert(key.clone(), value.clone());
                         }
@@ -768,7 +802,11 @@ pub async fn update_record(
     };
 
     // 5. Perform update
-    match state.storage.update_record(&table_name, &record_id, update_request).await {
+    match state
+        .storage
+        .update_record(&table_name, &record_id, update_request)
+        .await
+    {
         Ok(updated_record) => {
             let response = serde_json::json!({
                 "message": format!("Record '{}' updated successfully", record_id),
@@ -817,7 +855,7 @@ pub async fn delete_records(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -857,7 +895,7 @@ pub async fn search_vectors(
             let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
             ApiResponse::success(value).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -885,7 +923,11 @@ pub async fn list_records(
     let limit = request.limit.unwrap_or(100).min(1000); // Max 1000 records per request
     let offset = request.offset.unwrap_or(0);
 
-    match state.storage.list_records(&table_name, request.filter.as_ref(), limit, offset).await {
+    match state
+        .storage
+        .list_records(&table_name, request.filter.as_ref(), limit, offset)
+        .await
+    {
         Ok((records, total)) => {
             let response = serde_json::json!({
                 "records": records,
@@ -895,7 +937,7 @@ pub async fn list_records(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -926,9 +968,11 @@ pub async fn hybrid_search(
         let dense_vector = match query.dense_vector {
             Some(v) => v,
             None => {
-                return ApiResponse::error(
-                    crate::api::response::ApiError::new("BAD_REQUEST", "Dense vector is required for this search type")
-                ).into_response();
+                return ApiResponse::error(crate::api::response::ApiError::new(
+                    "BAD_REQUEST",
+                    "Dense vector is required for this search type",
+                ))
+                .into_response();
             }
         };
 
@@ -942,13 +986,13 @@ pub async fn hybrid_search(
             include_metadata: query.with_payload,
             ..Default::default()
         };
-        
+
         match state.storage.search(&table_name, search_query).await {
             Ok(result) => {
                 let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
                 ApiResponse::success(value).into_response()
             }
-            Err(e) => error_response(e)
+            Err(e) => error_response(e),
         }
     } else {
         // Full hybrid search with text and sparse vector support
@@ -995,7 +1039,7 @@ pub async fn hybrid_search(
         // Apply limiting and return combined results
         let mut combined_results = dense_results;
         combined_results.truncate(query.top_k);
-        let total = combined_results.len();  // Calculate length before move
+        let total = combined_results.len(); // Calculate length before move
 
         let search_result = SearchResult {
             hits: combined_results,
@@ -1020,8 +1064,7 @@ pub async fn hybrid_search(
     tag = "system"
 )]
 #[axum::debug_handler]
-pub async fn get_status(
-    State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.storage.get_stats().await;
 
     let status = serde_json::json!({
@@ -1047,9 +1090,7 @@ pub async fn get_status(
 ///
 /// Returns the current health state of the server including operation metrics.
 /// Use this endpoint to monitor server load and determine if backpressure is active.
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let health_state = state.server_health.current_state().await;
     let metrics = state.server_health.get_metrics();
 
@@ -1121,7 +1162,7 @@ pub async fn create_full_backup(
 ) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     match backup_manager.create_full_backup().await {
@@ -1132,7 +1173,7 @@ pub async fn create_full_backup(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1155,7 +1196,7 @@ pub async fn create_incremental_backup(
 ) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     match backup_manager.create_incremental_backup().await {
@@ -1166,7 +1207,7 @@ pub async fn create_incremental_backup(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1189,7 +1230,7 @@ pub async fn create_manual_backup(
 ) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     match backup_manager.create_manual_backup(request.tables).await {
@@ -1200,7 +1241,7 @@ pub async fn create_manual_backup(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1215,11 +1256,10 @@ pub async fn create_manual_backup(
     tag = "backup"
 )]
 #[axum::debug_handler]
-pub async fn get_backup_status(
-    State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_backup_status(State(state): State<AppState>) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     let backup_state = backup_manager.get_backup_state();
@@ -1238,11 +1278,10 @@ pub async fn get_backup_status(
     tag = "backup"
 )]
 #[axum::debug_handler]
-pub async fn list_backups(
-    State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_backups(State(state): State<AppState>) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     let backups = backup_manager.list_backups();
@@ -1270,20 +1309,20 @@ pub async fn restore_backup(
 ) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     // 解析备份ID
     let backup_id = match uuid::Uuid::parse_str(&request.backup_id) {
         Ok(id) => id,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response()
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     // 解析时间点（如果提供）
     let point_in_time = if let Some(time_str) = request.point_in_time {
         match chrono::DateTime::parse_from_rfc3339(&time_str) {
             Ok(dt) => Some(dt.with_timezone(&chrono::Utc)),
-            Err(_) => return StatusCode::BAD_REQUEST.into_response()
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         }
     } else {
         None
@@ -1305,7 +1344,7 @@ pub async fn restore_backup(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1331,13 +1370,13 @@ pub async fn delete_backup(
 ) -> impl IntoResponse {
     let backup_manager = match &state.backup_manager {
         Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     // 解析备份ID
     let backup_id = match uuid::Uuid::parse_str(&backup_id) {
         Ok(id) => id,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response()
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     match backup_manager.delete_backup(backup_id).await {
@@ -1347,7 +1386,7 @@ pub async fn delete_backup(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1376,13 +1415,21 @@ pub async fn insert_records_optimized(
 ) -> impl IntoResponse {
     // 批量大小验证
     let max_size = match request.mode {
-        BulkInsertMode::LockFree | BulkInsertMode::Streaming => 100000,  // 10万条
-        BulkInsertMode::BulkOptimized | BulkInsertMode::DeferredIndex => 50000,  // 5万条
+        BulkInsertMode::LockFree | BulkInsertMode::Streaming => 100000, // 10万条
+        BulkInsertMode::BulkOptimized | BulkInsertMode::DeferredIndex => 50000, // 5万条
         _ => MAXBATCH_SIZE,
     };
-    
+
     if request.records.len() > max_size {
-        let error = ApiError::new("INVALID_INPUT", &format!("Batch size {} exceeds maximum {} for mode {:?}", request.records.len(), max_size, request.mode));
+        let error = ApiError::new(
+            "INVALID_INPUT",
+            &format!(
+                "Batch size {} exceeds maximum {} for mode {:?}",
+                request.records.len(),
+                max_size,
+                request.mode
+            ),
+        );
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
     }
 
@@ -1394,7 +1441,13 @@ pub async fn insert_records_optimized(
     // 验证记录ID和向量
     for record in &request.records {
         if record.id.len() > MAX_RECORD_ID_LENGTH {
-            let error = ApiError::new("INVALID_INPUT", &format!("Record ID '{}' exceeds maximum length {}", record.id, MAX_RECORD_ID_LENGTH));
+            let error = ApiError::new(
+                "INVALID_INPUT",
+                &format!(
+                    "Record ID '{}' exceeds maximum length {}",
+                    record.id, MAX_RECORD_ID_LENGTH
+                ),
+            );
             return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
         }
 
@@ -1404,7 +1457,10 @@ pub async fn insert_records_optimized(
         }
 
         if record.vector.is_empty() {
-            let error = ApiError::new("INVALID_VECTOR", &format!("Record '{}' has an empty vector", record.id));
+            let error = ApiError::new(
+                "INVALID_VECTOR",
+                &format!("Record '{}' has an empty vector", record.id),
+            );
             return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
         }
     }
@@ -1412,61 +1468,101 @@ pub async fn insert_records_optimized(
     // 根据模式选择不同的插入方法
     let result = match request.mode {
         BulkInsertMode::Standard => {
-            match state.storage.insert_records(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records.into_iter().map(|r| r.id).collect()),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::LockFree => {
-            match state.storage.insert_records_lockfree(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_lockfree(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::Streaming => {
-            match state.storage.insert_records_streaming(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_streaming(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::MemoryPool => {
-            match state.storage.insert_records_with_memory_pool(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_with_memory_pool(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::DeferredIndex => {
-            match state.storage.insert_records_deferred_index(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_deferred_index(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::BulkOptimized => {
-            match state.storage.insert_records(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records.into_iter().map(|r| r.id).collect()),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::UltraFast => {
-            match state.storage.insert_records_ultra_fast(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_ultra_fast(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::VmOptimized => {
-            match state.storage.insert_records_vm_optimized(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_vm_optimized(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::NvmeOptimized => {
-            match state.storage.insert_records_nvme_optimized(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_nvme_optimized(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
         }
         BulkInsertMode::Ultimate => {
-            match state.storage.insert_records_ultimate(&table_name, request.records).await {
+            match state
+                .storage
+                .insert_records_ultimate(&table_name, request.records)
+                .await
+            {
                 Ok(records) => Ok(records),
                 Err(e) => Err(e),
             }
@@ -1482,7 +1578,7 @@ pub async fn insert_records_optimized(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => error_response(e)
+        Err(e) => error_response(e),
     }
 }
 
@@ -1510,46 +1606,52 @@ pub async fn full_text_search(
 ) -> impl IntoResponse {
     #[cfg(not(feature = "text-bm25"))]
     {
-        return ApiResponse::error(
-            ApiError::new("FEATURE_DISABLED", "Full-text search feature is not enabled. Compile with --features text-bm25")
-        ).into_response();
+        return ApiResponse::error(ApiError::new(
+            "FEATURE_DISABLED",
+            "Full-text search feature is not enabled. Compile with --features text-bm25",
+        ))
+        .into_response();
     }
 
     #[cfg(feature = "text-bm25")]
     {
         // Validate table name
         if let Err(e) = validate_table_name(&table_name) {
-            return ApiResponse::error(
-                ApiError::new("INVALID_TABLE_NAME", &e.to_string())
-            ).into_response();
+            return ApiResponse::error(ApiError::new("INVALID_TABLE_NAME", &e.to_string()))
+                .into_response();
         }
 
         // Get table to check if full-text search is enabled
         let table = match state.storage.get_table(&table_name).await {
             Ok(t) => t,
             Err(e) => {
-                return ApiResponse::error(
-                    ApiError::new("TABLE_NOT_FOUND", &format!("Table '{}' not found: {}", table_name, e))
-                ).into_response();
+                return ApiResponse::error(ApiError::new(
+                    "TABLE_NOT_FOUND",
+                    &format!("Table '{}' not found: {}", table_name, e),
+                ))
+                .into_response();
             }
         };
 
         if !table.enable_full_text_search {
-            return ApiResponse::error(
-                ApiError::new("FULL_TEXT_NOT_ENABLED", "Full-text search is not enabled for this table")
-            ).into_response();
+            return ApiResponse::error(ApiError::new(
+                "FULL_TEXT_NOT_ENABLED",
+                "Full-text search is not enabled for this table",
+            ))
+            .into_response();
         }
 
         // Perform the full-text search
         match state.storage.full_text_search(&table_name, request).await {
-            Ok(result) => {
-                ApiResponse::success(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)).into_response()
-            }
-            Err(e) => {
-                ApiResponse::error(
-                    ApiError::new("SEARCH_FAILED", &format!("Full-text search failed: {}", e))
-                ).into_response()
-            }
+            Ok(result) => ApiResponse::success(
+                serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
+            )
+            .into_response(),
+            Err(e) => ApiResponse::error(ApiError::new(
+                "SEARCH_FAILED",
+                &format!("Full-text search failed: {}", e),
+            ))
+            .into_response(),
         }
     }
 }
@@ -1577,28 +1679,30 @@ pub async fn hybrid_search_combined(
 ) -> impl IntoResponse {
     // Validate inputs
     if request.vector.is_none() && request.text.is_none() {
-        return ApiResponse::error(
-            ApiError::new("BAD_REQUEST", "At least one of 'vector' or 'text' must be provided")
-        ).into_response();
+        return ApiResponse::error(ApiError::new(
+            "BAD_REQUEST",
+            "At least one of 'vector' or 'text' must be provided",
+        ))
+        .into_response();
     }
 
     // Validate table name
     if let Err(e) = validate_table_name(&table_name) {
-        return ApiResponse::error(
-            ApiError::new("INVALID_TABLE_NAME", &e.to_string())
-        ).into_response();
+        return ApiResponse::error(ApiError::new("INVALID_TABLE_NAME", &e.to_string()))
+            .into_response();
     }
 
     // Perform hybrid search using the storage layer
     match state.storage.hybrid_search(&table_name, request).await {
         Ok(result) => {
-            ApiResponse::success(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)).into_response()
+            ApiResponse::success(serde_json::to_value(result).unwrap_or(serde_json::Value::Null))
+                .into_response()
         }
-        Err(e) => {
-            ApiResponse::error(
-                ApiError::new("SEARCH_FAILED", &format!("Hybrid search failed: {}", e))
-            ).into_response()
-        }
+        Err(e) => ApiResponse::error(ApiError::new(
+            "SEARCH_FAILED",
+            &format!("Hybrid search failed: {}", e),
+        ))
+        .into_response(),
     }
 }
 
@@ -1616,19 +1720,21 @@ pub async fn execute_dxql(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "missing 'query' field"})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
     // Parse → compile → execute
-    use crate::dxql::{parser::Parser, compiler::Compiler, executor_impl::StorageAwareExecutor};
+    use crate::dxql::{compiler::Compiler, executor_impl::StorageAwareExecutor, parser::Parser};
     let stmt = match Parser::new().parse(&sql) {
         Ok(s) => s,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("parse error: {}", e)})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
     let plan = match Compiler::new().compile(stmt) {
@@ -1637,25 +1743,33 @@ pub async fn execute_dxql(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("compile error: {}", e)})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
-    let executor = StorageAwareExecutor::new(state.storage.clone() as Arc<dyn crate::storage::traits::_Storage>);
+    let executor = StorageAwareExecutor::new(
+        state.storage.clone() as Arc<dyn crate::storage::traits::_Storage>
+    );
     match executor.execute(plan).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::json!({
-            "data": {
-                "records": result.records,
-                "metadata": {
-                    "total_results": result.metadata.total_results,
-                    "execution_time_ms": result.metadata.execution_time_ms,
-                    "plan_type": result.metadata.plan_type,
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "data": {
+                    "records": result.records,
+                    "metadata": {
+                        "total_results": result.metadata.total_results,
+                        "execution_time_ms": result.metadata.execution_time_ms,
+                        "plan_type": result.metadata.plan_type,
+                    }
                 }
-            }
-        }))).into_response(),
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({"error": format!("{}", e)})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -1670,9 +1784,7 @@ pub async fn execute_dxql(
     ),
     tag = "health"
 )]
-pub async fn health_metrics(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn health_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let metrics = state.server_health.get_metrics();
 
     let response = serde_json::json!({

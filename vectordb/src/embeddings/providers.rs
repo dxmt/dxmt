@@ -2,22 +2,25 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use super::compat::{EmbeddingError, EmbeddingFunction};
+use crate::types::vector::DenseVector;
 use async_trait::async_trait;
 use std::sync::Arc;
-use crate::types::vector::DenseVector;
-use super::compat::{EmbeddingFunction, EmbeddingError};
 
 /// Trait for embedding providers (OpenAI, HuggingFace, etc.)
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Get the name of the provider
     fn name(&self) -> &str;
-    
+
     /// List available models
     async fn list_models(&self) -> Vec<String>;
-    
+
     /// Create an embedding function for a specific model
-    async fn create_function(&self, model_name: &str) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError>;
+    async fn create_function(
+        &self,
+        model_name: &str,
+    ) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError>;
 }
 
 /// OpenAI embedding provider
@@ -45,7 +48,7 @@ impl EmbeddingProvider for OpenAIProvider {
     fn name(&self) -> &str {
         "openai"
     }
-    
+
     async fn list_models(&self) -> Vec<String> {
         vec![
             "text-embedding-3-small".to_string(),
@@ -53,17 +56,22 @@ impl EmbeddingProvider for OpenAIProvider {
             "text-embedding-ada-002".to_string(),
         ]
     }
-    
-    async fn create_function(&self, model_name: &str) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
+
+    async fn create_function(
+        &self,
+        model_name: &str,
+    ) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
         let dimension = match model_name {
             "text-embedding-3-small" => 1536,
             "text-embedding-3-large" => 3072,
             "text-embedding-ada-002" => 1536,
-            _ => return Err(EmbeddingError::ModelError {
-                message: format!("Unknown model: {}", model_name),
-            }),
+            _ => {
+                return Err(EmbeddingError::ModelError {
+                    message: format!("Unknown model: {}", model_name),
+                })
+            }
         };
-        
+
         Ok(Arc::new(OpenAIEmbeddingFunction {
             model_name: model_name.to_string(),
             dimension,
@@ -85,15 +93,15 @@ impl EmbeddingFunction for OpenAIEmbeddingFunction {
     fn name(&self) -> &str {
         &self.model_name
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
-    
+
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
         // Stub — wire up actual OpenAI v1/embeddings HTTP call when reqwest is added
         Ok(vec![0.1; self.dimension])
@@ -130,7 +138,7 @@ impl EmbeddingProvider for HuggingFaceProvider {
     fn name(&self) -> &str {
         "huggingface"
     }
-    
+
     async fn list_models(&self) -> Vec<String> {
         vec![
             "sentence-transformers/all-MiniLM-L6-v2".to_string(),
@@ -140,8 +148,11 @@ impl EmbeddingProvider for HuggingFaceProvider {
             "intfloat/e5-large-v2".to_string(),
         ]
     }
-    
-    async fn create_function(&self, model_name: &str) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
+
+    async fn create_function(
+        &self,
+        model_name: &str,
+    ) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
         let dimension = match model_name {
             "sentence-transformers/all-MiniLM-L6-v2" => 384,
             "sentence-transformers/all-mpnet-base-v2" => 768,
@@ -150,7 +161,7 @@ impl EmbeddingProvider for HuggingFaceProvider {
             "intfloat/e5-large-v2" => 1024,
             _ => 768, // Default dimension
         };
-        
+
         Ok(Arc::new(HuggingFaceEmbeddingFunction {
             model_name: model_name.to_string(),
             dimension,
@@ -172,15 +183,15 @@ impl EmbeddingFunction for HuggingFaceEmbeddingFunction {
     fn name(&self) -> &str {
         &self.model_name
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
-    
+
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
         // Stub — wire up HuggingFace Inference API when reqwest is added
         Ok(vec![0.2; self.dimension])
@@ -194,9 +205,7 @@ pub struct SentenceTransformerProvider {
 
 impl SentenceTransformerProvider {
     pub fn new() -> Self {
-        Self {
-            model_path: None,
-        }
+        Self { model_path: None }
     }
 
     pub fn with_model_path(mut self, path: String) -> Self {
@@ -216,7 +225,7 @@ impl EmbeddingProvider for SentenceTransformerProvider {
     fn name(&self) -> &str {
         "sentence-transformers"
     }
-    
+
     async fn list_models(&self) -> Vec<String> {
         vec![
             "all-MiniLM-L6-v2".to_string(),
@@ -224,15 +233,18 @@ impl EmbeddingProvider for SentenceTransformerProvider {
             "multi-qa-MiniLM-L6-cos-v1".to_string(),
         ]
     }
-    
-    async fn create_function(&self, model_name: &str) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
+
+    async fn create_function(
+        &self,
+        model_name: &str,
+    ) -> Result<Arc<dyn EmbeddingFunction>, EmbeddingError> {
         let dimension = match model_name {
             "all-MiniLM-L6-v2" => 384,
             "all-mpnet-base-v2" => 768,
             "multi-qa-MiniLM-L6-cos-v1" => 384,
             _ => 384,
         };
-        
+
         Ok(Arc::new(LocalSentenceTransformerFunction {
             model_name: model_name.to_string(),
             dimension,
@@ -252,15 +264,15 @@ impl EmbeddingFunction for LocalSentenceTransformerFunction {
     fn name(&self) -> &str {
         &self.model_name
     }
-    
+
     fn modality(&self) -> &str {
         "text"
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
-    
+
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
         // Stub — blocked on ort 2.0 stable; see CLAUDE.md multimodal section
         Ok(vec![0.3; self.dimension])

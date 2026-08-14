@@ -7,9 +7,7 @@
 //! - Memory usage patterns
 //! - Concurrency characteristics
 
-use crate::index_management::{
-    BenchmarkConfig, BenchmarkResult, OperationProfiler,
-};
+use crate::index_management::{BenchmarkConfig, BenchmarkResult, OperationProfiler};
 
 /// Main benchmark harness for Phase 3 components
 pub struct Phase3BenchmarkHarness {
@@ -69,10 +67,7 @@ impl Phase3BenchmarkHarness {
     }
 
     /// Run migration benchmark at various scales
-    pub async fn benchmark_migration_scaling<F>(
-        &self,
-        migrate_fn: F,
-    ) -> Vec<BenchmarkResult>
+    pub async fn benchmark_migration_scaling<F>(&self, migrate_fn: F) -> Vec<BenchmarkResult>
     where
         F: Fn(usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, String>>>>,
     {
@@ -99,7 +94,10 @@ impl Phase3BenchmarkHarness {
                 }
             }
 
-            if let Some(profile) = self.profiler.get_profile(&format!("migrate_{}", record_count)) {
+            if let Some(profile) = self
+                .profiler
+                .get_profile(&format!("migrate_{}", record_count))
+            {
                 let throughput = profile
                     .snapshots
                     .last()
@@ -111,7 +109,8 @@ impl Phase3BenchmarkHarness {
                     record_count,
                     vector_dimension: 0,
                     iterations: self.config.benchmark_iterations,
-                    total_duration_ms: profile.avg_duration_ms * self.config.benchmark_iterations as f64,
+                    total_duration_ms: profile.avg_duration_ms
+                        * self.config.benchmark_iterations as f64,
                     avg_duration_per_iteration_ms: profile.avg_duration_ms,
                     throughput_records_per_sec: throughput,
                 });
@@ -122,10 +121,7 @@ impl Phase3BenchmarkHarness {
     }
 
     /// Run query performance benchmark
-    pub async fn benchmark_query_performance<F>(
-        &self,
-        query_fn: F,
-    ) -> Vec<BenchmarkResult>
+    pub async fn benchmark_query_performance<F>(&self, query_fn: F) -> Vec<BenchmarkResult>
     where
         F: Fn(usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, String>>>>,
     {
@@ -152,13 +148,17 @@ impl Phase3BenchmarkHarness {
                 }
             }
 
-            if let Some(profile) = self.profiler.get_profile(&format!("query_{}", record_count)) {
+            if let Some(profile) = self
+                .profiler
+                .get_profile(&format!("query_{}", record_count))
+            {
                 results.push(BenchmarkResult {
                     operation_name: "query".to_string(),
                     record_count,
                     vector_dimension: 0,
                     iterations: self.config.benchmark_iterations,
-                    total_duration_ms: profile.avg_duration_ms * self.config.benchmark_iterations as f64,
+                    total_duration_ms: profile.avg_duration_ms
+                        * self.config.benchmark_iterations as f64,
                     avg_duration_per_iteration_ms: profile.avg_duration_ms,
                     throughput_records_per_sec: profile
                         .snapshots
@@ -194,7 +194,10 @@ impl Phase3BenchmarkHarness {
         }
 
         for (op_name, op_results) in operations {
-            let avg_duration: f64 = op_results.iter().map(|r| r.avg_duration_per_iteration_ms).sum::<f64>()
+            let avg_duration: f64 = op_results
+                .iter()
+                .map(|r| r.avg_duration_per_iteration_ms)
+                .sum::<f64>()
                 / op_results.len() as f64;
             let max_duration = op_results
                 .iter()
@@ -341,12 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quick_benchmark() {
-        let result = quick_benchmark(
-            "test_operation",
-            5,
-            || Box::pin(async { Ok(100) }),
-        )
-        .await;
+        let result = quick_benchmark("test_operation", 5, || Box::pin(async { Ok(100) })).await;
 
         assert_eq!(result.operation_name, "test_operation");
         assert_eq!(result.iterations, 5);

@@ -4,8 +4,8 @@
 //
 // Unit tests are fast, isolated tests of individual components.
 
-mod fixtures;
 mod common;
+mod fixtures;
 
 // Include unit test modules
 mod validation_test {

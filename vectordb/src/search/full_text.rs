@@ -6,12 +6,12 @@ use std::sync::Arc;
 use tantivy::{
     collector::TopDocs,
     query::{BooleanQuery, Occur, Query, QueryParser},
-    schema::*, Index, IndexReader, IndexWriter, Term,
-    TantivyDocument,
+    schema::*,
+    Index, IndexReader, IndexWriter, TantivyDocument, Term,
 };
 
 #[cfg(feature = "text-bm25")]
-use tantivy::schema::{TextFieldIndexing, TextOptions, IndexRecordOption};
+use tantivy::schema::{IndexRecordOption, TextFieldIndexing, TextOptions};
 use tokio::sync::RwLock;
 
 /// Full-text search engine using Tantivy
@@ -262,14 +262,15 @@ impl FullTextSearchEngine {
         let mut schema_builder = Schema::builder();
 
         // ID field (stored, indexed as string)
-        let id_field = schema_builder.add_text_field("id", tantivy::schema::STRING | tantivy::schema::STORED);
+        let id_field =
+            schema_builder.add_text_field("id", tantivy::schema::STRING | tantivy::schema::STORED);
 
         // Create text field options with default tokenizer for English text
         // Note: For Chinese text, change .set_tokenizer("default") to .set_tokenizer("jieba")
         #[cfg(feature = "text-bm25")]
         let text_options = {
             let text_indexing = TextFieldIndexing::default()
-                .set_tokenizer("default")  // Use default tokenizer for English (was: "jieba" for Chinese)
+                .set_tokenizer("default") // Use default tokenizer for English (was: "jieba" for Chinese)
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions);
             TextOptions::default()
                 .set_indexing_options(text_indexing)
@@ -291,19 +292,30 @@ impl FullTextSearchEngine {
 
         // Fallback for non-text-bm25 builds
         #[cfg(not(feature = "text-bm25"))]
-        let content_field = schema_builder.add_text_field("content", tantivy::schema::TEXT | tantivy::schema::STORED);
+        let content_field = schema_builder
+            .add_text_field("content", tantivy::schema::TEXT | tantivy::schema::STORED);
         #[cfg(not(feature = "text-bm25"))]
-        let title_field = schema_builder.add_text_field("title", tantivy::schema::TEXT | tantivy::schema::STORED);
+        let title_field =
+            schema_builder.add_text_field("title", tantivy::schema::TEXT | tantivy::schema::STORED);
         #[cfg(not(feature = "text-bm25"))]
-        let description_field = schema_builder.add_text_field("description", tantivy::schema::TEXT | tantivy::schema::STORED);
+        let description_field = schema_builder.add_text_field(
+            "description",
+            tantivy::schema::TEXT | tantivy::schema::STORED,
+        );
         #[cfg(not(feature = "text-bm25"))]
-        let tags_field = schema_builder.add_text_field("tags", tantivy::schema::TEXT | tantivy::schema::STORED | tantivy::schema::FAST);
+        let tags_field = schema_builder.add_text_field(
+            "tags",
+            tantivy::schema::TEXT | tantivy::schema::STORED | tantivy::schema::FAST,
+        );
 
         // Metadata as JSON string (stored only)
         let metadata_field = schema_builder.add_text_field("metadata", tantivy::schema::STORED);
 
         // Timestamp for sorting
-        let timestamp_field = schema_builder.add_i64_field("timestamp", tantivy::schema::INDEXED | tantivy::schema::STORED | tantivy::schema::FAST);
+        let timestamp_field = schema_builder.add_i64_field(
+            "timestamp",
+            tantivy::schema::INDEXED | tantivy::schema::STORED | tantivy::schema::FAST,
+        );
 
         let schema = schema_builder.build();
 
@@ -311,12 +323,15 @@ impl FullTextSearchEngine {
         // Check if meta.json exists to determine if this is an existing index
         let meta_path = Path::new(&config.index_path).join("meta.json");
         let index = if meta_path.exists() {
-            Index::open_in_dir(&config.index_path).map_err(|e| crate::Error::Internal(format!("Failed to open index: {}", e)))?
+            Index::open_in_dir(&config.index_path)
+                .map_err(|e| crate::Error::Internal(format!("Failed to open index: {}", e)))?
         } else {
-            std::fs::create_dir_all(&config.index_path).map_err(|e| crate::Error::Internal(format!("Failed to create index directory: {}", e)))?;
+            std::fs::create_dir_all(&config.index_path).map_err(|e| {
+                crate::Error::Internal(format!("Failed to create index directory: {}", e))
+            })?;
 
-            Index::create_in_dir(&config.index_path, schema.clone()).map_err(|e| crate::Error::Internal(format!("Failed to create index: {}", e))
-            )?
+            Index::create_in_dir(&config.index_path, schema.clone())
+                .map_err(|e| crate::Error::Internal(format!("Failed to create index: {}", e)))?
         };
 
         // Register Chinese tokenizer (Jieba) if text-bm25 feature is enabled
@@ -368,23 +383,19 @@ impl FullTextSearchEngine {
         tantivy_doc.add_text(self.schema_fields.content_field, &doc.content);
 
         if let Some(title) = &doc.title {
-
-
             tantivy_doc.add_text(self.schema_fields.title_field, title);
-
         }
         if let Some(description) = &doc.description {
-
             tantivy_doc.add_text(self.schema_fields.description_field, description);
-
         }
         for tag in &doc.tags {
             tantivy_doc.add_text(self.schema_fields.tags_field, tag);
         }
 
         if let Some(metadata) = &doc.payload {
-            let metadata_json =
-                serde_json::to_string(metadata).map_err(|e| crate::Error::Internal(format!("Failed to serialize payload: {}", e)))?;
+            let metadata_json = serde_json::to_string(metadata).map_err(|e| {
+                crate::Error::Internal(format!("Failed to serialize payload: {}", e))
+            })?;
             tantivy_doc.add_text(self.schema_fields.metadata_field, &metadata_json);
         }
 
@@ -431,10 +442,14 @@ impl FullTextSearchEngine {
     /// Commit changes to the index
     pub async fn commit(&self) -> crate::Result<()> {
         let mut writer = self.writer.write().await;
-        writer.commit().map_err(|e| crate::Error::Internal(format!("Failed to commit: {}", e)))?;
+        writer
+            .commit()
+            .map_err(|e| crate::Error::Internal(format!("Failed to commit: {}", e)))?;
 
         // Reload reader to see committed changes
-        self.reader.reload().map_err(|e| crate::Error::Internal(format!("Failed to reload reader: {}", e)))?;
+        self.reader
+            .reload()
+            .map_err(|e| crate::Error::Internal(format!("Failed to reload reader: {}", e)))?;
 
         Ok(())
     }
@@ -442,7 +457,8 @@ impl FullTextSearchEngine {
     /// Search for documents
     pub async fn search(
         &self,
-        request: &FullTextSearchRequest) -> crate::Result<Vec<FullTextSearchResult>> {
+        request: &FullTextSearchRequest,
+    ) -> crate::Result<Vec<FullTextSearchResult>> {
         let start_time = std::time::Instant::now();
 
         // Get searcher
@@ -457,18 +473,16 @@ impl FullTextSearchEngine {
         let collector = TopDocs::with_limit(limit + offset);
 
         // Execute search
-        let top_docs =
-            searcher
-                .search(&query, &collector)
-                .map_err(|e| crate::Error::Internal(format!("Search failed: {}", e)))?;
+        let top_docs = searcher
+            .search(&query, &collector)
+            .map_err(|e| crate::Error::Internal(format!("Search failed: {}", e)))?;
 
         // Process results
         let mut results = Vec::new();
         for (score, doc_address) in top_docs.into_iter().skip(offset) {
-            let doc: TantivyDocument =
-                searcher
-                    .doc(doc_address)
-                    .map_err(|e| crate::Error::Internal(format!("Failed to retrieve document: {}", e)))?;
+            let doc: TantivyDocument = searcher.doc(doc_address).map_err(|e| {
+                crate::Error::Internal(format!("Failed to retrieve document: {}", e))
+            })?;
 
             // Extract fields
             let id = doc
@@ -497,10 +511,13 @@ impl FullTextSearchEngine {
                 .as_ref()
                 .map(|c| self.generate_snippet(c, &request.query, 150));
 
-
             // Generate highlights if requested
             let highlights = if request.highlight {
-                Some(self.generate_highlights(&doc, &query, request).await.unwrap_or_default())
+                Some(
+                    self.generate_highlights(&doc, &query, request)
+                        .await
+                        .unwrap_or_default(),
+                )
             } else {
                 None
             };
@@ -528,15 +545,13 @@ impl FullTextSearchEngine {
 
     /// Build Tantivy query from search request
     async fn build_query(&self, request: &FullTextSearchRequest) -> crate::Result<Box<dyn Query>> {
-        let search_fields = request
-            .search_fields.clone()
-            .unwrap_or_else(|| {
-                vec![
-                    "title".to_string(),
-                    "content".to_string(),
-                    "description".to_string(),
-                ]
-            });
+        let search_fields = request.search_fields.clone().unwrap_or_else(|| {
+            vec![
+                "title".to_string(),
+                "content".to_string(),
+                "description".to_string(),
+            ]
+        });
 
         // Get or create query parser
         let parser_key = search_fields.join(",");
@@ -562,10 +577,9 @@ impl FullTextSearchEngine {
         });
 
         // Parse query
-        let mut query =
-            query_parser
-                .parse_query(&request.query)
-                .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?;
+        let mut query = query_parser
+            .parse_query(&request.query)
+            .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?;
 
         // Apply filters if any
         if let Some(filters) = &request.filters {
@@ -574,7 +588,12 @@ impl FullTextSearchEngine {
             for filter in filters {
                 let filter_query = match self.build_filter_query(filter) {
                     Ok(query) => query,
-                    Err(e) => return Err(crate::Error::Internal(format!("Filter query build failed: {:?}", e))),
+                    Err(e) => {
+                        return Err(crate::Error::Internal(format!(
+                            "Filter query build failed: {:?}",
+                            e
+                        )))
+                    }
                 };
                 clauses.push((Occur::Must, filter_query))
             }
@@ -593,14 +612,18 @@ impl FullTextSearchEngine {
                     "tags" => self.schema_fields.tags_field,
                     "id" => self.schema_fields.id_field,
                     _ => {
-                        return Err(crate::Error::InvalidInput(format!("Unknown filter field: {}", filter.field)));
+                        return Err(crate::Error::InvalidInput(format!(
+                            "Unknown filter field: {}",
+                            filter.field
+                        )));
                     }
                 };
 
                 let term = Term::from_field_text(field, text);
                 Ok(Box::new(tantivy::query::TermQuery::new(
                     term,
-                    tantivy::schema::IndexRecordOption::Basic)))
+                    tantivy::schema::IndexRecordOption::Basic,
+                )))
             }
             FilterValue::Number(num) => {
                 if filter.field == "timestamp" {
@@ -608,7 +631,8 @@ impl FullTextSearchEngine {
                         Term::from_field_i64(self.schema_fields.timestamp_field, *num as i64);
                     Ok(Box::new(tantivy::query::TermQuery::new(
                         term,
-                        tantivy::schema::IndexRecordOption::Basic)))
+                        tantivy::schema::IndexRecordOption::Basic,
+                    )))
                 } else {
                     Err(crate::Error::InvalidInput(format!(
                         "Numeric filter not supported for field: {}",
@@ -621,14 +645,20 @@ impl FullTextSearchEngine {
                     // For tantivy 0.22, we need to use field name string
                     // Create range query using tantivy 0.25 API
                     use std::ops::Bound;
-                    let min_term = Term::from_field_i64(self.schema_fields.timestamp_field, *min as i64);
-                    let max_term = Term::from_field_i64(self.schema_fields.timestamp_field, *max as i64);
+                    let min_term =
+                        Term::from_field_i64(self.schema_fields.timestamp_field, *min as i64);
+                    let max_term =
+                        Term::from_field_i64(self.schema_fields.timestamp_field, *max as i64);
                     let range_query = tantivy::query::RangeQuery::new(
                         Bound::Included(min_term),
-                        Bound::Included(max_term));
+                        Bound::Included(max_term),
+                    );
                     Ok(Box::new(range_query))
                 } else {
-                    Err(crate::Error::InvalidInput(format!("Range filter not supported for field: {}", filter.field)))
+                    Err(crate::Error::InvalidInput(format!(
+                        "Range filter not supported for field: {}",
+                        filter.field
+                    )))
                 }
             }
             FilterValue::Terms(terms) => {
@@ -648,10 +678,12 @@ impl FullTextSearchEngine {
                     let term = Term::from_field_text(field, term_str);
                     let term_query = tantivy::query::TermQuery::new(
                         term,
-                        tantivy::schema::IndexRecordOption::Basic);
+                        tantivy::schema::IndexRecordOption::Basic,
+                    );
                     clauses.push((
                         Occur::Should,
-                        Box::new(term_query) as Box<dyn tantivy::query::Query>));
+                        Box::new(term_query) as Box<dyn tantivy::query::Query>,
+                    ));
                 }
 
                 Ok(Box::new(BooleanQuery::new(clauses)))
@@ -694,7 +726,8 @@ impl FullTextSearchEngine {
         &self,
         doc: &TantivyDocument,
         _query: &dyn Query,
-        request: &FullTextSearchRequest) -> crate::Result<HashMap<String, Vec<String>>> {
+        request: &FullTextSearchRequest,
+    ) -> crate::Result<HashMap<String, Vec<String>>> {
         let mut highlights = HashMap::new();
 
         // For now, return a simple implementation
@@ -708,20 +741,16 @@ impl FullTextSearchEngine {
             .get_first(self.schema_fields.title_field)
             .and_then(|v| v.as_str())
         {
-
             let highlighted = self.highlight_text(title, &request.query, pre_tag, post_tag);
             highlights.insert("title".to_string(), vec![highlighted]);
-
         }
         // Highlight content
         if let Some(content) = doc
             .get_first(self.schema_fields.content_field)
             .and_then(|v| v.as_str())
         {
-
             let highlighted = self.highlight_text(content, &request.query, pre_tag, post_tag);
             highlights.insert("content".to_string(), vec![highlighted]);
-
         }
         Ok(highlights)
     }
@@ -752,7 +781,8 @@ impl FullTextSearchEngine {
 
     /// Optimize the index (merge all segments into one)
     pub async fn optimize(&self) -> crate::Result<()> {
-        let segment_ids: Vec<_> = self.index
+        let segment_ids: Vec<_> = self
+            .index
             .searchable_segment_ids()
             .map_err(|e| crate::Error::Internal(format!("Failed to list segments: {}", e)))?;
         if segment_ids.len() <= 1 {
@@ -834,12 +864,18 @@ mod tests {
 
         // Verify all results have positive scores and highlights
         for result in &results {
-            assert!(result.score > 0.0, "Result {} should have positive score", result.id);
+            assert!(
+                result.score > 0.0,
+                "Result {} should have positive score",
+                result.id
+            );
         }
 
         // Verify highlights are generated
-        assert!(results.iter().any(|r| r.highlights.is_some()),
-            "At least one result should have highlights");
+        assert!(
+            results.iter().any(|r| r.highlights.is_some()),
+            "At least one result should have highlights"
+        );
 
         // Test with filters
         let filtered_request = FullTextSearchRequest {
@@ -892,11 +928,20 @@ mod tests {
         let updated_results = engine.search(&advanced_search).await?;
 
         // The updated doc1 should be found with new title
-        assert!(!updated_results.is_empty(), "Should find updated document with 'Advanced Machine'");
-        assert!(updated_results.iter().any(|r| {
-            r.id == "doc1" &&
-            r.title.as_ref().map(|t| t.contains("Advanced")).unwrap_or(false)
-        }), "Updated doc1 should have 'Advanced' in title");
+        assert!(
+            !updated_results.is_empty(),
+            "Should find updated document with 'Advanced Machine'"
+        );
+        assert!(
+            updated_results.iter().any(|r| {
+                r.id == "doc1"
+                    && r.title
+                        .as_ref()
+                        .map(|t| t.contains("Advanced"))
+                        .unwrap_or(false)
+            }),
+            "Updated doc1 should have 'Advanced' in title"
+        );
 
         // Test deletion
         engine.delete_document(&"doc2".to_string()).await?;
@@ -918,7 +963,10 @@ mod tests {
             })
             .await?;
 
-        assert!(after_delete.is_empty(), "Expected no results after deleting doc2");
+        assert!(
+            after_delete.is_empty(),
+            "Expected no results after deleting doc2"
+        );
 
         // Check stats
         let stats = engine.get_stats().await;
@@ -942,7 +990,8 @@ mod tests {
             FullTextDocument {
                 id: "rust1".to_string(),
                 title: Some("Rust Programming Language".to_string()),
-                content: "Rust is a systems programming language focused on safety and performance."
+                content:
+                    "Rust is a systems programming language focused on safety and performance."
                         .to_string(),
                 description: Some("Introduction to Rust".to_string()),
                 tags: vec![
@@ -970,7 +1019,8 @@ mod tests {
             FullTextDocument {
                 id: "python1".to_string(),
                 title: Some("Python for Data Science".to_string()),
-                content: "Python is widely used in data science for its rich ecosystem of libraries."
+                content:
+                    "Python is widely used in data science for its rich ecosystem of libraries."
                         .to_string(),
                 description: Some("Python data science guide".to_string()),
                 tags: vec![

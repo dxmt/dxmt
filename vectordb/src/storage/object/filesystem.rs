@@ -45,9 +45,11 @@ impl FilesystemStorage {
     /// 确保目录存在
     async fn ensure_dir_exists(&self, path: &Path) -> ObjectStorageResult<()> {
         if let Some(parent) = path.parent() {
-
-            fs::create_dir_all(parent).await.map_err(|e| ObjectStorageError::InternalError { message: format!("Directory creation failed: {:?}", e) })?;
-
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ObjectStorageError::InternalError {
+                    message: format!("Directory creation failed: {:?}", e),
+                })?;
         }
         Ok(())
     }
@@ -56,17 +58,15 @@ impl FilesystemStorage {
     async fn get_file_metadata(&self, path: &Path) -> ObjectStorageResult<std::fs::Metadata> {
         match fs::metadata(path).await {
             Ok(metadata) => Ok(metadata),
-            Err(err) => Err(
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    ObjectStorageError::ObjectNotFound {
-                        key: path.to_string_lossy().to_string(),
-                    }
-                } else {
-                    ObjectStorageError::IoError {
-                        message: err.to_string(),
-                    }
+            Err(err) => Err(if err.kind() == std::io::ErrorKind::NotFound {
+                ObjectStorageError::ObjectNotFound {
+                    key: path.to_string_lossy().to_string(),
                 }
-            ),
+            } else {
+                ObjectStorageError::IoError {
+                    message: err.to_string(),
+                }
+            }),
         }
     }
 
@@ -92,13 +92,16 @@ impl ObjectStorage for FilesystemStorage {
         &self,
         key: &str,
         data: Bytes,
-        _content_type: Option<&str>) -> ObjectStorageResult<()> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         let path = self.get_object_path(key);
         self.ensure_dir_exists(&path).await?;
 
-        fs::write(&path, data.as_ref()).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
-        })?;
+        fs::write(&path, data.as_ref())
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
         Ok(())
     }
 
@@ -121,11 +124,12 @@ impl ObjectStorage for FilesystemStorage {
         &self,
         key: &str,
         start: u64,
-        end: u64) -> ObjectStorageResult<Vec<u8>> {
+        end: u64,
+    ) -> ObjectStorageResult<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
         let path = self.get_object_path(key);
-        let mut file = fs::File::open(&path).await.map_err(|err| 
+        let mut file = fs::File::open(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 ObjectStorageError::ObjectNotFound {
                     key: key.to_string(),
@@ -135,16 +139,21 @@ impl ObjectStorage for FilesystemStorage {
                     message: err.to_string(),
                 }
             }
-        )?;
-
-        file.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
         })?;
+
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
         let read_len = (end - start) as usize;
         let mut buffer = vec![0u8; read_len];
-        let bytes_read = file.read(&mut buffer).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
-        })?;
+        let bytes_read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
         buffer.truncate(bytes_read);
 
         Ok(buffer)
@@ -153,11 +162,11 @@ impl ObjectStorage for FilesystemStorage {
     async fn delete_object(&self, key: &str) -> ObjectStorageResult<()> {
         let path = self.get_object_path(key);
         if path.exists() {
-
-            fs::remove_file(&path).await.map_err(|e| ObjectStorageError::IoError {
-                message: e.to_string(),
-            })?;
-
+            fs::remove_file(&path)
+                .await
+                .map_err(|e| ObjectStorageError::IoError {
+                    message: e.to_string(),
+                })?;
         }
         Ok(())
     }
@@ -181,9 +190,12 @@ impl ObjectStorage for FilesystemStorage {
 
     async fn head_object(&self, key: &str) -> ObjectStorageResult<ObjectMetadata> {
         let path = self.get_object_path(key);
-        let metadata = self.get_file_metadata(&path).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
-        })?;
+        let metadata =
+            self.get_file_metadata(&path)
+                .await
+                .map_err(|e| ObjectStorageError::IoError {
+                    message: e.to_string(),
+                })?;
 
         let last_modified = metadata
             .modified()
@@ -202,7 +214,8 @@ impl ObjectStorage for FilesystemStorage {
 
     async fn list_objects(
         &self,
-        options: &ListObjectsOptions) -> ObjectStorageResult<ListObjectsResult> {
+        options: &ListObjectsOptions,
+    ) -> ObjectStorageResult<ListObjectsResult> {
         let bucket_path = self.root_path.join(&self.bucket);
         let mut objects = Vec::new();
         let mut common_prefixes = Vec::new();
@@ -213,7 +226,7 @@ impl ObjectStorage for FilesystemStorage {
                 common_prefixes,
                 is_truncated: false,
                 next_continuation_token: None,
-            })
+            });
         }
 
         let prefix = options.prefix.as_deref().unwrap_or("");
@@ -227,7 +240,9 @@ impl ObjectStorage for FilesystemStorage {
             delimiter,
             &mut objects,
             &mut common_prefixes,
-        ).await.map_err(|e| ObjectStorageError::IoError {
+        )
+        .await
+        .map_err(|e| ObjectStorageError::IoError {
             message: e.to_string(),
         })?;
 
@@ -254,9 +269,11 @@ impl ObjectStorage for FilesystemStorage {
         let dest_path = self.get_object_path(dest_key);
 
         self.ensure_dir_exists(&dest_path).await?;
-        fs::copy(&source_path, &dest_path).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
-        })?;
+        fs::copy(&source_path, &dest_path)
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -269,9 +286,7 @@ impl ObjectStorage for FilesystemStorage {
 
         for (key, data) in objects {
             if self.put_object(&key, Bytes::from(data), None).await.is_ok() {
-
                 uploaded.push(key);
-
             }
         }
 
@@ -283,9 +298,7 @@ impl ObjectStorage for FilesystemStorage {
 
         for key in keys {
             if let Ok(data) = self.get_object(key).await {
-
                 results.push((key.clone(), data));
-
             }
         }
 
@@ -297,21 +310,26 @@ impl ObjectStorage for FilesystemStorage {
         key: &str,
         mut stream: BoxStream<'static, Result<Bytes, std::io::Error>>,
         _content_length: Option<u64>,
-        _content_type: Option<&str>) -> ObjectStorageResult<()> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         let path = self.get_object_path(key);
         self.ensure_dir_exists(&path).await?;
 
-        let mut file = fs::File::create(&path).await.map_err(|e| ObjectStorageError::IoError {
-            message: e.to_string(),
-        })?;
+        let mut file = fs::File::create(&path)
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ObjectStorageError::IoError {
                 message: e.to_string(),
             })?;
-            file.write_all(&chunk).await.map_err(|e| ObjectStorageError::IoError {
-                message: e.to_string(),
-            })?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| ObjectStorageError::IoError {
+                    message: e.to_string(),
+                })?;
         }
 
         file.flush().await?;
@@ -320,7 +338,8 @@ impl ObjectStorage for FilesystemStorage {
 
     async fn get_stream(
         &self,
-        key: &str) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
+        key: &str,
+    ) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
         let data = self.get_object(key).await?;
         let stream = stream::iter(vec![Bytes::from(data)]);
         Ok(Box::pin(stream.map(Ok)))
@@ -329,7 +348,8 @@ impl ObjectStorage for FilesystemStorage {
     async fn create_multipart_upload(
         &self,
         _key: &str,
-        _content_type: Option<&str>) -> ObjectStorageResult<String> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<String> {
         // 为简化实现，生成一个简单的上传ID
         use uuid::Uuid;
         Ok(Uuid::new_v4().to_string())
@@ -340,7 +360,8 @@ impl ObjectStorage for FilesystemStorage {
         _key: &str,
         upload_id: &str,
         part_number: u32,
-        data: &[u8]) -> ObjectStorageResult<PartInfo> {
+        data: &[u8],
+    ) -> ObjectStorageResult<PartInfo> {
         // 将分片存储为临时文件
         let part_path = self
             .root_path
@@ -349,8 +370,16 @@ impl ObjectStorage for FilesystemStorage {
             .join(upload_id)
             .join(format!("part-{}", part_number));
 
-        self.ensure_dir_exists(&part_path).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to create directory".to_string() })?;
-        fs::write(&part_path, data).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to write part file".to_string() })?;
+        self.ensure_dir_exists(&part_path).await.map_err(|_| {
+            ObjectStorageError::InternalError {
+                message: "Failed to create directory".to_string(),
+            }
+        })?;
+        fs::write(&part_path, data)
+            .await
+            .map_err(|_| ObjectStorageError::InternalError {
+                message: "Failed to write part file".to_string(),
+            })?;
 
         Ok(PartInfo {
             part_number,
@@ -363,11 +392,21 @@ impl ObjectStorage for FilesystemStorage {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[PartInfo]) -> ObjectStorageResult<()> {
+        parts: &[PartInfo],
+    ) -> ObjectStorageResult<()> {
         let final_path = self.get_object_path(key);
-        self.ensure_dir_exists(&final_path).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to create directory".to_string() })?;
+        self.ensure_dir_exists(&final_path).await.map_err(|_| {
+            ObjectStorageError::InternalError {
+                message: "Failed to create directory".to_string(),
+            }
+        })?;
 
-        let mut final_file = fs::File::create(&final_path).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to create file".to_string() })?;
+        let mut final_file =
+            fs::File::create(&final_path)
+                .await
+                .map_err(|_| ObjectStorageError::InternalError {
+                    message: "Failed to create file".to_string(),
+                })?;
 
         // 按分片号排序
         let mut sorted_parts = parts.to_vec();
@@ -383,11 +422,17 @@ impl ObjectStorage for FilesystemStorage {
                 .join(format!("part-{}", part.part_number));
 
             if part_path.exists() {
-
-
-                let part_data = fs::read(&part_path).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to read part file".to_string() })?;
-                final_file.write_all(&part_data).await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to write to final file".to_string() })?;
-
+                let part_data =
+                    fs::read(&part_path)
+                        .await
+                        .map_err(|_| ObjectStorageError::InternalError {
+                            message: "Failed to read part file".to_string(),
+                        })?;
+                final_file.write_all(&part_data).await.map_err(|_| {
+                    ObjectStorageError::InternalError {
+                        message: "Failed to write to final file".to_string(),
+                    }
+                })?;
             }
         }
 
@@ -401,10 +446,7 @@ impl ObjectStorage for FilesystemStorage {
             .join(upload_id);
 
         if multipart_dir.exists() {
-
-
             let _ = fs::remove_dir_all(&multipart_dir).await;
-
         }
         Ok(())
     }
@@ -418,10 +460,11 @@ impl ObjectStorage for FilesystemStorage {
             .join(upload_id);
 
         if multipart_dir.exists() {
-
-
-            fs::remove_dir_all(&multipart_dir).await.map_err(|e| ObjectStorageError::IoError { message: e.to_string() })?;
-
+            fs::remove_dir_all(&multipart_dir)
+                .await
+                .map_err(|e| ObjectStorageError::IoError {
+                    message: e.to_string(),
+                })?;
         }
         Ok(())
     }
@@ -432,10 +475,8 @@ impl ObjectStorage for FilesystemStorage {
         let mut total_size = 0u64;
 
         if bucket_path.exists() {
-
-
-            self.calculate_stats(&bucket_path, &mut object_count, &mut total_size).await?;
-
+            self.calculate_stats(&bucket_path, &mut object_count, &mut total_size)
+                .await?;
         }
         Ok(StorageStats {
             bucket: self.bucket.clone(),
@@ -449,12 +490,24 @@ impl ObjectStorage for FilesystemStorage {
         let bucket_path = self.root_path.join(&self.bucket);
 
         // 确保存储桶目录存在
-        fs::create_dir_all(&bucket_path).await.map_err(|e| ObjectStorageError::IoError { message: e.to_string() })?;
+        fs::create_dir_all(&bucket_path)
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
 
         // 尝试写入一个测试文件
         let test_path = bucket_path.join(".health_check");
-        fs::write(&test_path, b"ok").await.map_err(|e| ObjectStorageError::IoError { message: e.to_string() })?;
-        fs::remove_file(&test_path).await.map_err(|e| ObjectStorageError::IoError { message: e.to_string() })?;
+        fs::write(&test_path, b"ok")
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
+        fs::remove_file(&test_path)
+            .await
+            .map_err(|e| ObjectStorageError::IoError {
+                message: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -468,28 +521,38 @@ impl FilesystemStorage {
         prefix: &str,
         delimiter: Option<&str>,
         objects: &mut Vec<ObjectInfo>,
-        common_prefixes: &mut Vec<String>) -> ObjectStorageResult<()> {
+        common_prefixes: &mut Vec<String>,
+    ) -> ObjectStorageResult<()> {
         let mut entries = match fs::read_dir(dir).await {
             Ok(entries) => entries,
-            Err(e) => return Err(ObjectStorageError::InternalError { message: format!("Read dir failed: {:?}", e) }),
+            Err(e) => {
+                return Err(ObjectStorageError::InternalError {
+                    message: format!("Read dir failed: {:?}", e),
+                })
+            }
         };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let relative_path = path
                 .strip_prefix(self.root_path.join(&self.bucket))
-                .map_err(|_| ObjectStorageError::InternalError { message: "Operation failed".to_string() })?
+                .map_err(|_| ObjectStorageError::InternalError {
+                    message: "Operation failed".to_string(),
+                })?
                 .to_string_lossy()
                 .replace('\\', "/");
 
             if !relative_path.starts_with(prefix) {
-
-
                 continue;
-
             }
             if path.is_file() {
-                let metadata = entry.metadata().await.map_err(|_| ObjectStorageError::InternalError { message: "Failed to get metadata".to_string() })?;
+                let metadata =
+                    entry
+                        .metadata()
+                        .await
+                        .map_err(|_| ObjectStorageError::InternalError {
+                            message: "Failed to get metadata".to_string(),
+                        })?;
                 let last_modified = metadata
                     .modified()
                     .map(DateTime::<Utc>::from)
@@ -505,9 +568,7 @@ impl FilesystemStorage {
                 if let Some(_delim) = delimiter {
                     let dir_prefix = format!("{}/", relative_path);
                     if dir_prefix.len() > prefix.len() {
-
                         common_prefixes.push(dir_prefix);
-
                     }
                 } else {
                     // 递归遍历子目录
@@ -517,8 +578,10 @@ impl FilesystemStorage {
                         delimiter,
                         objects,
                         common_prefixes,
-                    )).await {
-                        Ok(_) => {},
+                    ))
+                    .await
+                    {
+                        Ok(_) => {}
                         Err(e) => return Err(e),
                     };
                 }
@@ -533,23 +596,36 @@ impl FilesystemStorage {
         &self,
         dir: &Path,
         object_count: &mut u64,
-        total_size: &mut u64) -> ObjectStorageResult<()> {
+        total_size: &mut u64,
+    ) -> ObjectStorageResult<()> {
         let mut entries = match fs::read_dir(dir).await {
             Ok(entries) => entries,
-            Err(e) => return Err(ObjectStorageError::InternalError { message: format!("Read dir failed: {:?}", e) }),
+            Err(e) => {
+                return Err(ObjectStorageError::InternalError {
+                    message: format!("Read dir failed: {:?}", e),
+                })
+            }
         };
 
         while let Some(entry) = match entries.next_entry().await {
             Ok(Some(entry)) => Some(entry),
             Ok(None) => None,
-            Err(e) => return Err(ObjectStorageError::InternalError { message: format!("Entry read failed: {:?}", e) }),
+            Err(e) => {
+                return Err(ObjectStorageError::InternalError {
+                    message: format!("Entry read failed: {:?}", e),
+                })
+            }
         } {
             let path = entry.path();
 
             if path.is_file() {
                 let metadata = match entry.metadata().await {
                     Ok(meta) => meta,
-                    Err(e) => return Err(ObjectStorageError::InternalError { message: format!("Metadata read failed: {:?}", e) }),
+                    Err(e) => {
+                        return Err(ObjectStorageError::InternalError {
+                            message: format!("Metadata read failed: {:?}", e),
+                        })
+                    }
                 };
                 *object_count += 1;
                 *total_size += metadata.len();
@@ -557,8 +633,9 @@ impl FilesystemStorage {
                 if let Some(file_name) = path.file_name() {
                     if !file_name.to_string_lossy().starts_with('_') {
                         // 递归计算子目录，但跳过以_开头的目录（如_multipart）
-                        match Box::pin(self.calculate_stats(&path, object_count, total_size)).await {
-                            Ok(_) => {},
+                        match Box::pin(self.calculate_stats(&path, object_count, total_size)).await
+                        {
+                            Ok(_) => {}
                             Err(e) => return Err(e),
                         };
                     }

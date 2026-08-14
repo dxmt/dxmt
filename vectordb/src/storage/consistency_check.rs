@@ -115,7 +115,9 @@ impl RepairReport {
             format!(
                 "❌ Repair failed for '{}': {}",
                 self.table_name,
-                self.error_message.as_ref().unwrap_or(&"Unknown error".to_string())
+                self.error_message
+                    .as_ref()
+                    .unwrap_or(&"Unknown error".to_string())
             )
         }
     }
@@ -130,15 +132,9 @@ impl ConsistencyChecker {
         record_ids: HashSet<String>,
         index_ids: HashSet<String>,
     ) -> (Vec<String>, Vec<String>) {
-        let missing_from_index: Vec<String> = record_ids
-            .difference(&index_ids)
-            .cloned()
-            .collect();
+        let missing_from_index: Vec<String> = record_ids.difference(&index_ids).cloned().collect();
 
-        let orphaned_in_index: Vec<String> = index_ids
-            .difference(&record_ids)
-            .cloned()
-            .collect();
+        let orphaned_in_index: Vec<String> = index_ids.difference(&record_ids).cloned().collect();
 
         (missing_from_index, orphaned_in_index)
     }
@@ -180,11 +176,7 @@ mod tests {
         index.insert("id1".to_string());
         index.insert("id2".to_string());
 
-        let report = ConsistencyChecker::build_report(
-            "test_table".to_string(),
-            records,
-            index,
-        );
+        let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
         assert!(report.is_consistent);
         assert_eq!(report.total_records, 2);
@@ -205,11 +197,7 @@ mod tests {
         index.insert("id1".to_string());
         index.insert("id2".to_string());
 
-        let report = ConsistencyChecker::build_report(
-            "test_table".to_string(),
-            records,
-            index,
-        );
+        let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
         assert!(!report.is_consistent);
         assert_eq!(report.total_records, 3);
@@ -229,11 +217,7 @@ mod tests {
         index.insert("id2".to_string());
         index.insert("id3".to_string());
 
-        let report = ConsistencyChecker::build_report(
-            "test_table".to_string(),
-            records,
-            index,
-        );
+        let report = ConsistencyChecker::build_report("test_table".to_string(), records, index);
 
         assert!(!report.is_consistent);
         assert_eq!(report.total_records, 1);

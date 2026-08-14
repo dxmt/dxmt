@@ -9,8 +9,8 @@
 //   PROPTEST_CASES=100 cargo test --test property    # Normal
 //   PROPTEST_CASES=1000 cargo test --test property   # Comprehensive
 
-mod fixtures;
 mod common;
+mod fixtures;
 
 // Vector and distance metric properties
 mod vector_properties {

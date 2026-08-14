@@ -54,17 +54,17 @@ impl SimdLevel {
                 return Self::Sse;
             }
         }
-        
+
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("neon") {
                 return Self::Neon;
             }
         }
-        
+
         Self::None
     }
-    
+
     pub fn vector_width(&self) -> usize {
         match self {
             Self::None => 1,
@@ -90,44 +90,45 @@ impl SimdAccelerator {
             SimdLevel::Avx => Arc::new(AvxOps),
             _ => Arc::new(ScalarOps),
         };
-        
+
         Self { level, ops }
     }
-    
+
     pub fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
         self.ops.cosine_similarity(a, b)
     }
-    
+
     pub fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         self.ops.euclidean_distance(a, b)
     }
-    
+
     pub fn dot_product(&self, a: &[f32], b: &[f32]) -> f32 {
         self.ops.dot_product(a, b)
     }
-    
+
     pub fn vector_add(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         self.ops.vector_add(a, b, result)
     }
-    
+
     pub fn vector_sub(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         self.ops.vector_sub(a, b, result)
     }
-    
+
     pub fn vector_scale(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         self.ops.vector_scale(a, scalar, result)
     }
-    
+
     pub fn vector_normalize(&self, a: &[f32], result: &mut [f32]) {
         self.ops.vector_normalize(a, result)
     }
-    
+
     pub fn batch_cosine_similarity(&self, query: &[f32], vectors: &[DenseVector]) -> Vec<f32> {
-        vectors.iter()
+        vectors
+            .iter()
             .map(|v| self.cosine_similarity(query, v))
             .collect()
     }
-    
+
     pub fn level(&self) -> SimdLevel {
         self.level
     }
@@ -152,14 +153,14 @@ impl VectorOps for ScalarOps {
         let dot = self.dot_product(a, b);
         let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        
+
         if norm_a > 0.0 && norm_b > 0.0 {
             dot / (norm_a * norm_b)
         } else {
             0.0
         }
     }
-    
+
     fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         a.iter()
             .zip(b.iter())
@@ -170,29 +171,29 @@ impl VectorOps for ScalarOps {
             .sum::<f32>()
             .sqrt()
     }
-    
+
     fn dot_product(&self, a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
     }
-    
+
     fn vector_add(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         for i in 0..a.len() {
             result[i] = a[i] + b[i];
         }
     }
-    
+
     fn vector_sub(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         for i in 0..a.len() {
             result[i] = a[i] - b[i];
         }
     }
-    
+
     fn vector_scale(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         for i in 0..a.len() {
             result[i] = a[i] * scalar;
         }
     }
-    
+
     fn vector_normalize(&self, a: &[f32], result: &mut [f32]) {
         let norm = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
@@ -210,27 +211,27 @@ impl VectorOps for AvxOps {
     fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.cosine_similarity_avx(a, b) }
     }
-    
+
     fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.euclidean_distance_impl(a, b) }
     }
-    
+
     fn dot_product(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.dot_product_impl(a, b) }
     }
-    
+
     fn vector_add(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         unsafe { self.vector_add_impl(a, b, result) }
     }
-    
+
     fn vector_sub(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         unsafe { self.vector_sub_impl(a, b, result) }
     }
-    
+
     fn vector_scale(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         unsafe { self.vector_scale_impl(a, scalar, result) }
     }
-    
+
     fn vector_normalize(&self, a: &[f32], result: &mut [f32]) {
         let norm = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
@@ -263,7 +264,8 @@ impl AvxOps {
         let remainder = a.len() % 8;
         if remainder > 0 {
             let start = chunks * 8;
-            let scalar_dot: f32 = a[start..].iter()
+            let scalar_dot: f32 = a[start..]
+                .iter()
                 .zip(b[start..].iter())
                 .map(|(x, y)| x * y)
                 .sum();
@@ -280,16 +282,16 @@ impl AvxOps {
     unsafe fn euclidean_distance_impl(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm256_setzero_ps();
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             let diff = _mm256_sub_ps(a_vec, b_vec);
             sum = _mm256_add_ps(sum, _mm256_mul_ps(diff, diff));
         }
-        
+
         let mut result = horizontal_sum_ps256(sum);
-        
+
         // Handle remainder
         let remainder = a.len() % 8;
         if remainder > 0 {
@@ -299,23 +301,23 @@ impl AvxOps {
                 result += diff * diff;
             }
         }
-        
+
         result.sqrt()
     }
-    
+
     #[target_feature(enable = "avx")]
     unsafe fn dot_product_impl(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm256_setzero_ps();
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             sum = _mm256_add_ps(sum, _mm256_mul_ps(a_vec, b_vec));
         }
-        
+
         let mut result = horizontal_sum_ps256(sum);
-        
+
         // Handle remainder
         let remainder = a.len() % 8;
         if remainder > 0 {
@@ -324,21 +326,21 @@ impl AvxOps {
                 result += a[i] * b[i];
             }
         }
-        
+
         result
     }
-    
+
     #[target_feature(enable = "avx")]
     unsafe fn vector_add_impl(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             let sum = _mm256_add_ps(a_vec, b_vec);
             _mm256_storeu_ps(result.as_mut_ptr().add(i * 8), sum);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 8;
         if remainder > 0 {
@@ -348,18 +350,18 @@ impl AvxOps {
             }
         }
     }
-    
+
     #[target_feature(enable = "avx")]
     unsafe fn vector_sub_impl(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             let diff = _mm256_sub_ps(a_vec, b_vec);
             _mm256_storeu_ps(result.as_mut_ptr().add(i * 8), diff);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 8;
         if remainder > 0 {
@@ -369,18 +371,18 @@ impl AvxOps {
             }
         }
     }
-    
+
     #[target_feature(enable = "avx")]
     unsafe fn vector_scale_impl(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         let scalar_vec = _mm256_set1_ps(scalar);
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let scaled = _mm256_mul_ps(a_vec, scalar_vec);
             _mm256_storeu_ps(result.as_mut_ptr().add(i * 8), scaled);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 8;
         if remainder > 0 {
@@ -400,27 +402,27 @@ impl VectorOps for Avx2Ops {
         // AVX2 adds FMA instructions
         unsafe { self.cosine_similarity_fma(a, b) }
     }
-    
+
     fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.euclidean_distance_fma(a, b) }
     }
-    
+
     fn dot_product(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.dot_product_fma(a, b) }
     }
-    
+
     fn vector_add(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         AvxOps.vector_add(a, b, result)
     }
-    
+
     fn vector_sub(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         AvxOps.vector_sub(a, b, result)
     }
-    
+
     fn vector_scale(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         AvxOps.vector_scale(a, scalar, result)
     }
-    
+
     fn vector_normalize(&self, a: &[f32], result: &mut [f32]) {
         AvxOps.vector_normalize(a, result)
     }
@@ -432,50 +434,50 @@ impl Avx2Ops {
         let mut dot_sum = _mm256_setzero_ps();
         let mut norm_a_sum = _mm256_setzero_ps();
         let mut norm_b_sum = _mm256_setzero_ps();
-        
+
         let chunks = a.len() / 8;
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-            
+
             dot_sum = _mm256_fmadd_ps(a_vec, b_vec, dot_sum);
             norm_a_sum = _mm256_fmadd_ps(a_vec, a_vec, norm_a_sum);
             norm_b_sum = _mm256_fmadd_ps(b_vec, b_vec, norm_b_sum);
         }
-        
+
         let dot = horizontal_sum_ps256(dot_sum);
         let norm_a = horizontal_sum_ps256(norm_a_sum).sqrt();
         let norm_b = horizontal_sum_ps256(norm_b_sum).sqrt();
-        
+
         dot / (norm_a * norm_b)
     }
-    
+
     #[target_feature(enable = "avx2", enable = "fma")]
     unsafe fn euclidean_distance_fma(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm256_setzero_ps();
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             let diff = _mm256_sub_ps(a_vec, b_vec);
             sum = _mm256_fmadd_ps(diff, diff, sum);
         }
-        
+
         horizontal_sum_ps256(sum).sqrt()
     }
-    
+
     #[target_feature(enable = "avx2", enable = "fma")]
     unsafe fn dot_product_fma(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm256_setzero_ps();
         let chunks = a.len() / 8;
-        
+
         for i in 0..chunks {
             let a_vec = _mm256_loadu_ps(a.as_ptr().add(i * 8));
             let b_vec = _mm256_loadu_ps(b.as_ptr().add(i * 8));
             sum = _mm256_fmadd_ps(a_vec, b_vec, sum);
         }
-        
+
         horizontal_sum_ps256(sum)
     }
 }
@@ -487,27 +489,27 @@ impl VectorOps for Avx512Ops {
     fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.cosine_similarity_avx512(a, b) }
     }
-    
+
     fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.euclidean_distance_avx512(a, b) }
     }
-    
+
     fn dot_product(&self, a: &[f32], b: &[f32]) -> f32 {
         unsafe { self.dot_product_avx512(a, b) }
     }
-    
+
     fn vector_add(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         unsafe { self.vector_add_avx512(a, b, result) }
     }
-    
+
     fn vector_sub(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         unsafe { self.vector_sub_avx512(a, b, result) }
     }
-    
+
     fn vector_scale(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         unsafe { self.vector_scale_avx512(a, scalar, result) }
     }
-    
+
     fn vector_normalize(&self, a: &[f32], result: &mut [f32]) {
         let norm = self.dot_product(a, a).sqrt();
         if norm > 0.0 {
@@ -522,64 +524,64 @@ impl Avx512Ops {
         let mut dot_sum = _mm512_setzero_ps();
         let mut norm_a_sum = _mm512_setzero_ps();
         let mut norm_b_sum = _mm512_setzero_ps();
-        
+
         let chunks = a.len() / 16;
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let b_vec = _mm512_loadu_ps(b.as_ptr().add(i * 16));
-            
+
             dot_sum = _mm512_fmadd_ps(a_vec, b_vec, dot_sum);
             norm_a_sum = _mm512_fmadd_ps(a_vec, a_vec, norm_a_sum);
             norm_b_sum = _mm512_fmadd_ps(b_vec, b_vec, norm_b_sum);
         }
-        
+
         let dot = _mm512_reduce_add_ps(dot_sum);
         let norm_a = _mm512_reduce_add_ps(norm_a_sum).sqrt();
         let norm_b = _mm512_reduce_add_ps(norm_b_sum).sqrt();
-        
+
         dot / (norm_a * norm_b)
     }
-    
+
     #[target_feature(enable = "avx512f")]
     unsafe fn euclidean_distance_avx512(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm512_setzero_ps();
         let chunks = a.len() / 16;
-        
+
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let b_vec = _mm512_loadu_ps(b.as_ptr().add(i * 16));
             let diff = _mm512_sub_ps(a_vec, b_vec);
             sum = _mm512_fmadd_ps(diff, diff, sum);
         }
-        
+
         _mm512_reduce_add_ps(sum).sqrt()
     }
-    
+
     #[target_feature(enable = "avx512f")]
     unsafe fn dot_product_avx512(&self, a: &[f32], b: &[f32]) -> f32 {
         let mut sum = _mm512_setzero_ps();
         let chunks = a.len() / 16;
-        
+
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let b_vec = _mm512_loadu_ps(b.as_ptr().add(i * 16));
             sum = _mm512_fmadd_ps(a_vec, b_vec, sum);
         }
-        
+
         _mm512_reduce_add_ps(sum)
     }
-    
+
     #[target_feature(enable = "avx512f")]
     unsafe fn vector_add_avx512(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         let chunks = a.len() / 16;
-        
+
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let b_vec = _mm512_loadu_ps(b.as_ptr().add(i * 16));
             let sum = _mm512_add_ps(a_vec, b_vec);
             _mm512_storeu_ps(result.as_mut_ptr().add(i * 16), sum);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 16;
         if remainder > 0 {
@@ -589,18 +591,18 @@ impl Avx512Ops {
             }
         }
     }
-    
+
     #[target_feature(enable = "avx512f")]
     unsafe fn vector_sub_avx512(&self, a: &[f32], b: &[f32], result: &mut [f32]) {
         let chunks = a.len() / 16;
-        
+
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let b_vec = _mm512_loadu_ps(b.as_ptr().add(i * 16));
             let diff = _mm512_sub_ps(a_vec, b_vec);
             _mm512_storeu_ps(result.as_mut_ptr().add(i * 16), diff);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 16;
         if remainder > 0 {
@@ -610,18 +612,18 @@ impl Avx512Ops {
             }
         }
     }
-    
+
     #[target_feature(enable = "avx512f")]
     unsafe fn vector_scale_avx512(&self, a: &[f32], scalar: f32, result: &mut [f32]) {
         let scalar_vec = _mm512_set1_ps(scalar);
         let chunks = a.len() / 16;
-        
+
         for i in 0..chunks {
             let a_vec = _mm512_loadu_ps(a.as_ptr().add(i * 16));
             let scaled = _mm512_mul_ps(a_vec, scalar_vec);
             _mm512_storeu_ps(result.as_mut_ptr().add(i * 16), scaled);
         }
-        
+
         // Handle remainder
         let remainder = a.len() % 16;
         if remainder > 0 {
@@ -649,30 +651,30 @@ unsafe fn horizontal_sum_ps256(v: __m256) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_simd_detection() {
         let level = SimdLevel::detect();
         println!("Detected SIMD level: {:?}", level);
         println!("Vector width: {}", level.vector_width());
     }
-    
+
     #[test]
     fn test_simd_operations() {
         let accelerator = SimdAccelerator::new(SimdLevel::detect());
-        
+
         let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
-        
+
         let dot = accelerator.dot_product(&a, &b);
         println!("Dot product: {}", dot);
-        
+
         let cosine = accelerator.cosine_similarity(&a, &b);
         println!("Cosine similarity: {}", cosine);
-        
+
         let euclidean = accelerator.euclidean_distance(&a, &b);
         println!("Euclidean distance: {}", euclidean);
-        
+
         let mut result = vec![0.0; 8];
         accelerator.vector_add(&a, &b, &mut result);
         println!("Vector add: {:?}", result);

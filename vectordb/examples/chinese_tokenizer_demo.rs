@@ -8,10 +8,10 @@
 //
 // Run with: cargo run --example chinese_tokenizer_demo --features text-bm25
 
-use tantivy::schema::{Schema, TextFieldIndexing, TextOptions, IndexRecordOption, Value};
-use tantivy::{doc, Index, IndexWriter, TantivyDocument};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
+use tantivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value};
+use tantivy::{doc, Index, IndexWriter, TantivyDocument};
 
 // Import from the vectordb library
 use dxmt_vectordb::search::jieba_tokenizer::JiebaTokenizer;
@@ -61,11 +61,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut index_writer: IndexWriter = index.writer(50_000_000)?;
 
     let documents = vec![
-        ("机器学习入门", "机器学习是人工智能的一个重要分支，通过算法让计算机从数据中学习。"),
-        ("深度学习基础", "深度学习使用神经网络模型处理复杂的数据，在图像识别和自然语言处理中表现出色。"),
-        ("自然语言处理", "自然语言处理是让计算机理解和生成人类语言的技术，包括分词、词性标注等任务。"),
-        ("向量数据库", "向量数据库专门用于存储和检索高维向量数据，在相似性搜索中非常高效。"),
-        ("全文搜索引擎", "全文搜索引擎可以快速检索文本内容，支持中文分词、模糊匹配等功能。"),
+        (
+            "机器学习入门",
+            "机器学习是人工智能的一个重要分支，通过算法让计算机从数据中学习。",
+        ),
+        (
+            "深度学习基础",
+            "深度学习使用神经网络模型处理复杂的数据，在图像识别和自然语言处理中表现出色。",
+        ),
+        (
+            "自然语言处理",
+            "自然语言处理是让计算机理解和生成人类语言的技术，包括分词、词性标注等任务。",
+        ),
+        (
+            "向量数据库",
+            "向量数据库专门用于存储和检索高维向量数据，在相似性搜索中非常高效。",
+        ),
+        (
+            "全文搜索引擎",
+            "全文搜索引擎可以快速检索文本内容，支持中文分词、模糊匹配等功能。",
+        ),
     ];
 
     for (title_text, content_text) in documents {
@@ -113,7 +128,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(title_text) = retrieved_doc.get_first(title).and_then(|v| v.as_str()) {
                     println!("    - Title: {}", title_text);
                 }
-                if let Some(content_text) = retrieved_doc.get_first(content).and_then(|v| v.as_str()) {
+                if let Some(content_text) =
+                    retrieved_doc.get_first(content).and_then(|v| v.as_str())
+                {
                     println!("      Content: {}", content_text);
                 }
             }

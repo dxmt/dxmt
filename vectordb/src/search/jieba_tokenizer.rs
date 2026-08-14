@@ -75,11 +75,8 @@ impl<'a> JiebaTokenStream<'a> {
             for word in words {
                 let word_bytes = word.len();
                 if !word.trim().is_empty() {
-                    self.tokens.push((
-                        word.to_string(),
-                        byte_offset,
-                        byte_offset + word_bytes,
-                    ));
+                    self.tokens
+                        .push((word.to_string(), byte_offset, byte_offset + word_bytes));
                 }
                 byte_offset += word_bytes;
             }

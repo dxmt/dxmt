@@ -23,7 +23,8 @@ pub trait ObjectStorage: Send + Sync {
         &self,
         key: &str,
         data: Bytes,
-        content_type: Option<&str>) -> ObjectStorageResult<()>;
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()>;
 
     /// 下载对象
     ///
@@ -44,7 +45,8 @@ pub trait ObjectStorage: Send + Sync {
         &self,
         key: &str,
         start: u64,
-        end: u64) -> ObjectStorageResult<Vec<u8>>;
+        end: u64,
+    ) -> ObjectStorageResult<Vec<u8>>;
 
     /// 删除对象
     ///
@@ -88,7 +90,8 @@ pub trait ObjectStorage: Send + Sync {
     /// * `options` - 列表选项
     async fn list_objects(
         &self,
-        options: &ListObjectsOptions) -> ObjectStorageResult<ListObjectsResult>;
+        options: &ListObjectsOptions,
+    ) -> ObjectStorageResult<ListObjectsResult>;
 
     /// 复制对象
     ///
@@ -127,7 +130,8 @@ pub trait ObjectStorage: Send + Sync {
         key: &str,
         stream: BoxStream<'static, Result<Bytes, std::io::Error>>,
         content_length: Option<u64>,
-        content_type: Option<&str>) -> ObjectStorageResult<()>;
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()>;
 
     /// 流式下载对象
     ///
@@ -138,7 +142,8 @@ pub trait ObjectStorage: Send + Sync {
     /// 数据流
     async fn get_stream(
         &self,
-        key: &str) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>>;
+        key: &str,
+    ) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>>;
 
     /// 开始分片上传
     ///
@@ -151,7 +156,8 @@ pub trait ObjectStorage: Send + Sync {
     async fn create_multipart_upload(
         &self,
         key: &str,
-        content_type: Option<&str>) -> ObjectStorageResult<String>;
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<String>;
 
     /// 上传分片
     ///
@@ -168,7 +174,8 @@ pub trait ObjectStorage: Send + Sync {
         key: &str,
         upload_id: &str,
         part_number: u32,
-        data: &[u8]) -> ObjectStorageResult<PartInfo>;
+        data: &[u8],
+    ) -> ObjectStorageResult<PartInfo>;
 
     /// 完成分片上传
     ///
@@ -180,7 +187,8 @@ pub trait ObjectStorage: Send + Sync {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[PartInfo]) -> ObjectStorageResult<()>;
+        parts: &[PartInfo],
+    ) -> ObjectStorageResult<()>;
 
     /// 取消分片上传
     ///

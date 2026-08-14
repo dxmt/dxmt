@@ -1,4 +1,4 @@
-use crate::types::vector::{RecordId, DenseVector};
+use crate::types::vector::{DenseVector, RecordId};
 use std::any::Any;
 
 /// Synchronous vector index interface (legacy; prefer `index_traits::VectorIndex` for new code).

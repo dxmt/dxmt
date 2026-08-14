@@ -41,9 +41,7 @@ impl PrecomputedQuery {
         };
 
         let norm = match metric {
-            DistanceMetric::Cosine => {
-                squared_norm.map(|sn| sn.sqrt())
-            }
+            DistanceMetric::Cosine => squared_norm.map(|sn| sn.sqrt()),
             _ => None,
         };
 
@@ -72,7 +70,9 @@ impl PrecomputedQuery {
         match self.metric {
             DistanceMetric::Cosine => {
                 // ✅ Use precomputed query norm
-                let dot_product: f32 = self.vector.iter()
+                let dot_product: f32 = self
+                    .vector
+                    .iter()
                     .zip(target.iter())
                     .map(|(x, y)| x * y)
                     .sum();
@@ -80,10 +80,7 @@ impl PrecomputedQuery {
                 let norm_query = self.norm.unwrap_or(0.0);
 
                 // Still need to compute target norm (can't precompute for all DB vectors)
-                let norm_target: f32 = target.iter()
-                    .map(|x| x * x)
-                    .sum::<f32>()
-                    .sqrt();
+                let norm_target: f32 = target.iter().map(|x| x * x).sum::<f32>().sqrt();
 
                 if norm_query == 0.0 || norm_target == 0.0 {
                     return Ok(0.0);
@@ -94,7 +91,9 @@ impl PrecomputedQuery {
             }
             DistanceMetric::Euclidean => {
                 // Standard Euclidean calculation
-                let sum_squared_diff: f32 = self.vector.iter()
+                let sum_squared_diff: f32 = self
+                    .vector
+                    .iter()
                     .zip(target.iter())
                     .map(|(x, y)| (x - y) * (x - y))
                     .sum();
@@ -102,7 +101,9 @@ impl PrecomputedQuery {
             }
             DistanceMetric::Dot => {
                 // Dot product (negative for distance)
-                let dot_product: f32 = self.vector.iter()
+                let dot_product: f32 = self
+                    .vector
+                    .iter()
                     .zip(target.iter())
                     .map(|(x, y)| x * y)
                     .sum();
@@ -110,7 +111,9 @@ impl PrecomputedQuery {
             }
             DistanceMetric::Manhattan => {
                 // Manhattan distance
-                let sum_abs_diff: f32 = self.vector.iter()
+                let sum_abs_diff: f32 = self
+                    .vector
+                    .iter()
                     .zip(target.iter())
                     .map(|(x, y)| (x - y).abs())
                     .sum();
@@ -174,7 +177,8 @@ mod tests {
         let distance = precomputed.distance_to(&target).unwrap();
 
         // Manually calculate expected distance
-        let expected = ((4.0_f32 - 1.0).powi(2) + (5.0_f32 - 2.0).powi(2) + (6.0_f32 - 3.0).powi(2)).sqrt();
+        let expected =
+            ((4.0_f32 - 1.0).powi(2) + (5.0_f32 - 2.0).powi(2) + (6.0_f32 - 3.0).powi(2)).sqrt();
 
         assert!((distance - expected).abs() < 1e-6);
     }

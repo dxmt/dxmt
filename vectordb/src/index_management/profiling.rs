@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use parking_lot::RwLock;
+use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
-use std::sync::Arc;
-use parking_lot::RwLock;
 
 #[derive(Clone, Debug)]
 pub struct ProfileSnapshot {
@@ -194,17 +194,15 @@ impl OperationProfileHandle {
 
         profiles
             .entry(snapshot.name.clone())
-            .or_insert_with(|| {
-                PerformanceProfile {
-                    operation_name: snapshot.name.clone(),
-                    snapshots: vec![snapshot.clone()],
-                    min_duration_ms: snapshot.duration_ms,
-                    max_duration_ms: snapshot.duration_ms,
-                    avg_duration_ms: snapshot.duration_ms,
-                    p50_duration_ms: snapshot.duration_ms,
-                    p95_duration_ms: snapshot.duration_ms,
-                    p99_duration_ms: snapshot.duration_ms,
-                }
+            .or_insert_with(|| PerformanceProfile {
+                operation_name: snapshot.name.clone(),
+                snapshots: vec![snapshot.clone()],
+                min_duration_ms: snapshot.duration_ms,
+                max_duration_ms: snapshot.duration_ms,
+                avg_duration_ms: snapshot.duration_ms,
+                p50_duration_ms: snapshot.duration_ms,
+                p95_duration_ms: snapshot.duration_ms,
+                p99_duration_ms: snapshot.duration_ms,
             });
 
         let profile = profiles.get_mut(&snapshot.name).unwrap();

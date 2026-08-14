@@ -29,11 +29,7 @@ impl MapEvaluator {
     ///
     /// # Returns
     /// Average Precision score in range [0.0, 1.0]
-    pub fn average_precision_at_k(
-        retrieved: &[String],
-        ground_truth: &[String],
-        k: usize,
-    ) -> f64 {
+    pub fn average_precision_at_k(retrieved: &[String], ground_truth: &[String], k: usize) -> f64 {
         if k == 0 || retrieved.is_empty() || ground_truth.is_empty() {
             return 0.0;
         }

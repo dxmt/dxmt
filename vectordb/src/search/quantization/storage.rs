@@ -6,7 +6,7 @@ use super::{
     QuantizedVector, ScalarQuantizationConfig, ScalarQuantizer,
 };
 use crate::storage::object::{traits::ObjectStorage, TieredStorage};
-use crate::types::vector::{RecordId, DenseVector};
+use crate::types::vector::{DenseVector, RecordId};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -151,7 +151,10 @@ impl QuantizedStorage {
         self.quantizer.train(training_vectors)?;
 
         // 更新统计信息
-        let mut stats = self.stats.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+        let mut stats = self
+            .stats
+            .write()
+            .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
         stats.compression_ratio = self.quantizer.get_compression_ratio();
         stats.quantization_type = self.get_quantization_type_name();
 
@@ -168,7 +171,10 @@ impl QuantizedStorage {
 
         // 添加到写入缓冲区 — drop lock before async call
         let needs_flush = {
-            let mut buffer = self.write_buffer.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut buffer = self
+                .write_buffer
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             buffer.push((id.clone(), quantized.clone()));
             buffer.len() >= self.config.batch_write_size
         };
@@ -178,7 +184,10 @@ impl QuantizedStorage {
 
         // 添加到内存缓存 — drop lock before async call
         let deferred_insert = {
-            let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut cache = self
+                .memory_cache
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             if cache.len() >= self.config.memory_cache_size {
                 Some(quantized) // eviction needed; defer insert until after eviction
             } else {
@@ -188,13 +197,19 @@ impl QuantizedStorage {
         };
         if let Some(q) = deferred_insert {
             self.evict_from_cache().await?;
-            let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut cache = self
+                .memory_cache
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             cache.insert(id, q);
         }
 
         // 更新统计信息
         {
-            let mut stats = self.stats.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut stats = self
+                .stats
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             stats.total_vectors += 1;
             stats.memory_usagebytes += std::mem::size_of::<QuantizedVector>()
         }
@@ -211,7 +226,10 @@ impl QuantizedStorage {
 
         // 首先检查内存缓存 — drop lock before async call
         let cached = {
-            let cache = self.memory_cache.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let cache = self
+                .memory_cache
+                .read()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             cache.get(id).cloned()
         };
         if let Some(vector) = cached {
@@ -228,7 +246,10 @@ impl QuantizedStorage {
 
                 // 加载到内存缓存
                 {
-                    let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+                    let mut cache = self
+                        .memory_cache
+                        .write()
+                        .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
                     cache.insert(id.clone(), vector.clone());
                 }
 
@@ -246,7 +267,10 @@ impl QuantizedStorage {
 
             // 加载到内存缓存
             {
-                let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+                let mut cache = self
+                    .memory_cache
+                    .write()
+                    .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
                 cache.insert(id.clone(), vector.clone());
             }
 
@@ -273,7 +297,10 @@ impl QuantizedStorage {
     pub async fn remove(&self, id: &RecordId) -> crate::Result<bool> {
         // 从内存缓存删除
         let cache_removed = {
-            let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut cache = self
+                .memory_cache
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             cache.remove(id).is_some()
         };
 
@@ -290,7 +317,10 @@ impl QuantizedStorage {
 
         // 更新统计信息
         if cache_removed || storage_removed {
-            let mut stats = self.stats.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut stats = self
+                .stats
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             stats.total_vectors = stats.total_vectors.saturating_sub(1)
         }
 
@@ -337,7 +367,9 @@ impl QuantizedStorage {
 
     // 私有辅助方法
 
-    fn create_quantizer(quantizationtype: &QuantizationType) -> crate::Result<Box<dyn QuantizerWrapper>> {
+    fn create_quantizer(
+        quantizationtype: &QuantizationType,
+    ) -> crate::Result<Box<dyn QuantizerWrapper>> {
         match quantizationtype {
             QuantizationType::Scalar(config) => {
                 let quantizer =
@@ -373,7 +405,10 @@ impl QuantizedStorage {
 
     async fn flush_write_buffer(&self) -> crate::Result<()> {
         let vectors_to_write = {
-            let mut buffer = self.write_buffer.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut buffer = self
+                .write_buffer
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             let vectors = buffer.clone();
             buffer.clear();
             vectors
@@ -390,11 +425,13 @@ impl QuantizedStorage {
             if let Some(ref tiered_storage) = self.tiered_storage {
                 tiered_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
             } else if let Some(ref object_storage) = self.object_storage {
                 object_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
             }
         }
 
@@ -406,23 +443,21 @@ impl QuantizedStorage {
         let evict_count = self.config.memory_cache_size / 10; // 逐出10%
 
         let vectors_to_evict = {
-            let mut cache = self.memory_cache.write().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let mut cache = self
+                .memory_cache
+                .write()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             let mut evicted = Vec::new();
 
             let mut iter = cache.iter();
             for _ in 0..evict_count {
                 if let Some((id, vector)) = iter.next() {
-
                     evicted.push((id.clone(), vector.clone()));
-
-
                 }
-
             }
 
             for (id, _) in &evicted {
                 cache.remove(id);
-
             }
 
             evicted
@@ -435,11 +470,13 @@ impl QuantizedStorage {
             if let Some(ref tiered_storage) = self.tiered_storage {
                 tiered_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
             } else if let Some(ref object_storage) = self.object_storage {
                 object_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
             }
         }
 
@@ -448,7 +485,10 @@ impl QuantizedStorage {
 
     async fn persist_memory_cache(&self) -> crate::Result<()> {
         let cache_contents = {
-            let cache = self.memory_cache.read().map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
+            let cache = self
+                .memory_cache
+                .read()
+                .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?;
             cache.clone()
         };
 
@@ -458,13 +498,14 @@ impl QuantizedStorage {
             if let Some(ref tiered_storage) = self.tiered_storage {
                 tiered_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
             } else if let Some(ref object_storage) = self.object_storage {
-     object_storage
+                object_storage
                     .put_object(&id.to_string(), serialized, None)
-                    .await.map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
-
- }
+                    .await
+                    .map_err(|_| crate::Error::Internal("Storage operation failed".to_string()))?;
+            }
         }
 
         Ok(())
@@ -472,11 +513,12 @@ impl QuantizedStorage {
 
     fn serialize_vector(&self, vector: &QuantizedVector) -> crate::Result<Bytes> {
         let data = if self.config.enable_compression {
-            self.compress_data(&bincode::serialize(vector).map_err(|e|
-                crate::Error::Serialization(e.to_string() )
-            )?)?
+            self.compress_data(
+                &bincode::serialize(vector)
+                    .map_err(|e| crate::Error::Serialization(e.to_string()))?,
+            )?
         } else {
-            bincode::serialize(vector).map_err(|e| crate::Error::Serialization(e.to_string() ))?
+            bincode::serialize(vector).map_err(|e| crate::Error::Serialization(e.to_string()))?
         };
 
         Ok(Bytes::from(data))
@@ -493,8 +535,8 @@ impl QuantizedStorage {
     }
 
     fn compress_data(&self, data: &[u8]) -> crate::Result<Vec<u8>> {
-        zstd::bulk::compress(data, self.config.compression_level).map_err(|e|
-            crate::Error::Serialization(e.to_string()))
+        zstd::bulk::compress(data, self.config.compression_level)
+            .map_err(|e| crate::Error::Serialization(e.to_string()))
     }
 
     fn decompress_data(&self, data: &Bytes) -> crate::Result<Vec<u8>> {
@@ -523,7 +565,7 @@ impl QuantizedStorageBuilder {
         Self {
             config: QuantizedStorageConfig::default(),
             object_storage: None,
-            tiered_storage: None
+            tiered_storage: None,
         }
     }
 
@@ -563,7 +605,6 @@ impl QuantizerWrapper for ScalarQuantizerWrapper {
 
     fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         self.quantizer.train(training_vectors)
-
     }
 
     fn get_compression_ratio(&self) -> f32 {
@@ -572,27 +613,22 @@ impl QuantizerWrapper for ScalarQuantizerWrapper {
 
     fn serialize(&self) -> crate::Result<Vec<u8>> {
         bincode::serialize(&self.quantizer).map_err(|e| crate::Error::Serialization(e.to_string()))
-
     }
 
     fn deserialize(&mut self, data: &[u8]) -> crate::Result<()> {
         self.quantizer =
-            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string())
-            )?;
+            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         Ok(())
     }
-
 }
 
 impl QuantizerWrapper for ProductQuantizerWrapper {
     fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         self.quantizer.quantize(vector)
-
     }
 
     fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         self.quantizer.train(training_vectors)
-
     }
 
     fn get_compression_ratio(&self) -> f32 {
@@ -601,27 +637,22 @@ impl QuantizerWrapper for ProductQuantizerWrapper {
 
     fn serialize(&self) -> crate::Result<Vec<u8>> {
         bincode::serialize(&self.quantizer).map_err(|e| crate::Error::Serialization(e.to_string()))
-
     }
 
     fn deserialize(&mut self, data: &[u8]) -> crate::Result<()> {
         self.quantizer =
-            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string())
-            )?;
+            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         Ok(())
     }
-
 }
 
 impl QuantizerWrapper for BinaryQuantizerWrapper {
     fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         self.quantizer.quantize(vector)
-
     }
 
     fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         self.quantizer.train(training_vectors)
-
     }
 
     fn get_compression_ratio(&self) -> f32 {
@@ -630,27 +661,22 @@ impl QuantizerWrapper for BinaryQuantizerWrapper {
 
     fn serialize(&self) -> crate::Result<Vec<u8>> {
         bincode::serialize(&self.quantizer).map_err(|e| crate::Error::Serialization(e.to_string()))
-
     }
 
     fn deserialize(&mut self, data: &[u8]) -> crate::Result<()> {
         self.quantizer =
-            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string())
-            )?;
+            bincode::deserialize(data).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         Ok(())
     }
-
 }
 
 impl QuantizerWrapper for HybridQuantizerWrapper {
     fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         self.quantizer.quantize(vector)
-
     }
 
     fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         self.quantizer.train(training_vectors)
-
     }
 
     fn get_compression_ratio(&self) -> f32 {
@@ -666,12 +692,10 @@ impl QuantizerWrapper for HybridQuantizerWrapper {
         // 简化实现
         Ok(())
     }
-
 }
 
 #[cfg(test)]
 mod tests {
-    
 
     // Commented out - test doesn't return Result and uses undefined StatusCode
     // #[tokio::test]

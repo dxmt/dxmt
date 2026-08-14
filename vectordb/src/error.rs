@@ -1,41 +1,41 @@
 //! Unified error handling for VectorDB
 //! Following best practices from TiKV and other top-tier projects
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// 应用程序错误类型
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Internal error: {0}")]
     Internal(String),
-    
+
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    
+
     #[error("Not found: {0}")]
     NotFound(String),
-    
+
     #[error("Unauthorized")]
     Unauthorized,
-    
+
     #[error("Configuration error: {0}")]
     InvalidConfig(String),
-    
+
     #[error("Storage error: {0}")]
     Storage(String),
-    
+
     #[error("Network error: {0}")]
     Network(String),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(String),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Bincode error: {0}")]
     Bincode(#[from] Box<bincode::ErrorKind>),
-    
+
     #[error("Object storage error: {0}")]
     ObjectStorage(#[from] crate::storage::object::ObjectStorageError),
 
@@ -45,56 +45,56 @@ pub enum Error {
     // Legacy compatibility variants
     #[error("Table not found: {0}")]
     TableNotFound(String),
-    
+
     #[error("Record not found: {0}")]
     RecordNotFound(String),
-    
+
     #[error("Node not found: {0}")]
     NodeNotFound(String),
-    
+
     #[error("Table already exists: {0}")]
     TableAlreadyExists(String),
-    
+
     #[error("Record already exists: {0}")]
     RecordAlreadyExists(String),
-    
+
     #[error("Invalid vector: {0}")]
     InvalidVector(String),
-    
+
     #[error("Dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
-    
+
     #[error("Not implemented: {0}")]
     NotImplemented(String),
-    
+
     #[error("Timeout: {0}")]
     Timeout(String),
-    
+
     #[error("Not leader")]
     NotLeader,
-    
+
     #[error("No available nodes")]
     NoAvailableNodes,
-    
+
     #[error("Empty vector")]
     EmptyVector,
-    
+
     // Structured error variants for compatibility
     #[error("Validation error: {message}")]
     ValidationError { message: String },
-    
+
     #[error("Serialization error: {message}")]
     SerializationError { message: String },
-    
+
     #[error("Compression error: {message}")]
     CompressionError { message: String },
-    
+
     #[error("Decompression error: {message}")]
     DecompressionError { message: String },
-    
+
     #[error("Remote error: {message}")]
     RemoteError { message: String },
-    
+
     #[error("Service unavailable: {message}")]
     ServiceUnavailable { message: String },
 }
@@ -147,25 +147,29 @@ impl Error {
             crate::Error::NotFound(_)
             | crate::Error::TableNotFound(_)
             | crate::Error::RecordNotFound(_)
-            | crate::Error::NodeNotFound(_) => {
-                ErrorCode::NotFound
-            }
-            crate::Error::TableAlreadyExists(_ ) | crate::Error::RecordAlreadyExists(_) => {
+            | crate::Error::NodeNotFound(_) => ErrorCode::NotFound,
+            crate::Error::TableAlreadyExists(_) | crate::Error::RecordAlreadyExists(_) => {
                 ErrorCode::AlreadyExists
             }
-            crate::Error::InvalidVector(_) | crate::Error::InvalidInput(_ ) => ErrorCode::InvalidInput,
+            crate::Error::InvalidVector(_) | crate::Error::InvalidInput(_) => {
+                ErrorCode::InvalidInput
+            }
             crate::Error::InvalidConfig(_) => ErrorCode::InvalidConfig,
             crate::Error::DimensionMismatch { .. } => ErrorCode::DimensionMismatch,
             crate::Error::Storage(_) | crate::Error::Io(_) => ErrorCode::Storage,
             crate::Error::Timeout(_) => ErrorCode::Timeout,
-            crate::Error::NotImplemented(_ ) => ErrorCode::NotImplemented,
-            crate::Error::NotLeader | crate::Error::NoAvailableNodes => {
+            crate::Error::NotImplemented(_) => ErrorCode::NotImplemented,
+            crate::Error::NotLeader | crate::Error::NoAvailableNodes => ErrorCode::ClusterError,
+            crate::Error::ValidationError { .. } => ErrorCode::InvalidInput,
+            crate::Error::SerializationError { .. } | crate::Error::EmptyVector => {
+                ErrorCode::InvalidInput
+            }
+            crate::Error::CompressionError { .. } | crate::Error::DecompressionError { .. } => {
+                ErrorCode::Storage
+            }
+            crate::Error::RemoteError { .. } | crate::Error::ServiceUnavailable { .. } => {
                 ErrorCode::ClusterError
             }
-            crate::Error::ValidationError { .. } => ErrorCode::InvalidInput,
-            crate::Error::SerializationError { .. } | crate::Error::EmptyVector => ErrorCode::InvalidInput,
-            crate::Error::CompressionError { .. } | crate::Error::DecompressionError { .. } => ErrorCode::Storage,
-            crate::Error::RemoteError { .. } | crate::Error::ServiceUnavailable { .. } => ErrorCode::ClusterError,
             crate::Error::Unauthorized => ErrorCode::Unauthorized,
             _ => ErrorCode::Internal,
         }
@@ -269,7 +273,11 @@ mod tests {
     fn test_not_found_generic_maps_404() {
         let err = crate::Error::NotFound("something".to_string());
         assert_eq!(err.error_code(), ErrorCode::NotFound);
-        assert_eq!(err.status_code(), 404, "generic NotFound should return 404, not 500");
+        assert_eq!(
+            err.status_code(),
+            404,
+            "generic NotFound should return 404, not 500"
+        );
     }
 
     #[test]
@@ -281,7 +289,10 @@ mod tests {
 
     #[test]
     fn test_dimension_mismatch_status_code() {
-        let err = crate::Error::DimensionMismatch { expected: 128, actual: 64 };
+        let err = crate::Error::DimensionMismatch {
+            expected: 128,
+            actual: 64,
+        };
         assert_eq!(err.error_code(), ErrorCode::DimensionMismatch);
         assert_eq!(err.status_code(), 400);
     }

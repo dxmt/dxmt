@@ -3,12 +3,12 @@
 //! This module solves the Arc<dyn VectorIndex> design conflict by providing
 //! a wrapper that uses RwLock to enable mutations through immutable references.
 
-use crate::types::vector::{RecordId, DenseVector};
+use crate::types::vector::{DenseVector, RecordId};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Use index_traits::VectorIndex which HnswIndex and BruteForceIndex implement
-use super::index_traits::{VectorIndex, IndexStats};
+use super::index_traits::{IndexStats, VectorIndex};
 use crate::Result;
 
 #[cfg(test)]
@@ -53,16 +53,23 @@ impl IndexWrapper {
         let index = self.index.read().await;
         // Call async search and convert String back to RecordId
         let results = index.search(query, k).await?;
-        Ok(results.into_iter()
+        Ok(results
+            .into_iter()
             .map(|(id_str, score)| (RecordId::from(id_str), score))
             .collect())
     }
 
     /// Search with an explicit ef_search hint (HNSW respects this; other indexes fall back to search).
-    pub async fn search_with_ef_hint(&self, query: &DenseVector, k: usize, ef: usize) -> Result<Vec<(RecordId, f32)>> {
+    pub async fn search_with_ef_hint(
+        &self,
+        query: &DenseVector,
+        k: usize,
+        ef: usize,
+    ) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;
         let results = index.search_with_ef_hint(query, k, ef).await?;
-        Ok(results.into_iter()
+        Ok(results
+            .into_iter()
             .map(|(id_str, score)| (RecordId::from(id_str), score))
             .collect())
     }
@@ -78,7 +85,8 @@ impl IndexWrapper {
     ) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;
         let results = index.search_with_filter(query, k, ef, filter_ids).await?;
-        Ok(results.into_iter()
+        Ok(results
+            .into_iter()
             .map(|(id_str, score)| (RecordId::from(id_str), score))
             .collect())
     }
@@ -121,7 +129,7 @@ impl IndexWrapper {
         // This would require iterating through all IDs and deleting them
         // or recreating the index. For now, return an error.
         Err(crate::Error::InvalidInput(
-            "Index clear operation not yet implemented".to_string()
+            "Index clear operation not yet implemented".to_string(),
         ))
     }
 
@@ -253,10 +261,7 @@ mod tests {
 
         // Insert
         wrapper
-            .insert(
-                "doc1".to_string(),
-                vec![0.1, 0.2, 0.3],
-            )
+            .insert("doc1".to_string(), vec![0.1, 0.2, 0.3])
             .await
             .unwrap();
 
@@ -264,10 +269,7 @@ mod tests {
         assert_eq!(wrapper.len().await, 1);
 
         // Search
-        let results = wrapper
-            .search(&vec![0.1, 0.2, 0.3], 10)
-            .await
-            .unwrap();
+        let results = wrapper.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
         assert!(!results.is_empty());
     }
 
@@ -280,17 +282,10 @@ mod tests {
         let wrapper2 = wrapper.clone();
 
         // Concurrent insert and search
-        let insert_handle = tokio::spawn(async move {
-            wrapper1
-                .insert("doc1".to_string(), vec![0.1; 128])
-                .await
-        });
+        let insert_handle =
+            tokio::spawn(async move { wrapper1.insert("doc1".to_string(), vec![0.1; 128]).await });
 
-        let search_handle = tokio::spawn(async move {
-            wrapper2
-                .search(&vec![0.1; 128], 10)
-                .await
-        });
+        let search_handle = tokio::spawn(async move { wrapper2.search(&vec![0.1; 128], 10).await });
 
         let _ = insert_handle.await;
         let _ = search_handle.await;

@@ -4,11 +4,13 @@
 
 use dxmt_vectordb::{
     storage::{
-        memory::MemoryStorage, tiered::TieredStorage, tier_promotion::{Tier, TierPromotionConfig},
+        memory::MemoryStorage,
+        tier_promotion::{Tier, TierPromotionConfig},
+        tiered::TieredStorage,
         Storage, StorageConfig,
     },
     types::{
-        record::{CreateRecordRequest, SearchQuery, SearchMode},
+        record::{CreateRecordRequest, SearchMode, SearchQuery},
         table::TableConfig,
         DistanceMetric, IndexType,
     },
@@ -81,7 +83,11 @@ async fn test_move_vector_cold_to_hot() {
         .move_vector_to_tier("test_move", &"vec_1".to_string(), Tier::Hot, Tier::Warm)
         .await;
 
-    assert!(move_result.is_ok(), "Move to warm tier failed: {:?}", move_result);
+    assert!(
+        move_result.is_ok(),
+        "Move to warm tier failed: {:?}",
+        move_result
+    );
     println!("✓ Vector moved from hot to warm tier");
 
     // Verify policy updated
@@ -209,9 +215,7 @@ async fn test_promotion_on_frequent_access() {
     }
 
     // Check hotness score
-    let hotness = tiered_storage
-        .promotion_policy()
-        .get_hotness_score("vec_1");
+    let hotness = tiered_storage.promotion_policy().get_hotness_score("vec_1");
 
     println!("✓ Hotness score after 15 accesses: {:.3}", hotness);
     assert!(hotness > 0.0, "Hotness should be > 0 after accesses");
@@ -232,12 +236,8 @@ async fn test_move_nonexistent_vector() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Create table
     let table_config = create_test_table_config("test_nonexistent");
@@ -265,18 +265,17 @@ async fn test_promotion_policy_stats() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Initially should have no vectors
     let stats = tiered_storage.promotion_policy().get_stats();
     assert_eq!(stats.total_vectors, 0);
     assert_eq!(stats.total_accesses, 0);
-    println!("✓ Initial stats: {} vectors, {} accesses", stats.total_vectors, stats.total_accesses);
+    println!(
+        "✓ Initial stats: {} vectors, {} accesses",
+        stats.total_vectors, stats.total_accesses
+    );
 
     // Record some accesses
     for _ in 0..10 {
@@ -286,6 +285,8 @@ async fn test_promotion_policy_stats() {
     // Check updated stats
     let stats = tiered_storage.promotion_policy().get_stats();
     assert!(stats.total_accesses >= 10);
-    println!("✓ After accesses: {} vectors tracked, {} total accesses",
-        stats.total_vectors, stats.total_accesses);
+    println!(
+        "✓ After accesses: {} vectors tracked, {} total accesses",
+        stats.total_vectors, stats.total_accesses
+    );
 }

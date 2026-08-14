@@ -177,11 +177,13 @@ impl AppConfig {
 
     /// 从文件加载配置
     fn load_from_file() -> crate::Result<Self> {
-        let config_str = std::fs::read_to_string("config.toml")
-            .map_err(|e| crate::Error::InvalidConfig(format!("Failed to read config file: {}", e)))?;
+        let config_str = std::fs::read_to_string("config.toml").map_err(|e| {
+            crate::Error::InvalidConfig(format!("Failed to read config file: {}", e))
+        })?;
 
-        let config: AppConfig = toml::from_str(&config_str)
-            .map_err(|e| crate::Error::InvalidConfig(format!("Failed to parse config file: {}", e)))?;
+        let config: AppConfig = toml::from_str(&config_str).map_err(|e| {
+            crate::Error::InvalidConfig(format!("Failed to parse config file: {}", e))
+        })?;
 
         Ok(config)
     }
@@ -189,11 +191,15 @@ impl AppConfig {
     /// 验证配置
     pub fn validate(&self) -> crate::Result<()> {
         if self.server.port == 0 {
-            return Err(crate::Error::InvalidConfig("Server port cannot be 0".to_string()));
+            return Err(crate::Error::InvalidConfig(
+                "Server port cannot be 0".to_string(),
+            ));
         }
 
         if self.tables.default_dimension == 0 {
-            return Err(crate::Error::InvalidConfig("Default dimension cannot be 0".to_string()));
+            return Err(crate::Error::InvalidConfig(
+                "Default dimension cannot be 0".to_string(),
+            ));
         }
 
         Ok(())
@@ -563,7 +569,10 @@ mod tests {
         std::env::set_var("DB_AWS_SECRET_ACCESS_KEY", "test_secret");
 
         let config = AppConfig::default();
-        let object_storage = config.storage.object_storage.as_ref()
+        let object_storage = config
+            .storage
+            .object_storage
+            .as_ref()
             .ok_or("object_storage should be configured")?;
         assert_eq!(object_storage.provider, "minio");
         assert_eq!(object_storage.bucket, "my-test-bucket");

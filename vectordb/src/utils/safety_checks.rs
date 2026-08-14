@@ -35,7 +35,10 @@ impl PointerValidator {
     #[inline]
     pub fn check_not_null<T>(ptr: *const T, context: &str) -> crate::Result<()> {
         if ptr.is_null() {
-            return Err(crate::error::Error::Internal(format!("Null pointer detected in {}", context)));
+            return Err(crate::error::Error::Internal(format!(
+                "Null pointer detected in {}",
+                context
+            )));
         }
         Ok(())
     }
@@ -47,7 +50,8 @@ impl PointerValidator {
         if !(ptr as usize).is_multiple_of(alignment) {
             return Err(crate::error::Error::Internal(format!(
                 "Misaligned pointer in {}: address {:p} not aligned to {}",
-                context, ptr, alignment)));
+                context, ptr, alignment
+            )));
         }
         Ok(())
     }
@@ -58,21 +62,26 @@ impl PointerValidator {
         ptr: *const T,
         len: usize,
         buffer_size: usize,
-        context: &str) -> crate::Result<()> {
+        context: &str,
+    ) -> crate::Result<()> {
         // Check for null
         Self::check_not_null(ptr, context)?;
 
         // Check for overflow
         let element_size = std::mem::size_of::<T>();
-        let total_size = len
-            .checked_mul(element_size)
-            .ok_or_else(|| crate::error::Error::Internal(format!("Size overflow in {}: {} * {}", context, len, element_size)))?;
+        let total_size = len.checked_mul(element_size).ok_or_else(|| {
+            crate::error::Error::Internal(format!(
+                "Size overflow in {}: {} * {}",
+                context, len, element_size
+            ))
+        })?;
 
         // Check bounds
         if total_size > buffer_size {
             return Err(crate::error::Error::Internal(format!(
                 "Buffer overflow in {}: {} bytes requested, {} available",
-                context, total_size, buffer_size)));
+                context, total_size, buffer_size
+            )));
         }
 
         Ok(())
@@ -88,7 +97,8 @@ impl PointerValidator {
     pub unsafe fn create_slice_checked<'a, T>(
         ptr: *const T,
         len: usize,
-        context: &str) -> crate::Result<&'a [T]> {
+        context: &str,
+    ) -> crate::Result<&'a [T]> {
         Self::check_not_null(ptr, context)?;
         Self::check_alignment(ptr, context)?;
 
@@ -97,7 +107,8 @@ impl PointerValidator {
         if len > MAX_SLICE_ELEMENTS {
             return Err(crate::error::Error::Internal(format!(
                 "Slice too large in {}: {} elements exceeds limit {}",
-                context, len, MAX_SLICE_ELEMENTS)));
+                context, len, MAX_SLICE_ELEMENTS
+            )));
         }
 
         Ok(slice::from_raw_parts(ptr, len))
@@ -123,7 +134,10 @@ impl SimdValidator {
 
         // Check non-empty
         if a.is_empty() {
-            return Err(crate::error::Error::Internal(format!("Empty vectors in {}", context)));
+            return Err(crate::error::Error::Internal(format!(
+                "Empty vectors in {}",
+                context
+            )));
         }
 
         // Check for NaN/Inf values that could cause issues
@@ -133,14 +147,16 @@ impl SimdValidator {
                 if !val.is_finite() {
                     return Err(crate::error::Error::Internal(format!(
                         "Non-finite value in vector a[{}]: {} in {}",
-                        i, val, context)));
+                        i, val, context
+                    )));
                 }
             }
             for (i, &val) in b.iter().enumerate() {
                 if !val.is_finite() {
                     return Err(crate::error::Error::Internal(format!(
                         "Non-finite value in vector b[{}]: {} in {}",
-                        i, val, context)));
+                        i, val, context
+                    )));
                 }
             }
         }
@@ -153,11 +169,13 @@ impl SimdValidator {
     pub fn check_simd_alignment(
         ptr: *const f32,
         alignment: usize,
-        context: &str) -> crate::Result<()> {
+        context: &str,
+    ) -> crate::Result<()> {
         if !(ptr as usize).is_multiple_of(alignment) {
             return Err(crate::error::Error::Internal(format!(
                 "SIMD misaligned pointer in {}: address {:p} not aligned to {}",
-                context, ptr, alignment)));
+                context, ptr, alignment
+            )));
         }
         Ok(())
     }
@@ -173,7 +191,8 @@ impl MemoryValidator {
         src: *const u8,
         dst: *mut u8,
         len: usize,
-        context: &str) -> crate::Result<()> {
+        context: &str,
+    ) -> crate::Result<()> {
         // Check for null pointers
         PointerValidator::check_not_null(src, context)?;
         PointerValidator::check_not_null(dst, context)?;
@@ -185,11 +204,7 @@ impl MemoryValidator {
         if src_range.start < dst_range.end && dst_range.start < src_range.end {
             return Err(crate::error::Error::Internal(format!(
                 "Memory ranges overlap in {}: src[{}..{}] overlaps dst[{}..{}]",
-                context,
-                src_range.start,
-                src_range.end,
-                dst_range.start,
-                dst_range.end
+                context, src_range.start, src_range.end, dst_range.start, dst_range.end
             )));
         }
 
@@ -201,15 +216,20 @@ impl MemoryValidator {
     pub fn validate_allocation_size(
         size: usize,
         max_size: usize,
-        context: &str) -> crate::Result<()> {
+        context: &str,
+    ) -> crate::Result<()> {
         if size == 0 {
-            return Err(crate::error::Error::Internal(format!("Zero-size allocation requested in {}", context)));
+            return Err(crate::error::Error::Internal(format!(
+                "Zero-size allocation requested in {}",
+                context
+            )));
         }
 
         if size > max_size {
             return Err(crate::error::Error::Internal(format!(
                 "Allocation too large in {}: {} bytes exceeds limit {}",
-                context, size, max_size)));
+                context, size, max_size
+            )));
         }
 
         Ok(())

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 use crate::types::vector::DenseVector;
 
@@ -105,7 +105,10 @@ impl SimpleEmbedder {
 impl AutoTunedSearchEngine {
     /// Create a new auto-tuned search engine
     pub fn new(memory_limit: usize) -> Self {
-        info!("Initializing auto-tuned search engine with {} MB memory", memory_limit);
+        info!(
+            "Initializing auto-tuned search engine with {} MB memory",
+            memory_limit
+        );
 
         Self {
             memory_limit,
@@ -155,10 +158,16 @@ impl AutoTunedSearchEngine {
         if estimated_memory > self.memory_limit {
             // Need compression
             if num_vectors > 10_000_000 {
-                debug!("Selected EnhancedPQ for {} vectors (> 10M, memory constrained)", num_vectors);
+                debug!(
+                    "Selected EnhancedPQ for {} vectors (> 10M, memory constrained)",
+                    num_vectors
+                );
                 return SearchStrategy::EnhancedPQ;
             } else {
-                debug!("Selected PQFastScan for {} vectors (memory constrained)", num_vectors);
+                debug!(
+                    "Selected PQFastScan for {} vectors (memory constrained)",
+                    num_vectors
+                );
                 return SearchStrategy::PQFastScan;
             }
         }
@@ -179,7 +188,6 @@ impl AutoTunedSearchEngine {
         debug!("Selected EnhancedPQ for {} vectors (> 10M)", num_vectors);
         SearchStrategy::EnhancedPQ
     }
-
 
     /// Perform search using the specified strategy
     pub async fn search(
@@ -223,7 +231,11 @@ impl AutoTunedSearchEngine {
     }
 
     /// Brute force search implementation
-    fn brute_force_search(query: &DenseVector, vectors: &[DenseVector], k: usize) -> Vec<(usize, f32)> {
+    fn brute_force_search(
+        query: &DenseVector,
+        vectors: &[DenseVector],
+        k: usize,
+    ) -> Vec<(usize, f32)> {
         let mut distances: Vec<(usize, f32)> = vectors
             .iter()
             .enumerate()
@@ -246,7 +258,11 @@ impl AutoTunedSearchEngine {
     }
 
     /// PQFastScan search (simplified)
-    fn pq_fastscan_search(query: &DenseVector, vectors: &[DenseVector], k: usize) -> Vec<(usize, f32)> {
+    fn pq_fastscan_search(
+        query: &DenseVector,
+        vectors: &[DenseVector],
+        k: usize,
+    ) -> Vec<(usize, f32)> {
         // For now, use brute force as placeholder
         // In production, would use actual PQFastScan implementation
         Self::brute_force_search(query, vectors, k)
@@ -260,7 +276,11 @@ impl AutoTunedSearchEngine {
     }
 
     /// Enhanced PQ search (simplified)
-    fn enhanced_pq_search(query: &DenseVector, vectors: &[DenseVector], k: usize) -> Vec<(usize, f32)> {
+    fn enhanced_pq_search(
+        query: &DenseVector,
+        vectors: &[DenseVector],
+        k: usize,
+    ) -> Vec<(usize, f32)> {
         // For now, use brute force as placeholder
         // In production, would use actual Enhanced PQ implementation
         Self::brute_force_search(query, vectors, k)
@@ -283,11 +303,15 @@ impl AutoTunedSearchEngine {
     pub async fn get_stats(&self) -> HashMap<String, serde_json::Value> {
         let mut stats = HashMap::new();
 
-        stats.insert("memory_limit_mb".to_string(), serde_json::json!(self.memory_limit));
+        stats.insert(
+            "memory_limit_mb".to_string(),
+            serde_json::json!(self.memory_limit),
+        );
         stats.insert("auto_tuning".to_string(), serde_json::json!(true));
-        stats.insert("strategies".to_string(), serde_json::json!([
-            "BruteForce", "HNSW", "PQFastScan", "LSH", "EnhancedPQ"
-        ]));
+        stats.insert(
+            "strategies".to_string(),
+            serde_json::json!(["BruteForce", "HNSW", "PQFastScan", "LSH", "EnhancedPQ"]),
+        );
 
         // Add performance profiles if available
         let profiles = self.profiles.read().await;
@@ -302,11 +326,14 @@ impl AutoTunedSearchEngine {
                             "p95_latency_ms": profile.p95_latency_ms,
                             "recall_rate": profile.recall_rate,
                             "memory_usage_mb": profile.memory_usage_mb,
-                        })
+                        }),
                     )
                 })
                 .collect();
-            stats.insert("performance_profiles".to_string(), serde_json::json!(profile_stats));
+            stats.insert(
+                "performance_profiles".to_string(),
+                serde_json::json!(profile_stats),
+            );
         }
 
         stats
@@ -400,16 +427,10 @@ mod tests {
         let engine = AutoTunedSearchEngine::new(1024);
 
         // Small dataset -> BruteForce
-        assert_eq!(
-            engine.select_strategy(500, 128),
-            SearchStrategy::BruteForce
-        );
+        assert_eq!(engine.select_strategy(500, 128), SearchStrategy::BruteForce);
 
         // Medium dataset -> HNSW
-        assert_eq!(
-            engine.select_strategy(50_000, 256),
-            SearchStrategy::HNSW
-        );
+        assert_eq!(engine.select_strategy(50_000, 256), SearchStrategy::HNSW);
 
         // Large dataset -> PQFastScan
         assert_eq!(
@@ -418,10 +439,7 @@ mod tests {
         );
 
         // High dimensional -> LSH
-        assert_eq!(
-            engine.select_strategy(10_000, 2048),
-            SearchStrategy::LSH
-        );
+        assert_eq!(engine.select_strategy(10_000, 2048), SearchStrategy::LSH);
 
         // Extreme scale -> EnhancedPQ
         assert_eq!(
@@ -447,10 +465,10 @@ mod tests {
         let engine = AutoTunedSearchEngine::new(1024);
 
         let recommendation = engine.analyze_workload(
-            100_000,  // 100K vectors
-            384,      // 384 dimensions
-            1000.0,   // 1000 QPS target
-            0.95,     // 95% recall target
+            100_000, // 100K vectors
+            384,     // 384 dimensions
+            1000.0,  // 1000 QPS target
+            0.95,    // 95% recall target
         );
 
         assert_eq!(recommendation.strategy, SearchStrategy::HNSW);

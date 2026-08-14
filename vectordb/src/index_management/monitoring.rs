@@ -6,10 +6,10 @@
 //! - Event logging
 //! - Error tracking
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 /// Metrics for index operations
 #[derive(Debug, Clone, Serialize, Deserialize)]

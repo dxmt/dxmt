@@ -49,7 +49,10 @@ impl ApiResponse {
     }
 
     /// 创建成功响应并指定状态码
-    pub fn success_with_status<T: Serialize>(data: T, _status: StatusCode) -> std::result::Result<ApiResponse, StatusCode> {
+    pub fn success_with_status<T: Serialize>(
+        data: T,
+        _status: StatusCode,
+    ) -> std::result::Result<ApiResponse, StatusCode> {
         // Since StatusCode is already handled in IntoResponse implementation,
         // we can just return a normal success response
         Ok(Self::success(data))
@@ -77,9 +80,9 @@ impl ApiError {
 impl From<Error> for ApiError {
     fn from(err: Error) -> Self {
         let code = match &err {
-            crate::Error::TableNotFound(_ ) => "TABLE_NOT_FOUND",
+            crate::Error::TableNotFound(_) => "TABLE_NOT_FOUND",
             crate::Error::TableAlreadyExists(_) => "TABLE_ALREADY_EXISTS",
-            crate::Error::RecordNotFound(_ ) => "RECORD_NOT_FOUND",
+            crate::Error::RecordNotFound(_) => "RECORD_NOT_FOUND",
             crate::Error::RecordAlreadyExists(_) => "RECORD_ALREADY_EXISTS",
             crate::Error::InvalidVector(_) => "INVALID_VECTOR",
             crate::Error::InvalidInput(_) => "INVALID_INPUT",
@@ -101,7 +104,7 @@ impl From<Error> for ApiError {
             crate::Error::ServiceUnavailable { .. } => "SERVICE_UNAVAILABLE",
             crate::Error::Internal(_) => "INTERNAL_ERROR",
             crate::Error::NotFound(_) => "NOT_FOUND",
-            crate::Error::Unauthorized => "UNAUTHORIZED", 
+            crate::Error::Unauthorized => "UNAUTHORIZED",
             crate::Error::Io(_) => "IO_ERROR",
             crate::Error::Bincode(_) => "BINCODE_ERROR",
             crate::Error::ObjectStorage(_) => "OBJECT_STORAGE_ERROR",
@@ -135,7 +138,9 @@ impl IntoResponse for ApiResponse {
                 | Some("BAD_REQUEST")
                 | Some("EMPTY_VECTOR") => StatusCode::BAD_REQUEST,
                 Some("UNAUTHORIZED") => StatusCode::UNAUTHORIZED,
-                Some("FULL_TEXT_NOT_ENABLED") | Some("FEATURE_DISABLED") | Some("NOT_IMPLEMENTED") => StatusCode::NOT_IMPLEMENTED,
+                Some("FULL_TEXT_NOT_ENABLED")
+                | Some("FEATURE_DISABLED")
+                | Some("NOT_IMPLEMENTED") => StatusCode::NOT_IMPLEMENTED,
                 Some("SERVICE_UNAVAILABLE") => StatusCode::SERVICE_UNAVAILABLE,
                 Some("TIMEOUT") => StatusCode::REQUEST_TIMEOUT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -151,7 +156,7 @@ impl IntoResponse for ApiResponse {
 macro_rules! successresponse {
     ($data:expr) => {
         $crate::api::response::ApiResponse::success($data)
-    }
+    };
 }
 
 /// 便捷宏：创建错误响应
@@ -164,7 +169,7 @@ macro_rules! errorresponse {
     };
     ($err:expr) => {
         $crate::api::response::ApiResponse::error($crate::api::response::ApiError::from($err))
-    }
+    };
 }
 
 /// 便捷宏：创建带详情的错误响应
@@ -174,5 +179,5 @@ macro_rules! errorresponse_with_details {
         $crate::api::response::ApiResponse::error($crate::api::response::ApiError::with_details(
             $code, $message, $details,
         ))
-    }
+    };
 }

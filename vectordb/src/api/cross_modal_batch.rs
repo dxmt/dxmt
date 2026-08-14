@@ -119,12 +119,14 @@ pub async fn batch_cross_modal_search(
     // Return a simple response indicating the feature is not available
 
     let response = BatchCrossModalSearchResponse {
-        results: request.queries.into_iter().map(|q| {
-            SingleQueryResponse {
+        results: request
+            .queries
+            .into_iter()
+            .map(|q| SingleQueryResponse {
                 query_id: q.id,
                 results: vec![],
-            }
-        }).collect(),
+            })
+            .collect(),
         statistics: BatchStatistics {
             total_queries: 0,
             successful_queries: 0,

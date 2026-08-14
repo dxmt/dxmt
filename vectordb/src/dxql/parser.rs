@@ -35,11 +35,15 @@ impl Parser {
             }
         }
 
-        Err(DxqlError::ParseError("No valid statement found".to_string()))
+        Err(DxqlError::ParseError(
+            "No valid statement found".to_string(),
+        ))
     }
 
     fn parse_statement(&self, pair: pest::iterators::Pair<Rule>) -> Result<Statement, DxqlError> {
-        let inner = pair.into_inner().next()
+        let inner = pair
+            .into_inner()
+            .next()
             .ok_or_else(|| DxqlError::ParseError("Empty statement".to_string()))?;
 
         match inner.as_rule() {
@@ -49,7 +53,10 @@ impl Parser {
             Rule::delete_statement => self.parse_delete(inner),
             Rule::create_statement => self.parse_create(inner),
             Rule::drop_statement => self.parse_drop(inner),
-            _ => Err(DxqlError::ParseError(format!("Unknown statement type: {:?}", inner.as_rule()))),
+            _ => Err(DxqlError::ParseError(format!(
+                "Unknown statement type: {:?}",
+                inner.as_rule()
+            ))),
         }
     }
 
@@ -89,7 +96,10 @@ impl Parser {
         Ok(Statement::Select(select))
     }
 
-    fn parse_select_list(&self, pair: pest::iterators::Pair<Rule>) -> Result<Vec<SelectField>, DxqlError> {
+    fn parse_select_list(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<Vec<SelectField>, DxqlError> {
         let mut fields = vec![];
 
         for pair in pair.into_inner() {
@@ -117,7 +127,10 @@ impl Parser {
         Ok(fields)
     }
 
-    fn parse_where_clause(&self, pair: pest::iterators::Pair<Rule>) -> Result<WhereClause, DxqlError> {
+    fn parse_where_clause(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<WhereClause, DxqlError> {
         for pair in pair.into_inner() {
             if pair.as_rule() == Rule::condition {
                 return self.parse_condition(pair);
@@ -137,7 +150,10 @@ impl Parser {
         Err(DxqlError::ParseError("Invalid condition".to_string()))
     }
 
-    fn parse_and_condition(&self, pair: pest::iterators::Pair<Rule>) -> Result<WhereClause, DxqlError> {
+    fn parse_and_condition(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<WhereClause, DxqlError> {
         let mut conditions = vec![];
 
         for pair in pair.into_inner() {
@@ -153,7 +169,10 @@ impl Parser {
         }
     }
 
-    fn parse_or_condition(&self, pair: pest::iterators::Pair<Rule>) -> Result<WhereClause, DxqlError> {
+    fn parse_or_condition(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<WhereClause, DxqlError> {
         let mut conditions = vec![];
 
         for pair in pair.into_inner() {
@@ -169,33 +188,35 @@ impl Parser {
         }
     }
 
-    fn parse_primary_condition(&self, pair: pest::iterators::Pair<Rule>) -> Result<WhereClause, DxqlError> {
-        let inner = pair.into_inner().next()
+    fn parse_primary_condition(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<WhereClause, DxqlError> {
+        let inner = pair
+            .into_inner()
+            .next()
             .ok_or_else(|| DxqlError::ParseError("Empty primary condition".to_string()))?;
 
         match inner.as_rule() {
-            Rule::vector_similarity_condition => {
-                Ok(WhereClause::VectorSimilarity {
-                    field: "embedding".to_string(),
-                    vector: vec![],
-                    threshold: 0.8,
-                })
-            }
-            Rule::text_match_condition => {
-                Ok(WhereClause::TextMatch {
-                    field: "text".to_string(),
-                    query: String::new(),
-                })
-            }
-            Rule::comparison_condition => {
-                Ok(WhereClause::Comparison {
-                    field: String::new(),
-                    op: ComparisonOp::Equal,
-                    value: Value::Null,
-                })
-            }
+            Rule::vector_similarity_condition => Ok(WhereClause::VectorSimilarity {
+                field: "embedding".to_string(),
+                vector: vec![],
+                threshold: 0.8,
+            }),
+            Rule::text_match_condition => Ok(WhereClause::TextMatch {
+                field: "text".to_string(),
+                query: String::new(),
+            }),
+            Rule::comparison_condition => Ok(WhereClause::Comparison {
+                field: String::new(),
+                op: ComparisonOp::Equal,
+                value: Value::Null,
+            }),
             Rule::condition => self.parse_condition(inner),
-            _ => Err(DxqlError::ParseError(format!("Unknown condition type: {:?}", inner.as_rule()))),
+            _ => Err(DxqlError::ParseError(format!(
+                "Unknown condition type: {:?}",
+                inner.as_rule()
+            ))),
         }
     }
 
@@ -206,18 +227,26 @@ impl Parser {
         })
     }
 
-    fn parse_limit(&self, pair: pest::iterators::Pair<Rule>) -> Result<(usize, Option<usize>), DxqlError> {
+    fn parse_limit(
+        &self,
+        pair: pest::iterators::Pair<Rule>,
+    ) -> Result<(usize, Option<usize>), DxqlError> {
         let mut limit = 10;
         let mut offset = None;
 
         for pair in pair.into_inner() {
             if pair.as_rule() == Rule::integer {
                 if offset.is_none() {
-                    limit = pair.as_str().parse()
+                    limit = pair
+                        .as_str()
+                        .parse()
                         .map_err(|_| DxqlError::ParseError("Invalid limit".to_string()))?;
                 } else {
-                    offset = Some(pair.as_str().parse()
-                        .map_err(|_| DxqlError::ParseError("Invalid offset".to_string()))?);
+                    offset = Some(
+                        pair.as_str()
+                            .parse()
+                            .map_err(|_| DxqlError::ParseError("Invalid offset".to_string()))?,
+                    );
                 }
             }
         }

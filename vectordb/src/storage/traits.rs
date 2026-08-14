@@ -24,18 +24,24 @@ pub trait _Storage: Send + Sync {
     /// enable_full_text_search toggle, add/drop payload field declarations).
     async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
         let _ = (name, req);
-        Err(crate::Error::NotImplemented("alter_table not implemented for this backend".to_string()))
+        Err(crate::Error::NotImplemented(
+            "alter_table not implemented for this backend".to_string(),
+        ))
     }
 
     /// Insert a record
-    async fn insert_record(&self, tablename: &str, request: CreateRecordRequest)
-        -> crate::Result<Record>;
+    async fn insert_record(
+        &self,
+        tablename: &str,
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record>;
 
     /// Batch insert records
     async fn batch_insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>>;
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>>;
 
     /// Search for similar vectors
     async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult>;
@@ -48,7 +54,8 @@ pub trait _Storage: Send + Sync {
         &self,
         tablename: &str,
         record_id: &RecordId,
-        request: CreateRecordRequest) -> crate::Result<Record>;
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record>;
 
     /// Delete a record
     async fn delete_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<()>;
@@ -57,10 +64,12 @@ pub trait _Storage: Send + Sync {
     async fn insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>>;
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>>;
 
     /// Delete multiple records
-    async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>) -> crate::Result<()>;
+    async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>)
+        -> crate::Result<()>;
 
     /// Backup table data
     async fn backup(&self, tablename: &str, backup_path: &str) -> crate::Result<()>;
@@ -84,12 +93,22 @@ pub trait _Storage: Send + Sync {
     }
 
     /// Delete by filter (stub implementation)
-    async fn delete_by_filter(&self, _tablename: &str, _filter: serde_json::Value) -> crate::Result<()> {
-        Err(crate::Error::NotImplemented("delete_by_filter not implemented".to_string()))
+    async fn delete_by_filter(
+        &self,
+        _tablename: &str,
+        _filter: serde_json::Value,
+    ) -> crate::Result<()> {
+        Err(crate::Error::NotImplemented(
+            "delete_by_filter not implemented".to_string(),
+        ))
     }
 
     /// Hybrid search (stub implementation)
-    async fn hybrid_search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+    async fn hybrid_search(
+        &self,
+        tablename: &str,
+        query: SearchQuery,
+    ) -> crate::Result<SearchResult> {
         self.search(tablename, query).await
     }
 
@@ -118,7 +137,11 @@ pub trait _Storage: Send + Sync {
     }
 
     /// Get sample vectors (stub implementation)
-    async fn get_sample_vectors(&self, _tablename: &str, _limit: usize) -> crate::Result<Vec<Record>> {
+    async fn get_sample_vectors(
+        &self,
+        _tablename: &str,
+        _limit: usize,
+    ) -> crate::Result<Vec<Record>> {
         Ok(vec![])
     }
 

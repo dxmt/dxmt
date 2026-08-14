@@ -1,44 +1,30 @@
 pub mod audio_processor;
+pub mod clip;
+pub mod fusion;
 pub mod image_processor;
 pub mod manager;
 pub mod processor;
-pub mod clip;
-pub mod whisper;
-pub mod fusion;
 pub mod unified;
+pub mod whisper;
 
 // PyTorch backend (optional, requires 'python' feature)
 #[cfg(feature = "python")]
 pub mod clip_pytorch;
 
 // Re-export core types
-pub use processor::{
-    MultimodalProcessor,
-    TextProcessor,
-    ImageProcessor,
-    AudioProcessor,
-};
+pub use processor::{AudioProcessor, ImageProcessor, MultimodalProcessor, TextProcessor};
 
-pub use image_processor::{
-    CLIPImageProcessor,
-    ResNetImageProcessor,
-};
+pub use image_processor::{CLIPImageProcessor, ResNetImageProcessor};
 
-pub use audio_processor::{
-    WhisperAudioProcessor,
-    MusicEmbeddingProcessor,
-};
+pub use audio_processor::{MusicEmbeddingProcessor, WhisperAudioProcessor};
 
-pub use manager::{
-    MultimodalManager,
-    MultimodalConfig,
-};
+pub use manager::{MultimodalConfig, MultimodalManager};
 
 // Re-export new implementations
-pub use clip::{CLIPEmbedding, CLIPModel, CLIPConfig};
-pub use whisper::{WhisperProcessor, WhisperModel, WhisperConfig};
-pub use fusion::{FusionStrategy, ModalityWeight, FusionEngine};
-pub use unified::{UnifiedMultimodalAPI, MultimodalQuery, MultimodalResult};
+pub use clip::{CLIPConfig, CLIPEmbedding, CLIPModel};
+pub use fusion::{FusionEngine, FusionStrategy, ModalityWeight};
+pub use unified::{MultimodalQuery, MultimodalResult, UnifiedMultimodalAPI};
+pub use whisper::{WhisperConfig, WhisperModel, WhisperProcessor};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -81,7 +67,7 @@ impl MultimodalContent {
             metadata: HashMap::new(),
         }
     }
-    
+
     pub fn image(data: Vec<u8>) -> Self {
         Self {
             modality: Modality::Image,
@@ -89,7 +75,7 @@ impl MultimodalContent {
             metadata: HashMap::new(),
         }
     }
-    
+
     pub fn audio(data: Vec<u8>) -> Self {
         Self {
             modality: Modality::Audio,
@@ -97,7 +83,7 @@ impl MultimodalContent {
             metadata: HashMap::new(),
         }
     }
-    
+
     pub fn with_metadata(mut self, key: String, value: serde_json::Value) -> Self {
         self.metadata.insert(key, value);
         self
@@ -106,7 +92,10 @@ impl MultimodalContent {
 
 #[async_trait]
 pub trait MultimodalEmbedding: Send + Sync {
-    async fn embed(&self, content: MultimodalContent) -> Result<Vec<f32>, crate::embeddings::EmbeddingError>;
+    async fn embed(
+        &self,
+        content: MultimodalContent,
+    ) -> Result<Vec<f32>, crate::embeddings::EmbeddingError>;
     fn supported_modalities(&self) -> Vec<Modality>;
     fn dimension(&self) -> usize;
     fn name(&self) -> String;

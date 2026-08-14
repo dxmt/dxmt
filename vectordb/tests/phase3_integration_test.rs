@@ -61,7 +61,10 @@ fn test_phase3_hierarchical_clustering_basic() {
 
     assert_eq!(results.len(), 10, "Should find 10 results");
     assert_eq!(results[0].0, "vec_0", "First result should be query itself");
-    assert!(results[0].1 < 0.01, "Query should match itself with distance ~0");
+    assert!(
+        results[0].1 < 0.01,
+        "Query should match itself with distance ~0"
+    );
 
     // Calculate reduction
     let vectors_per_fine = 500 / (config.num_coarse_clusters * config.num_fine_clusters_per_coarse);
@@ -191,7 +194,10 @@ fn test_phase3_adaptive_sizing_small() {
         result.num_fine_per_coarse >= config.min_fine_per_coarse,
         "Should respect minimum fine clusters"
     );
-    assert!(result.reduction_ratio > 1.0, "Should provide some reduction");
+    assert!(
+        result.reduction_ratio > 1.0,
+        "Should provide some reduction"
+    );
     assert!(
         result.confidence >= 0.0 && result.confidence <= 1.0,
         "Confidence should be in [0, 1]"
@@ -242,10 +248,7 @@ fn test_phase3_elbow_method() {
 
     // Cluster 1: around origin
     for i in 0..30 {
-        vectors.push(vec![
-            (i as f32 * 0.1) % 1.0,
-            (i as f32 * 0.1) % 1.0,
-        ]);
+        vectors.push(vec![(i as f32 * 0.1) % 1.0, (i as f32 * 0.1) % 1.0]);
     }
 
     // Cluster 2: around (10, 10)
@@ -264,11 +267,8 @@ fn test_phase3_elbow_method() {
         ]);
     }
 
-    let (optimal_k, wcss_values) = AdaptiveClusterAnalyzer::find_optimal_k_elbow(
-        &vectors,
-        2..8,
-        DistanceMetric::Euclidean,
-    );
+    let (optimal_k, wcss_values) =
+        AdaptiveClusterAnalyzer::find_optimal_k_elbow(&vectors, 2..8, DistanceMetric::Euclidean);
 
     println!("Elbow method results:");
     println!("  Optimal K: {}", optimal_k);
@@ -420,9 +420,9 @@ fn test_phase3_end_to_end() {
     };
 
     let recommendation = AdaptiveClusterAnalyzer::recommend_config(&adaptive_config, 64);
-    println!("  ✓ Recommended {}x{} clusters",
-        recommendation.num_coarse_clusters,
-        recommendation.num_fine_per_coarse
+    println!(
+        "  ✓ Recommended {}x{} clusters",
+        recommendation.num_coarse_clusters, recommendation.num_fine_per_coarse
     );
 
     // 2. Create dataset

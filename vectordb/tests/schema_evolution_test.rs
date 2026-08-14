@@ -36,16 +36,24 @@ fn make_table_config(name: &str) -> TableConfig {
 }
 
 async fn make_storage() -> IntelligentIndexedStorage {
-    IntelligentIndexedStorage::new(&make_storage_config()).await.unwrap()
+    IntelligentIndexedStorage::new(&make_storage_config())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
 async fn test_alter_table_increments_schema_version() {
     let storage = make_storage().await;
-    storage.create_table(make_table_config("ev_test")).await.unwrap();
+    storage
+        .create_table(make_table_config("ev_test"))
+        .await
+        .unwrap();
 
     let table = storage.get_table("ev_test").await.unwrap();
-    assert_eq!(table.schema_version, 1, "Initial schema_version should be 1");
+    assert_eq!(
+        table.schema_version, 1,
+        "Initial schema_version should be 1"
+    );
     assert!(table.payload_schema.is_none());
 
     let req = TableAlterRequest {
@@ -60,7 +68,10 @@ async fn test_alter_table_increments_schema_version() {
     };
 
     let updated = storage.alter_table("ev_test", req).await.unwrap();
-    assert_eq!(updated.schema_version, 2, "schema_version should be 2 after alter");
+    assert_eq!(
+        updated.schema_version, 2,
+        "schema_version should be 2 after alter"
+    );
     assert_eq!(updated.description.as_deref(), Some("updated description"));
 
     let schema = updated.payload_schema.as_ref().unwrap();
@@ -71,13 +82,26 @@ async fn test_alter_table_increments_schema_version() {
 #[tokio::test]
 async fn test_alter_table_add_then_drop_field() {
     let storage = make_storage().await;
-    storage.create_table(make_table_config("ev_drop_test")).await.unwrap();
+    storage
+        .create_table(make_table_config("ev_drop_test"))
+        .await
+        .unwrap();
 
     // Add two fields
     let req_add = TableAlterRequest {
         add_fields: vec![
-            FieldDef { name: "tag".to_string(), field_type: FieldType::String, nullable: true, default_value: None },
-            FieldDef { name: "score".to_string(), field_type: FieldType::Number, nullable: true, default_value: None },
+            FieldDef {
+                name: "tag".to_string(),
+                field_type: FieldType::String,
+                nullable: true,
+                default_value: None,
+            },
+            FieldDef {
+                name: "score".to_string(),
+                field_type: FieldType::Number,
+                nullable: true,
+                default_value: None,
+            },
         ],
         ..Default::default()
     };
@@ -100,14 +124,22 @@ async fn test_alter_table_add_then_drop_field() {
 #[tokio::test]
 async fn test_alter_table_not_found_returns_error() {
     let storage = make_storage().await;
-    let result = storage.alter_table("nonexistent", TableAlterRequest::default()).await;
-    assert!(result.is_err(), "alter_table on missing table should return error");
+    let result = storage
+        .alter_table("nonexistent", TableAlterRequest::default())
+        .await;
+    assert!(
+        result.is_err(),
+        "alter_table on missing table should return error"
+    );
 }
 
 #[tokio::test]
 async fn test_schema_persisted_across_get_table() {
     let storage = make_storage().await;
-    storage.create_table(make_table_config("ev_persist")).await.unwrap();
+    storage
+        .create_table(make_table_config("ev_persist"))
+        .await
+        .unwrap();
 
     let req = TableAlterRequest {
         add_fields: vec![FieldDef {
@@ -132,7 +164,10 @@ async fn test_schema_persisted_across_get_table() {
 #[tokio::test]
 async fn test_alter_table_enable_full_text_search() {
     let storage = make_storage().await;
-    storage.create_table(make_table_config("ev_fts")).await.unwrap();
+    storage
+        .create_table(make_table_config("ev_fts"))
+        .await
+        .unwrap();
 
     let table = storage.get_table("ev_fts").await.unwrap();
     assert!(!table.enable_full_text_search);

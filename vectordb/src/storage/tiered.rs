@@ -1,5 +1,5 @@
 use crate::storage::{
-    tier_promotion::{TierPromotionPolicy, TierPromotionConfig, Tier},
+    tier_promotion::{Tier, TierPromotionConfig, TierPromotionPolicy},
     traits::_Storage as Storage,
     traits::StorageConfig,
 };
@@ -27,10 +27,9 @@ impl TieredStorage {
         hot_tier: Arc<dyn Storage>,
         warm_tier: Arc<dyn Storage>,
         cold_tier: Arc<dyn Storage>,
-        config: StorageConfig) -> Self {
-        let promotion_policy = Arc::new(TierPromotionPolicy::new(
-            TierPromotionConfig::default(),
-        ));
+        config: StorageConfig,
+    ) -> Self {
+        let promotion_policy = Arc::new(TierPromotionPolicy::new(TierPromotionConfig::default()));
         Self {
             _hot_tier: hot_tier,
             warm_tier,
@@ -145,30 +144,42 @@ impl TieredStorage {
         }
 
         // Step 5: Update promotion policy
-        self.promotion_policy.set_current_tier(vector_id, target_tier);
+        self.promotion_policy
+            .set_current_tier(vector_id, target_tier);
 
         Ok(())
     }
 
     /// Find which tier contains a vector
-    async fn find_vector_tier(
-        &self,
-        tablename: &str,
-        vector_id: &RecordId,
-    ) -> Option<Tier> {
+    async fn find_vector_tier(&self, tablename: &str, vector_id: &RecordId) -> Option<Tier> {
         // Check promotion policy first (fast)
         if let Some(tier) = self.promotion_policy.get_current_tier(vector_id) {
             return Some(tier);
         }
 
         // If not tracked, search tiers from hot to cold
-        if self._hot_tier.get_record(tablename, vector_id).await.is_ok() {
+        if self
+            ._hot_tier
+            .get_record(tablename, vector_id)
+            .await
+            .is_ok()
+        {
             return Some(Tier::Hot);
         }
-        if self.warm_tier.get_record(tablename, vector_id).await.is_ok() {
+        if self
+            .warm_tier
+            .get_record(tablename, vector_id)
+            .await
+            .is_ok()
+        {
             return Some(Tier::Warm);
         }
-        if self.cold_tier.get_record(tablename, vector_id).await.is_ok() {
+        if self
+            .cold_tier
+            .get_record(tablename, vector_id)
+            .await
+            .is_ok()
+        {
             return Some(Tier::Cold);
         }
 
@@ -192,7 +203,11 @@ impl TieredStorage {
             results.push((vector_id.clone(), result));
 
             if success {
-                tracing::debug!("Successfully moved vector {} to {:?}", vector_id, target_tier);
+                tracing::debug!(
+                    "Successfully moved vector {} to {:?}",
+                    vector_id,
+                    target_tier
+                );
             }
         }
 
@@ -232,7 +247,11 @@ impl TieredStorage {
                                     e
                                 );
                             } else {
-                                tracing::info!("Promoted vector {} from {:?} to hot tier", hit.id, source_tier);
+                                tracing::info!(
+                                    "Promoted vector {} from {:?} to hot tier",
+                                    hit.id,
+                                    source_tier
+                                );
                             }
                         }
                     }
@@ -255,7 +274,11 @@ impl TieredStorage {
                                 e
                             );
                         } else {
-                            tracing::info!("Promoted vector {} from {:?} to warm tier", hit.id, source_tier);
+                            tracing::info!(
+                                "Promoted vector {} from {:?} to warm tier",
+                                hit.id,
+                                source_tier
+                            );
                         }
                     }
                 }
@@ -337,7 +360,8 @@ impl Storage for TieredStorage {
     async fn insert_record(
         &self,
         tablename: &str,
-        request: CreateRecordRequest) -> crate::Result<Record> {
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         // Insert into hot tier first
         self._hot_tier.insert_record(tablename, request).await
     }
@@ -345,15 +369,19 @@ impl Storage for TieredStorage {
     async fn batch_insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>> {
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>> {
         // Insert into hot tier first
-        self._hot_tier.batch_insert_records(tablename, requests).await
+        self._hot_tier
+            .batch_insert_records(tablename, requests)
+            .await
     }
 
     async fn insert_records(
         &self,
         tablename: &str,
-        requests: Vec<CreateRecordRequest>) -> crate::Result<Vec<Record>> {
+        requests: Vec<CreateRecordRequest>,
+    ) -> crate::Result<Vec<Record>> {
         // Insert into hot tier first
         self._hot_tier.insert_records(tablename, requests).await
     }
@@ -375,7 +403,8 @@ impl Storage for TieredStorage {
         &self,
         tablename: &str,
         record_id: &RecordId,
-        request: CreateRecordRequest) -> crate::Result<Record> {
+        request: CreateRecordRequest,
+    ) -> crate::Result<Record> {
         // Update in the tier where the record exists
         if self
             ._hot_tier
@@ -386,7 +415,7 @@ impl Storage for TieredStorage {
             return self
                 ._hot_tier
                 .update_record(tablename, record_id, request.clone())
-                .await
+                .await;
         }
         if self
             .warm_tier
@@ -412,10 +441,20 @@ impl Storage for TieredStorage {
         Ok(())
     }
 
-    async fn delete_records(&self, tablename: &str, record_ids: Vec<RecordId>) -> crate::Result<()> {
+    async fn delete_records(
+        &self,
+        tablename: &str,
+        record_ids: Vec<RecordId>,
+    ) -> crate::Result<()> {
         // Delete from all tiers
-        let _ = self._hot_tier.delete_records(tablename, record_ids.clone()).await;
-        let _ = self.warm_tier.delete_records(tablename, record_ids.clone()).await;
+        let _ = self
+            ._hot_tier
+            .delete_records(tablename, record_ids.clone())
+            .await;
+        let _ = self
+            .warm_tier
+            .delete_records(tablename, record_ids.clone())
+            .await;
         let _ = self.cold_tier.delete_records(tablename, record_ids).await;
         Ok(())
     }
@@ -435,7 +474,8 @@ impl Storage for TieredStorage {
         // If we have enough results from hot tier, return early
         if all_hits.len() >= top_k {
             all_hits.sort_by(|a, b| {
-                a.score.partial_cmp(&b.score)
+                a.score
+                    .partial_cmp(&b.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             all_hits.truncate(top_k);
@@ -459,7 +499,8 @@ impl Storage for TieredStorage {
         // If we now have enough results, return after reranking
         if all_hits.len() >= top_k {
             all_hits.sort_by(|a, b| {
-                a.score.partial_cmp(&b.score)
+                a.score
+                    .partial_cmp(&b.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             all_hits.truncate(top_k);
@@ -482,7 +523,8 @@ impl Storage for TieredStorage {
 
         // Final reranking and truncation
         all_hits.sort_by(|a, b| {
-            a.score.partial_cmp(&b.score)
+            a.score
+                .partial_cmp(&b.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_hits.truncate(top_k);
@@ -500,17 +542,29 @@ impl Storage for TieredStorage {
 
     async fn backup(&self, tablename: &str, path: &str) -> crate::Result<()> {
         // Backup all tiers
-        self._hot_tier.backup(tablename, &format!("{}/hot", path)).await?;
-        self.warm_tier.backup(tablename, &format!("{}/warm", path)).await?;
-        self.cold_tier.backup(tablename, &format!("{}/cold", path)).await?;
+        self._hot_tier
+            .backup(tablename, &format!("{}/hot", path))
+            .await?;
+        self.warm_tier
+            .backup(tablename, &format!("{}/warm", path))
+            .await?;
+        self.cold_tier
+            .backup(tablename, &format!("{}/cold", path))
+            .await?;
         Ok(())
     }
 
     async fn restore(&self, tablename: &str, path: &str) -> crate::Result<()> {
         // Restore all tiers
-        self._hot_tier.restore(tablename, &format!("{}/hot", path)).await?;
-        self.warm_tier.restore(tablename, &format!("{}/warm", path)).await?;
-        self.cold_tier.restore(tablename, &format!("{}/cold", path)).await?;
+        self._hot_tier
+            .restore(tablename, &format!("{}/hot", path))
+            .await?;
+        self.warm_tier
+            .restore(tablename, &format!("{}/warm", path))
+            .await?;
+        self.cold_tier
+            .restore(tablename, &format!("{}/cold", path))
+            .await?;
         Ok(())
     }
 }

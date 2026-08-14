@@ -1,7 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use dxmt_vectordb::config::{MemoryConfig, StorageConfig};
 use dxmt_vectordb::storage::IntelligentIndexedStorage;
-use dxmt_vectordb::types::record::{CreateRecordRequest, SearchQuery, Filter, Condition, FilterOperation};
+use dxmt_vectordb::types::record::{
+    Condition, CreateRecordRequest, Filter, FilterOperation, SearchQuery,
+};
 use dxmt_vectordb::types::table::TableConfig;
 use dxmt_vectordb::types::vector::{DenseVector, DistanceMetric};
 use tokio::runtime::Runtime;
@@ -89,9 +91,7 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
         object_storage: None,
     };
 
-    let storage = rt.block_on(async {
-        IntelligentIndexedStorage::new(&config).await.unwrap()
-    });
+    let storage = rt.block_on(async { IntelligentIndexedStorage::new(&config).await.unwrap() });
 
     // Test parameters
     let dimension = 128;
@@ -107,7 +107,9 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
 
         // Create table with test data
         rt.block_on(async {
-            create_test_table(&storage, &table_name, dimension, dataset_size).await.unwrap();
+            create_test_table(&storage, &table_name, dimension, dataset_size)
+                .await
+                .unwrap();
         });
 
         for (test_name, category, _expected_selectivity) in &selectivity_tests {
@@ -128,9 +130,7 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
                             filter: Some(Filter {
                                 must: Some(vec![Condition {
                                     key: "category".to_string(),
-                                    operation: FilterOperation::Equal(
-                                        serde_json::json!(category)
-                                    ),
+                                    operation: FilterOperation::Equal(serde_json::json!(category)),
                                 }]),
                                 must_not: None,
                                 should: None,
@@ -162,16 +162,16 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
         object_storage: None,
     };
 
-    let storage = rt.block_on(async {
-        IntelligentIndexedStorage::new(&config).await.unwrap()
-    });
+    let storage = rt.block_on(async { IntelligentIndexedStorage::new(&config).await.unwrap() });
 
     let dimension = 128;
     let dataset_size = 10_000;
     let table_name = "bench_no_filter";
 
     rt.block_on(async {
-        create_test_table(&storage, table_name, dimension, dataset_size).await.unwrap();
+        create_test_table(&storage, table_name, dimension, dataset_size)
+            .await
+            .unwrap();
     });
 
     c.bench_function("search_no_filter_10k", |b| {

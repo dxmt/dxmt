@@ -2,9 +2,10 @@
 // 参考 Qdrant 的 Binary Quantization
 
 use super::{
-    BinaryQuantizationConfig, QuantizationMetadata, QuantizationParams, QuantizationStats, QuantizedIndex,
+    BinaryQuantizationConfig, QuantizationMetadata, QuantizationParams, QuantizationStats,
+    QuantizedIndex,
 };
-use crate::search::quantization::{QuantizedVector, QuantizedData};
+use crate::search::quantization::{QuantizedData, QuantizedVector};
 use crate::types::{vector::DenseVector, DistanceMetric};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +48,9 @@ impl BinaryQuantizer {
     /// 训练量化器
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Training vectors cannot be empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Training vectors cannot be empty".to_string(),
+            ));
         }
 
         let dimension = training_vectors[0].len();
@@ -58,7 +61,7 @@ impl BinaryQuantizer {
                 return Err(crate::Error::DimensionMismatch {
                     expected: dimension,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -75,7 +78,9 @@ impl BinaryQuantizer {
     /// 量化向量
     pub fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before quantization".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before quantization".to_string(),
+            ));
         }
 
         let mut encoded_data = Vec::new();
@@ -108,7 +113,9 @@ impl BinaryQuantizer {
     /// 编码查询向量
     pub fn encode_query(&self, query: &DenseVector) -> crate::Result<BinaryQuery> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before encoding".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before encoding".to_string(),
+            ));
         }
 
         let mut encoded_bits = Vec::new();
@@ -138,7 +145,9 @@ impl BinaryQuantizer {
 
             Ok(total_distance)
         } else {
-            Err(crate::Error::InvalidInput("Vector is not binary quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector is not binary quantized".to_string(),
+            ))
         }
     }
 
@@ -161,10 +170,7 @@ impl BinaryQuantizer {
         }
 
         if bit_count > 0 {
-
-
             bytes.push(byte);
-
         }
         bytes
     }
@@ -205,7 +211,9 @@ impl QuantizedIndex for BinaryQuantizedIndex {
             self.vectors.insert(vector.id.clone(), vector);
             Ok(())
         } else {
-            Err(crate::Error::InvalidInput("Vector must be binary quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector must be binary quantized".to_string(),
+            ))
         }
     }
 
@@ -223,7 +231,8 @@ impl QuantizedIndex for BinaryQuantizedIndex {
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(k);
 
-        self.query_latency_us.store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.query_latency_us
+            .store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         Ok(candidates)
     }

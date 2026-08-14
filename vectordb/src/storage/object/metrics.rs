@@ -86,9 +86,7 @@ impl OperationMetrics {
         // 记录最近的延迟
         self.recent_durations.push(duration);
         if self.recent_durations.len() > 100 {
-
             self.recent_durations.remove(0);
-
         }
         // 更新平均延迟
         if self.total_count > 0 {
@@ -351,7 +349,8 @@ impl MetricsCollector {
         operation: &str,
         duration: Duration,
         bytes: u64,
-        success: bool) {
+        success: bool,
+    ) {
         let mut operation_stats = self.operation_stats.write().await;
         let metrics = operation_stats
             .entry(operation.to_string())
@@ -366,9 +365,7 @@ impl MetricsCollector {
         let mut global_stats = self.global_stats.write().await;
         global_stats.total_requests += 1;
         if !success {
-
             global_stats.total_errors += 1;
-
         }
         global_stats.update_uptime();
     }
@@ -379,7 +376,8 @@ impl MetricsCollector {
         tier: StorageTier,
         operation: &str,
         bytes: u64,
-        cache_hit: Option<bool>) {
+        cache_hit: Option<bool>,
+    ) {
         let mut tier_stats = self.tier_stats.write().await;
         let metrics = tier_stats.get_mut(&tier);
 
@@ -400,7 +398,8 @@ impl MetricsCollector {
                     metrics.delete_ops += 1;
                     if metrics.objects_stored > 0 {
                         metrics.objects_stored -= 1;
-                        metrics.total_storagebytes = metrics.total_storagebytes.saturating_sub(bytes);
+                        metrics.total_storagebytes =
+                            metrics.total_storagebytes.saturating_sub(bytes);
                         metrics.update_avg_object_size();
                     }
                 }
@@ -425,7 +424,8 @@ impl MetricsCollector {
         originalbytes: u64,
         compressedbytes: u64,
         duration: Duration,
-        success: bool) {
+        success: bool,
+    ) {
         let mut compression_stats = self.compression_stats.write().await;
         let metrics = compression_stats
             .entry(compression_type)
@@ -467,25 +467,21 @@ impl MetricsCollector {
 
         // 源层级减少
         if let Some(from_metrics) = tier_stats.get_mut(&from_tier) {
-
             if from_metrics.objects_stored > 0 {
                 from_metrics.objects_stored -= 1;
                 from_metrics.total_storagebytes =
                     from_metrics.total_storagebytes.saturating_sub(bytes);
                 from_metrics.evictions += 1;
                 from_metrics.update_avg_object_size();
-
-        }
+            }
         }
 
         // 目标层级增加
         if let Some(to_metrics) = tier_stats.get_mut(&to_tier) {
-
             to_metrics.objects_stored += 1;
             to_metrics.total_storagebytes += bytes;
             to_metrics.promotions += 1;
             to_metrics.update_avg_object_size();
-
         }
     }
 
@@ -530,9 +526,7 @@ impl MetricsCollector {
 
         // 只保留最近100个快照
         if historical_stats.len() > 100 {
-
             historical_stats.remove(0);
-
         }
     }
 
@@ -559,7 +553,7 @@ impl MetricsCollector {
             tier_stats,
             compression_stats,
             summary,
-    }
+        }
     }
 
     async fn generate_summary(
@@ -615,15 +609,16 @@ impl MetricsCollector {
                 avg_success_rate,
                 overall_cache_hit_rate,
                 avg_latency,
-            )
-    }
+            ),
+        }
     }
 
     fn calculate_performance_grade(
         &self,
         success_rate: f64,
         cache_hit_rate: f64,
-        avg_latency: Duration) -> String {
+        avg_latency: Duration,
+    ) -> String {
         let mut score = 0;
 
         // 成功率评分 (40%)

@@ -4,11 +4,13 @@
 
 use dxmt_vectordb::{
     storage::{
-        memory::MemoryStorage, tiered::TieredStorage, tier_promotion::{Tier, TierPromotionConfig},
+        memory::MemoryStorage,
+        tier_promotion::{Tier, TierPromotionConfig},
+        tiered::TieredStorage,
         Storage, StorageConfig,
     },
     types::{
-        record::{CreateRecordRequest, SearchQuery, SearchMode},
+        record::{CreateRecordRequest, SearchMode, SearchQuery},
         table::TableConfig,
         DistanceMetric, IndexType,
     },
@@ -74,9 +76,15 @@ async fn test_move_vector_between_tiers() {
         .set_current_tier("vec_1", Tier::Cold);
 
     // Verify it's in cold tier
-    assert!(cold_tier.get_record("test_move", &"vec_1".to_string()).is_ok());
-    assert!(warm_tier.get_record("test_move", &"vec_1".to_string()).is_err());
-    assert!(hot_tier.get_record("test_move", &"vec_1".to_string()).is_err());
+    assert!(cold_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_ok());
+    assert!(warm_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
+    assert!(hot_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
 
     // Move from Cold to Warm
     tiered_storage
@@ -85,9 +93,15 @@ async fn test_move_vector_between_tiers() {
         .unwrap();
 
     // Verify it's now in warm tier
-    assert!(cold_tier.get_record("test_move", &"vec_1".to_string()).is_err());
-    assert!(warm_tier.get_record("test_move", &"vec_1".to_string()).is_ok());
-    assert!(hot_tier.get_record("test_move", &"vec_1".to_string()).is_err());
+    assert!(cold_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
+    assert!(warm_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_ok());
+    assert!(hot_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
 
     // Verify policy updated
     assert_eq!(
@@ -102,9 +116,15 @@ async fn test_move_vector_between_tiers() {
         .unwrap();
 
     // Verify it's now in hot tier
-    assert!(cold_tier.get_record("test_move", &"vec_1".to_string()).is_err());
-    assert!(warm_tier.get_record("test_move", &"vec_1".to_string()).is_err());
-    assert!(hot_tier.get_record("test_move", &"vec_1".to_string()).is_ok());
+    assert!(cold_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
+    assert!(warm_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_err());
+    assert!(hot_tier
+        .get_record("test_move", &"vec_1".to_string())
+        .is_ok());
 
     // Verify policy updated
     assert_eq!(
@@ -161,28 +181,31 @@ async fn test_batch_move_vectors() {
     // Verify all moves succeeded
     assert_eq!(results.len(), 5);
     for (vec_id, result) in &results {
-        assert!(
-            result.is_ok(),
-            "Move failed for {}: {:?}",
-            vec_id,
-            result
-        );
+        assert!(result.is_ok(), "Move failed for {}: {:?}", vec_id, result);
     }
 
     // Verify final locations
-    assert!(hot_tier.get_record("test_batch_move", &"vec_0".to_string()).is_ok());
-    assert!(hot_tier.get_record("test_batch_move", &"vec_1".to_string()).is_ok());
-    assert!(warm_tier.get_record("test_batch_move", &"vec_2".to_string()).is_ok());
-    assert!(warm_tier.get_record("test_batch_move", &"vec_3".to_string()).is_ok());
-    assert!(hot_tier.get_record("test_batch_move", &"vec_4".to_string()).is_ok());
+    assert!(hot_tier
+        .get_record("test_batch_move", &"vec_0".to_string())
+        .is_ok());
+    assert!(hot_tier
+        .get_record("test_batch_move", &"vec_1".to_string())
+        .is_ok());
+    assert!(warm_tier
+        .get_record("test_batch_move", &"vec_2".to_string())
+        .is_ok());
+    assert!(warm_tier
+        .get_record("test_batch_move", &"vec_3".to_string())
+        .is_ok());
+    assert!(hot_tier
+        .get_record("test_batch_move", &"vec_4".to_string())
+        .is_ok());
 
     // Verify not in cold tier anymore
     for i in 0..5 {
-        assert!(
-            cold_tier
-                .get_record("test_batch_move", &format!("vec_{}", i))
-                .is_err()
-        );
+        assert!(cold_tier
+            .get_record("test_batch_move", &format!("vec_{}", i))
+            .is_err());
     }
 }
 
@@ -242,13 +265,13 @@ async fn test_automatic_promotion_on_access() {
     };
 
     for _ in 0..20 {
-        let _ = tiered_storage.search("test_auto_promote", query.clone()).await;
+        let _ = tiered_storage
+            .search("test_auto_promote", query.clone())
+            .await;
     }
 
     // Check hotness score
-    let hotness = tiered_storage
-        .promotion_policy()
-        .get_hotness_score("vec_1");
+    let hotness = tiered_storage.promotion_policy().get_hotness_score("vec_1");
 
     println!("Hotness after 20 accesses: {:.3}", hotness);
     assert!(hotness > 0.0);
@@ -282,17 +305,16 @@ async fn test_demote_cold_vectors() {
 
     // Insert vector into hot tier
     let vector = create_test_vector("vec_1");
-    hot_tier
-        .insert_record("test_demote", vector)
-        .await
-        .unwrap();
+    hot_tier.insert_record("test_demote", vector).await.unwrap();
 
     tiered_storage
         .promotion_policy()
         .set_current_tier("vec_1", Tier::Hot);
 
     // Verify it's in hot tier
-    assert!(hot_tier.get_record("test_demote", &"vec_1".to_string()).is_ok());
+    assert!(hot_tier
+        .get_record("test_demote", &"vec_1".to_string())
+        .is_ok());
 
     // Run demotion (it should find that vec_1 has no recent accesses)
     // and should be demoted
@@ -333,25 +355,25 @@ async fn test_find_vector_tier() {
 
     // Insert into warm tier
     let vector2 = create_test_vector("vec_warm");
-    warm_tier
-        .insert_record("test_find", vector2)
-        .await
-        .unwrap();
+    warm_tier.insert_record("test_find", vector2).await.unwrap();
 
     // Insert into cold tier
     let vector3 = create_test_vector("vec_cold");
-    cold_tier
-        .insert_record("test_find", vector3)
-        .await
-        .unwrap();
+    cold_tier.insert_record("test_find", vector3).await.unwrap();
 
     // Test finding each vector (this tests the private method indirectly
     // by checking that moves work correctly)
 
     // For now, just verify they exist in their respective tiers
-    assert!(hot_tier.get_record("test_find", &"vec_hot".to_string()).is_ok());
-    assert!(warm_tier.get_record("test_find", &"vec_warm".to_string()).is_ok());
-    assert!(cold_tier.get_record("test_find", &"vec_cold".to_string()).is_ok());
+    assert!(hot_tier
+        .get_record("test_find", &"vec_hot".to_string())
+        .is_ok());
+    assert!(warm_tier
+        .get_record("test_find", &"vec_warm".to_string())
+        .is_ok());
+    assert!(cold_tier
+        .get_record("test_find", &"vec_cold".to_string())
+        .is_ok());
 }
 
 #[tokio::test]

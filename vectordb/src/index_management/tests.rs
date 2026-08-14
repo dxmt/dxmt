@@ -59,8 +59,8 @@ mod factory_tests {
     #[test]
     fn test_factory_valid_hnsw_params() {
         let config = AdaptiveConfig {
-            hnsw_m: 16,                 // Valid
-            hnsw_ef_construction: 200,  // Valid
+            hnsw_m: 16,                // Valid
+            hnsw_ef_construction: 200, // Valid
             ..AdaptiveConfig::default()
         };
         let factory = IndexFactory::new(config);
@@ -70,12 +70,18 @@ mod factory_tests {
     #[test]
     fn test_factory_boundary_m_values() {
         // Test lower boundary
-        let config = AdaptiveConfig { hnsw_m: 4, ..AdaptiveConfig::default() };
+        let config = AdaptiveConfig {
+            hnsw_m: 4,
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config.clone());
         assert!(factory.validate_config().is_ok());
 
         // Test upper boundary
-        let config = AdaptiveConfig { hnsw_m: 64, ..AdaptiveConfig::default() };
+        let config = AdaptiveConfig {
+            hnsw_m: 64,
+            ..AdaptiveConfig::default()
+        };
         let factory = IndexFactory::new(config);
         assert!(factory.validate_config().is_ok());
     }
@@ -223,7 +229,7 @@ mod migrator_tests {
 
 #[cfg(test)]
 mod transaction_log_tests {
-    use crate::index_management::{TransactionLog, LogEntryType};
+    use crate::index_management::{LogEntryType, TransactionLog};
     use crate::types::table::IndexType;
     use std::path::PathBuf;
 

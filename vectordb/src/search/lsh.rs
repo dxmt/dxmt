@@ -241,7 +241,9 @@ impl LSHIndex {
 
         for i in 0..self.config.num_hash_functions {
             let hash_component = ((projected[i] + offset[i]) / self.config.bucket_width) as i32;
-            hash_value = hash_value.wrapping_mul(31).wrapping_add(hash_component as u64);
+            hash_value = hash_value
+                .wrapping_mul(31)
+                .wrapping_add(hash_component as u64);
         }
 
         hash_value
@@ -317,8 +319,11 @@ impl LSHIndex {
                 // Compute hash for perturbed projection
                 let mut hash_value = 0u64;
                 for j in 0..self.config.num_hash_functions {
-                    let hash_component = ((perturbed[j] + offset[j]) / self.config.bucket_width) as i32;
-                    hash_value = hash_value.wrapping_mul(31).wrapping_add(hash_component as u64);
+                    let hash_component =
+                        ((perturbed[j] + offset[j]) / self.config.bucket_width) as i32;
+                    hash_value = hash_value
+                        .wrapping_mul(31)
+                        .wrapping_add(hash_component as u64);
                 }
 
                 probes.push(hash_value);

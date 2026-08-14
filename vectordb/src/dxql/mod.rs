@@ -1,8 +1,8 @@
-pub mod parser;
 pub mod compiler;
 pub mod executor;
 pub mod executor_impl;
 pub mod optimizer;
+pub mod parser;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -7,11 +7,11 @@
 // distance computation silently degrades search quality.
 
 use dxmt_vectordb::{
-    storage::IntelligentIndexedStorage,
     config::StorageConfig,
+    storage::IntelligentIndexedStorage,
     types::{
+        record::{Condition, CreateRecordRequest, Filter, FilterOperation, SearchQuery},
         table::TableConfig,
-        record::{CreateRecordRequest, SearchQuery, Filter, Condition, FilterOperation},
         vector::DistanceMetric,
     },
 };
@@ -40,7 +40,10 @@ fn make_vectors(count: usize, dim: usize) -> Vec<Vec<f32>> {
             let v: Vec<f32> = (0..dim)
                 .map(|d| {
                     // LCG-style mixing for good spread across the hypersphere
-                    let h = (i.wrapping_mul(2654435761).wrapping_add(d.wrapping_mul(2246822519))) as f32;
+                    let h = (i
+                        .wrapping_mul(2654435761)
+                        .wrapping_add(d.wrapping_mul(2246822519)))
+                        as f32;
                     (h.sin() * 127.0).fract()
                 })
                 .collect();
@@ -82,7 +85,9 @@ async fn test_e2e_recall_small_dataset() {
     const TOP_K: usize = 10;
     const MIN_RECALL: f32 = 0.90;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
 
     let table_cfg = TableConfig {
         name: "recall_small".to_string(),
@@ -113,7 +118,10 @@ async fn test_e2e_recall_small_dataset() {
             named_vectors: None,
         })
         .collect();
-    storage.insert_records("recall_small", requests).await.unwrap();
+    storage
+        .insert_records("recall_small", requests)
+        .await
+        .unwrap();
 
     // Query every 10th vector as a query (20 queries total)
     let mut total_recall = 0.0f32;
@@ -141,7 +149,10 @@ async fn test_e2e_recall_small_dataset() {
     assert!(
         avg_recall >= MIN_RECALL,
         "recall@{} = {:.3} < threshold {:.2} (small dataset, {} vectors)",
-        TOP_K, avg_recall, MIN_RECALL, N
+        TOP_K,
+        avg_recall,
+        MIN_RECALL,
+        N
     );
     println!("recall@{TOP_K} (small, N={N}): {avg_recall:.3}");
 }
@@ -151,7 +162,10 @@ async fn test_e2e_recall_small_dataset() {
 /// Kept small to run in under 30s while still validating graph-based search quality.
 #[tokio::test]
 async fn test_e2e_recall_hnsw_direct() {
-    use dxmt_vectordb::search::{hnsw::{HnswIndex, HnswConfig}, index_traits::VectorIndex};
+    use dxmt_vectordb::search::{
+        hnsw::{HnswConfig, HnswIndex},
+        index_traits::VectorIndex,
+    };
 
     const N: usize = 1_500;
     const DIM: usize = 32;
@@ -167,7 +181,10 @@ async fn test_e2e_recall_hnsw_direct() {
         ef_search: 100,
         ..Default::default()
     };
-    let mut index = HnswIndex::new(dxmt_vectordb::types::vector::DistanceMetric::Cosine, Some(config));
+    let mut index = HnswIndex::new(
+        dxmt_vectordb::types::vector::DistanceMetric::Cosine,
+        Some(config),
+    );
 
     let vectors = make_vectors(N, DIM);
     let ids: Vec<String> = (0..N).map(|i| format!("v{:06}", i)).collect();
@@ -182,7 +199,10 @@ async fn test_e2e_recall_hnsw_direct() {
 
     for qi in (0..N).step_by(N / 20) {
         let gt = ground_truth_top_k(&vectors[qi], &vectors, TOP_K);
-        let results = index.search_with_ef_hint(&vectors[qi], TOP_K, 200).await.unwrap();
+        let results = index
+            .search_with_ef_hint(&vectors[qi], TOP_K, 200)
+            .await
+            .unwrap();
         let retrieved: Vec<String> = results.iter().map(|(id, _)| id.clone()).collect();
         let r = recall_at_k(&retrieved, &gt, &ids);
         total_recall += r;
@@ -193,7 +213,11 @@ async fn test_e2e_recall_hnsw_direct() {
     assert!(
         avg_recall >= MIN_RECALL,
         "HNSW recall@{} = {:.3} < threshold {:.2} (N={} vectors, dim={})",
-        TOP_K, avg_recall, MIN_RECALL, N, DIM
+        TOP_K,
+        avg_recall,
+        MIN_RECALL,
+        N,
+        DIM
     );
     println!("recall@{TOP_K} (HNSW direct, N={N}, dim={DIM}): {avg_recall:.3}");
 }
@@ -203,7 +227,9 @@ async fn test_e2e_recall_hnsw_direct() {
 async fn test_e2e_delete_removes_from_search() {
     const DIM: usize = 16;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
 
     let table_cfg = TableConfig {
         name: "recall_delete".to_string(),
@@ -234,11 +260,17 @@ async fn test_e2e_delete_removes_from_search() {
             named_vectors: None,
         })
         .collect();
-    storage.insert_records("recall_delete", requests).await.unwrap();
+    storage
+        .insert_records("recall_delete", requests)
+        .await
+        .unwrap();
 
     // Delete the first 25 vectors
     let to_delete: Vec<String> = ids[..25].to_vec();
-    storage.delete_records("recall_delete", to_delete.clone()).await.unwrap();
+    storage
+        .delete_records("recall_delete", to_delete.clone())
+        .await
+        .unwrap();
 
     // Search with a query close to deleted vector 0 — should not appear in results
     let query = SearchQuery {
@@ -265,54 +297,83 @@ async fn test_e2e_delete_removes_from_search() {
 async fn test_upsert_increments_version() {
     const DIM: usize = 8;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
-    storage.create_table(TableConfig {
-        name: "upsert_ver".to_string(),
-        dimension: DIM,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
+    storage
+        .create_table(TableConfig {
+            name: "upsert_ver".to_string(),
+            dimension: DIM,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await
+        .unwrap();
 
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let v2: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
     // Insert initial record
-    storage.insert_records("upsert_ver", vec![CreateRecordRequest {
-        id: "r1".to_string(),
-        vector: v1.clone(),
-        sparse_vector: None,
-        payload: Some(serde_json::json!({"tag": "original"})),
-        named_vectors: None,
-    }]).await.unwrap();
+    storage
+        .insert_records(
+            "upsert_ver",
+            vec![CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: v1.clone(),
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"tag": "original"})),
+                named_vectors: None,
+            }],
+        )
+        .await
+        .unwrap();
 
-    let r1 = storage.get_record("upsert_ver", &"r1".to_string()).await.unwrap();
+    let r1 = storage
+        .get_record("upsert_ver", &"r1".to_string())
+        .await
+        .unwrap();
     assert_eq!(r1.version, 1, "initial version should be 1");
     let created_at = r1.created_at;
 
     // Upsert the same record with a different vector
-    storage.insert_records("upsert_ver", vec![CreateRecordRequest {
-        id: "r1".to_string(),
-        vector: v2.clone(),
-        sparse_vector: None,
-        payload: Some(serde_json::json!({"tag": "updated"})),
-        named_vectors: None,
-    }]).await.unwrap();
+    storage
+        .insert_records(
+            "upsert_ver",
+            vec![CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: v2.clone(),
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"tag": "updated"})),
+                named_vectors: None,
+            }],
+        )
+        .await
+        .unwrap();
 
-    let r1_updated = storage.get_record("upsert_ver", &"r1".to_string()).await.unwrap();
+    let r1_updated = storage
+        .get_record("upsert_ver", &"r1".to_string())
+        .await
+        .unwrap();
     assert_eq!(r1_updated.version, 2, "version should increment on upsert");
-    assert_eq!(r1_updated.created_at, created_at, "created_at should be preserved on upsert");
+    assert_eq!(
+        r1_updated.created_at, created_at,
+        "created_at should be preserved on upsert"
+    );
     assert_eq!(r1_updated.vector, v2, "vector should be updated");
 
     // Verify record_count stays at 1 (no duplicate)
     let table = storage.get_table("upsert_ver").await.unwrap();
-    assert_eq!(table.record_count, 1, "upsert should not increase record count");
+    assert_eq!(
+        table.record_count, 1,
+        "upsert should not increase record count"
+    );
 }
 
 /// Verifies that update_record without a vector preserves the existing vector.
@@ -320,43 +381,64 @@ async fn test_upsert_increments_version() {
 async fn test_update_record_preserves_vector_when_not_provided() {
     const DIM: usize = 8;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
-    storage.create_table(TableConfig {
-        name: "update_vec".to_string(),
-        dimension: DIM,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
+    storage
+        .create_table(TableConfig {
+            name: "update_vec".to_string(),
+            dimension: DIM,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await
+        .unwrap();
 
     let original_vector: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let norm = (original_vector.iter().map(|x| x * x).sum::<f32>()).sqrt();
     let original_vector: Vec<f32> = original_vector.iter().map(|x| x / norm).collect();
 
-    storage.insert_records("update_vec", vec![CreateRecordRequest {
-        id: "r1".to_string(),
-        vector: original_vector.clone(),
-        sparse_vector: None,
-        payload: Some(serde_json::json!({"tag": "v1"})),
-        named_vectors: None,
-    }]).await.unwrap();
+    storage
+        .insert_records(
+            "update_vec",
+            vec![CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: original_vector.clone(),
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"tag": "v1"})),
+                named_vectors: None,
+            }],
+        )
+        .await
+        .unwrap();
 
     // Update only the payload (no vector) via update_record
-    let updated = storage.update_record("update_vec", &"r1".to_string(), CreateRecordRequest {
-        id: "r1".to_string(),
-        vector: original_vector.clone(), // storage-level update_record requires a vector
-        sparse_vector: None,
-        payload: Some(serde_json::json!({"tag": "v2"})),
-        named_vectors: None,
-    }).await.unwrap();
+    let updated = storage
+        .update_record(
+            "update_vec",
+            &"r1".to_string(),
+            CreateRecordRequest {
+                id: "r1".to_string(),
+                vector: original_vector.clone(), // storage-level update_record requires a vector
+                sparse_vector: None,
+                payload: Some(serde_json::json!({"tag": "v2"})),
+                named_vectors: None,
+            },
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(updated.vector, original_vector, "vector should be unchanged after payload-only update");
+    assert_eq!(
+        updated.vector, original_vector,
+        "vector should be unchanged after payload-only update"
+    );
     assert_eq!(updated.payload["tag"], "v2", "payload should be updated");
     assert_eq!(updated.version, 2, "version should increment");
 
@@ -379,32 +461,40 @@ async fn test_search_with_payload_filter() {
     let config = make_config();
     let storage = IntelligentIndexedStorage::new(&config).await.unwrap();
 
-    storage.create_table(TableConfig {
-        name: "filter_test".to_string(),
-        dimension: DIM,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await.unwrap();
+    storage
+        .create_table(TableConfig {
+            name: "filter_test".to_string(),
+            dimension: DIM,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await
+        .unwrap();
 
     // Insert records with different categories
-    let records: Vec<CreateRecordRequest> = (0..20).map(|i| CreateRecordRequest {
-        id: format!("r{}", i),
-        vector: make_vectors(1, DIM)[0].clone(),
-        sparse_vector: None,
-        payload: Some(serde_json::json!({
-            "category": if i % 2 == 0 { "even" } else { "odd" },
-            "index": i
-        })),
-        named_vectors: None,
-    }).collect();
-    storage.insert_records("filter_test", records).await.unwrap();
+    let records: Vec<CreateRecordRequest> = (0..20)
+        .map(|i| CreateRecordRequest {
+            id: format!("r{}", i),
+            vector: make_vectors(1, DIM)[0].clone(),
+            sparse_vector: None,
+            payload: Some(serde_json::json!({
+                "category": if i % 2 == 0 { "even" } else { "odd" },
+                "index": i
+            })),
+            named_vectors: None,
+        })
+        .collect();
+    storage
+        .insert_records("filter_test", records)
+        .await
+        .unwrap();
 
     // Search with filter: only "even" category
     let filter = Filter {
@@ -432,18 +522,24 @@ async fn test_search_with_payload_filter() {
     for hit in &result.hits {
         let payload = hit.payload.as_ref().expect("payload should be present");
         assert_eq!(
-            payload["category"].as_str().unwrap(), "even",
-            "record {} should have category 'even', got {:?}", hit.id, payload["category"]
+            payload["category"].as_str().unwrap(),
+            "even",
+            "record {} should have category 'even', got {:?}",
+            hit.id,
+            payload["category"]
         );
     }
 
     // Verify we didn't accidentally return "odd" records (IDs are "r0".."r19", strip "r" prefix)
-    assert!(result.hits.iter().all(|h| {
-        h.id.strip_prefix('r')
-            .and_then(|s| s.parse::<usize>().ok())
-            .map(|n| n % 2 == 0)
-            .unwrap_or(false)
-    }), "all returned record indices should be even");
+    assert!(
+        result.hits.iter().all(|h| {
+            h.id.strip_prefix('r')
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(|n| n % 2 == 0)
+                .unwrap_or(false)
+        }),
+        "all returned record indices should be even"
+    );
 }
 
 /// Tests Acorn-style filter-in-graph: 1000 records, filter matches only 10 (1% selectivity).
@@ -453,37 +549,47 @@ async fn test_search_with_payload_filter() {
 async fn test_filtered_search_recall_high_selectivity() {
     const N: usize = 1000;
     const DIM: usize = 32;
-    const FILTER_COUNT: usize = 10;  // Only 10 out of 1000 records match (1%)
+    const FILTER_COUNT: usize = 10; // Only 10 out of 1000 records match (1%)
     const TOP_K: usize = 5;
 
-    let storage = IntelligentIndexedStorage::new(&make_config()).await.unwrap();
-    storage.create_table(TableConfig {
-        name: "acorn_test".to_string(),
-        dimension: DIM,
-        distance_metric: DistanceMetric::Cosine,
-        description: None,
-        index_type: None,
-        text_fields: None,
-        enable_full_text_search: false,
-        memory_optimization: None,
-        payload_schema: None,
-        schema_version: 1,
-        named_vectors: None,
-    }).await.unwrap();
+    let storage = IntelligentIndexedStorage::new(&make_config())
+        .await
+        .unwrap();
+    storage
+        .create_table(TableConfig {
+            name: "acorn_test".to_string(),
+            dimension: DIM,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        })
+        .await
+        .unwrap();
 
     let vectors = make_vectors(N, DIM);
 
     // Insert N records; first FILTER_COUNT get category="target"
-    let requests: Vec<CreateRecordRequest> = (0..N).map(|i| CreateRecordRequest {
-        id: format!("v{:04}", i),
-        vector: vectors[i].clone(),
-        sparse_vector: None,
-        payload: Some(serde_json::json!({
-            "category": if i < FILTER_COUNT { "target" } else { "other" }
-        })),
-        named_vectors: None,
-    }).collect();
-    storage.insert_records("acorn_test", requests).await.unwrap();
+    let requests: Vec<CreateRecordRequest> = (0..N)
+        .map(|i| CreateRecordRequest {
+            id: format!("v{:04}", i),
+            vector: vectors[i].clone(),
+            sparse_vector: None,
+            payload: Some(serde_json::json!({
+                "category": if i < FILTER_COUNT { "target" } else { "other" }
+            })),
+            named_vectors: None,
+        })
+        .collect();
+    storage
+        .insert_records("acorn_test", requests)
+        .await
+        .unwrap();
 
     // Query closest to v0 (a target record), with filter = only "target" records
     let filter = Filter {
@@ -507,12 +613,19 @@ async fn test_filtered_search_recall_high_selectivity() {
     let result = storage.search("acorn_test", query).await.unwrap();
 
     // Must return exactly TOP_K results, all with category "target"
-    assert_eq!(result.hits.len(), TOP_K, "should return exactly {} results", TOP_K);
+    assert_eq!(
+        result.hits.len(),
+        TOP_K,
+        "should return exactly {} results",
+        TOP_K
+    );
     for hit in &result.hits {
         let payload = hit.payload.as_ref().expect("payload should be present");
         assert_eq!(
-            payload["category"].as_str().unwrap(), "target",
-            "result {} should have category 'target'", hit.id
+            payload["category"].as_str().unwrap(),
+            "target",
+            "result {} should have category 'target'",
+            hit.id
         );
     }
 }

@@ -18,8 +18,8 @@
 //! assert_eq!(recall, 0.2); // 2 matches out of 10 (k=10)
 //! ```
 
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Evaluates recall@k for ANN search results
 #[derive(Debug, Clone)]
@@ -140,11 +140,7 @@ impl RecallStatistics {
         let min = recalls[0];
         let max = recalls[num_queries - 1];
 
-        let variance = recalls
-            .iter()
-            .map(|r| (r - mean).powi(2))
-            .sum::<f64>()
-            / num_queries as f64;
+        let variance = recalls.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / num_queries as f64;
         let stddev = variance.sqrt();
 
         let p95 = percentile(recalls, 95.0);
@@ -240,7 +236,9 @@ mod tests {
     #[test]
     fn test_recall_partial() {
         let evaluator = RecallEvaluator::new(10);
-        let retrieved = vec!["v1", "v2", "v5", "v6", "v11", "v12", "v13", "v14", "v15", "v16"];
+        let retrieved = vec![
+            "v1", "v2", "v5", "v6", "v11", "v12", "v13", "v14", "v15", "v16",
+        ];
         let ground_truth = vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"];
 
         let recall = evaluator.calculate_recall(&retrieved, &ground_truth);
@@ -250,7 +248,9 @@ mod tests {
     #[test]
     fn test_recall_zero() {
         let evaluator = RecallEvaluator::new(10);
-        let retrieved = vec!["v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20"];
+        let retrieved = vec![
+            "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20",
+        ];
         let ground_truth = vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"];
 
         let recall = evaluator.calculate_recall(&retrieved, &ground_truth);
@@ -263,7 +263,9 @@ mod tests {
 
         // Even though we provide 10 items, only first 5 should be considered
         let retrieved = vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"];
-        let ground_truth = vec!["v1", "v2", "v3", "v4", "v5", "v100", "v101", "v102", "v103", "v104"];
+        let ground_truth = vec![
+            "v1", "v2", "v3", "v4", "v5", "v100", "v101", "v102", "v103", "v104",
+        ];
 
         let recall = evaluator.calculate_recall(&retrieved, &ground_truth);
         assert_eq!(recall, 1.0); // All first 5 match
@@ -275,8 +277,12 @@ mod tests {
 
         let results = vec![
             vec!["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"],
-            vec!["v1", "v2", "v3", "v4", "v5", "v11", "v12", "v13", "v14", "v15"],
-            vec!["v1", "v2", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"],
+            vec![
+                "v1", "v2", "v3", "v4", "v5", "v11", "v12", "v13", "v14", "v15",
+            ],
+            vec![
+                "v1", "v2", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18",
+            ],
         ];
 
         let ground_truths = vec![

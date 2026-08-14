@@ -1,5 +1,8 @@
 use crate::search::VectorIndex;
-use crate::types::{vector::{RecordId, DenseVector}, Payload};
+use crate::types::{
+    vector::{DenseVector, RecordId},
+    Payload,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tantivy::{schema::*, Index, TantivyDocument};
@@ -77,10 +80,7 @@ pub struct HybridSearchEngine {
 impl HybridSearchEngine {
     /// Create a new hybrid search engine
     /// Note: This is a simplified constructor for basic functionality
-    pub fn new(
-        vector_index: Box<dyn VectorIndex>,
-        text_index: Index,
-    ) -> Self {
+    pub fn new(vector_index: Box<dyn VectorIndex>, text_index: Index) -> Self {
         Self {
             vector_index,
             text_index,
@@ -100,28 +100,25 @@ impl HybridSearchEngine {
 
         // 1. Vector search
         if let Some(vector) = query_vector {
-
             let vector_results = self.vector_index.search(vector, k * 3).await?;
             for (id, score) in vector_results {
                 scores.insert(id.clone(), score * alpha);
-
-        }
+            }
         }
 
         // 2. Text search
         if let Some(text) = text_query {
-
             let text_results = self.search_text(text, k * 3).await?;
             for result in text_results {
                 let score = scores.get(&result.id).unwrap_or(&0.0) + result.score * (1.0 - alpha);
                 scores.insert(result.id, score);
-
-        }
+            }
         }
 
         // 3. Apply filters
         let filtered_ids = if let Some(filters) = filters {
-            self.apply_filters(&filters, scores.keys().cloned().collect()).await?
+            self.apply_filters(&filters, scores.keys().cloned().collect())
+                .await?
         } else {
             scores.keys().cloned().collect()
         };
@@ -138,7 +135,11 @@ impl HybridSearchEngine {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(k);
 
         // 5. Load payloads
@@ -149,27 +150,33 @@ impl HybridSearchEngine {
         Ok(results)
     }
 
-    async fn search_text(
-        &self,
-        query: &str,
-        limit: usize) -> crate::Result<Vec<SearchResult>> {
-        let reader = self.text_index.reader()
-            .map_err(|e| crate::Error::Internal(format!("Failed to get reader: {}", e) ))?;
+    async fn search_text(&self, query: &str, limit: usize) -> crate::Result<Vec<SearchResult>> {
+        let reader = self
+            .text_index
+            .reader()
+            .map_err(|e| crate::Error::Internal(format!("Failed to get reader: {}", e)))?;
         let searcher = reader.searcher();
 
         let query_parser = tantivy::query::QueryParser::for_index(&self.text_index, vec![]);
-        let query = query_parser.parse_query(query)
-            .map_err(|e| crate::Error::Internal(format!("Failed to parse query: {}", e) ))?;
+        let query = query_parser
+            .parse_query(query)
+            .map_err(|e| crate::Error::Internal(format!("Failed to parse query: {}", e)))?;
 
-        let top_docs = searcher.search(&query, &tantivy::collector::TopDocs::with_limit(limit))
-            .map_err(|e| crate::Error::Internal(format!("Search failed: {}", e) ))?;
+        let top_docs = searcher
+            .search(&query, &tantivy::collector::TopDocs::with_limit(limit))
+            .map_err(|e| crate::Error::Internal(format!("Search failed: {}", e)))?;
 
         let mut results = Vec::new();
         for (_score, doc_address) in top_docs {
-            let doc: TantivyDocument = searcher.doc(doc_address)
-                .map_err(|e| crate::Error::Internal(format!("Failed to get doc: {}", e) ))?;
-            if let Some(id_field) = doc.get_first(self.text_index.schema().get_field("id").map_err(|_| crate::Error::Internal("Operation failed".to_string()))?)
-            {
+            let doc: TantivyDocument = searcher
+                .doc(doc_address)
+                .map_err(|e| crate::Error::Internal(format!("Failed to get doc: {}", e)))?;
+            if let Some(id_field) = doc.get_first(
+                self.text_index
+                    .schema()
+                    .get_field("id")
+                    .map_err(|_| crate::Error::Internal("Operation failed".to_string()))?,
+            ) {
                 if let Some(id) = id_field.as_str() {
                     results.push(SearchResult {
                         id: RecordId::from(id),
@@ -186,16 +193,15 @@ impl HybridSearchEngine {
     async fn apply_filters(
         &self,
         _filters: &[FilterOperator],
-        candidates: Vec<RecordId>) -> crate::Result<Vec<RecordId>> {
+        candidates: Vec<RecordId>,
+    ) -> crate::Result<Vec<RecordId>> {
         // This is a placeholder for the actual metadata engine.
         // In a real scenario, this would call a separate metadata engine.
         // For now, it just returns all candidates.
         Ok(candidates)
     }
 
-    async fn load_payload(
-        &self,
-        _id: &RecordId) -> crate::Result<Option<serde_json::Value>> {
+    async fn load_payload(&self, _id: &RecordId) -> crate::Result<Option<serde_json::Value>> {
         // This is a placeholder for loading payloads.
         // In a real scenario, this would fetch the payload from a storage backend.
         Ok(None)
@@ -305,13 +311,19 @@ impl HybridSearchEngine {
         let mut results: Vec<SearchResult> = ids
             .into_iter()
             .filter_map(|id| {
-                merged_scores
-                    .get(&id)
-                    .map(|&score| SearchResult { id, score, payload: None })
+                merged_scores.get(&id).map(|&score| SearchResult {
+                    id,
+                    score,
+                    payload: None,
+                })
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(k);
 
         for result in &mut results {
@@ -333,7 +345,8 @@ impl HybridSearchEngine {
     pub async fn rerank(
         &self,
         results: Vec<SearchResult>,
-        strategy: RerankStrategy) -> crate::Result<Vec<SearchResult>> {
+        strategy: RerankStrategy,
+    ) -> crate::Result<Vec<SearchResult>> {
         Ok(match strategy {
             RerankStrategy::RRF { k } => self.rerank_rrf(results, k)?,
             RerankStrategy::Linear { vector_weight } => {
@@ -345,10 +358,7 @@ impl HybridSearchEngine {
         })
     }
 
-    fn rerank_rrf(
-        &self,
-        results: Vec<SearchResult>,
-        k: i32) -> crate::Result<Vec<SearchResult>> {
+    fn rerank_rrf(&self, results: Vec<SearchResult>, k: i32) -> crate::Result<Vec<SearchResult>> {
         // Implement Reciprocal Rank Fusion
         let mut rrf_scores: HashMap<RecordId, f32> = HashMap::new();
 
@@ -366,14 +376,19 @@ impl HybridSearchEngine {
             })
             .collect();
 
-        reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(reranked)
     }
 
     async fn rerank_linear(
         &self,
         results: Vec<SearchResult>,
-        vector_weight: f32) -> crate::Result<Vec<SearchResult>> {
+        vector_weight: f32,
+    ) -> crate::Result<Vec<SearchResult>> {
         let mut reranked: Vec<_> = results
             .into_iter()
             .map(|result| SearchResult {
@@ -382,14 +397,19 @@ impl HybridSearchEngine {
                 payload: result.payload,
             })
             .collect();
-        reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(reranked)
     }
 
     async fn rerank_cross_encoder(
         &self,
         results: Vec<SearchResult>,
-        _model_name: &str) -> crate::Result<Vec<SearchResult>> {
+        _model_name: &str,
+    ) -> crate::Result<Vec<SearchResult>> {
         Ok(results)
     }
 }
@@ -457,13 +477,20 @@ mod tests {
         let txt_norm = dbsf_normalize(&text_raw);
 
         let mut scores: HashMap<RecordId, f32> = HashMap::new();
-        for (id, s) in vec_norm { *scores.entry(id).or_insert(0.0) += s; }
-        for (id, s) in txt_norm { *scores.entry(id).or_insert(0.0) += s; }
+        for (id, s) in vec_norm {
+            *scores.entry(id).or_insert(0.0) += s;
+        }
+        for (id, s) in txt_norm {
+            *scores.entry(id).or_insert(0.0) += s;
+        }
 
         let best_score = scores["best"];
         for (id, &s) in &scores {
             if id != "best" {
-                assert!(best_score >= s, "'best' should have the highest fused score");
+                assert!(
+                    best_score >= s,
+                    "'best' should have the highest fused score"
+                );
             }
         }
     }

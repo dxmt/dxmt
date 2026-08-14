@@ -7,8 +7,8 @@
 
 use crate::search::quantization::{QuantizationType, QuantizedVector};
 use crate::types::{vector::DenseVector, DistanceMetric};
-use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// 量化错误类型
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +94,9 @@ impl QuantizationUtils {
     /// 分析向量数据集
     pub fn analyze_vectors(vectors: &[DenseVector]) -> crate::Result<VectorStatistics> {
         if vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Vector dataset is empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Vector dataset is empty".to_string(),
+            ));
         }
 
         let dimension = vectors[0].len();
@@ -105,7 +107,7 @@ impl QuantizationUtils {
                 return Err(crate::Error::DimensionMismatch {
                     expected: dimension,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -161,7 +163,8 @@ impl QuantizationUtils {
     pub fn recommend_quantization(
         vectors: &[DenseVector],
         target_compression_ratio: Option<f32>,
-        max_accuracy_loss: Option<f32>) -> crate::Result<QuantizationRecommendation> {
+        max_accuracy_loss: Option<f32>,
+    ) -> crate::Result<QuantizationRecommendation> {
         let stats = Self::analyze_vectors(vectors)?;
 
         // 分析数据特征
@@ -217,16 +220,19 @@ impl QuantizationUtils {
         // 检查是否满足约束条件
         if let Some(target_ratio) = target_compression_ratio {
             if compression_ratio < target_ratio {
-                return Err(crate::Error::InvalidInput(format!("Cannot achieve target compression ratio {}", target_ratio)));
+                return Err(crate::Error::InvalidInput(format!(
+                    "Cannot achieve target compression ratio {}",
+                    target_ratio
+                )));
             }
         }
 
         if let Some(max_loss) = max_accuracy_loss {
             if accuracy_loss > max_loss {
                 return Err(crate::Error::InvalidInput(format!(
-                        "Accuracy loss {} exceeds maximum {}",
-                        accuracy_loss, max_loss
-                    )));
+                    "Accuracy loss {} exceeds maximum {}",
+                    accuracy_loss, max_loss
+                )));
             }
         }
 
@@ -248,9 +254,12 @@ impl QuantizationUtils {
     pub fn validate_quantization_quality(
         original_vectors: &[DenseVector],
         quantized_vectors: &[QuantizedVector],
-        distance_metric: DistanceMetric) -> crate::Result<QuantizationQuality> {
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<QuantizationQuality> {
         if original_vectors.len() != quantized_vectors.len() {
-            return Err(crate::Error::InvalidInput("Original and quantized vector counts must match".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Original and quantized vector counts must match".to_string(),
+            ));
         }
 
         let mut distance_errors = Vec::new();
@@ -299,7 +308,8 @@ impl QuantizationUtils {
     pub fn optimize_quantization_parameters(
         vectors: &[DenseVector],
         quantization_type: &QuantizationType,
-        target_accuracy: f32) -> crate::Result<QuantizationType> {
+        target_accuracy: f32,
+    ) -> crate::Result<QuantizationType> {
         // 简化的参数优化实现
         // 实际应该使用网格搜索或其他优化算法
 
@@ -322,7 +332,7 @@ impl QuantizationUtils {
                     }
                 }
 
-Ok(QuantizationType::Scalar(best_config))
+                Ok(QuantizationType::Scalar(best_config))
             }
             QuantizationType::Product(config) => {
                 let mut best_config = config.clone();
@@ -331,16 +341,14 @@ Ok(QuantizationType::Scalar(best_config))
                 // 优化子向量数量
                 for num_sub_vectors in [8, 16, 32, 64] {
                     if dimension.is_multiple_of(num_sub_vectors) {
-
                         let mut test_config = config.clone();
                         test_config.num_sub_vectors = Some(num_sub_vectors);
                         best_config = test_config;
                         break;
-
                     }
                 }
 
-Ok(QuantizationType::Product(best_config))
+                Ok(QuantizationType::Product(best_config))
             }
             _ => Ok(quantization_type.clone()),
         }
@@ -349,7 +357,8 @@ Ok(QuantizationType::Product(best_config))
     /// 比较量化方法
     pub fn compare_quantization_methods(
         vectors: &[DenseVector],
-        methods: &[QuantizationType]) -> crate::Result<Vec<QuantizationComparison>> {
+        methods: &[QuantizationType],
+    ) -> crate::Result<Vec<QuantizationComparison>> {
         let mut comparisons = Vec::new();
 
         for method in methods {
@@ -415,7 +424,7 @@ Ok(QuantizationType::Product(best_config))
                 mean: 0.0,
                 std: 0.0,
                 median: 0.0,
-            }
+            };
         }
 
         let mut sorted_values = values.to_vec();
@@ -489,7 +498,8 @@ Ok(QuantizationType::Product(best_config))
 
     fn calculate_overall_quality_score(
         distance_errors: &[f32],
-        reconstruction_errors: &[f32]) -> f32 {
+        reconstruction_errors: &[f32],
+    ) -> f32 {
         let avg_distance_error = distance_errors.iter().sum::<f32>() / distance_errors.len() as f32;
         let avg_reconstruction_error =
             reconstruction_errors.iter().sum::<f32>() / reconstruction_errors.len() as f32;
@@ -573,8 +583,7 @@ mod tests {
             vec![0.0, 0.0, 1.0],
         ];
 
-        let recommendation =
-            QuantizationUtils::recommend_quantization(&vectors, None, None)?;
+        let recommendation = QuantizationUtils::recommend_quantization(&vectors, None, None)?;
         assert!(recommendation.expected_compression_ratio > 1.0);
         Ok(())
     }

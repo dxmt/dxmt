@@ -11,8 +11,8 @@ pub mod lookup_tables;
 // #[cfg(test)]
 // mod tests;
 
-pub use pq_fastscan::{PQFastScan, PQFastScanConfig};
 pub use lookup_tables::LookupTableBuilder;
+pub use pq_fastscan::{PQFastScan, PQFastScanConfig};
 
 /// Aligned vector for SIMD operations
 #[repr(align(32))]

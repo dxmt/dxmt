@@ -69,7 +69,9 @@ async fn hnsw_keeps_deletions_across_a_reload() {
     // Deletion is a tombstone on the node, not a removal from the vector. If the flag did not
     // survive serialization the record would come back from the dead on the next restart.
     let reloaded = HnswIndex::load(&path).unwrap();
-    let hits = VectorIndex::search(&reloaded, &vectors(50, 8)[7].1, 50).await.unwrap();
+    let hits = VectorIndex::search(&reloaded, &vectors(50, 8)[7].1, 50)
+        .await
+        .unwrap();
     assert!(
         !hits.iter().any(|(id, _)| id == "v7"),
         "a deleted record reappeared after reload"
@@ -103,10 +105,17 @@ async fn hnsw_pq_carries_its_codebooks() {
     let reloaded = HnswPqIndex::load(&path).unwrap();
     let after = VectorIndex::search(&reloaded, &query, 5).await.unwrap();
 
-    assert_eq!(before.len(), after.len(), "reloaded index returned a different result count");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "reloaded index returned a different result count"
+    );
     let before_ids: Vec<_> = before.iter().map(|(id, _)| id.as_str()).collect();
     let after_ids: Vec<_> = after.iter().map(|(id, _)| id.as_str()).collect();
-    assert_eq!(before_ids, after_ids, "PQ neighbours changed across save/load");
+    assert_eq!(
+        before_ids, after_ids,
+        "PQ neighbours changed across save/load"
+    );
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ pub mod simple_discovery;
 
 use serde::{Deserialize, Serialize};
 
-pub use simple_discovery::{SimpleDiscovery, ClusterConfig, NodeAnnouncement};
+pub use simple_discovery::{ClusterConfig, NodeAnnouncement, SimpleDiscovery};
 
 /// Node ID type
 pub type NodeId = String;

@@ -1,12 +1,12 @@
 //! Model Context Protocol (MCP) implementation for DXMT VectorDB
-//! 
+//!
 //! This module provides MCP server capabilities, allowing AI assistants like
 //! Claude and GPT to interact with the vector database through standardized tools.
 
+pub mod prompts;
+pub mod resources;
 pub mod server;
 pub mod tools;
-pub mod resources;
-pub mod prompts;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
@@ -67,25 +67,25 @@ pub struct LoggingCapability {
 pub enum McpRequest {
     #[serde(rename = "initialize")]
     Initialize(InitializeParams),
-    
+
     #[serde(rename = "tools/list")]
     ListTools,
-    
+
     #[serde(rename = "tools/call")]
     CallTool(CallToolParams),
-    
+
     #[serde(rename = "resources/list")]
     ListResources,
-    
+
     #[serde(rename = "resources/read")]
     ReadResource(ReadResourceParams),
-    
+
     #[serde(rename = "prompts/list")]
     ListPrompts,
-    
+
     #[serde(rename = "prompts/get")]
     GetPrompt(GetPromptParams),
-    
+
     #[serde(rename = "completion/complete")]
     Complete(CompleteParams),
 }
@@ -216,9 +216,17 @@ pub struct ReadResourceResult {
 #[serde(tag = "type")]
 pub enum ResourceContent {
     #[serde(rename = "text")]
-    Text { uri: String, mime_type: Option<String>, text: String },
+    Text {
+        uri: String,
+        mime_type: Option<String>,
+        text: String,
+    },
     #[serde(rename = "blob")]
-    Blob { uri: String, mime_type: Option<String>, blob: String },
+    Blob {
+        uri: String,
+        mime_type: Option<String>,
+        blob: String,
+    },
 }
 
 /// Prompt-related types
@@ -342,19 +350,19 @@ impl McpError {
             data: None,
         }
     }
-    
+
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(-32600, message)
     }
-    
+
     pub fn method_not_found(method: &str) -> Self {
         Self::new(-32601, format!("Method not found: {}", method))
     }
-    
+
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self::new(-32602, message)
     }
-    
+
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::new(-32603, message)
     }
@@ -372,14 +380,20 @@ pub struct JsonRpcMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JsonRpcContent {
-    Request { method: String, params: Option<serde_json::Value> },
+    Request {
+        method: String,
+        params: Option<serde_json::Value>,
+    },
     Response {
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<McpError>,
     },
-    Notification { method: String, params: Option<serde_json::Value> },
+    Notification {
+        method: String,
+        params: Option<serde_json::Value>,
+    },
 }
 
 impl Default for ServerInfo {
@@ -396,7 +410,12 @@ impl Default for ServerInfo {
                 }),
                 prompts: Some(PromptsCapability { list_changed: true }),
                 logging: Some(LoggingCapability {
-                    levels: vec!["debug".to_string(), "info".to_string(), "warning".to_string(), "error".to_string()],
+                    levels: vec![
+                        "debug".to_string(),
+                        "info".to_string(),
+                        "warning".to_string(),
+                        "error".to_string(),
+                    ],
                 }),
             },
         }

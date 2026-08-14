@@ -8,13 +8,14 @@
 
 use dxmt_vectordb::{
     storage::{
-        memory::MemoryStorage, tiered::TieredStorage,
-        tier_promotion::{TierPromotionConfig, Tier},
-        background_demotion::{BackgroundDemotionConfig, start_background_demotion_task},
+        background_demotion::{start_background_demotion_task, BackgroundDemotionConfig},
+        memory::MemoryStorage,
+        tier_promotion::{Tier, TierPromotionConfig},
+        tiered::TieredStorage,
         Storage, StorageConfig,
     },
     types::{
-        record::{CreateRecordRequest, SearchQuery, SearchMode},
+        record::{CreateRecordRequest, SearchMode, SearchQuery},
         table::TableConfig,
         DistanceMetric, IndexType,
     },
@@ -64,11 +65,11 @@ async fn test_complete_tiered_workflow() {
     let cold_tier = Arc::new(MemoryStorage::new());
 
     let promotion_config = TierPromotionConfig {
-        hot_threshold: 0.15,      // Very low for testing
-        warm_threshold: 0.08,     // Very low for testing
+        hot_threshold: 0.15,  // Very low for testing
+        warm_threshold: 0.08, // Very low for testing
         demote_to_warm_threshold: 0.12,
         demote_to_cold_threshold: 0.05,
-        time_window_secs: 10,     // Short window for testing
+        time_window_secs: 10, // Short window for testing
         auto_promotion_enabled: true,
         auto_demotion_enabled: true,
     };
@@ -107,7 +108,9 @@ async fn test_complete_tiered_workflow() {
 
     // Track vectors in promotion policy
     for i in 0..10 {
-        storage.promotion_policy().set_current_tier(&format!("vec_{}", i), Tier::Hot);
+        storage
+            .promotion_policy()
+            .set_current_tier(&format!("vec_{}", i), Tier::Hot);
     }
 
     println!("✓ Inserted 10 vectors into hot tier");
@@ -127,7 +130,10 @@ async fn test_complete_tiered_workflow() {
         vector_name: None,
     };
 
-    let result = storage.search("workflow_test", query.clone()).await.unwrap();
+    let result = storage
+        .search("workflow_test", query.clone())
+        .await
+        .unwrap();
     println!("✓ Found {} results", result.hits.len());
     for (i, hit) in result.hits.iter().take(3).enumerate() {
         println!("  {}. ID: {}, Score: {:.4}", i + 1, hit.id, hit.score);
@@ -149,13 +155,19 @@ async fn test_complete_tiered_workflow() {
     for vec_id in &frequent_vectors {
         let hotness = storage.promotion_policy().get_hotness_score(vec_id);
         let tier = storage.promotion_policy().get_recommended_tier(vec_id);
-        println!("  - {}: hotness={:.3}, recommended={:?}", vec_id, hotness, tier);
+        println!(
+            "  - {}: hotness={:.3}, recommended={:?}",
+            vec_id, hotness, tier
+        );
     }
     println!();
 
     // Step 6: Trigger promotion by performing search
     println!("Step 6: Performing search to trigger automatic promotion...");
-    let result = storage.search("workflow_test", query.clone()).await.unwrap();
+    let result = storage
+        .search("workflow_test", query.clone())
+        .await
+        .unwrap();
     println!("✓ Search completed, promotions triggered");
     println!("  - Search took {}ms", result.tookms);
     println!();
@@ -191,7 +203,10 @@ async fn test_complete_tiered_workflow() {
 
     // Step 10: Perform final search to verify system still works
     println!("Step 10: Performing final search across all tiers...");
-    let final_result = storage.search("workflow_test", query.clone()).await.unwrap();
+    let final_result = storage
+        .search("workflow_test", query.clone())
+        .await
+        .unwrap();
     println!("✓ Final search completed");
     println!("  - Found {} results", final_result.hits.len());
     println!("  - Search took {}ms", final_result.tookms);
@@ -255,7 +270,9 @@ async fn test_vector_lifecycle() {
         .unwrap();
 
     // Track in promotion policy
-    storage.promotion_policy().set_current_tier("lifecycle_vec", Tier::Hot);
+    storage
+        .promotion_policy()
+        .set_current_tier("lifecycle_vec", Tier::Hot);
 
     println!("Phase 1: Initial state");
     println!("  - Vector inserted into hot tier");
@@ -271,7 +288,9 @@ async fn test_vector_lifecycle() {
         storage.promotion_policy().record_access("lifecycle_vec");
     }
 
-    let hotness = storage.promotion_policy().get_hotness_score("lifecycle_vec");
+    let hotness = storage
+        .promotion_policy()
+        .get_hotness_score("lifecycle_vec");
     println!("  - Hotness score: {:.3}", hotness);
     println!("  - Should stay in hot tier");
 
@@ -279,7 +298,9 @@ async fn test_vector_lifecycle() {
     println!("\nPhase 3: No access for 12 seconds (beyond time window)");
     tokio::time::sleep(Duration::from_secs(12)).await;
 
-    let coolness = storage.promotion_policy().get_hotness_score("lifecycle_vec");
+    let coolness = storage
+        .promotion_policy()
+        .get_hotness_score("lifecycle_vec");
     println!("  - Hotness score: {:.3}", coolness);
     println!("  - Should be eligible for demotion");
 
@@ -296,10 +317,14 @@ async fn test_vector_lifecycle() {
         storage.promotion_policy().record_access("lifecycle_vec");
     }
 
-    let reheated_score = storage.promotion_policy().get_hotness_score("lifecycle_vec");
+    let reheated_score = storage
+        .promotion_policy()
+        .get_hotness_score("lifecycle_vec");
     println!("  - Hotness score: {:.3}", reheated_score);
 
-    let recommended = storage.promotion_policy().get_recommended_tier("lifecycle_vec");
+    let recommended = storage
+        .promotion_policy()
+        .get_recommended_tier("lifecycle_vec");
     println!("  - Recommended tier: {:?}", recommended);
     println!("  - Should be promoted back to hot tier");
 
@@ -333,24 +358,39 @@ async fn test_search_performance_across_tiers() {
     println!("  - Inserting 10 vectors into hot tier...");
     for i in 0..10 {
         let vec = create_test_vector(&format!("hot_{}", i), i as f32 / 10.0);
-        hot_tier.insert_record("performance_test", vec).await.unwrap();
-        storage.promotion_policy().set_current_tier(&format!("hot_{}", i), Tier::Hot);
+        hot_tier
+            .insert_record("performance_test", vec)
+            .await
+            .unwrap();
+        storage
+            .promotion_policy()
+            .set_current_tier(&format!("hot_{}", i), Tier::Hot);
     }
 
     // Warm tier: 10 vectors
     println!("  - Inserting 10 vectors into warm tier...");
     for i in 0..10 {
         let vec = create_test_vector(&format!("warm_{}", i), i as f32 / 10.0);
-        warm_tier.insert_record("performance_test", vec).await.unwrap();
-        storage.promotion_policy().set_current_tier(&format!("warm_{}", i), Tier::Warm);
+        warm_tier
+            .insert_record("performance_test", vec)
+            .await
+            .unwrap();
+        storage
+            .promotion_policy()
+            .set_current_tier(&format!("warm_{}", i), Tier::Warm);
     }
 
     // Cold tier: 10 vectors
     println!("  - Inserting 10 vectors into cold tier...");
     for i in 0..10 {
         let vec = create_test_vector(&format!("cold_{}", i), i as f32 / 10.0);
-        cold_tier.insert_record("performance_test", vec).await.unwrap();
-        storage.promotion_policy().set_current_tier(&format!("cold_{}", i), Tier::Cold);
+        cold_tier
+            .insert_record("performance_test", vec)
+            .await
+            .unwrap();
+        storage
+            .promotion_policy()
+            .set_current_tier(&format!("cold_{}", i), Tier::Cold);
     }
 
     println!("✓ Test data prepared (30 vectors across 3 tiers)");

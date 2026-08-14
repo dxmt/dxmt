@@ -10,14 +10,10 @@
 //! - Maintains >95% recall with proper configuration
 
 use crate::search::quantization::rabitq::{RaBitQConfig, RaBitQQuantizer};
-use crate::types::{
-    record::{SearchHit},
-    vector::DenseVector,
-    DistanceMetric,
-};
+use crate::types::{record::SearchHit, vector::DenseVector, DistanceMetric};
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Binary HNSW configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,11 +45,11 @@ impl Default for BinaryHnswConfig {
     fn default() -> Self {
         Self {
             rabitq_config: RaBitQConfig::default(),
-            m: 16,                  // Good default for most use cases
-            ef_construction: 200,   // Higher = better graph quality
-            ef_search: 100,         // Higher = better recall
-            max_layer: None,        // Auto-calculate
-            refinement_factor: 3,   // Refine top-3k candidates
+            m: 16,                // Good default for most use cases
+            ef_construction: 200, // Higher = better graph quality
+            ef_search: 100,       // Higher = better recall
+            max_layer: None,      // Auto-calculate
+            refinement_factor: 3, // Refine top-3k candidates
             enable_refinement: true,
         }
     }
@@ -112,7 +108,11 @@ pub struct BinaryHnswStats {
 
 impl BinaryHnswIndex {
     /// Create new Binary HNSW index
-    pub fn new(config: BinaryHnswConfig, distance_metric: DistanceMetric, dimension: usize) -> Self {
+    pub fn new(
+        config: BinaryHnswConfig,
+        distance_metric: DistanceMetric,
+        dimension: usize,
+    ) -> Self {
         Self {
             quantizer: RaBitQQuantizer::new(
                 config.rabitq_config.clone(),
@@ -134,11 +134,14 @@ impl BinaryHnswIndex {
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
             return Err(crate::Error::InvalidInput(
-                "Training vectors cannot be empty".to_string()
+                "Training vectors cannot be empty".to_string(),
             ));
         }
 
-        tracing::info!("Training Binary HNSW with {} vectors", training_vectors.len());
+        tracing::info!(
+            "Training Binary HNSW with {} vectors",
+            training_vectors.len()
+        );
 
         // Train RaBitQ quantizer
         self.quantizer.train(training_vectors)?;
@@ -152,7 +155,7 @@ impl BinaryHnswIndex {
     pub fn insert(&mut self, id: String, vector: DenseVector) -> crate::Result<()> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(
-                "Index must be trained before insertion".to_string()
+                "Index must be trained before insertion".to_string(),
             ));
         }
 
@@ -198,15 +201,15 @@ impl BinaryHnswIndex {
 
             // Insert and connect at each layer from layer to 0
             for lc in (0..=layer).rev() {
-                let candidates = self.search_layer(
-                    &node.codes,
-                    &nearest,
-                    self.config.ef_construction,
-                    lc,
-                );
+                let candidates =
+                    self.search_layer(&node.codes, &nearest, self.config.ef_construction, lc);
 
                 // Select M neighbors
-                let m = if lc == 0 { self.config.m * 2 } else { self.config.m };
+                let m = if lc == 0 {
+                    self.config.m * 2
+                } else {
+                    self.config.m
+                };
                 let neighbors_to_add = self.select_neighbors(&node.codes, candidates, m);
 
                 // Add bidirectional links
@@ -227,8 +230,13 @@ impl BinaryHnswIndex {
                         // Check if pruning needed
                         if neighbor.neighbors[lc].len() > m {
                             let neighbor_codes = neighbor.codes.clone();
-                            let to_prune: Vec<String> = neighbor.neighbors[lc].iter().cloned().collect();
-                            neighbors_to_prune.push((neighbor_id.clone(), neighbor_codes, to_prune));
+                            let to_prune: Vec<String> =
+                                neighbor.neighbors[lc].iter().cloned().collect();
+                            neighbors_to_prune.push((
+                                neighbor_id.clone(),
+                                neighbor_codes,
+                                to_prune,
+                            ));
                         }
                     }
                 }
@@ -260,7 +268,7 @@ impl BinaryHnswIndex {
     pub fn search(&self, query: &DenseVector, k: usize) -> crate::Result<Vec<SearchHit>> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(
-                "Index must be trained before search".to_string()
+                "Index must be trained before search".to_string(),
             ));
         }
 
@@ -363,7 +371,8 @@ impl BinaryHnswIndex {
                             if let Some(neighbor) = self.nodes.get(neighbor_id) {
                                 let dist = self.hamming_distance(query_codes, &neighbor.codes);
 
-                                let f_dist = w.peek().map(|MaxHeapEntry(d, _)| *d).unwrap_or(f32::MAX);
+                                let f_dist =
+                                    w.peek().map(|MaxHeapEntry(d, _)| *d).unwrap_or(f32::MAX);
 
                                 if dist < f_dist || w.len() < ef {
                                     candidates.push(MinHeapEntry(dist, neighbor_id.clone()));
@@ -384,7 +393,12 @@ impl BinaryHnswIndex {
     }
 
     /// Select M neighbors using heuristic
-    fn select_neighbors(&self, query_codes: &[u8], candidates: Vec<String>, m: usize) -> Vec<String> {
+    fn select_neighbors(
+        &self,
+        query_codes: &[u8],
+        candidates: Vec<String>,
+        m: usize,
+    ) -> Vec<String> {
         if candidates.len() <= m {
             return candidates;
         }
@@ -677,7 +691,9 @@ mod tests {
             let results = index.search(query, k).unwrap();
 
             // Check if query itself is in top-k
-            let found = results.iter().any(|hit| hit.id == format!("vec_{}", query_idx));
+            let found = results
+                .iter()
+                .any(|hit| hit.id == format!("vec_{}", query_idx));
             if found {
                 total_found += 1;
             }
@@ -692,7 +708,13 @@ mod tests {
         }
 
         let recall = total_found as f32 / num_queries as f32;
-        println!("Recall@{}: {:.2}% ({}/{} found)", k, recall * 100.0, total_found, num_queries);
+        println!(
+            "Recall@{}: {:.2}% ({}/{} found)",
+            k,
+            recall * 100.0,
+            total_found,
+            num_queries
+        );
 
         println!("Note: Low recall is expected with small test dataset");
         println!("Binary quantization trades precision for memory efficiency");

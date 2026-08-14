@@ -5,9 +5,9 @@
 
 use crate::storage::tiered::TieredStorage;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use std::time::Duration;
 
 /// Configuration for background demotion task
 #[derive(Debug, Clone)]
@@ -82,7 +82,11 @@ pub fn start_background_demotion_task(
     tracing::info!(
         "Starting background demotion task (interval: {}s, tables: {:?})",
         config.interval_secs,
-        if table_names.is_empty() { "all".to_string() } else { format!("{:?}", table_names) }
+        if table_names.is_empty() {
+            "all".to_string()
+        } else {
+            format!("{:?}", table_names)
+        }
     );
 
     let task_handle = tokio::spawn(async move {
@@ -139,14 +143,12 @@ mod tests {
     use super::*;
     use crate::storage::{
         memory::MemoryStorage,
+        tier_promotion::{Tier, TierPromotionConfig},
         tiered::TieredStorage,
-        tier_promotion::{TierPromotionConfig, Tier},
-        StorageConfig, Storage,
+        Storage, StorageConfig,
     };
     use crate::types::{
-        record::CreateRecordRequest,
-        table::TableConfig,
-        DistanceMetric, IndexType,
+        record::CreateRecordRequest, table::TableConfig, DistanceMetric, IndexType,
     };
 
     fn create_test_table_config(name: &str) -> TableConfig {
@@ -241,10 +243,15 @@ mod tests {
 
         // Insert a vector into hot tier
         let vector = create_test_vector("vec_1");
-        hot_tier.insert_record("test_demotion", vector).await.unwrap();
+        hot_tier
+            .insert_record("test_demotion", vector)
+            .await
+            .unwrap();
 
         // Set it as hot in promotion policy (but with no recent accesses)
-        storage.promotion_policy().set_current_tier("vec_1", Tier::Hot);
+        storage
+            .promotion_policy()
+            .set_current_tier("vec_1", Tier::Hot);
 
         // Start background task with short interval
         let config = BackgroundDemotionConfig {

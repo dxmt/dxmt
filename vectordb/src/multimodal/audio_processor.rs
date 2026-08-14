@@ -1,6 +1,9 @@
-use async_trait::async_trait;
-use crate::types::{DenseVector, multimodal::{ModalityType, MultimodalContent}};
 use super::processor::MultimodalProcessor;
+use crate::types::{
+    multimodal::{ModalityType, MultimodalContent},
+    DenseVector,
+};
+use async_trait::async_trait;
 use std::path::Path;
 
 /// Whisper-based audio processor for speech embeddings
@@ -17,18 +20,18 @@ impl WhisperAudioProcessor {
             model_name: model_name.unwrap_or_else(|| "openai/whisper-base".to_string()),
         }
     }
-    
+
     async fn process_audio_file(&self, path: &str) -> crate::Result<DenseVector> {
         // In production, this would:
         // 1. Load audio file using symphonia or similar
         // 2. Resample to 16kHz if needed
         // 3. Extract mel-spectrogram features
         // 4. Run through Whisper encoder
-        
+
         // Mock implementation
         let mut embedding = vec![0.0f32; self.dimension];
         let hash = path.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
-        
+
         for (i, v) in embedding.iter_mut().enumerate() {
             *v = ((hash.wrapping_mul(i as u32 + 1) % 1000) as f32) / 1000.0 - 0.5;
         }
@@ -52,7 +55,7 @@ impl WhisperAudioProcessor {
         for (i, v) in embedding.iter_mut().enumerate() {
             *v = ((seed.wrapping_mul(i as u32 + 1) % 1000) as f32) / 1000.0 - 0.5;
         }
-        
+
         // Normalize
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
@@ -60,7 +63,7 @@ impl WhisperAudioProcessor {
                 *x /= norm;
             }
         }
-        
+
         Ok(embedding)
     }
 }
@@ -70,16 +73,18 @@ impl MultimodalProcessor for WhisperAudioProcessor {
     fn modality(&self) -> ModalityType {
         ModalityType::Audio
     }
-    
+
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector> {
         match content {
             MultimodalContent::AudioPath(path) => self.process_audio_file(path).await,
             MultimodalContent::AudioBytes(data) => self.process_audio_bytes(data).await,
             MultimodalContent::Embedding(vec) => Ok(vec.clone()),
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()> {
         match content {
             MultimodalContent::AudioPath(path) => {
@@ -91,10 +96,13 @@ impl MultimodalProcessor for WhisperAudioProcessor {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
-                    
+
                 match ext.to_lowercase().as_str() {
                     "wav" | "mp3" | "flac" | "ogg" | "m4a" | "aac" => Ok(()),
-                    _ => Err(crate::Error::InvalidInput(format!("Unsupported audio format: {}", ext)))
+                    _ => Err(crate::Error::InvalidInput(format!(
+                        "Unsupported audio format: {}",
+                        ext
+                    ))),
                 }
             }
             MultimodalContent::AudioBytes(data) => {
@@ -115,10 +123,12 @@ impl MultimodalProcessor for WhisperAudioProcessor {
                     Ok(())
                 }
             }
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -148,11 +158,10 @@ impl MultimodalProcessor for MusicEmbeddingProcessor {
     fn modality(&self) -> ModalityType {
         ModalityType::Audio
     }
-    
+
     async fn process(&self, content: &MultimodalContent) -> crate::Result<DenseVector> {
         match content {
-            MultimodalContent::AudioPath(path) | 
-            MultimodalContent::AudioBytes(path) => {
+            MultimodalContent::AudioPath(path) | MultimodalContent::AudioBytes(path) => {
                 // Mock implementation for music features
                 let mut embedding = vec![0.0f32; self.dimension];
                 let seed = if let MultimodalContent::AudioPath(p) = content {
@@ -160,7 +169,7 @@ impl MultimodalProcessor for MusicEmbeddingProcessor {
                 } else {
                     path.len() as u32
                 };
-                
+
                 // Simulate different features for music
                 for (i, v) in embedding.iter_mut().enumerate() {
                     let feature_type = i / 64; // Group features
@@ -171,7 +180,7 @@ impl MultimodalProcessor for MusicEmbeddingProcessor {
                         _ => ((seed.wrapping_mul(i as u32 + 17) % 1000) as f32) / 1000.0, // Timbre
                     } - 0.5;
                 }
-                
+
                 // Normalize
                 let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 0.0 {
@@ -179,23 +188,27 @@ impl MultimodalProcessor for MusicEmbeddingProcessor {
                         *x /= norm;
                     }
                 }
-                
+
                 Ok(embedding)
             }
             MultimodalContent::Embedding(vec) => Ok(vec.clone()),
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn validate(&self, content: &MultimodalContent) -> crate::Result<()> {
         match content {
-            MultimodalContent::AudioPath(_) | 
-            MultimodalContent::AudioBytes(_) | 
-            MultimodalContent::Embedding(_) => Ok(()),
-            _ => Err(crate::Error::InvalidInput("Expected audio content".to_string()))
+            MultimodalContent::AudioPath(_)
+            | MultimodalContent::AudioBytes(_)
+            | MultimodalContent::Embedding(_) => Ok(()),
+            _ => Err(crate::Error::InvalidInput(
+                "Expected audio content".to_string(),
+            )),
         }
     }
-    
+
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -204,32 +217,32 @@ impl MultimodalProcessor for MusicEmbeddingProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_whisper_processor() {
         let processor = WhisperAudioProcessor::new(None);
-        
+
         // Test with audio path
         let content = MultimodalContent::AudioPath("test.wav".to_string());
         assert!(processor.validate(&content).is_ok());
-        
+
         let embedding = processor.process(&content).await.unwrap();
         assert_eq!(embedding.len(), 768);
-        
+
         // Check normalization
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 0.01);
     }
-    
+
     #[tokio::test]
     async fn test_music_processor() {
         let processor = MusicEmbeddingProcessor::new();
-        
+
         let content = MultimodalContent::AudioPath("song.mp3".to_string());
         let embedding = processor.process(&content).await.unwrap();
         assert_eq!(embedding.len(), 512);
     }
-    
+
     #[tokio::test]
     async fn test_invalid_audio_format() {
         let processor = WhisperAudioProcessor::new(None);

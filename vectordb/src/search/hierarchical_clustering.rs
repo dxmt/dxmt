@@ -22,9 +22,9 @@
 //! ```
 
 use crate::types::{vector::DenseVector, DistanceMetric};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rayon::prelude::*;
 
 /// Hierarchical clustering configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,10 +54,10 @@ pub struct HierarchicalClusteringConfig {
 impl Default for HierarchicalClusteringConfig {
     fn default() -> Self {
         Self {
-            num_coarse_clusters: 100,       // 100 coarse clusters
+            num_coarse_clusters: 100,          // 100 coarse clusters
             num_fine_clusters_per_coarse: 100, // 100 fine per coarse = 10K total
-            num_coarse_probes: 5,           // Search 5 coarse clusters
-            num_fine_probes: 10,            // Search 10 fine per coarse
+            num_coarse_probes: 5,              // Search 5 coarse clusters
+            num_fine_probes: 10,               // Search 10 fine per coarse
             max_iterations: 20,
             tolerance: 1e-4,
             enable_parallel: true,
@@ -145,10 +145,7 @@ pub struct ClusteringStats {
 
 impl HierarchicalClusteringIndex {
     /// Create new hierarchical clustering index
-    pub fn new(
-        config: HierarchicalClusteringConfig,
-        distance_metric: DistanceMetric,
-    ) -> Self {
+    pub fn new(config: HierarchicalClusteringConfig, distance_metric: DistanceMetric) -> Self {
         Self {
             config,
             distance_metric,
@@ -165,7 +162,7 @@ impl HierarchicalClusteringIndex {
     pub fn train(&mut self, training_vectors: &[(String, DenseVector)]) -> crate::Result<()> {
         if training_vectors.is_empty() {
             return Err(crate::Error::InvalidInput(
-                "Training vectors cannot be empty".to_string()
+                "Training vectors cannot be empty".to_string(),
             ));
         }
 
@@ -180,16 +177,14 @@ impl HierarchicalClusteringIndex {
         );
 
         // Extract just vectors for clustering
-        let vectors: Vec<DenseVector> = training_vectors.iter()
-            .map(|(_, v)| v.clone())
-            .collect();
+        let vectors: Vec<DenseVector> = training_vectors.iter().map(|(_, v)| v.clone()).collect();
 
         // Step 1: Train coarse clusters (Level 1)
-        tracing::info!("Training {} coarse clusters...", self.config.num_coarse_clusters);
-        let coarse_centroids = self.train_kmeans(
-            &vectors,
-            self.config.num_coarse_clusters,
-        )?;
+        tracing::info!(
+            "Training {} coarse clusters...",
+            self.config.num_coarse_clusters
+        );
+        let coarse_centroids = self.train_kmeans(&vectors, self.config.num_coarse_clusters)?;
 
         // Step 2: Assign vectors to coarse clusters
         let coarse_assignments = self.assign_to_clusters(&vectors, &coarse_centroids);
@@ -218,7 +213,10 @@ impl HierarchicalClusteringIndex {
             }
 
             // Train fine clusters for this coarse cluster
-            let num_fine = self.config.num_fine_clusters_per_coarse.min(cluster_vectors.len());
+            let num_fine = self
+                .config
+                .num_fine_clusters_per_coarse
+                .min(cluster_vectors.len());
             let fine_centroids = if num_fine > 1 {
                 self.train_kmeans(&cluster_vectors, num_fine)?
             } else {
@@ -271,7 +269,8 @@ impl HierarchicalClusteringIndex {
 
         // Build vector storage and assignments
         for vector_data in training_vectors {
-            self.vectors.insert(vector_data.0.clone(), vector_data.1.clone());
+            self.vectors
+                .insert(vector_data.0.clone(), vector_data.1.clone());
         }
 
         // Build assignments map
@@ -289,11 +288,13 @@ impl HierarchicalClusteringIndex {
         // Update statistics
         self.stats.total_vectors = training_vectors.len();
         self.stats.num_coarse_clusters = self.coarse_clusters.len();
-        self.stats.total_fine_clusters = self.coarse_clusters.iter()
+        self.stats.total_fine_clusters = self
+            .coarse_clusters
+            .iter()
             .map(|c| c.fine_clusters.len())
             .sum();
-        self.stats.avg_vectors_per_coarse = training_vectors.len() as f32
-            / self.coarse_clusters.len() as f32;
+        self.stats.avg_vectors_per_coarse =
+            training_vectors.len() as f32 / self.coarse_clusters.len() as f32;
         self.stats.training_time_ms = start_time.elapsed().as_millis() as u64;
 
         self.is_trained = true;
@@ -309,14 +310,10 @@ impl HierarchicalClusteringIndex {
     }
 
     /// Search for nearest neighbors using hierarchical clustering
-    pub fn search(
-        &self,
-        query: &DenseVector,
-        k: usize,
-    ) -> crate::Result<Vec<(String, f32)>> {
+    pub fn search(&self, query: &DenseVector, k: usize) -> crate::Result<Vec<(String, f32)>> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(
-                "Index must be trained before search".to_string()
+                "Index must be trained before search".to_string(),
             ));
         }
 
@@ -330,10 +327,7 @@ impl HierarchicalClusteringIndex {
             let coarse_cluster = &self.coarse_clusters[*coarse_id];
 
             // Find nearest fine clusters within this coarse cluster
-            let fine_candidates = self.find_nearest_fine_clusters(
-                query,
-                coarse_cluster,
-            );
+            let fine_candidates = self.find_nearest_fine_clusters(query, coarse_cluster);
 
             // Search within nearest fine clusters
             for fine_id in fine_candidates.iter().take(self.config.num_fine_probes) {
@@ -413,17 +407,25 @@ impl HierarchicalClusteringIndex {
         for _ in 1..num_clusters {
             // Compute distance to nearest centroid for each vector
             let distances: Vec<f32> = if self.config.enable_parallel {
-                vectors.par_iter().map(|v| {
-                    centroids.iter()
-                        .map(|c| self.compute_distance(v, c))
-                        .fold(f32::INFINITY, f32::min)
-                }).collect()
+                vectors
+                    .par_iter()
+                    .map(|v| {
+                        centroids
+                            .iter()
+                            .map(|c| self.compute_distance(v, c))
+                            .fold(f32::INFINITY, f32::min)
+                    })
+                    .collect()
             } else {
-                vectors.iter().map(|v| {
-                    centroids.iter()
-                        .map(|c| self.compute_distance(v, c))
-                        .fold(f32::INFINITY, f32::min)
-                }).collect()
+                vectors
+                    .iter()
+                    .map(|v| {
+                        centroids
+                            .iter()
+                            .map(|c| self.compute_distance(v, c))
+                            .fold(f32::INFINITY, f32::min)
+                    })
+                    .collect()
             };
 
             // Choose next centroid with probability proportional to distance squared
@@ -450,29 +452,33 @@ impl HierarchicalClusteringIndex {
     }
 
     /// Assign vectors to nearest clusters
-    fn assign_to_clusters(
-        &self,
-        vectors: &[DenseVector],
-        centroids: &[DenseVector],
-    ) -> Vec<usize> {
+    fn assign_to_clusters(&self, vectors: &[DenseVector], centroids: &[DenseVector]) -> Vec<usize> {
         if self.config.enable_parallel {
-            vectors.par_iter().map(|v| {
-                centroids.iter()
-                    .enumerate()
-                    .map(|(i, c)| (i, self.compute_distance(v, c)))
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
-            }).collect()
+            vectors
+                .par_iter()
+                .map(|v| {
+                    centroids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (i, self.compute_distance(v, c)))
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
+                })
+                .collect()
         } else {
-            vectors.iter().map(|v| {
-                centroids.iter()
-                    .enumerate()
-                    .map(|(i, c)| (i, self.compute_distance(v, c)))
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
-            }).collect()
+            vectors
+                .iter()
+                .map(|v| {
+                    centroids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (i, self.compute_distance(v, c)))
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
+                })
+                .collect()
         }
     }
 
@@ -523,7 +529,8 @@ impl HierarchicalClusteringIndex {
 
     /// Find nearest coarse clusters
     fn find_nearest_coarse_clusters(&self, query: &DenseVector) -> Vec<usize> {
-        let mut distances: Vec<(usize, f32)> = self.coarse_clusters
+        let mut distances: Vec<(usize, f32)> = self
+            .coarse_clusters
             .iter()
             .map(|cluster| {
                 let distance = self.compute_distance(query, &cluster.centroid);
@@ -542,7 +549,8 @@ impl HierarchicalClusteringIndex {
         query: &DenseVector,
         coarse_cluster: &CoarseCluster,
     ) -> Vec<usize> {
-        let mut distances: Vec<(usize, f32)> = coarse_cluster.fine_clusters
+        let mut distances: Vec<(usize, f32)> = coarse_cluster
+            .fine_clusters
             .iter()
             .map(|fine_cluster| {
                 let distance = self.compute_distance(query, &fine_cluster.centroid);
@@ -692,13 +700,12 @@ impl AdaptiveClusterAnalyzer {
         let (num_coarse, num_fine) = if estimated_memory_mb > config.memory_budget_mb as f32 {
             // Reduce cluster counts proportionally
             let scale = (config.memory_budget_mb as f32 / estimated_memory_mb).sqrt();
-            let new_coarse = ((num_coarse as f32 * scale) as usize)
-                .max(config.min_coarse_clusters);
-            let new_fine = ((num_fine as f32 * scale) as usize)
-                .max(config.min_fine_per_coarse);
+            let new_coarse = ((num_coarse as f32 * scale) as usize).max(config.min_coarse_clusters);
+            let new_fine = ((num_fine as f32 * scale) as usize).max(config.min_fine_per_coarse);
 
             // Recalculate memory with new cluster counts
-            let new_centroid_memory_mb = (new_coarse * new_fine * bytes_per_vector) as f32 / 1_048_576.0;
+            let new_centroid_memory_mb =
+                (new_coarse * new_fine * bytes_per_vector) as f32 / 1_048_576.0;
             estimated_memory_mb = total_vector_memory_mb + new_centroid_memory_mb;
 
             (new_coarse, new_fine)
@@ -1041,7 +1048,10 @@ mod tests {
         let stats = index.get_stats();
         println!("  Coarse clusters: {}", stats.num_coarse_clusters);
         println!("  Total fine clusters: {}", stats.total_fine_clusters);
-        println!("  Avg vectors per coarse: {:.1}", stats.avg_vectors_per_coarse);
+        println!(
+            "  Avg vectors per coarse: {:.1}",
+            stats.avg_vectors_per_coarse
+        );
         println!("  Training time: {}ms", stats.training_time_ms);
     }
 
@@ -1082,8 +1092,8 @@ mod tests {
         let config = HierarchicalClusteringConfig {
             num_coarse_clusters: 20,
             num_fine_clusters_per_coarse: 20,
-            num_coarse_probes: 2,    // Only search 2 coarse clusters
-            num_fine_probes: 3,      // Only search 3 fine per coarse
+            num_coarse_probes: 2, // Only search 2 coarse clusters
+            num_fine_probes: 3,   // Only search 3 fine per coarse
             max_iterations: 10,
             tolerance: 1e-4,
             enable_parallel: false,
@@ -1096,7 +1106,8 @@ mod tests {
         index.train(&training_data).unwrap();
 
         // Calculate search space reduction
-        let vectors_searched = config.num_coarse_probes * config.num_fine_probes
+        let vectors_searched = config.num_coarse_probes
+            * config.num_fine_probes
             * (dataset_size / (config.num_coarse_clusters * config.num_fine_clusters_per_coarse));
 
         let reduction_ratio = dataset_size as f32 / vectors_searched as f32;
@@ -1106,7 +1117,10 @@ mod tests {
         println!("  Vectors searched: ~{}", vectors_searched);
         println!("  Reduction ratio: {:.1}x", reduction_ratio);
 
-        assert!(reduction_ratio > 10.0, "Should achieve at least 10x reduction");
+        assert!(
+            reduction_ratio > 10.0,
+            "Should achieve at least 10x reduction"
+        );
     }
 
     #[test]
@@ -1206,7 +1220,10 @@ mod tests {
         println!("\nSilhouette Score: {:.4}", score);
 
         // Well-separated clusters should have high silhouette score (> 0.5)
-        assert!(score > 0.5, "Silhouette score should be > 0.5 for well-separated clusters");
+        assert!(
+            score > 0.5,
+            "Silhouette score should be > 0.5 for well-separated clusters"
+        );
     }
 
     #[test]
@@ -1216,10 +1233,7 @@ mod tests {
 
         // Cluster 1: around (0, 0)
         for i in 0..50 {
-            vectors.push(vec![
-                (i as f32 * 0.1) % 1.0,
-                (i as f32 * 0.1) % 1.0,
-            ]);
+            vectors.push(vec![(i as f32 * 0.1) % 1.0, (i as f32 * 0.1) % 1.0]);
         }
 
         // Cluster 2: around (10, 10)

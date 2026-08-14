@@ -42,13 +42,12 @@ pub mod adaptive_index;
 pub mod index_management;
 
 // Core modules
-pub mod wal;  // Write-Ahead Log with batch flush optimization
-pub mod async_wal;  // Async Write-Ahead Log for non-blocking writes
-pub mod consensus;  // Raft consensus implementation
-pub mod memory_pool;  // Memory pool for vector allocation optimization
-pub mod precomputed_query;  // Precomputed query optimization for faster searches
-pub mod multi_tenant;       // Multi-tenancy: usage limits, quotas, federation
-
+pub mod async_wal; // Async Write-Ahead Log for non-blocking writes
+pub mod consensus; // Raft consensus implementation
+pub mod memory_pool; // Memory pool for vector allocation optimization
+pub mod multi_tenant;
+pub mod precomputed_query; // Precomputed query optimization for faster searches
+pub mod wal; // Write-Ahead Log with batch flush optimization // Multi-tenancy: usage limits, quotas, federation
 
 // Commented out - module file missing
 // #[cfg(test)]
@@ -62,4 +61,3 @@ pub use types::{
     table::{Table, TableConfig},
     vector::{DenseVector, DistanceMetric, RecordId},
 };
-

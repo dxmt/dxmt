@@ -50,7 +50,8 @@ impl SparseVector {
         // 2. Empty check
         if self.indices.is_empty() {
             return Err(crate::Error::InvalidVector(
-                "Sparse vector cannot be empty (must have at least one non-zero element)".to_string()
+                "Sparse vector cannot be empty (must have at least one non-zero element)"
+                    .to_string(),
             ));
         }
 
@@ -88,12 +89,14 @@ impl SparseVector {
         for (pos, &val) in self.values.iter().enumerate() {
             if val.is_nan() {
                 return Err(crate::Error::InvalidVector(format!(
-                    "NaN value at position {}", pos
+                    "NaN value at position {}",
+                    pos
                 )));
             }
             if val.is_infinite() {
                 return Err(crate::Error::InvalidVector(format!(
-                    "Infinite value at position {}: {}", pos, val
+                    "Infinite value at position {}: {}",
+                    pos, val
                 )));
             }
             // Note: We don't enforce non-negative values as some algorithms
@@ -107,7 +110,8 @@ impl SparseVector {
     /// Maintains the pairing between indices and values
     pub fn sort_indices(&mut self) {
         // Create pairs of (index, value)
-        let mut pairs: Vec<(u32, f32)> = self.indices
+        let mut pairs: Vec<(u32, f32)> = self
+            .indices
             .iter()
             .zip(self.values.iter())
             .map(|(&i, &v)| (i, v))
@@ -261,7 +265,8 @@ impl HybridVector {
         &self,
         other: &HybridVector,
         dense_weight: f32,
-        sparse_weight: f32) -> f32 {
+        sparse_weight: f32,
+    ) -> f32 {
         let dense_sim = cosine_similarity(&self.dense, &other.dense);
         let sparse_sim = self.sparse.cosine_similarity(&other.sparse);
 

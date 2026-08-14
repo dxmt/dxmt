@@ -3,7 +3,6 @@
 //! This module provides concrete implementation patterns for creating different index types.
 //! These are reference implementations that show the patterns to follow.
 
-
 // Example HNSW index creation pattern
 //
 // Pattern to follow:

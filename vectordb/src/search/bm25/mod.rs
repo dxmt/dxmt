@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::types::RecordId;
 
@@ -78,7 +78,8 @@ impl BM25Index {
 
         for (position, token) in tokens.iter().enumerate() {
             *term_counts.entry(token.clone()).or_insert(0) += 1;
-            term_positions.entry(token.clone())
+            term_positions
+                .entry(token.clone())
                 .or_default()
                 .push(position as u32);
         }
@@ -98,7 +99,8 @@ impl BM25Index {
                 positions: term_positions.get(&term).cloned().unwrap_or_default(),
             };
 
-            inverted_index.entry(term.clone())
+            inverted_index
+                .entry(term.clone())
                 .or_default()
                 .push(posting_entry);
 
@@ -107,7 +109,8 @@ impl BM25Index {
 
         let old_total = *total_docs;
         *total_docs += 1;
-        *avg_doc_length = (*avg_doc_length * old_total as f64 + doc_length as f64) / *total_docs as f64;
+        *avg_doc_length =
+            (*avg_doc_length * old_total as f64 + doc_length as f64) / *total_docs as f64;
     }
 
     pub fn delete_document(&self, doc_id: &RecordId) -> bool {
@@ -337,10 +340,7 @@ impl BM25Index {
             total_docs: *self.total_docs.read(),
             avg_doc_length: *self.avg_doc_length.read(),
             unique_terms: self.inverted_index.read().len(),
-            total_postings: self.inverted_index.read()
-                .values()
-                .map(|p| p.len())
-                .sum(),
+            total_postings: self.inverted_index.read().values().map(|p| p.len()).sum(),
         }
     }
 }

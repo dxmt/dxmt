@@ -44,12 +44,20 @@ impl SparseIndex {
     /// Insert a sparse vector into the index
     pub fn insert(&mut self, id: RecordId, vector: &SparseVector) -> crate::Result<()> {
         for (&dim, &val) in vector.indices.iter().zip(vector.values.iter()) {
-            let posting = Posting { id: id.clone(), value: val };
+            let posting = Posting {
+                id: id.clone(),
+                value: val,
+            };
 
             let list = self.inverted_index.entry(dim).or_default();
             list.push(posting);
             // Keep sorted by |value| descending for WAND upper-bound scan
-            list.sort_by(|a, b| b.value.abs().partial_cmp(&a.value.abs()).unwrap_or(std::cmp::Ordering::Equal));
+            list.sort_by(|a, b| {
+                b.value
+                    .abs()
+                    .partial_cmp(&a.value.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             // Update per-dimension max
             let max = self.dim_max_value.entry(dim).or_insert(0.0);
@@ -92,9 +100,9 @@ impl SparseIndex {
             .iter()
             .zip(query.values.iter())
             .filter_map(|(&dim, &qval)| {
-                self.dim_max_value.get(&dim).map(|&max_d| {
-                    (dim, qval.abs() * max_d)
-                })
+                self.dim_max_value
+                    .get(&dim)
+                    .map(|&max_d| (dim, qval.abs() * max_d))
             })
             .collect();
 
@@ -133,7 +141,9 @@ impl SparseIndex {
                 for posting in postings {
                     // WAND per-posting: check if remaining contribution can beat threshold
                     let candidate_ub = posting.value.abs() * qval.abs();
-                    if heap.len() >= k && candidate_ub + *dot_products.get(&posting.id).unwrap_or(&0.0) < threshold {
+                    if heap.len() >= k
+                        && candidate_ub + *dot_products.get(&posting.id).unwrap_or(&0.0) < threshold
+                    {
                         // Because postings are sorted by |value| desc, all subsequent
                         // postings are even smaller — safe to break this list
                         break;
@@ -180,8 +190,7 @@ impl SparseIndex {
             .values()
             .map(|list| list.len() * (std::mem::size_of::<Posting>() + 32)) // id string approx
             .sum();
-        let overhead = self.inverted_index.len() * 64
-            + self.dim_max_value.len() * 12;
+        let overhead = self.inverted_index.len() * 64 + self.dim_max_value.len() * 12;
         postings + overhead
     }
 }
@@ -207,9 +216,15 @@ mod tests {
         let mut index = SparseIndex::new();
 
         // Insert three vectors
-        index.insert("a".into(), &make_sparse(vec![0, 2], vec![1.0, 1.0])).unwrap();
-        index.insert("b".into(), &make_sparse(vec![1, 2], vec![1.0, 2.0])).unwrap();
-        index.insert("c".into(), &make_sparse(vec![0, 1], vec![3.0, 0.5])).unwrap();
+        index
+            .insert("a".into(), &make_sparse(vec![0, 2], vec![1.0, 1.0]))
+            .unwrap();
+        index
+            .insert("b".into(), &make_sparse(vec![1, 2], vec![1.0, 2.0]))
+            .unwrap();
+        index
+            .insert("c".into(), &make_sparse(vec![0, 1], vec![3.0, 0.5]))
+            .unwrap();
 
         // Query: [0]=1, [2]=1 — should prefer "a" (exact match) and "b" (shares dim 2)
         let query = make_sparse(vec![0, 2], vec![1.0, 1.0]);
@@ -227,7 +242,9 @@ mod tests {
         let mut index = SparseIndex::new();
         for i in 0..10u32 {
             let val = (i + 1) as f32;
-            index.insert(format!("v{i}"), &make_sparse(vec![0], vec![val])).unwrap();
+            index
+                .insert(format!("v{i}"), &make_sparse(vec![0], vec![val]))
+                .unwrap();
         }
 
         let query = make_sparse(vec![0], vec![1.0]);
@@ -243,14 +260,21 @@ mod tests {
     #[test]
     fn test_sparse_index_delete() {
         let mut index = SparseIndex::new();
-        index.insert("a".into(), &make_sparse(vec![0], vec![5.0])).unwrap();
-        index.insert("b".into(), &make_sparse(vec![0], vec![3.0])).unwrap();
+        index
+            .insert("a".into(), &make_sparse(vec![0], vec![5.0]))
+            .unwrap();
+        index
+            .insert("b".into(), &make_sparse(vec![0], vec![3.0]))
+            .unwrap();
 
         index.delete("a").unwrap();
 
         let results = index.search(&make_sparse(vec![0], vec![1.0]), 5);
         let ids: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
-        assert!(!ids.contains(&"a"), "deleted vector should not appear in results");
+        assert!(
+            !ids.contains(&"a"),
+            "deleted vector should not appear in results"
+        );
         assert!(ids.contains(&"b"));
     }
 
@@ -265,19 +289,26 @@ mod tests {
     #[test]
     fn test_sparse_index_no_overlap() {
         let mut index = SparseIndex::new();
-        index.insert("a".into(), &make_sparse(vec![10, 11], vec![1.0, 1.0])).unwrap();
+        index
+            .insert("a".into(), &make_sparse(vec![10, 11], vec![1.0, 1.0]))
+            .unwrap();
 
         // Query on completely different dimensions
         let query = make_sparse(vec![0, 1], vec![1.0, 1.0]);
         let results = index.search(&query, 5);
-        assert!(results.is_empty(), "no overlap means no positive dot product");
+        assert!(
+            results.is_empty(),
+            "no overlap means no positive dot product"
+        );
     }
 
     #[test]
     fn test_sparse_index_memory_usage() {
         let mut index = SparseIndex::new();
         for i in 0..100u32 {
-            index.insert(format!("v{i}"), &make_sparse(vec![i % 10], vec![1.0])).unwrap();
+            index
+                .insert(format!("v{i}"), &make_sparse(vec![i % 10], vec![1.0]))
+                .unwrap();
         }
         assert!(index.memory_usage() > 0);
     }

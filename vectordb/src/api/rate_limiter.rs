@@ -1,10 +1,4 @@
-use axum::{
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::Response,
-    body::Body,
-};
+use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,10 +46,10 @@ impl RateLimiter {
     pub async fn check_rate_limit(&self, identifier: &str) -> bool {
         let now = Instant::now();
         let mut entry = self.requests.entry(identifier.to_string()).or_default();
-        
+
         // Clean old requests
         entry.retain(|&time| now.duration_since(time) < self.window);
-        
+
         // Check if under limit
         if entry.len() < self.max_requests {
             entry.push(now);
@@ -99,7 +93,10 @@ pub struct AdaptiveRateLimiter {
 impl AdaptiveRateLimiter {
     pub fn new(config: RateLimiterConfig) -> Self {
         Self {
-            baselimiter: Arc::new(RateLimiter::new(config.maxrequests as usize, config.windowduration)),
+            baselimiter: Arc::new(RateLimiter::new(
+                config.maxrequests as usize,
+                config.windowduration,
+            )),
             cputhreshold: 0.8,
             memorythreshold: 0.85,
         }

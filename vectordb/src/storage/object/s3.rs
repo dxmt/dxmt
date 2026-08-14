@@ -38,9 +38,7 @@ impl S3Storage {
 
         // 如果提供了自定义端点（如 MinIO），使用它
         if let Some(endpoint) = &config.endpoint {
-
             client_config = client_config.endpoint_url(endpoint);
-
         }
         let client = Client::from_conf(client_config.build());
 
@@ -66,7 +64,8 @@ impl ObjectStorage for S3Storage {
         &self,
         key: &str,
         data: Bytes,
-        content_type: Option<&str>) -> ObjectStorageResult<()> {
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         let s3_key = self.build_key(key);
         let body = ByteStream::from(data.as_ref().to_vec());
 
@@ -78,10 +77,7 @@ impl ObjectStorage for S3Storage {
             .body(body);
 
         if let Some(ct) = content_type {
-
-
             request = request.content_type(ct);
-
         }
         request
             .send()
@@ -103,7 +99,7 @@ impl ObjectStorage for S3Storage {
             .key(&s3_key)
             .send()
             .await
-            .map_err(|e| 
+            .map_err(|e| {
                 if e.to_string().contains("NoSuchKey") {
                     ObjectStorageError::ObjectNotFound {
                         key: key.to_string(),
@@ -113,7 +109,7 @@ impl ObjectStorage for S3Storage {
                         message: e.to_string(),
                     }
                 }
-            )?;
+            })?;
 
         let data = response
             .body
@@ -130,7 +126,8 @@ impl ObjectStorage for S3Storage {
         &self,
         key: &str,
         start: u64,
-        end: u64) -> ObjectStorageResult<Vec<u8>> {
+        end: u64,
+    ) -> ObjectStorageResult<Vec<u8>> {
         let s3_key = self.build_key(key);
         let range_header = format!("bytes={}-{}", start, end - 1);
 
@@ -223,11 +220,9 @@ impl ObjectStorage for S3Storage {
 
         let mut metadata = HashMap::new();
         if let Some(meta) = response.metadata {
-
             for (k, v) in meta {
                 metadata.insert(k, v);
-
-        }
+            }
         }
 
         Ok(ObjectMetadata {
@@ -242,7 +237,8 @@ impl ObjectStorage for S3Storage {
 
     async fn list_objects(
         &self,
-        options: &ListObjectsOptions) -> ObjectStorageResult<ListObjectsResult> {
+        options: &ListObjectsOptions,
+    ) -> ObjectStorageResult<ListObjectsResult> {
         let prefix = match &self.prefix {
             Some(base_prefix) => {
                 if let Some(opt_prefix) = &options.prefix {
@@ -261,20 +257,13 @@ impl ObjectStorage for S3Storage {
             .prefix(&prefix);
 
         if let Some(max_keys) = options.max_keys {
-
-
             request = request.max_keys(max_keys);
-
         }
         if let Some(token) = &options.continuation_token {
-
             request = request.continuation_token(token);
-
         }
         if let Some(delimiter) = &options.delimiter {
-
             request = request.delimiter(delimiter);
-
         }
         let response = request
             .send()
@@ -366,9 +355,7 @@ impl ObjectStorage for S3Storage {
         // S3 没有原生的批量上传API，只能逐个上传
         for (key, data) in objects {
             if self.put_object(&key, Bytes::from(data), None).await.is_ok() {
-
                 uploaded.push(key);
-
             }
         }
 
@@ -393,7 +380,8 @@ impl ObjectStorage for S3Storage {
         key: &str,
         mut stream: BoxStream<'static, Result<Bytes, std::io::Error>>,
         _content_length: Option<u64>,
-        content_type: Option<&str>) -> ObjectStorageResult<()> {
+        content_type: Option<&str>,
+    ) -> ObjectStorageResult<()> {
         // 简化实现：收集所有数据然后上传
         use futures::StreamExt;
 
@@ -410,7 +398,8 @@ impl ObjectStorage for S3Storage {
 
     async fn get_stream(
         &self,
-        key: &str) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
+        key: &str,
+    ) -> ObjectStorageResult<BoxStream<'static, Result<Bytes, ObjectStorageError>>> {
         // 简化实现：下载全部数据然后转为流
         let data = self.get_object(key).await?;
         use futures::stream::StreamExt;
@@ -421,7 +410,8 @@ impl ObjectStorage for S3Storage {
     async fn create_multipart_upload(
         &self,
         _key: &str,
-        _content_type: Option<&str>) -> ObjectStorageResult<String> {
+        _content_type: Option<&str>,
+    ) -> ObjectStorageResult<String> {
         // 简化实现：返回一个假的上传ID
         Ok("simplified-upload-id".to_string())
     }
@@ -431,7 +421,8 @@ impl ObjectStorage for S3Storage {
         _key: &str,
         _upload_id: &str,
         part_number: u32,
-        data: &[u8]) -> ObjectStorageResult<PartInfo> {
+        data: &[u8],
+    ) -> ObjectStorageResult<PartInfo> {
         // 简化实现：返回基础的分片信息
         Ok(PartInfo {
             part_number,
@@ -444,7 +435,8 @@ impl ObjectStorage for S3Storage {
         &self,
         _key: &str,
         _upload_id: &str,
-        _parts: &[PartInfo]) -> ObjectStorageResult<()> {
+        _parts: &[PartInfo],
+    ) -> ObjectStorageResult<()> {
         // 简化实现：直接成功
         Ok(())
     }
@@ -452,7 +444,8 @@ impl ObjectStorage for S3Storage {
     async fn abort_multipart_upload(
         &self,
         _key: &str,
-        _upload_id: &str) -> ObjectStorageResult<()> {
+        _upload_id: &str,
+    ) -> ObjectStorageResult<()> {
         // 简化实现：直接成功
         Ok(())
     }
@@ -475,7 +468,7 @@ impl ObjectStorage for S3Storage {
             .max_keys(1)
             .send()
             .await
-            .map_err(|e| 
+            .map_err(|e| {
                 if e.to_string().contains("NoSuchBucket") {
                     ObjectStorageError::BucketNotFound {
                         bucket: self.bucket.clone(),
@@ -485,7 +478,7 @@ impl ObjectStorage for S3Storage {
                         message: e.to_string(),
                     }
                 }
-            )?;
+            })?;
 
         Ok(())
     }

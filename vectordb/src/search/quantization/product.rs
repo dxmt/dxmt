@@ -57,7 +57,9 @@ impl ProductQuantizer {
     /// 训练量化器
     pub fn train(&mut self, training_vectors: &[DenseVector]) -> crate::Result<()> {
         if training_vectors.is_empty() {
-            return Err(crate::Error::InvalidInput("Training vectors cannot be empty".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Training vectors cannot be empty".to_string(),
+            ));
         }
 
         let dimension = training_vectors[0].len();
@@ -68,12 +70,14 @@ impl ProductQuantizer {
                 return Err(crate::Error::DimensionMismatch {
                     expected: dimension,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
         // 计算子向量数量（优先使用配置中显式指定的值）
-        self.num_sub_vectors = self.config.num_sub_vectors
+        self.num_sub_vectors = self
+            .config
+            .num_sub_vectors
             .unwrap_or_else(|| self.calculate_optimal_sub_vectors(dimension));
 
         // 分割向量
@@ -89,7 +93,9 @@ impl ProductQuantizer {
     /// 量化向量
     pub fn quantize(&self, vector: &DenseVector) -> crate::Result<QuantizedVector> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before quantization".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before quantization".to_string(),
+            ));
         }
 
         let mut encoded_data = Vec::with_capacity(self.num_sub_vectors);
@@ -123,7 +129,9 @@ impl ProductQuantizer {
     /// 编码查询向量
     pub fn encode_query(&self, query: &DenseVector) -> crate::Result<ProductQuery> {
         if !self.is_trained {
-            return Err(crate::Error::InvalidInput("Quantizer must be trained before encoding".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Quantizer must be trained before encoding".to_string(),
+            ));
         }
 
         let mut lookup_table = Vec::new();
@@ -160,7 +168,9 @@ impl ProductQuantizer {
 
             Ok(total_distance)
         } else {
-            Err(crate::Error::InvalidInput("Vector is not product quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector is not product quantized".to_string(),
+            ))
         }
     }
 
@@ -212,7 +222,9 @@ impl ProductQuantizer {
 
     fn kmeans_clustering(&self, vectors: &[Vec<f32>], k: usize) -> crate::Result<Vec<Vec<f32>>> {
         if vectors.is_empty() || k == 0 {
-            return Err(crate::Error::InvalidInput("Invalid clustering parameters".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Invalid clustering parameters".to_string(),
+            ));
         }
 
         let dimension = vectors[0].len();
@@ -265,10 +277,7 @@ impl ProductQuantizer {
             }
 
             if converged {
-
-
                 break;
-
             }
         }
 
@@ -277,7 +286,9 @@ impl ProductQuantizer {
 
     fn initialize_centroids(&self, vectors: &[Vec<f32>], k: usize) -> crate::Result<Vec<Vec<f32>>> {
         if vectors.len() < k {
-            return Err(crate::Error::InvalidInput("Not enough vectors for clustering".to_string() ));
+            return Err(crate::Error::InvalidInput(
+                "Not enough vectors for clustering".to_string(),
+            ));
         }
 
         let mut centroids = Vec::new();
@@ -309,10 +320,8 @@ impl ProductQuantizer {
             for (idx, &distance) in distances.iter().enumerate() {
                 cumulative += distance;
                 if cumulative >= random_value {
-
                     centroids.push(vectors[idx].clone());
                     break;
-
                 }
             }
         }
@@ -320,7 +329,11 @@ impl ProductQuantizer {
         Ok(centroids)
     }
 
-    fn find_nearest_centroid(&self, sub_vector: &[f32], sub_vector_idx: usize) -> crate::Result<usize> {
+    fn find_nearest_centroid(
+        &self,
+        sub_vector: &[f32],
+        sub_vector_idx: usize,
+    ) -> crate::Result<usize> {
         let centroids_start = sub_vector_idx * (1 << self.num_bits);
         let centroids_end = centroids_start + (1 << self.num_bits);
 
@@ -394,7 +407,9 @@ impl QuantizedIndex for ProductQuantizedIndex {
             self.vectors.insert(vector.id.clone(), vector);
             Ok(())
         } else {
-            Err(crate::Error::InvalidInput("Vector must be product quantized".to_string() ))
+            Err(crate::Error::InvalidInput(
+                "Vector must be product quantized".to_string(),
+            ))
         }
     }
 
@@ -412,7 +427,8 @@ impl QuantizedIndex for ProductQuantizedIndex {
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(k);
 
-        self.query_latency_us.store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.query_latency_us
+            .store(start_time.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         Ok(candidates)
     }

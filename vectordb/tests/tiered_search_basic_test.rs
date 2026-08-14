@@ -4,11 +4,11 @@
 
 use dxmt_vectordb::{
     storage::{
-        memory::MemoryStorage, tiered::TieredStorage, tier_promotion::TierPromotionConfig, Storage,
+        memory::MemoryStorage, tier_promotion::TierPromotionConfig, tiered::TieredStorage, Storage,
         StorageConfig,
     },
     types::{
-        record::{CreateRecordRequest, SearchQuery, SearchMode},
+        record::{CreateRecordRequest, SearchMode, SearchQuery},
         table::TableConfig,
         DistanceMetric, IndexType,
     },
@@ -56,12 +56,8 @@ async fn test_basic_tiered_storage_creation() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Verify promotion policy exists
     let policy = tiered_storage.promotion_policy();
@@ -76,12 +72,8 @@ async fn test_tiered_storage_create_table() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Create table
     let table_config = create_test_table_config("test_table");
@@ -100,25 +92,16 @@ async fn test_tiered_storage_insert_and_search() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Create table
     let table_config = create_test_table_config("test_search");
-    tiered_storage
-        .create_table(table_config)
-        .await
-        .unwrap();
+    tiered_storage.create_table(table_config).await.unwrap();
 
     // Insert vectors
     let vectors = create_test_vectors(50, 128);
-    let insert_result = tiered_storage
-        .insert_records("test_search", vectors)
-        .await;
+    let insert_result = tiered_storage.insert_records("test_search", vectors).await;
 
     assert!(insert_result.is_ok());
     let inserted = insert_result.unwrap();
@@ -177,10 +160,7 @@ async fn test_tier_promotion_policy() {
 
     // Create table
     let table_config = create_test_table_config("test_promotion");
-    tiered_storage
-        .create_table(table_config)
-        .await
-        .unwrap();
+    tiered_storage.create_table(table_config).await.unwrap();
 
     // Insert vectors
     let vectors = create_test_vectors(20, 128);
@@ -235,19 +215,12 @@ async fn test_search_result_sorting() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Create table
     let table_config = create_test_table_config("test_sorting");
-    tiered_storage
-        .create_table(table_config)
-        .await
-        .unwrap();
+    tiered_storage.create_table(table_config).await.unwrap();
 
     // Insert vectors
     let vectors = create_test_vectors(100, 128);
@@ -292,19 +265,12 @@ async fn test_search_with_filters() {
     let warm_tier = Arc::new(MemoryStorage::new());
     let cold_tier = Arc::new(MemoryStorage::new());
 
-    let tiered_storage = TieredStorage::new(
-        hot_tier,
-        warm_tier,
-        cold_tier,
-        StorageConfig::default(),
-    );
+    let tiered_storage =
+        TieredStorage::new(hot_tier, warm_tier, cold_tier, StorageConfig::default());
 
     // Create table
     let table_config = create_test_table_config("test_filters");
-    tiered_storage
-        .create_table(table_config)
-        .await
-        .unwrap();
+    tiered_storage.create_table(table_config).await.unwrap();
 
     // Insert vectors
     let vectors = create_test_vectors(50, 128);

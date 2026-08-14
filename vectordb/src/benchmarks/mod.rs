@@ -1,27 +1,24 @@
 // ANN-Benchmarks module for standardized vector database testing
 
 pub mod ann_benchmark;
-pub mod metrics;
 pub mod datasets;
+pub mod metrics;
 pub mod thresholds;
 
 pub use ann_benchmark::{
-    AnnBenchmark, BenchmarkConfig, BenchmarkDataset, BenchmarkResult,
-    DatasetMetrics, QueryMetrics, HnswParams, IndexType,
+    AnnBenchmark, BenchmarkConfig, BenchmarkDataset, BenchmarkResult, DatasetMetrics, HnswParams,
+    IndexType, QueryMetrics,
 };
 
 pub use metrics::{
-    RecallEvaluator, RecallStatistics,
-    PrecisionEvaluator, NdcgEvaluator, MapEvaluator,
-    MetricsEvaluator, MetricsReport, MetricStatistics,
+    MapEvaluator, MetricStatistics, MetricsEvaluator, MetricsReport, NdcgEvaluator,
+    PrecisionEvaluator, RecallEvaluator, RecallStatistics,
 };
 
 pub use datasets::{
-    Dataset, DatasetRegistry, DatasetMetadata, DatasetCache,
-    SizeCategory, DimensionCategory,
+    Dataset, DatasetCache, DatasetMetadata, DatasetRegistry, DimensionCategory, SizeCategory,
 };
 
 pub use thresholds::{
-    PerformanceThreshold, ThresholdValidator, ThresholdValidation,
-    ValidationMetrics,
+    PerformanceThreshold, ThresholdValidation, ThresholdValidator, ValidationMetrics,
 };

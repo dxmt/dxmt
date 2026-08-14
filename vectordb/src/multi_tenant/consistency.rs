@@ -1,9 +1,9 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorClock {
@@ -38,9 +38,21 @@ pub struct ReplicationEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReplicationOperation {
-    Insert { table: String, key: Vec<u8>, value: Vec<u8> },
-    Update { table: String, key: Vec<u8>, value: Vec<u8>, previous_version: Option<Vec<u8>> },
-    Delete { table: String, key: Vec<u8> },
+    Insert {
+        table: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Update {
+        table: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        previous_version: Option<Vec<u8>>,
+    },
+    Delete {
+        table: String,
+        key: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,7 +107,11 @@ impl ConsistencyManager {
         merged
     }
 
-    pub fn compare_vector_clocks(&self, clock1: &VectorClock, clock2: &VectorClock) -> ClockComparison {
+    pub fn compare_vector_clocks(
+        &self,
+        clock1: &VectorClock,
+        clock2: &VectorClock,
+    ) -> ClockComparison {
         let mut c1_newer = false;
         let mut c2_newer = false;
 
@@ -136,7 +152,11 @@ impl ConsistencyManager {
 
     pub async fn get_replication_entries_since(&self, index: u64) -> Vec<ReplicationEntry> {
         let log = self.replication_log.read().await;
-        log.entries.iter().filter(|e| e.index > index).cloned().collect()
+        log.entries
+            .iter()
+            .filter(|e| e.index > index)
+            .cloned()
+            .collect()
     }
 }
 
@@ -156,15 +176,24 @@ mod tests {
         let node_a = Uuid::new_v4();
         let node_b = Uuid::new_v4();
 
-        let mut c1 = VectorClock { nodeid: node_a, clocks: HashMap::new() };
-        let mut c2 = VectorClock { nodeid: node_b, clocks: HashMap::new() };
+        let mut c1 = VectorClock {
+            nodeid: node_a,
+            clocks: HashMap::new(),
+        };
+        let mut c2 = VectorClock {
+            nodeid: node_b,
+            clocks: HashMap::new(),
+        };
 
         c1.clocks.insert(node_a, 5);
         c2.clocks.insert(node_a, 3);
         assert_eq!(mgr.compare_vector_clocks(&c1, &c2), ClockComparison::After);
 
         c2.clocks.insert(node_b, 10);
-        assert_eq!(mgr.compare_vector_clocks(&c1, &c2), ClockComparison::Concurrent);
+        assert_eq!(
+            mgr.compare_vector_clocks(&c1, &c2),
+            ClockComparison::Concurrent
+        );
     }
 
     #[test]
@@ -173,8 +202,14 @@ mod tests {
         let n1 = Uuid::new_v4();
         let n2 = Uuid::new_v4();
 
-        let mut c1 = VectorClock { nodeid: n1, clocks: HashMap::new() };
-        let mut c2 = VectorClock { nodeid: n2, clocks: HashMap::new() };
+        let mut c1 = VectorClock {
+            nodeid: n1,
+            clocks: HashMap::new(),
+        };
+        let mut c2 = VectorClock {
+            nodeid: n2,
+            clocks: HashMap::new(),
+        };
         c1.clocks.insert(n1, 5);
         c1.clocks.insert(n2, 2);
         c2.clocks.insert(n1, 3);

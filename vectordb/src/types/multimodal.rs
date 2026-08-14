@@ -1,10 +1,10 @@
+use crate::types::{DenseVector, Payload, RecordId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::{DenseVector, RecordId, Payload};
 
-use crate::types::{sparse_vector::SparseVector};
 use crate::error::Error;
+use crate::types::sparse_vector::SparseVector;
 
 /// 模态类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,7 +44,10 @@ impl std::str::FromStr for ModalityType {
             "audio" => Ok(ModalityType::Audio),
             "video" => Ok(ModalityType::Video),
             "document" => Ok(ModalityType::Document),
-            _ => Err(crate::Error::InvalidInput(format!("Invalid modality type: {}", s)))
+            _ => Err(crate::Error::InvalidInput(format!(
+                "Invalid modality type: {}",
+                s
+            ))),
         }
     }
 }
@@ -253,7 +256,9 @@ impl MultiVectorRecord {
             let dimensions: Vec<usize> = vectors.values().map(|v| v.len()).collect();
             let first_dim = dimensions[0];
             if !dimensions.iter().all(|&d| d == first_dim) {
-                return Err(crate::Error::InvalidInput("All vectors must have the same dimension".to_string()));
+                return Err(crate::Error::InvalidInput(
+                    "All vectors must have the same dimension".to_string(),
+                ));
             }
         }
 
@@ -276,12 +281,17 @@ impl MultiVectorRecord {
     pub fn add_vector(&mut self, modality_name: String, vector: DenseVector) -> crate::Result<()> {
         // 检查维度一致性
         if !self.vectors.is_empty() {
-            let existing_dim = self.vectors.values().next().ok_or_else(|| crate::Error::Internal("No vectors found".to_string()))?.len();
+            let existing_dim = self
+                .vectors
+                .values()
+                .next()
+                .ok_or_else(|| crate::Error::Internal("No vectors found".to_string()))?
+                .len();
             if vector.len() != existing_dim {
                 return Err(crate::Error::DimensionMismatch {
                     expected: existing_dim,
                     actual: vector.len(),
-                })
+                });
             }
         }
 
@@ -333,14 +343,10 @@ impl Default for CrossModalSearchQuery {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_modality_type_conversion() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!("text".parse::<ModalityType>()?, ModalityType::Text);
-        assert_eq!(
-            "image".parse::<ModalityType>()?,
-            ModalityType::Image
-        );
+        assert_eq!("image".parse::<ModalityType>()?, ModalityType::Image);
         assert_eq!(ModalityType::Audio.to_string(), "audio");
         Ok(())
     }

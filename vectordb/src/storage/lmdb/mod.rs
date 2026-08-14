@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::types::{RecordId, DistanceMetric};
+use crate::types::{DistanceMetric, RecordId};
 
 // Export Storage trait implementation
 pub mod storage_impl;
@@ -87,7 +87,10 @@ pub struct TableMetadata {
 }
 
 impl LmdbStorage {
-    pub fn new(path: impl AsRef<Path>, map_size: usize) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        path: impl AsRef<Path>,
+        map_size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&path)?;
 
         let env = unsafe {
@@ -99,32 +102,38 @@ impl LmdbStorage {
 
         let mut wtxn = env.write_txn()?;
 
-        let vectors_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let vectors_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_VECTORS)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
 
-        let metadata_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let metadata_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_METADATA)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
 
-        let payloads_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let payloads_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_PAYLOADS)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
 
-        let graph_nodes_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let graph_nodes_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_GRAPH_NODES)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
 
-        let graph_edges_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let graph_edges_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_GRAPH_EDGES)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
 
-        let indices_db: Database<heed::types::Bytes, heed::types::Bytes> = env.database_options()
+        let indices_db: Database<heed::types::Bytes, heed::types::Bytes> = env
+            .database_options()
             .name(DB_INDICES)
             .types::<heed::types::Bytes, heed::types::Bytes>()
             .create(&mut wtxn)?;
@@ -142,7 +151,10 @@ impl LmdbStorage {
         })
     }
 
-    pub fn insert_vector(&self, record: &VectorRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn insert_vector(
+        &self,
+        record: &VectorRecord,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut wtxn = self.env.write_txn()?;
 
         let key = record.id.as_bytes();
@@ -165,7 +177,10 @@ impl LmdbStorage {
         Ok(())
     }
 
-    pub fn get_vector(&self, id: &RecordId) -> Result<Option<VectorRecord>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_vector(
+        &self,
+        id: &RecordId,
+    ) -> Result<Option<VectorRecord>, Box<dyn std::error::Error + Send + Sync>> {
         let rtxn = self.env.read_txn()?;
         let key = id.as_bytes();
 
@@ -222,13 +237,17 @@ impl LmdbStorage {
         // Store properties separately if present
         let properties_key = format!("props_{}", node.id).into_bytes();
         let properties_value = serde_json::to_vec(&node.properties)?;
-        self.metadata_db.put(&mut wtxn, &properties_key, &properties_value)?;
+        self.metadata_db
+            .put(&mut wtxn, &properties_key, &properties_value)?;
 
         wtxn.commit()?;
         Ok(())
     }
 
-    pub fn get_graph_node(&self, id: &Uuid) -> Result<Option<GraphNode>, Box<dyn std::error::Error>> {
+    pub fn get_graph_node(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<GraphNode>, Box<dyn std::error::Error>> {
         let rtxn = self.env.read_txn()?;
         let key = id.as_bytes();
 
@@ -238,11 +257,12 @@ impl LmdbStorage {
 
             // Retrieve properties separately
             let properties_key = format!("props_{}", id).into_bytes();
-            let properties = if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
-                serde_json::from_slice(props_bytes)?
-            } else {
-                serde_json::json!({})
-            };
+            let properties =
+                if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
+                    serde_json::from_slice(props_bytes)?
+                } else {
+                    serde_json::json!({})
+                };
 
             // Reconstruct full GraphNode
             let node = GraphNode {
@@ -277,13 +297,17 @@ impl LmdbStorage {
         // Store properties separately
         let properties_key = format!("edge_props_{}", edge.id).into_bytes();
         let properties_value = serde_json::to_vec(&edge.properties)?;
-        self.metadata_db.put(&mut wtxn, &properties_key, &properties_value)?;
+        self.metadata_db
+            .put(&mut wtxn, &properties_key, &properties_value)?;
 
         wtxn.commit()?;
         Ok(())
     }
 
-    pub fn get_graph_edges_from(&self, node_id: &Uuid) -> Result<Vec<GraphEdge>, Box<dyn std::error::Error>> {
+    pub fn get_graph_edges_from(
+        &self,
+        node_id: &Uuid,
+    ) -> Result<Vec<GraphEdge>, Box<dyn std::error::Error>> {
         let rtxn = self.env.read_txn()?;
         let mut edges = Vec::new();
 
@@ -294,11 +318,12 @@ impl LmdbStorage {
             if edge_data.from_node == *node_id {
                 // Retrieve properties separately
                 let properties_key = format!("edge_props_{}", edge_data.id).into_bytes();
-                let properties = if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
-                    serde_json::from_slice(props_bytes)?
-                } else {
-                    serde_json::json!({})
-                };
+                let properties =
+                    if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
+                        serde_json::from_slice(props_bytes)?
+                    } else {
+                        serde_json::json!({})
+                    };
 
                 // Reconstruct full GraphEdge
                 edges.push(GraphEdge {
@@ -314,7 +339,10 @@ impl LmdbStorage {
         Ok(edges)
     }
 
-    pub fn get_graph_edges_to(&self, node_id: &Uuid) -> Result<Vec<GraphEdge>, Box<dyn std::error::Error>> {
+    pub fn get_graph_edges_to(
+        &self,
+        node_id: &Uuid,
+    ) -> Result<Vec<GraphEdge>, Box<dyn std::error::Error>> {
         let rtxn = self.env.read_txn()?;
         let mut edges = Vec::new();
 
@@ -325,11 +353,12 @@ impl LmdbStorage {
             if edge_data.to_node == *node_id {
                 // Retrieve properties separately
                 let properties_key = format!("edge_props_{}", edge_data.id).into_bytes();
-                let properties = if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
-                    serde_json::from_slice(props_bytes)?
-                } else {
-                    serde_json::json!({})
-                };
+                let properties =
+                    if let Some(props_bytes) = self.metadata_db.get(&rtxn, &properties_key)? {
+                        serde_json::from_slice(props_bytes)?
+                    } else {
+                        serde_json::json!({})
+                    };
 
                 // Reconstruct full GraphEdge
                 edges.push(GraphEdge {
@@ -346,7 +375,10 @@ impl LmdbStorage {
     }
 
     /// Store full Table as JSON under key `"__fullcfg__{name}"` for complete schema recovery.
-    pub fn store_full_table(&self, table: &crate::types::table::Table) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn store_full_table(
+        &self,
+        table: &crate::types::table::Table,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut wtxn = self.env.write_txn()?;
         let key = format!("__fullcfg__{}", table.name);
         let value = serde_json::to_vec(table)?;
@@ -356,7 +388,10 @@ impl LmdbStorage {
     }
 
     /// Load full Table from JSON; returns None if not present (legacy table).
-    pub fn load_full_table(&self, table_name: &str) -> Result<Option<crate::types::table::Table>, Box<dyn std::error::Error>> {
+    pub fn load_full_table(
+        &self,
+        table_name: &str,
+    ) -> Result<Option<crate::types::table::Table>, Box<dyn std::error::Error>> {
         let rtxn = self.env.read_txn()?;
         let key = format!("__fullcfg__{}", table_name);
         if let Some(value) = self.metadata_db.get(&rtxn, key.as_bytes())? {
@@ -367,7 +402,11 @@ impl LmdbStorage {
         }
     }
 
-    pub fn update_table_metadata(&self, table_name: &str, metadata: &TableMetadata) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn update_table_metadata(
+        &self,
+        table_name: &str,
+        metadata: &TableMetadata,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut wtxn = self.env.write_txn()?;
 
         let key = table_name.as_bytes();
@@ -379,7 +418,10 @@ impl LmdbStorage {
         Ok(())
     }
 
-    pub fn get_table_metadata(&self, table_name: &str) -> Result<Option<TableMetadata>, Box<dyn std::error::Error>> {
+    pub fn get_table_metadata(
+        &self,
+        table_name: &str,
+    ) -> Result<Option<TableMetadata>, Box<dyn std::error::Error>> {
         let rtxn = self.env.read_txn()?;
         let key = table_name.as_bytes();
 

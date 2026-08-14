@@ -34,7 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    from: {:?}", result.from_type);
     println!("    to: {:?}", result.to_type);
     println!("    reason: {}", result.reason);
-    println!("    expected improvement: {:.1}%\n", result.expected_improvement * 100.0);
+    println!(
+        "    expected improvement: {:.1}%\n",
+        result.expected_improvement * 100.0
+    );
 
     // Phase 2: Medium dataset — HNSW recommended
     println!("=== Phase 2: Medium Dataset (10K-100K vectors) ===");
@@ -78,7 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Recommendation:");
     println!("    target: {:?}", recommendation.target_type);
     println!("    should switch: {}", recommendation.should_switch());
-    println!("    expected improvement: {:.1}%", recommendation.expected_improvement * 100.0);
+    println!(
+        "    expected improvement: {:.1}%",
+        recommendation.expected_improvement * 100.0
+    );
     println!("    reason: {}\n", recommendation.reason);
 
     println!("Adaptive indexing demo completed successfully!");

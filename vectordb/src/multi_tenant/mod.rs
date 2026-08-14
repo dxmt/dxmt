@@ -1,6 +1,6 @@
+pub mod consistency;
 pub mod query_router;
 pub mod shard_manager;
-pub mod consistency;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -66,10 +66,7 @@ impl TenantQuota {
         if collection_count + count > self.limits.max_records_per_collection {
             return Err(crate::error::Error::InvalidInput(format!(
                 "Tenant '{}' per-collection record limit would be exceeded ({} + {} > {})",
-                self.tenant_id,
-                collection_count,
-                count,
-                self.limits.max_records_per_collection
+                self.tenant_id, collection_count, count, self.limits.max_records_per_collection
             )));
         }
         Ok(())
@@ -142,7 +139,10 @@ pub trait FederationCoordinator: Send + Sync {
     async fn list_nodes(&self) -> crate::Result<Vec<FederationNode>>;
     async fn get_node(&self, nodeid: &Uuid) -> crate::Result<Option<FederationNode>>;
     async fn update_node_status(&self, nodeid: &Uuid, status: NodeStatus) -> crate::Result<()>;
-    async fn federated_search(&self, query: FederationQuery) -> crate::Result<Vec<crate::types::record::SearchResult>>;
+    async fn federated_search(
+        &self,
+        query: FederationQuery,
+    ) -> crate::Result<Vec<crate::types::record::SearchResult>>;
     async fn federated_insert(
         &self,
         tablename: &str,

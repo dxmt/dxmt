@@ -2,23 +2,18 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, debug};
+use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 use crate::config::StorageConfig;
 use crate::storage::{
-    traits::{_Storage as Storage},
-    IntelligentIndexedStorage,
-    MemoryStorage,
-    tiered::TieredStorage,
-    compression::CompressionLevel,
+    compression::CompressionLevel, tiered::TieredStorage, traits::_Storage as Storage,
+    IntelligentIndexedStorage, MemoryStorage,
 };
 
-
 /// Storage backend types available in DXMT
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum StorageBackend {
     /// In-memory storage for development/testing
     Memory,
@@ -33,34 +28,33 @@ pub enum StorageBackend {
     Auto,
 }
 
-
 /// Comprehensive storage optimization configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizedStorageConfig {
     /// Primary storage backend selection
     pub backend: StorageBackend,
-    
+
     /// Enable tiered storage optimization
     pub enable_tiering: bool,
-    
+
     /// Enable vector compression
     pub enable_compression: bool,
-    
+
     /// Enable memory-mapped index storage
     pub enable_mmap: bool,
-    
+
     /// Performance targets for optimization
     pub performance_targets: PerformanceTargets,
-    
+
     /// Cost constraints for optimization  
     pub cost_constraints: OptimizedCostConstraints,
-    
+
     /// Tiering configuration
     pub tiering: TieringConfig,
-    
+
     /// Compression configuration
     pub compression: CompressionConfig,
-    
+
     /// Memory mapping configuration
     pub mmap: MmapConfig,
 }
@@ -69,13 +63,13 @@ pub struct OptimizedStorageConfig {
 pub struct PerformanceTargets {
     /// Target P95 query latency in milliseconds
     pub target_latency_p95_ms: f64,
-    
+
     /// Target queries per second
     pub target_qps: f64,
-    
+
     /// Minimum acceptable recall rate
     pub min_recall_rate: f64,
-    
+
     /// Target insert throughput (vectors per second)
     pub target_insert_throughput: f64,
 }
@@ -84,10 +78,10 @@ pub struct PerformanceTargets {
 pub struct OptimizedCostConstraints {
     /// Maximum storage cost per TB per month
     pub max_storage_cost_per_tb: f64,
-    
+
     /// Maximum compute cost per hour
     pub max_compute_cost_per_hour: f64,
-    
+
     /// Total monthly budget limit
     pub total_budget_limit: f64,
 }
@@ -96,16 +90,16 @@ pub struct OptimizedCostConstraints {
 pub struct TieringConfig {
     /// Hot tier configuration (memory/fast SSD)
     pub hot_tier: TierConfig,
-    
+
     /// Warm tier configuration (SSD/NVMe)
     pub warm_tier: TierConfig,
-    
+
     /// Cold tier configuration (object storage)
     pub cold_tier: TierConfig,
-    
+
     /// Automatic tier migration enabled
     pub auto_migration: bool,
-    
+
     /// Migration frequency in seconds
     pub migration_interval_secs: u64,
 }
@@ -114,13 +108,13 @@ pub struct TieringConfig {
 pub struct TierConfig {
     /// Storage type
     pub storage_type: String,
-    
+
     /// Maximum size in GB
     pub max_size_gb: f64,
-    
+
     /// Cost per GB per month
     pub cost_per_gb: f64,
-    
+
     /// Expected P95 latency in ms
     pub expected_latency_ms: f64,
 }
@@ -129,16 +123,16 @@ pub struct TierConfig {
 pub struct CompressionConfig {
     /// Compression algorithm
     pub algorithm: String,
-    
+
     /// Compression level
     pub level: CompressionLevel,
-    
+
     /// Enable vector-specific compression
     pub enable_vector_compression: bool,
-    
+
     /// Product quantization bits per component
     pub pq_bits_per_component: u8,
-    
+
     /// Minimum accuracy threshold for compression
     pub accuracy_threshold: f64,
 }
@@ -159,13 +153,13 @@ impl Default for CompressionConfig {
 pub struct MmapConfig {
     /// Enable memory mapping for indices
     pub enable_index_mmap: bool,
-    
+
     /// Enable memory mapping for vectors
     pub enable_vector_mmap: bool,
-    
+
     /// Prefetch batch size
     pub prefetch_batch_size: usize,
-    
+
     /// Memory advise strategy
     pub memory_advise: String,
 }
@@ -243,51 +237,55 @@ impl StorageFactory {
             performance_predictor: PerformancePredictor::new(),
         }
     }
-    
+
     /// Create optimized storage based on configuration and requirements
     pub async fn create_storage(
         &self,
         base_config: &StorageConfig,
         opt_config: &OptimizedStorageConfig,
     ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
-        info!("Creating optimized storage with backend: {:?}", opt_config.backend);
-        
+        info!(
+            "Creating optimized storage with backend: {:?}",
+            opt_config.backend
+        );
+
         // Detect hardware capabilities
         let hardware_capabilities = self.hardware_detector.detect().await;
         debug!("Detected hardware: {:?}", hardware_capabilities);
-        
+
         // Select optimal backend if auto mode
         let selected_backend = match &opt_config.backend {
             StorageBackend::Auto => {
-                self.select_optimal_backend(opt_config, &hardware_capabilities).await?
+                self.select_optimal_backend(opt_config, &hardware_capabilities)
+                    .await?
             }
             backend => backend.clone(),
         };
-        
+
         info!("Selected storage backend: {:?}", selected_backend);
-        
+
         // Create storage instance
         match selected_backend {
-            StorageBackend::Memory => {
-                Ok(Arc::new(MemoryStorage::new()))
-            }
-            
+            StorageBackend::Memory => Ok(Arc::new(MemoryStorage::new())),
+
             StorageBackend::IntelligentIndexed => {
-                self.create_intelligent_storage(base_config, opt_config, &hardware_capabilities).await
+                self.create_intelligent_storage(base_config, opt_config, &hardware_capabilities)
+                    .await
             }
-            
+
             StorageBackend::UltraPerformance => {
-                self.create_ultra_performance_storage(base_config, opt_config).await
+                self.create_ultra_performance_storage(base_config, opt_config)
+                    .await
             }
-            
+
             StorageBackend::TieredOptimized => {
                 self.create_tiered_storage(base_config, opt_config).await
             }
-            
+
             StorageBackend::Auto => unreachable!("Auto backend should be resolved"),
         }
     }
-    
+
     /// Create intelligent indexed storage
     async fn create_intelligent_storage(
         &self,
@@ -296,17 +294,17 @@ impl StorageFactory {
         hardware_capabilities: &HardwareCapabilities,
     ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
         info!("Creating intelligent indexed storage");
-        
+
         // Convert optimized config to storage config
         let mut storage_config = base_config.clone();
         self.apply_optimizations(&mut storage_config, opt_config);
-        
+
         // Create intelligent storage
         let storage = IntelligentIndexedStorage::new(&storage_config).await?;
-        
+
         Ok(Arc::new(storage))
     }
-    
+
     /// Create ultra-performance storage
     async fn create_ultra_performance_storage(
         &self,
@@ -314,31 +312,40 @@ impl StorageFactory {
         opt_config: &OptimizedStorageConfig,
     ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
         info!("Creating ultra-performance storage");
-        
+
         // Convert and apply optimizations
         let mut storage_config = base_config.clone();
         self.apply_optimizations(&mut storage_config, opt_config);
-        
+
         // Create ultra-performance storage
         let config = StorageConfig::default();
         let storage = IntelligentIndexedStorage::new(&config).await?;
-        
+
         Ok(Arc::new(storage))
     }
-    
+
     /// Create tiered storage
     async fn create_tiered_storage(
         &self,
         base_config: &StorageConfig,
         opt_config: &OptimizedStorageConfig,
     ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
-        info!("Creating tiered storage with configuration: {:?}", opt_config.tiering);
-        
+        info!(
+            "Creating tiered storage with configuration: {:?}",
+            opt_config.tiering
+        );
+
         // Create individual tier storages
-        let hot_storage = self.create_tier_storage(&opt_config.tiering.hot_tier).await?;
-        let warm_storage = self.create_tier_storage(&opt_config.tiering.warm_tier).await?;
-        let cold_storage = self.create_tier_storage(&opt_config.tiering.cold_tier).await?;
-        
+        let hot_storage = self
+            .create_tier_storage(&opt_config.tiering.hot_tier)
+            .await?;
+        let warm_storage = self
+            .create_tier_storage(&opt_config.tiering.warm_tier)
+            .await?;
+        let cold_storage = self
+            .create_tier_storage(&opt_config.tiering.cold_tier)
+            .await?;
+
         // Create tiered storage
         // Convert to storage traits config
         let storage_config = crate::storage::traits::StorageConfig {
@@ -346,17 +353,12 @@ impl StorageFactory {
             path: None,
             cache_size_mb: None,
         };
-        
-        let tiered = TieredStorage::new(
-            hot_storage,
-            warm_storage,
-            cold_storage,
-            storage_config,
-        );
-        
+
+        let tiered = TieredStorage::new(hot_storage, warm_storage, cold_storage, storage_config);
+
         Ok(Arc::new(tiered))
     }
-    
+
     /// Select optimal backend based on requirements
     async fn select_optimal_backend(
         &self,
@@ -368,17 +370,17 @@ impl StorageFactory {
             cost_constraints: opt_config.cost_constraints.clone(),
             workload_characteristics: self.analyze_workload().await?,
         };
-        
+
         let selection = self.analyze_backend_suitability(&analysis).await?;
-        
+
         info!(
             "Backend selection analysis complete: {:?} with confidence {:.2}",
             selection.recommended_backend, selection.confidence
         );
-        
+
         Ok(selection.recommended_backend)
     }
-    
+
     /// Apply optimizations to storage config
     fn apply_optimizations(
         &self,
@@ -391,33 +393,39 @@ impl StorageFactory {
             // storage_config.compression_level = opt_config.compression.level;
             debug!("Applied compression optimizations");
         }
-        
+
         // Apply tiering settings
         if opt_config.enable_tiering {
             // storage_config.enable_tiering = true;
             debug!("Applied tiering optimizations");
         }
-        
+
         // Apply memory mapping settings
         if opt_config.enable_mmap {
             // storage_config.enable_mmap = true;
             debug!("Applied memory mapping optimizations");
         }
     }
-    
+
     /// Create storage for a specific tier
-    async fn create_tier_storage(&self, tier_config: &TierConfig) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
+    async fn create_tier_storage(
+        &self,
+        tier_config: &TierConfig,
+    ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
         match tier_config.storage_type.as_str() {
             "memory" => Ok(Arc::new(MemoryStorage::new())),
             "ssd" | "nvme" => Ok(Arc::new(MemoryStorage::new())), // Simplified for now
             "s3" | "object" => Ok(Arc::new(MemoryStorage::new())), // Simplified for now
             _ => {
-                warn!("Unknown storage type: {}, defaulting to memory", tier_config.storage_type);
+                warn!(
+                    "Unknown storage type: {}, defaulting to memory",
+                    tier_config.storage_type
+                );
                 Ok(Arc::new(MemoryStorage::new()))
             }
         }
     }
-    
+
     /// Analyze workload characteristics
     async fn analyze_workload(&self) -> crate::Result<WorkloadCharacteristics> {
         // Simplified workload analysis
@@ -428,7 +436,7 @@ impl StorageFactory {
             dataset_size: DatasetSize::Large,
         })
     }
-    
+
     /// Analyze backend suitability
     async fn analyze_backend_suitability(
         &self,
@@ -442,7 +450,7 @@ impl StorageFactory {
         } else {
             StorageBackend::IntelligentIndexed
         };
-        
+
         Ok(BackendSelection {
             recommended_backend,
             confidence: 0.85,
@@ -474,9 +482,13 @@ impl HardwareDetector {
     pub(crate) async fn detect(&self) -> HardwareCapabilities {
         let has_gpu = {
             #[cfg(feature = "gpu")]
-            { crate::acceleration::gpu::is_cuda_available() }
+            {
+                crate::acceleration::gpu::is_cuda_available()
+            }
             #[cfg(not(feature = "gpu"))]
-            { false }
+            {
+                false
+            }
         };
         HardwareCapabilities {
             cpu_cores: num_cpus::get(),
@@ -485,7 +497,7 @@ impl HardwareDetector {
             has_gpu,
         }
     }
-    
+
     async fn detect_memory_gb(&self) -> f64 {
         // Simplified memory detection
         #[cfg(target_os = "linux")]
@@ -502,7 +514,7 @@ impl HardwareDetector {
                 }
             }
         }
-        
+
         // Default fallback
         16.0
     }
@@ -521,12 +533,8 @@ impl CostCalculator {
     pub fn new() -> Self {
         Self
     }
-    
-    pub async fn calculate_storage_cost(
-        &self,
-        backend: &StorageBackend,
-        data_size_gb: f64,
-    ) -> f64 {
+
+    pub async fn calculate_storage_cost(&self, backend: &StorageBackend, data_size_gb: f64) -> f64 {
         match backend {
             StorageBackend::Memory => data_size_gb * 10.0, // $10/GB/month for memory
             StorageBackend::IntelligentIndexed => data_size_gb * 2.0,
@@ -550,7 +558,7 @@ impl PerformancePredictor {
     pub fn new() -> Self {
         Self
     }
-    
+
     pub async fn predict_latency(
         &self,
         backend: &StorageBackend,
@@ -571,7 +579,7 @@ impl PerformancePredictor {
 pub struct BackendSelectionAnalysis {
     pub performance_targets: PerformanceTargets,
     pub cost_constraints: OptimizedCostConstraints,
-//     pub hardware_capabilities: HardwareCapabilities,
+    //     pub hardware_capabilities: HardwareCapabilities,
     pub workload_characteristics: WorkloadCharacteristics,
 }
 
@@ -628,10 +636,10 @@ impl StorageIntegration {
     ) -> crate::Result<Arc<dyn Storage + Send + Sync>> {
         let factory = StorageFactory::new();
         let opt_config = OptimizedStorageConfig::default();
-        
+
         factory.create_storage(base_config, &opt_config).await
     }
-    
+
     /// Migrate from one storage backend to another.
     ///
     /// Copies all tables and their records from `current_storage` into a freshly
@@ -670,7 +678,10 @@ impl StorageIntegration {
             };
 
             if let Err(e) = new_storage.create_table(table_config).await {
-                warn!("Failed to create table {} in target storage: {}", table.name, e);
+                warn!(
+                    "Failed to create table {} in target storage: {}",
+                    table.name, e
+                );
                 continue;
             }
 
@@ -691,16 +702,18 @@ impl StorageIntegration {
 
             match current_storage.search(&table.name, query).await {
                 Ok(result) => {
-                    let records: Vec<crate::types::record::CreateRecordRequest> = result.hits
+                    let records: Vec<crate::types::record::CreateRecordRequest> = result
+                        .hits
                         .into_iter()
                         .filter_map(|hit| {
-                            hit.vector.map(|v| crate::types::record::CreateRecordRequest {
-                                id: hit.id,
-                                vector: v,
-                                sparse_vector: None,
-                                payload: hit.payload,
-                                named_vectors: None,
-                            })
+                            hit.vector
+                                .map(|v| crate::types::record::CreateRecordRequest {
+                                    id: hit.id,
+                                    vector: v,
+                                    sparse_vector: None,
+                                    payload: hit.payload,
+                                    named_vectors: None,
+                                })
                         })
                         .collect();
 
@@ -708,7 +721,10 @@ impl StorageIntegration {
                     if let Err(e) = new_storage.insert_records(&table.name, records).await {
                         warn!("Failed to migrate records for table {}: {}", table.name, e);
                     } else {
-                        info!("Migrated {} records from table {}", record_count, table.name);
+                        info!(
+                            "Migrated {} records from table {}",
+                            record_count, table.name
+                        );
                     }
                 }
                 Err(e) => {
@@ -717,7 +733,10 @@ impl StorageIntegration {
             }
         }
 
-        info!("Storage migration complete: {} tables processed", table_count);
+        info!(
+            "Storage migration complete: {} tables processed",
+            table_count
+        );
         Ok(new_storage)
     }
 }
@@ -725,17 +744,17 @@ impl StorageIntegration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_storage_factory_creation() {
         let factory = StorageFactory::new();
         let base_config = StorageConfig::default();
         let opt_config = OptimizedStorageConfig::default();
-        
+
         let storage = factory.create_storage(&base_config, &opt_config).await;
         assert!(storage.is_ok());
     }
-    
+
     #[tokio::test]
     async fn test_backend_selection() {
         let factory = StorageFactory::new();
@@ -756,7 +775,7 @@ mod tests {
         // let backend = factory.select_optimal_backend(&opt_config, &hardware_capabilities).await;
         // assert!(backend.is_ok());
     }
-    
+
     #[tokio::test]
     async fn test_hardware_detection() {
         let detector = HardwareDetector::new();
@@ -765,11 +784,11 @@ mod tests {
         // assert!(caps.cpu_cores > 0);
         // assert!(caps.available_memory_gb > 0.0);
     }
-    
+
     #[test]
     fn test_optimized_config_defaults() {
         let config = OptimizedStorageConfig::default();
-        
+
         assert!(config.enable_tiering);
         assert!(config.enable_compression);
         assert!(config.enable_mmap);
@@ -790,9 +809,13 @@ impl Default for HardwareCapabilities {
     fn default() -> Self {
         let has_gpu = {
             #[cfg(feature = "gpu")]
-            { crate::acceleration::gpu::is_cuda_available() }
+            {
+                crate::acceleration::gpu::is_cuda_available()
+            }
             #[cfg(not(feature = "gpu"))]
-            { false }
+            {
+                false
+            }
         };
         Self {
             cpu_cores: num_cpus::get(),

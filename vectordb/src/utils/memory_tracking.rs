@@ -35,7 +35,8 @@ impl MemoryTracker {
                 peak,
                 new_total,
                 Ordering::Relaxed,
-                Ordering::Relaxed) {
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(p) => peak = p,
             }
@@ -150,14 +151,13 @@ pub mod memory_utils {
 
     /// Calculate memory usage of a vector of vectors
     pub fn vector_memory_usage(vectors: &[Vec<f32>]) -> usize {
-        vectors.iter().map(|v| v.memory_size()).sum::<usize>()
-            + std::mem::size_of_val(vectors)
+        vectors.iter().map(|v| v.memory_size()).sum::<usize>() + std::mem::size_of_val(vectors)
     }
 
     /// Calculate memory usage of an index structure
     pub fn index_memory_usage(numvectors: usize, dimension: usize, _connectivity: usize) -> usize {
         // Base vector storage
-        
+
         numvectors * dimension * std::mem::size_of::<f32>()
     }
 
@@ -181,9 +181,7 @@ lazy_static::lazy_static! {
 macro_rules! track_memory {
     ($tracker:expr, $size:expr) => {{
         $tracker.track_allocation($size);
-        scopeguard::guard((), |_| {
-            $tracker.track_deallocation($size)
-        })
+        scopeguard::guard((), |_| $tracker.track_deallocation($size))
     }};
 }
 

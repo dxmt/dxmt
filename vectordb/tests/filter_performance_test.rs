@@ -1,6 +1,8 @@
+use dxmt_vectordb::config::{MemoryConfig, StorageConfig};
 use dxmt_vectordb::storage::IntelligentIndexedStorage;
-use dxmt_vectordb::config::{StorageConfig, MemoryConfig};
-use dxmt_vectordb::types::record::{CreateRecordRequest, SearchQuery, SearchMode, Filter, Condition, FilterOperation};
+use dxmt_vectordb::types::record::{
+    Condition, CreateRecordRequest, Filter, FilterOperation, SearchMode, SearchQuery,
+};
 use dxmt_vectordb::types::table::TableConfig;
 use dxmt_vectordb::types::vector::{DenseVector, DistanceMetric};
 
@@ -20,7 +22,9 @@ async fn create_test_storage() -> IntelligentIndexedStorage {
         ssd: None,
         object_storage: None,
     };
-    IntelligentIndexedStorage::new(&config).await.expect("Failed to create storage")
+    IntelligentIndexedStorage::new(&config)
+        .await
+        .expect("Failed to create storage")
 }
 
 #[tokio::test]
@@ -65,7 +69,10 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         });
     }
 
-    storage.insert_records("test_pre_filter", records).await.unwrap();
+    storage
+        .insert_records("test_pre_filter", records)
+        .await
+        .unwrap();
 
     // First, verify records were inserted correctly
     let stats = storage.get_stats().await;
@@ -79,9 +86,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         filter: Some(Filter {
             must: Some(vec![Condition {
                 key: "category".to_string(),
-                operation: FilterOperation::Equal(
-                    serde_json::json!("category_rare")
-                ),
+                operation: FilterOperation::Equal(serde_json::json!("category_rare")),
             }]),
             must_not: None,
             should: None,
@@ -96,23 +101,37 @@ async fn test_pre_filtering_with_highly_selective_filter() {
     let result = storage.search("test_pre_filter", query).await.unwrap();
 
     // Debug output
-    println!("Found {} results, tookms: {}, total: {}",
-             result.hits.len(), result.tookms, result.total);
+    println!(
+        "Found {} results, tookms: {}, total: {}",
+        result.hits.len(),
+        result.tookms,
+        result.total
+    );
 
     // Should find results (up to 5, but only 10 total match)
-    assert!(!result.hits.is_empty(), "Should find some results with rare category. Got {} results.", result.hits.len());
+    assert!(
+        !result.hits.is_empty(),
+        "Should find some results with rare category. Got {} results.",
+        result.hits.len()
+    );
     assert!(result.hits.len() <= 5, "Should not exceed top_k");
 
     // Verify all results have the correct category
     for hit in &result.hits {
         if let Some(payload) = &hit.payload {
             let category = payload.get("category").and_then(|v| v.as_str()).unwrap();
-            assert_eq!(category, "category_rare", "All results should have category_rare");
+            assert_eq!(
+                category, "category_rare",
+                "All results should have category_rare"
+            );
         }
     }
 
-    println!("PRE-FILTERING test passed: found {} results in {} ms",
-             result.hits.len(), result.tookms);
+    println!(
+        "PRE-FILTERING test passed: found {} results in {} ms",
+        result.hits.len(),
+        result.tookms
+    );
 }
 
 #[tokio::test]
@@ -157,7 +176,10 @@ async fn test_post_filtering_with_low_selective_filter() {
         });
     }
 
-    storage.insert_records("test_post_filter", records).await.unwrap();
+    storage
+        .insert_records("test_post_filter", records)
+        .await
+        .unwrap();
 
     // Search with low selective filter (50% selectivity)
     let query = SearchQuery {
@@ -167,9 +189,7 @@ async fn test_post_filtering_with_low_selective_filter() {
         filter: Some(Filter {
             must: Some(vec![Condition {
                 key: "category".to_string(),
-                operation: FilterOperation::Equal(
-                    serde_json::json!("category_common")
-                ),
+                operation: FilterOperation::Equal(serde_json::json!("category_common")),
             }]),
             must_not: None,
             should: None,
@@ -190,12 +210,18 @@ async fn test_post_filtering_with_low_selective_filter() {
     for hit in &result.hits {
         if let Some(payload) = &hit.payload {
             let category = payload.get("category").and_then(|v| v.as_str()).unwrap();
-            assert_eq!(category, "category_common", "All results should have category_common");
+            assert_eq!(
+                category, "category_common",
+                "All results should have category_common"
+            );
         }
     }
 
-    println!("POST-FILTERING test passed: found {} results in {} ms",
-             result.hits.len(), result.tookms);
+    println!(
+        "POST-FILTERING test passed: found {} results in {} ms",
+        result.hits.len(),
+        result.tookms
+    );
 }
 
 #[tokio::test]
@@ -240,7 +266,10 @@ async fn test_filter_with_in_operation() {
         });
     }
 
-    storage.insert_records("test_in_filter", records).await.unwrap();
+    storage
+        .insert_records("test_in_filter", records)
+        .await
+        .unwrap();
 
     // Search with IN filter for categories A and B (50% selectivity)
     let query = SearchQuery {
@@ -282,6 +311,9 @@ async fn test_filter_with_in_operation() {
         }
     }
 
-    println!("IN filter test passed: found {} results in {} ms",
-             result.hits.len(), result.tookms);
+    println!(
+        "IN filter test passed: found {} results in {} ms",
+        result.hits.len(),
+        result.tookms
+    );
 }
