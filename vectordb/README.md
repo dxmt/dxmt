@@ -83,7 +83,8 @@ serve           →  /api/v1/*
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
-Snapshots are uploaded to object storage, and a table nothing has queried for a while is
+Both the write-ahead log and the snapshots are uploaded to object storage — the log as immutable
+chunks, so a write acknowledged between two snapshots survives losing the machine. and a table nothing has queried for a while is
 dropped from memory entirely — records and index — leaving only its segments in the object
 store. The next query on it rehydrates transparently, so memory tracks the working set rather
 than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.

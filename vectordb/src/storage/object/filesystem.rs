@@ -542,9 +542,19 @@ impl FilesystemStorage {
                 .to_string_lossy()
                 .replace('\\', "/");
 
-            if !relative_path.starts_with(prefix) {
+            // Only files are filtered by prefix here. A directory has to be descended into
+            // whenever it *could* hold matching keys — listing with prefix "wal/" used to find
+            // nothing at all, because the directory's own relative path is "wal", which does not
+            // start with "wal/", so the recursion below never ran.
+            if path.is_dir() {
+                let dir_path = format!("{}/", relative_path);
+                if !dir_path.starts_with(prefix) && !prefix.starts_with(&dir_path) {
+                    continue;
+                }
+            } else if !relative_path.starts_with(prefix) {
                 continue;
             }
+
             if path.is_file() {
                 let metadata =
                     entry
@@ -644,5 +654,41 @@ impl FilesystemStorage {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn listing_by_prefix_descends_into_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = FilesystemStorage::new(dir.path(), "bucket").unwrap();
+
+        storage
+            .put_object("wal/000.chunk", bytes::Bytes::from_static(b"a"), None)
+            .await
+            .unwrap();
+        storage
+            .put_object("snapshot/manifest", bytes::Bytes::from_static(b"b"), None)
+            .await
+            .unwrap();
+
+        // The prefix ends in a slash while the directory's own relative path does not, so the
+        // filter used to reject the directory before the recursion below could run — every
+        // prefixed listing came back empty, silently.
+        let listed = storage
+            .list_objects(&ListObjectsOptions {
+                prefix: Some("wal/".to_string()),
+                max_keys: None,
+                continuation_token: None,
+                delimiter: None,
+            })
+            .await
+            .unwrap();
+
+        let keys: Vec<_> = listed.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["wal/000.chunk"], "prefix listing missed the key");
     }
 }

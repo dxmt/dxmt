@@ -697,3 +697,57 @@ async fn an_evicted_table_still_appears_in_listings() {
     assert_eq!(listed[0].name, "t");
     assert_eq!(listed[0].record_count, 1, "listing lost the row count");
 }
+
+#[tokio::test]
+async fn writes_after_the_last_snapshot_survive_losing_the_machine() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("a")))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("snapshotted", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+
+        // Acknowledged after the snapshot, so it exists only in the WAL. If the WAL is local
+        // only, "object storage is the source of truth" is false for exactly this window —
+        // every write between two snapshots dies with the machine.
+        storage
+            .insert_records(
+                "t",
+                vec![record("after_snapshot", vec![0.0, 1.0, 0.0, 0.0])],
+            )
+            .await
+            .unwrap();
+    }
+
+    // The machine is gone: new node, empty local disk, same bucket.
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("b")))
+        .await
+        .unwrap();
+
+    let hits = recovered
+        .search("t", query(vec![0.0, 0.0, 0.0, 0.0], 10))
+        .await
+        .unwrap();
+    let ids: std::collections::HashSet<_> = hits.hits.iter().map(|h| h.id.as_str()).collect();
+    assert!(
+        ids.contains("snapshotted"),
+        "the snapshotted record was lost: {:?}",
+        ids
+    );
+    assert!(
+        ids.contains("after_snapshot"),
+        "an acknowledged write made after the snapshot did not survive: {:?}",
+        ids
+    );
+}

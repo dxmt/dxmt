@@ -503,7 +503,7 @@ impl IntelligentIndexedStorage {
             // restored, and applying it to an empty store would lose those edits.
             let from_seq = storage.load_snapshot(&dir).await?;
 
-            let pending = {
+            let mut pending = {
                 let guard = storage
                     .wal
                     .as_ref()
@@ -512,6 +512,26 @@ impl IntelligentIndexedStorage {
                     .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
                 guard.replay_from(from_seq)?
             };
+
+            // A fresh machine has an empty local log, so everything written since the last
+            // snapshot lives only in the object store. Merge both sources and let the sequence
+            // number decide: chunks a machine already has locally are duplicates, and dropping
+            // them here is cheaper than replaying an insert twice.
+            if storage.object_storage_enabled {
+                let remote = storage.fetch_wal_chunks(from_seq).await?;
+                if !remote.is_empty() {
+                    let local: std::collections::HashSet<u64> =
+                        pending.iter().map(|(seq, _)| *seq).collect();
+                    let added = remote.len();
+                    pending.extend(remote.into_iter().filter(|(seq, _)| !local.contains(seq)));
+                    pending.sort_by_key(|(seq, _)| *seq);
+                    info!(
+                        "Merged {} WAL entries from object storage ({} already local)",
+                        pending.len(),
+                        added + local.len() - pending.len()
+                    );
+                }
+            }
 
             if pending.is_empty() {
                 info!(
@@ -804,10 +824,15 @@ impl IntelligentIndexedStorage {
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))
             .and_then(|mut g| g.truncate_before(seq))
         {
-            Ok(reclaimed) if reclaimed > 0 => info!(
-                "WAL compacted below sequence {}: {} bytes reclaimed",
-                seq, reclaimed
-            ),
+            Ok(reclaimed) if reclaimed > 0 => {
+                info!(
+                    "WAL compacted below sequence {}: {} bytes reclaimed",
+                    seq, reclaimed
+                );
+                if self.object_storage_enabled {
+                    self.prune_wal_chunks(seq).await;
+                }
+            }
             Ok(_) => {}
             // The snapshot is durable already, so a failed compaction costs disk and startup
             // time, not correctness.
@@ -1201,7 +1226,7 @@ impl IntelligentIndexedStorage {
     ///
     /// 每次调用都 `force_flush`：`write_entry` 默认攒够 256KB 才写文件，攒着的部分
     /// `kill -9` 就没了，而"已经返回成功的写入不能丢"正是 WAL 存在的理由。
-    fn wal_append(&self, entries: Vec<WalEntry>) -> crate::Result<()> {
+    async fn wal_append(&self, entries: Vec<WalEntry>) -> crate::Result<()> {
         if self.replaying.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -1209,14 +1234,134 @@ impl IntelligentIndexedStorage {
             return Ok(());
         };
 
-        let mut guard = wal
-            .lock()
-            .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
-        for entry in entries {
-            guard.write_entry(entry)?;
+        let stamped: Vec<(u64, WalEntry)> = {
+            let mut guard = wal
+                .lock()
+                .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+            let mut stamped = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let seq = guard.write_entry(entry.clone())?;
+                stamped.push((seq, entry));
+            }
+            guard.force_flush()?;
+            stamped
+        };
+
+        // The local log alone leaves a hole in "object storage is the source of truth": every
+        // write acknowledged between two snapshots lives only on this machine, so losing the
+        // machine loses it. Mirror the entries to object storage as an immutable chunk — the
+        // same model the snapshot segments use, so a chunk is written once and never rewritten.
+        if self.object_storage_enabled {
+            if let Some((first_seq, _)) = stamped.first() {
+                if let Err(e) = self.offload_wal_chunk(*first_seq, &stamped).await {
+                    // The write is already durable locally, so this is a reduction in blast
+                    // radius, not a lost write. Say so rather than failing the caller.
+                    warn!("WAL chunk {} stayed local, upload failed: {}", first_seq, e);
+                }
+            }
         }
-        guard.force_flush()?;
         Ok(())
+    }
+
+    /// 一段 WAL 分块在对象存储里的键。用定宽序号，好让字典序等于序号序。
+    fn wal_chunk_key(first_seq: u64) -> String {
+        format!("wal/{:020}.chunk", first_seq)
+    }
+
+    /// 把一批 WAL 条目作为不可变分块推到对象存储。
+    async fn offload_wal_chunk(
+        &self,
+        first_seq: u64,
+        entries: &[(u64, WalEntry)],
+    ) -> crate::Result<()> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        // MessagePack, not bincode: WalEntry carries a serde_json::Value payload, which bincode
+        // cannot round-trip. This is the same reason wal.rs uses rmp.
+        let bytes =
+            rmp_serde::to_vec(entries).map_err(|e| crate::Error::Serialization(e.to_string()))?;
+
+        self.storage
+            .put_object(
+                &Self::wal_chunk_key(first_seq),
+                bytes::Bytes::from(bytes),
+                Some("application/octet-stream"),
+            )
+            .await
+            .map_err(|e| crate::Error::Internal(format!("uploading WAL chunk: {}", e)))
+    }
+
+    /// 列出 `wal/` 下所有分块的键，按序号（即字典序）排好。
+    async fn list_wal_chunk_keys(&self) -> Vec<String> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let options = crate::storage::object::types::ListObjectsOptions {
+            prefix: Some("wal/".to_string()),
+            max_keys: None,
+            continuation_token: None,
+            delimiter: None,
+        };
+        match self.storage.list_objects(&options).await {
+            Ok(result) => {
+                let mut keys: Vec<String> = result.objects.into_iter().map(|o| o.key).collect();
+                keys.sort();
+                keys
+            }
+            // No chunks yet is the normal first-boot case, not an error.
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 从对象存储取回序号 >= `from_seq` 的 WAL 条目。
+    async fn fetch_wal_chunks(&self, from_seq: u64) -> crate::Result<Vec<(u64, WalEntry)>> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let mut out = Vec::new();
+        for key in self.list_wal_chunk_keys().await {
+            let Ok(bytes) = self.storage.get_object(&key).await else {
+                warn!("WAL chunk {} could not be read; skipping", key);
+                continue;
+            };
+            let entries: Vec<(u64, WalEntry)> = match rmp_serde::from_slice(&bytes) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("WAL chunk {} is unreadable ({}); skipping", key, e);
+                    continue;
+                }
+            };
+            out.extend(entries.into_iter().filter(|(seq, _)| *seq >= from_seq));
+        }
+        Ok(out)
+    }
+
+    /// 删掉序号全部低于 `keep_from` 的 WAL 分块。
+    async fn prune_wal_chunks(&self, keep_from: u64) {
+        use crate::storage::object::traits::ObjectStorage;
+
+        for key in self.list_wal_chunk_keys().await {
+            // The key embeds the chunk's first sequence number. A chunk whose *last* entry is
+            // still below the cutoff is fully covered by the snapshot; parse the first and only
+            // prune when the next chunk also starts below the cutoff, which the sorted order
+            // gives us for free — so compare conservatively against the first sequence.
+            let Some(seq) = key
+                .rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".chunk"))
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if seq < keep_from {
+                if let Ok(bytes) = self.storage.get_object(&key).await {
+                    if let Ok(entries) = rmp_serde::from_slice::<Vec<(u64, WalEntry)>>(&bytes) {
+                        // Only drop the chunk when every entry in it is covered.
+                        if entries.iter().all(|(s, _)| *s < keep_from) {
+                            let _ = self.storage.delete_object(&key).await;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 创建表时自动选择最优索引
@@ -1354,7 +1499,8 @@ impl IntelligentIndexedStorage {
             tables.insert(table.name.clone(), table_data);
         }
 
-        self.wal_append(vec![WalEntry::CreateTableWithConfig { config }])?;
+        self.wal_append(vec![WalEntry::CreateTableWithConfig { config }])
+            .await?;
 
         Ok(table)
     }
@@ -1398,7 +1544,8 @@ impl IntelligentIndexedStorage {
                     payload: serde_json::to_value(&r.payload).ok(),
                 })
                 .collect(),
-        )?;
+        )
+        .await?;
 
         Ok(inserted)
     }
@@ -2143,7 +2290,8 @@ impl IntelligentIndexedStorage {
 
         self.wal_append(vec![WalEntry::DeleteTable {
             table: name.to_string(),
-        }])?;
+        }])
+        .await?;
 
         Ok(())
     }
@@ -2929,7 +3077,8 @@ impl IntelligentIndexedStorage {
                     record_id: id,
                 })
                 .collect(),
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
