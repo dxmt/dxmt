@@ -214,9 +214,7 @@ These are real gaps, not roadmap aspirations:
   removed.
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
-- **CI does not run.** The workflows live under `vectordb/.github/`, which GitHub Actions
-  does not read — and `make verify` fails on 154 pre-existing clippy errors, so it cannot serve
-  as a gate either. Use `cargo test --lib`.
+
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what is being done about these and in what order.
 

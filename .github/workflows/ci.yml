@@ -1,0 +1,64 @@
+name: CI
+
+# The crate lives in vectordb/, but GitHub Actions only reads .github/ at the repository root.
+# Nine workflows used to sit in vectordb/.github/workflows/ where nothing could trigger them —
+# and they invoked cargo at the checkout root with no working-directory, so they would have
+# failed on the first step even if they had. This file replaces the lot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    working-directory: vectordb
+
+jobs:
+  verify:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+
+      # Not `make verify`: the same three steps, but named separately so a failure says which
+      # one without reading the log. Note cargo fmt is not idempotent on this tree — if this
+      # step fails after a local `cargo fmt`, run it a second time.
+      - name: Formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      # These spawn the server binary and exercise recovery, snapshots, the MCP transport and
+      # the routes the client SDKs call. They are the tests that catch the things unit tests
+      # cannot: a lost write, a 404 on a documented endpoint, a log line on MCP's stdout.
+      - name: Integration tests
+        run: cargo test --tests
+
+  build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+      - run: cargo build --release --bins

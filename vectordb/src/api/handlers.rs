@@ -525,6 +525,30 @@ pub async fn create_snapshot(State(state): State<AppState>) -> impl IntoResponse
     }
 }
 
+/// Size and memory statistics for one table.
+///
+/// Added because dxmt-js-sdk's `getTableStats()` has always called `GET /tables/{name}/stats`,
+/// a route that did not exist — the method threw for every user of the JS client.
+#[utoipa::path(
+    get,
+    path = "/api/v1/tables/{table_name}/stats",
+    params(("table_name" = String, Path, description = "表名")),
+    responses(
+        (status = 200, description = "表统计", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse)
+    ),
+    tag = "tables"
+)]
+pub async fn get_table_stats(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.get_table_stats(&table_name).await {
+        Ok(stats) => ApiResponse::success(stats).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Branch a table — create an independent copy of source table's schema and records.
 ///
 /// POST /tables/:table_name/branch

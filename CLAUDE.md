@@ -25,8 +25,10 @@ the Rust source. This file covers only repo-level facts that are not in it.
 | `vectordb/langchain-dxmt/` | LangChain vector store package |
 | `vectordb/llama-index-vector-stores-dxmt/` | LlamaIndex vector store package |
 
-Each SDK is an independently packaged project with its own tests and dependency manifest —
-changing the Rust HTTP API means updating the SDKs separately; nothing cross-validates them.
+Each SDK is an independently packaged project with its own tests and dependency manifest, so
+changing the Rust HTTP API means updating them separately. `vectordb/tests/api_contract_test.rs`
+is the one link between them: it lists every method/path pair the SDKs issue and fails if the
+router stops serving one. Add to `CONTRACTS` there when an SDK starts calling something new.
 
 ## Per-package commands
 
@@ -57,9 +59,13 @@ and has no `/api/v1` at all, so nothing will connect.
   `test-cluster` and the release targets append `python3 scripts/...` steps for files that left
   the tree, guarded with `|| true` so they no-op silently. `test` and `verify` were cleaned up
   in W5; the rest still advertise work they do not do.
-- **CI does not run.** The workflows in `vectordb/.github/workflows/` invoke `cargo` at the
-  checkout root with no `working-directory:`, and GitHub Actions only reads `.github/` at the
-  true repo root — so they neither trigger nor would pass now that the crate is nested.
+- **CI runs from `.github/workflows/ci.yml` at the repo root**, with
+  `defaults.run.working-directory: vectordb`. It is fmt-check, clippy `--all-targets`,
+  `cargo test --lib` and `cargo test --tests`, plus a release build — about six minutes. The
+  nine workflows that used to sit in `vectordb/.github/` were unreachable (Actions only reads
+  the true repo root) and invoked cargo at the checkout root with no working-directory, so they
+  neither triggered nor would have passed; six of them also called scripts that are not in the
+  tree.
 - **`make verify` passes as of W5** and is now a usable gate: `fmt-check` + `clippy
   --all-targets -D warnings` + `test`. It used to fail on 154 clippy errors, and its first step
   was `cargo fmt`, which writes rather than checks — a gate that edits your tree is not a gate.

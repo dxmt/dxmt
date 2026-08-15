@@ -2598,6 +2598,49 @@ impl IntelligentIndexedStorage {
         Ok(table_data.index.len().await)
     }
 
+    /// 表的规模与内存占用统计。
+    ///
+    /// 字段名对齐 dxmt-js-sdk 的 `TableStats`——它的 `getTableStats()` 一直在调用一个不存在的
+    /// 路由，所以这个方法对每个 JS 客户端用户都是抛异常的。
+    pub async fn get_table_stats(&self, tablename: &str) -> crate::Result<serde_json::Value> {
+        self.ensure_resident(tablename).await?;
+
+        let tables = self.tables.read().await;
+        let data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        let index_stats = data.index.get_stats().await;
+        let dimension = data.table.dimension;
+        let record_count = data.records.len();
+
+        // 记录本身的内存：向量 + payload 的 JSON 文本长度。payload 是 serde_json::Value，
+        // 没有便宜的精确大小，序列化后的字节数是最接近的可得近似。
+        let payload_bytes: usize = data
+            .records
+            .values()
+            .map(|r| {
+                serde_json::to_string(&r.payload)
+                    .map(|s| s.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+        let vector_bytes = record_count * dimension * std::mem::size_of::<f32>();
+
+        Ok(serde_json::json!({
+            "name": data.table.name,
+            "record_count": record_count,
+            "dimension": dimension,
+            "index_type": data.table.index_type.to_string(),
+            "index_size_bytes": index_stats.index_size_bytes,
+            "memory_usage_bytes": vector_bytes + payload_bytes + index_stats.index_size_bytes,
+            // Records live in memory; only snapshots and WAL are on disk, and those are
+            // per-instance rather than per-table, so reporting a per-table figure would be
+            // inventing one.
+            "disk_usage_bytes": 0,
+        }))
+    }
+
     /// 获取表的性能统计
     pub async fn get_performance_stats(&self, tablename: &str) -> crate::Result<PerformanceStats> {
         let tables = self.tables.read().await;

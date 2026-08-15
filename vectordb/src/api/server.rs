@@ -15,7 +15,7 @@ use crate::{
         handlers::{
             alter_table, branch_table, create_backup, create_snapshot, create_table,
             delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
-            get_status, get_table, health_check, health_metrics, hybrid_search,
+            get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
             hybrid_search_combined, insert_records, insert_records_optimized, list_records,
             list_tables, rebuild_index, search_vectors, update_record, AppState,
         },
@@ -187,6 +187,7 @@ pub async fn create_app_with_storage(
         )
         .route("/tables/:table_name/records", delete(delete_records))
         .route("/tables/:table_name/records/list", post(list_records))
+        .route("/tables/:table_name/stats", get(get_table_stats))
         // 批量操作API
         // .route("/tables/:table_name/bulk_insert", post(bulk_insert_records))  // Removed
         .route(
