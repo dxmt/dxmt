@@ -1,0 +1,126 @@
+# 备份与恢复
+
+**先记住一件事：`data/wal/snapshot/` 是数据，不是缓存。**
+
+W7 给 WAL 加了截断——快照校验通过后，它所覆盖的那段日志会被删掉。所以从那一刻起，
+快照是那段数据的**唯一副本**。把 `snapshot/` 当缓存清理掉，等于删数据。
+
+---
+
+## 该备份什么
+
+| 路径 | 内容 | 必须备份 |
+|---|---|---|
+| `$DB_WAL_DIR/snapshot/` | 表元数据、记录、索引段 | **是** |
+| `$DB_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
+| `$DB_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
+| 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**（等价于上面两项） |
+
+`DB_WAL_DIR` 默认 `./data/wal`。
+
+**配了对象存储的部署**，快照段和 WAL 分块都已经在桶里了——备份桶即可，本地目录是缓存。
+`partitions/` 前缀下是分区索引的段文件，同样要备份：分区索引只在内存里保留质心。
+
+---
+
+## 备份
+
+```bash
+curl -sX POST http://localhost:9999/api/v1/backup \
+     -H 'Content-Type: application/json' \
+     -d '{"path":"/backups/dxmt-2026-08-15"}'
+```
+
+返回一份清单：
+
+```json
+{
+  "created_at": "2026-08-15T03:14:07.123456789+00:00",
+  "tables": 3,
+  "files": ["snapshot/manifest", "snapshot/t0.meta", "snapshot/t0.idx", "wal.log"],
+  "bytes": 5387421,
+  "restore": "Stop the server, replace the contents of DB_WAL_DIR with this directory, and start it again."
+}
+```
+
+**这个端点会先强制做一次快照**，顺序不能反：快照把内存里尚未落盘的写入固定下来，并把日志
+压到快照点。反过来拷的话，拿到的是一份旧快照配一段与之不匹配的日志。
+
+目录由**服务进程**写，所以路径要对服务端可写，不是对调用方。
+
+---
+
+## 恢复
+
+恢复是离线操作，不走 API：
+
+```bash
+systemctl stop dxmt-vectordb          # 或 kill -TERM
+
+rm -rf   /var/lib/dxmt/wal
+mkdir -p /var/lib/dxmt/wal
+cp -a /backups/dxmt-2026-08-15/snapshot /var/lib/dxmt/wal/
+cp -a /backups/dxmt-2026-08-15/wal.log  /var/lib/dxmt/wal/   # 如果备份里有
+
+DB_WAL_DIR=/var/lib/dxmt/wal systemctl start dxmt-vectordb
+```
+
+启动日志里应当看到：
+
+```
+Snapshot loaded: 3 tables; replaying WAL from sequence 41
+```
+
+**故意不做成 API**：往一个正在跑的服务里灌恢复数据，需要先停掉写入、清空内存状态、
+再重放——那是一个比"停机拷文件"复杂得多、也更容易出错的路径，而收益只是省一次重启。
+
+---
+
+## 快照什么时候发生
+
+| 触发 | 配置 |
+|---|---|
+| 定期 | `DB_SNAPSHOT_INTERVAL_SECS`，默认 300 秒，0 关闭 |
+| 优雅停机 | SIGTERM / Ctrl-C，drain 之后 |
+| `POST /api/v1/tables/{name}/index/rebuild` 之后 | 自动 |
+| `POST /api/v1/snapshot` | 手动 |
+| 冷表驱逐前 | `DB_EVICTION_INTERVAL_SECS`，默认 600 秒 |
+
+快照间隔决定了**最坏情况下需要回放多少 WAL**，也决定了单机部署（没配对象存储时）
+一次崩溃可能丢多少——不会丢已确认的写入，但恢复要多花时间。
+
+---
+
+## 快照读不出来会怎样
+
+**服务拒绝启动**，并打印类似：
+
+```
+snapshot at ./data/wal/snapshot is unreadable (…). The WAL no longer covers the entries it
+holds, so starting would lose data. Restore it from backup, or delete the directory to accept
+the loss and start from whatever the WAL still has.
+```
+
+这是有意的。原来的行为是告警一句然后空库启动——在日志已被截断的前提下，那等于静默丢数据。
+
+两个选择：
+
+1. **从备份恢复**（推荐）——按上面的步骤。
+2. **接受损失**：`rm -rf $DB_WAL_DIR/snapshot`，然后启动。剩下的日志能回放多少算多少。
+
+写快照时会先完整读回来校验（manifest、每个 `.meta`、每个声称有索引的 `.idx`），
+校验不过就不替换、也不截断日志，所以正常情况下不该出现这个错误。
+
+---
+
+## 有意不提供的东西
+
+- **增量备份**。没有备份目录（catalogue），也没有备份 ID。
+- **备份列表 / 删除 / 状态查询**。
+- **通过 API 恢复**。
+
+`/backup/full`、`/backup/incremental`、`/backup/manual`、`/backup/status`、`/backup/list`、
+`/backup/restore`、`DELETE /backup/{id}` 这七个端点曾经存在，但**无条件返回 500**：
+`backup_manager` 在 `server.rs` 里写死 `None`。而它们背后的 `BackupManager` 收集的是
+`tables/` 前缀下的对象——**没有任何代码写过那个前缀**，所以就算接上，产出的也是空备份。
+比报错更糟。已经删掉，换成上面这一个能用的端点。

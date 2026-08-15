@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use std::sync::Arc;
@@ -10,9 +10,9 @@ use crate::{
         cluster::{get_cluster_status, handle_announce, handle_heartbeat},
         graphql,
         handlers::{
-            create_full_backup, create_table, delete_backup, delete_records, delete_table,
-            get_record, get_status, get_table, health_check, insert_records, list_backups,
-            list_tables, restore_backup, search_vectors, update_record, AppState,
+            create_backup, create_table, delete_records, delete_table, get_record, get_status,
+            get_table, health_check, insert_records, list_tables, search_vectors, update_record,
+            AppState,
         },
         multimodal::{
             create_multimodal_record, cross_modal_search, generate_embedding,
@@ -36,7 +36,6 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
     // 创建应用状态
     let base_state = AppState {
         storage: storage.clone(),
-        backup_manager: None, // 简化处理，暂时不使用备份管理器
         server_health,
     };
 
@@ -66,10 +65,8 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
             get(get_record).put(update_record),
         )
         .route("/tables/:table_name/search", post(search_vectors))
-        .route("/backup/create", post(create_full_backup))
-        .route("/backup/list", get(list_backups))
-        .route("/backup/restore", post(restore_backup))
-        .route("/backup/:backup_id", delete(delete_backup))
+        // Backup is a single endpoint now; the catalogue routes returned 500 unconditionally.
+        .route("/backup", post(create_backup))
         .with_state(base_state.clone());
 
     // 初始化应用

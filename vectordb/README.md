@@ -187,7 +187,9 @@ DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
 
 These are real gaps, not roadmap aspirations:
 
-- **A snapshot is the only copy of what it covers.** The WAL is compacted once a snapshot
+- **A snapshot is the only copy of what it covers**, so back it up — see
+  [docs/operations/backup-restore.md](docs/operations/backup-restore.md).
+  Briefly: The WAL is compacted once a snapshot
   verifies, so the entries below that point exist nowhere else. The snapshot is read back before
   the log is trimmed, and an unreadable snapshot makes the server refuse to start rather than
   come up empty — but back up `data/wal/snapshot/` like the data it is.

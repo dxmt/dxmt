@@ -987,6 +987,75 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
+    /// 把一份自洽的备份写到 `dest`。
+    ///
+    /// W7 给 WAL 加了截断之后，快照就成了它所覆盖那段数据的**唯一副本**——`snapshot/` 目录
+    /// 从缓存变成了必须备份的数据。这个方法产出的目录包含恢复所需的全部内容。
+    ///
+    /// 先强制快照再拷贝，顺序不能反：快照会把内存里尚未落盘的写入固定下来，并把日志压到
+    /// 快照点。反过来拷的话，拿到的是一份旧快照配一段与之不匹配的日志。
+    pub async fn backup_to(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
+        let Some(ref wal_dir) = self.wal_dir else {
+            return Err(crate::Error::InvalidInput(
+                "backup requires WAL-backed storage; this instance has no durable state"
+                    .to_string(),
+            ));
+        };
+
+        let tables = self.snapshot().await?;
+
+        std::fs::create_dir_all(dest)?;
+        let mut copied = Vec::new();
+        let mut bytes = 0u64;
+
+        // 快照目录
+        let snapshot_src = Self::snapshot_dir(wal_dir);
+        if snapshot_src.exists() {
+            let snapshot_dst = dest.join("snapshot");
+            std::fs::create_dir_all(&snapshot_dst)?;
+            for entry in std::fs::read_dir(&snapshot_src)? {
+                let entry = entry?;
+                if entry.path().is_file() {
+                    let name = entry.file_name();
+                    let n = std::fs::copy(entry.path(), snapshot_dst.join(&name))?;
+                    bytes += n;
+                    copied.push(format!("snapshot/{}", name.to_string_lossy()));
+                }
+            }
+        }
+
+        // 快照点之后的日志尾巴。刚做完快照通常很短，但不能不带——恢复要靠它补上
+        // 快照与备份完成之间的那几条写入。
+        let wal_log = wal_dir.join("wal.log");
+        if wal_log.exists() {
+            let n = std::fs::copy(&wal_log, dest.join("wal.log"))?;
+            bytes += n;
+            copied.push("wal.log".to_string());
+        }
+
+        let manifest = serde_json::json!({
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "tables": tables,
+            "files": copied,
+            "bytes": bytes,
+            "restore": "Stop the server, replace the contents of DB_WAL_DIR with this \
+                        directory, and start it again.",
+        });
+        std::fs::write(
+            dest.join("BACKUP.json"),
+            serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| crate::Error::Serialization(e.to_string()))?,
+        )?;
+
+        info!(
+            "Backup written to {}: {} tables, {} bytes",
+            dest.display(),
+            tables,
+            bytes
+        );
+        Ok(manifest)
+    }
+
     /// 直接把一张表移出内存，不看热度。仅供测试构造"已驱逐"状态。
     ///
     /// 生产路径请用 [`Self::evict_cold_tables`]——它会先快照，这一步不会。

@@ -238,7 +238,6 @@ pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
 
     let app_state = Arc::new(AppState {
         storage: storage.clone(),
-        backup_manager: None,
         server_health,
     });
 

@@ -13,13 +13,11 @@ use crate::{
         // batch_handlers::batch_search_vectors,  // Removed
         // bulk_handlers::bulk_insert_records,  // Removed
         handlers::{
-            alter_table, branch_table, create_full_backup, create_incremental_backup,
-            create_manual_backup, create_snapshot, create_table, delete_backup, delete_records,
-            delete_table, drop_index, execute_dxql, full_text_search, get_backup_status,
-            get_record, get_status, get_table, health_check, health_metrics, hybrid_search,
-            hybrid_search_combined, insert_records, insert_records_optimized, list_backups,
-            list_records, list_tables, rebuild_index, restore_backup, search_vectors,
-            update_record, AppState,
+            alter_table, branch_table, create_backup, create_snapshot, create_table,
+            delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
+            get_status, get_table, health_check, health_metrics, hybrid_search,
+            hybrid_search_combined, insert_records, insert_records_optimized, list_records,
+            list_tables, rebuild_index, search_vectors, update_record, AppState,
         },
         multimodal::{
             create_multimodal_record, cross_modal_search, generate_embedding,
@@ -164,7 +162,6 @@ pub async fn create_app_with_storage(
 
     let base_state = AppState {
         storage: storage.clone(),
-        backup_manager: None, // wire up in production when a StorageBackupManager config is provided
         server_health,
     };
 
@@ -218,14 +215,8 @@ pub async fn create_app_with_storage(
             "/tables/:table_name/search/hybrid",
             post(hybrid_search_combined),
         )
-        // 备份恢复API
-        .route("/backup/full", post(create_full_backup))
-        .route("/backup/incremental", post(create_incremental_backup))
-        .route("/backup/manual", post(create_manual_backup))
-        .route("/backup/status", get(get_backup_status))
-        .route("/backup/list", get(list_backups))
-        .route("/backup/restore", post(restore_backup))
-        .route("/backup/:backup_id", delete(delete_backup))
+        // 备份：写一份自洽的备份目录。恢复是离线操作，见 docs/operations/backup-restore.md
+        .route("/backup", post(create_backup))
         .with_state(base_state.clone());
 
     // 创建系统路由（在根路径）

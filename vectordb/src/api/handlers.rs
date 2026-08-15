@@ -15,7 +15,7 @@ use crate::storage::traits::_Storage as _;
 use crate::{
     api::response::ApiError,
     api::server_health::ServerHealth,
-    storage::{BackupManager, IntelligentIndexedStorage, RestoreOptions},
+    storage::IntelligentIndexedStorage,
     types::{
         record::CreateRecordRequest,
         record::HybridSearchQuery,
@@ -40,7 +40,6 @@ fn error_response(err: crate::Error) -> Response {
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Arc<IntelligentIndexedStorage>,
-    pub backup_manager: Option<Arc<BackupManager>>,
     pub server_health: Arc<ServerHealth>,
     // Extensions will be handled through request extractors instead
 }
@@ -1078,270 +1077,42 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     ApiResponse::success(response).into_response()
 }
 
-// ============ 备份恢复API ============
+// ============ 备份API ============
 
-/// 创建备份请求
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct CreateBackupRequest {
-    pub backup_type: Option<String>, // "full", "incremental", "manual"
-    pub tables: Option<Vec<String>>, // 指定要备份的表，为空则备份所有表
-    pub description: Option<String>,
+    /// Directory the backup is written to. Must be writable by the server process.
+    pub path: String,
 }
 
-/// 恢复备份请求
-#[derive(Debug, Deserialize)]
-pub struct RestoreBackupRequest {
-    pub backup_id: String,
-    pub target_tables: Option<Vec<String>>,
-    pub point_in_time: Option<String>, // ISO 8601 格式
-    pub verify_integrity: Option<bool>,
-    pub parallel_threads: Option<usize>,
-    pub overwrite_existing: Option<bool>,
-}
-
-/// 创建全量备份
+/// Write a self-contained backup to a directory on the server.
+///
+/// Replaces seven endpoints (`/backup/full`, `/incremental`, `/manual`, `/status`, `/list`,
+/// `/restore`, `DELETE /backup/{id}`) that returned 500 unconditionally: `backup_manager` was
+/// hardcoded to `None`, and the BackupManager behind them collected objects under a `tables/`
+/// prefix that nothing has ever written to — wiring it up would have produced empty backups,
+/// which is worse than an error.
 #[utoipa::path(
     post,
-    path = "/api/v1/backup/full",
+    path = "/api/v1/backup",
     request_body = CreateBackupRequest,
     responses(
-        (status = 200, description = "备份创建成功", body = ApiResponse),
-        (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 500, description = "备份创建失败", body = ApiResponse)
+        (status = 200, description = "备份完成", body = ApiResponse),
+        (status = 400, description = "请求参数错误", body = ApiResponse)
     ),
     tag = "backup"
 )]
-#[axum::debug_handler]
-pub async fn create_full_backup(
-    State(state): State<AppState>,
-    Json(_request): Json<CreateBackupRequest>,
-) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    match backup_manager.create_full_backup().await {
-        Ok(task_id) => {
-            let response = serde_json::json!({
-                "task_id": task_id,
-                "message": "Full backup task created successfully"
-            });
-            ApiResponse::success(response).into_response()
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-/// 创建增量备份
-#[utoipa::path(
-    post,
-    path = "/api/v1/backup/incremental",
-    request_body = CreateBackupRequest,
-    responses(
-        (status = 200, description = "增量备份创建成功", body = ApiResponse),
-        (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 500, description = "备份创建失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn create_incremental_backup(
-    State(state): State<AppState>,
-    Json(_request): Json<CreateBackupRequest>,
-) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    match backup_manager.create_incremental_backup().await {
-        Ok(task_id) => {
-            let response = serde_json::json!({
-                "task_id": task_id,
-                "message": "Incremental backup task created successfully"
-            });
-            ApiResponse::success(response).into_response()
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-/// 创建手动备份
-#[utoipa::path(
-    post,
-    path = "/api/v1/backup/manual",
-    request_body = CreateBackupRequest,
-    responses(
-        (status = 200, description = "手动备份创建成功", body = ApiResponse),
-        (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 500, description = "备份创建失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn create_manual_backup(
+pub async fn create_backup(
     State(state): State<AppState>,
     Json(request): Json<CreateBackupRequest>,
 ) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    match backup_manager.create_manual_backup(request.tables).await {
-        Ok(task_id) => {
-            let response = serde_json::json!({
-                "task_id": task_id,
-                "message": "Manual backup task created successfully"
-            });
-            ApiResponse::success(response).into_response()
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-/// 获取备份状态
-#[utoipa::path(
-    get,
-    path = "/api/v1/backup/status",
-    responses(
-        (status = 200, description = "备份状态", body = ApiResponse),
-        (status = 500, description = "获取状态失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn get_backup_status(State(state): State<AppState>) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    let backup_state = backup_manager.get_backup_state();
-    let value = serde_json::to_value(backup_state).unwrap_or(serde_json::Value::Null);
-    ApiResponse::success(value).into_response()
-}
-
-/// 列出所有备份
-#[utoipa::path(
-    get,
-    path = "/api/v1/backup/list",
-    responses(
-        (status = 200, description = "备份列表", body = ApiResponse),
-        (status = 500, description = "获取备份列表失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn list_backups(State(state): State<AppState>) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    let backups = backup_manager.list_backups();
-    let value = serde_json::to_value(backups).unwrap_or(serde_json::Value::Null);
-    ApiResponse::success(value).into_response()
-}
-
-/// 恢复备份
-#[utoipa::path(
-    post,
-    path = "/api/v1/backup/restore",
-    request_body = RestoreBackupRequest,
-    responses(
-        (status = 200, description = "恢复成功", body = ApiResponse),
-        (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 404, description = "备份不存在", body = ApiResponse),
-        (status = 500, description = "恢复失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn restore_backup(
-    State(state): State<AppState>,
-    Json(request): Json<RestoreBackupRequest>,
-) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    // 解析备份ID
-    let backup_id = match uuid::Uuid::parse_str(&request.backup_id) {
-        Ok(id) => id,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-
-    // 解析时间点（如果提供）
-    let point_in_time = if let Some(time_str) = request.point_in_time {
-        match chrono::DateTime::parse_from_rfc3339(&time_str) {
-            Ok(dt) => Some(dt.with_timezone(&chrono::Utc)),
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-        }
-    } else {
-        None
-    };
-
-    // 构建恢复选项
-    let options = RestoreOptions {
-        target_tables: request.target_tables,
-        point_in_time,
-        verify_integrity: request.verify_integrity.unwrap_or(true),
-        parallel_threads: request.parallel_threads.unwrap_or(4),
-        overwrite_existing: request.overwrite_existing.unwrap_or(false),
-    };
-
-    match backup_manager.restore_backup(backup_id, options).await {
-        Ok(_) => {
-            let response = serde_json::json!({
-                "message": "Backup restored successfully"
-            });
-            ApiResponse::success(response).into_response()
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-/// 删除备份
-#[utoipa::path(
-    delete,
-    path = "/api/v1/backup/{backup_id}",
-    params(
-        ("backup_id" = String, Path, description = "备份ID")
-    ),
-    responses(
-        (status = 200, description = "备份删除成功", body = ApiResponse),
-        (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 404, description = "备份不存在", body = ApiResponse),
-        (status = 500, description = "删除失败", body = ApiResponse)
-    ),
-    tag = "backup"
-)]
-#[axum::debug_handler]
-pub async fn delete_backup(
-    State(state): State<AppState>,
-    Path(backup_id): Path<String>,
-) -> impl IntoResponse {
-    let backup_manager = match &state.backup_manager {
-        Some(manager) => manager,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    // 解析备份ID
-    let backup_id = match uuid::Uuid::parse_str(&backup_id) {
-        Ok(id) => id,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-
-    match backup_manager.delete_backup(backup_id).await {
-        Ok(_) => {
-            let response = serde_json::json!({
-                "message": "Backup deleted successfully"
-            });
-            ApiResponse::success(response).into_response()
-        }
+    match state
+        .storage
+        .backup_to(std::path::Path::new(&request.path))
+        .await
+    {
+        Ok(manifest) => ApiResponse::success(manifest).into_response(),
         Err(e) => error_response(e),
     }
 }

@@ -243,7 +243,8 @@ python            # PyO3 Python bindings
 See `docs/ROADMAP.md` for the ordered plan. Current blockers for single-node production
 readiness, in dependency order:
 
-1. **A verified snapshot is the sole copy of the log it replaced.** Snapshots are read back
+1. **A verified snapshot is the sole copy of the log it replaced** — backup and restore
+   procedure in `docs/operations/backup-restore.md`. Snapshots are read back
    before the WAL is compacted, and an unreadable snapshot aborts startup rather than yielding
    an empty database — but `data/wal/snapshot/` is now real data, not a cache.
 2. **No index persistence** — only `src/search/ivf.rs` implements `SerializableIndex`; HNSW

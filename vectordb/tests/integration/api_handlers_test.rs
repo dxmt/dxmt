@@ -38,7 +38,6 @@ async fn create_test_app_state() -> AppState {
 
     AppState {
         storage: Arc::new(storage),
-        backup_manager: None,
         server_health: Arc::new(server_health),
     }
 }

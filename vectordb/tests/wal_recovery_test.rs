@@ -819,3 +819,69 @@ async fn a_large_table_is_partitioned_on_rebuild_and_still_answers() {
         "partitioned search returned fewer hits"
     );
 }
+
+#[tokio::test]
+async fn a_backup_directory_is_enough_to_restore_from() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let backup_dir = tmp.path().join("backup");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("b", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let manifest = storage.backup_to(&backup_dir).await.unwrap();
+        assert_eq!(manifest["tables"], 1);
+        assert!(
+            manifest["bytes"].as_u64().unwrap() > 0,
+            "backup reported zero bytes"
+        );
+    }
+
+    // Destroy the original. Since W7 compacts the WAL after a snapshot, the backup is the only
+    // copy of everything it covers — if it is not self-contained, nothing else can save this.
+    std::fs::remove_dir_all(&wal_dir).unwrap();
+
+    // Restore is deliberately a file copy: the server is stopped, the directory is put back.
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let snapshot_dst = wal_dir.join("snapshot");
+    std::fs::create_dir_all(&snapshot_dst).unwrap();
+    for entry in std::fs::read_dir(backup_dir.join("snapshot")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), snapshot_dst.join(entry.file_name())).unwrap();
+    }
+    if backup_dir.join("wal.log").exists() {
+        std::fs::copy(backup_dir.join("wal.log"), wal_dir.join("wal.log")).unwrap();
+    }
+
+    let restored = open(&wal_dir).await;
+    let tables = restored.list_tables().await.unwrap();
+    assert_eq!(
+        tables.len(),
+        1,
+        "the table did not come back from the backup"
+    );
+    assert_eq!(tables[0].record_count, 2);
+
+    let hits = restored
+        .search("t", query(vec![1.0, 0.0, 0.0, 0.0], 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.hits[0].id, "a",
+        "the restored index answers differently"
+    );
+}
