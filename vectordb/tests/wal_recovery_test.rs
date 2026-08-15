@@ -1539,3 +1539,113 @@ async fn table_stats_say_whether_the_table_was_in_memory() {
         true
     );
 }
+
+#[tokio::test]
+async fn an_evicted_table_survives_a_later_snapshot_and_restart() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir.clone()))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("cold", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("cold", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+
+        // Evict it, as the sweep would once it went cold.
+        storage.evict_table_for_test("cold").await;
+
+        // Then a later snapshot runs — the periodic one, or a shutdown. Snapshots write what is
+        // in memory, and an evicted table is not. If it drops out of the manifest here, the
+        // table is gone at the next restart even though nobody deleted it.
+        storage.snapshot().await.unwrap();
+    }
+
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir))
+        .await
+        .unwrap();
+    let names: Vec<_> = recovered
+        .list_tables()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(
+        names.contains(&"cold".to_string()),
+        "an evicted table vanished after a later snapshot: {:?}",
+        names
+    );
+
+    let hits = recovered
+        .search("cold", query(vec![1.0, 0.0, 0.0, 0.0], 1))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits[0].id, "a", "the evicted table came back empty");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn dropping_a_partitioned_table_removes_its_segments() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 64, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    let rows: Vec<_> = (0..300)
+        .map(|i| {
+            let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    storage.rebuild_index("t").await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+
+    let segments = shared.join("ssd").join("test-bucket").join("partitions");
+    assert!(segments.exists(), "no segments were written");
+
+    // Dropping the table used to leave every segment behind forever: delete_table touched the
+    // in-memory map and the log and nothing else.
+    storage.delete_table("t").await.unwrap();
+
+    let left: Vec<_> = walk_files(&segments);
+    assert!(
+        left.is_empty(),
+        "dropping the table left {} segment(s) behind: {:?}",
+        left.len(),
+        left
+    );
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk_files(&path));
+            } else {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    out
+}

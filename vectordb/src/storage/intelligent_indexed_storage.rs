@@ -838,6 +838,49 @@ impl IntelligentIndexedStorage {
         }
         drop(tables);
 
+        // Carry over tables that are not in memory. Eviction removes a table from `tables`
+        // while leaving it perfectly valid in the previous snapshot — writing only what is
+        // resident drops it from the new manifest, and since the WAL is then compacted past
+        // the point that created it, the table is gone at the next restart. Nobody deleted it.
+        //
+        // An evicted table cannot have changed: every write path calls ensure_resident first,
+        // so it would be back in memory before anything touched it. Its segments from the
+        // previous snapshot are therefore still current and can simply be copied across.
+        if dir.exists() {
+            if let Ok(previous) = crate::search::index_persistence::read_index::<SnapshotManifest>(
+                &dir.join("manifest"),
+                "snapshot-manifest",
+            ) {
+                let resident: std::collections::HashSet<String> = names.iter().cloned().collect();
+                for (i, name) in previous.names.iter().enumerate() {
+                    if resident.contains(name) {
+                        continue;
+                    }
+                    let from = format!("t{}", i);
+                    let to = format!("t{}", written);
+                    if std::fs::copy(
+                        dir.join(format!("{}.meta", from)),
+                        staging.join(format!("{}.meta", to)),
+                    )
+                    .is_err()
+                    {
+                        warn!(
+                            "Evicted table '{}' has no snapshot metadata to carry over",
+                            name
+                        );
+                        continue;
+                    }
+                    // The index file is optional — BruteForce has no on-disk form.
+                    let _ = std::fs::copy(
+                        dir.join(format!("{}.idx", from)),
+                        staging.join(format!("{}.idx", to)),
+                    );
+                    names.push(name.clone());
+                    written += 1;
+                }
+            }
+        }
+
         crate::search::index_persistence::write_index(
             &staging.join("manifest"),
             "snapshot-manifest",
@@ -2736,19 +2779,64 @@ impl IntelligentIndexedStorage {
 
     /// 删除表
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
-        {
+        let table_id = {
             let mut tables = self.tables.write().await;
-            tables
+            let data = tables
                 .remove(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
-        }
+            data.table.id.to_string()
+        };
 
         self.wal_append(vec![WalEntry::DeleteTable {
             table: name.to_string(),
         }])
         .await?;
 
+        // A partitioned table leaves its segments in object storage. Delete them here rather
+        // than at the next snapshot: the table is out of `tables` and its removal is in the
+        // log, so nothing that can still be recovered refers to them.
+        //
+        // The caveat is real and the same one every database has with DROP: a backup taken
+        // before this point can no longer restore that table's index, because its segments are
+        // gone. chroma keeps a version graph precisely so files shared across versions are not
+        // deleted while some live version still points at them; our segments belong to exactly
+        // one table, so the graph is unnecessary — but the "do not delete what something still
+        // references" rule is why this waits until the removal is durable in the WAL.
+        if self.object_storage_enabled {
+            self.delete_partition_segments(&table_id).await;
+        }
+
         Ok(())
+    }
+
+    /// 删掉一张表在对象存储上的全部分区段。
+    async fn delete_partition_segments(&self, table_id: &str) {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let prefix = format!("partitions/{}/", table_id);
+        let options = crate::storage::object::types::ListObjectsOptions {
+            prefix: Some(prefix.clone()),
+            max_keys: None,
+            continuation_token: None,
+            delimiter: None,
+        };
+        let Ok(listed) = self.storage.list_objects(&options).await else {
+            warn!(
+                "Could not list {} to clean up; segments may be left behind",
+                prefix
+            );
+            return;
+        };
+
+        let mut removed = 0usize;
+        for object in listed.objects {
+            if self.storage.delete_object(&object.key).await.is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            info!("Deleted {} partition segment(s) under {}", removed, prefix);
+        }
     }
 
     /// Drop the vector index for a table, replacing it with a BruteForce index.
