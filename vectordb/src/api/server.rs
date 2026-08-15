@@ -100,6 +100,45 @@ fn spawn_eviction_sweep(storage: Arc<IntelligentIndexedStorage>, interval: u64) 
     tracing::info!("Cold-table eviction sweep every {}s", interval);
 }
 
+/// Index re-evaluation interval in seconds; 0 disables. Default 900.
+fn reindex_interval_from_env() -> u64 {
+    std::env::var("DB_REINDEX_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900)
+}
+
+/// Re-check periodically whether each table's index still suits its size.
+///
+/// Without this the algorithm is whatever CREATE TABLE picked from a fixed estimate, for the
+/// life of the table — an "adaptive index" that adapts once, before there is any data to adapt
+/// to.
+fn spawn_index_reevaluation(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
+    if interval == 0 {
+        tracing::info!("Automatic index re-evaluation disabled (DB_REINDEX_INTERVAL_SECS=0)");
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match storage.reevaluate_indexes().await {
+                Ok(rebuilt) if !rebuilt.is_empty() => {
+                    tracing::info!(
+                        "Rebuilt {} index(es) after re-evaluation: {:?}",
+                        rebuilt.len(),
+                        rebuilt
+                    )
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Index re-evaluation failed: {}", e),
+            }
+        }
+    });
+    tracing::info!("Index re-evaluation every {}s", interval);
+}
+
 /// Snapshot every `interval` seconds for as long as the process runs.
 fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
@@ -302,6 +341,7 @@ pub async fn create_app_with_storage(
 
     spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
     spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
+    spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
 
     Ok((app, storage))
 }

@@ -1063,6 +1063,90 @@ impl IntelligentIndexedStorage {
         self.tables.write().await.remove(name);
     }
 
+    /// 检查每张表当前的索引算法是否仍与其规模相称，不相称的重建。
+    ///
+    /// 这是"自适应索引"真正成立的地方。此前算法只在建表时选一次，用的还是写死的
+    /// `estimated_size = 10_000`——一张长到百万行的表，索引仍然是按一万行挑的那个，
+    /// 除非有人手工调 `/index/rebuild`。
+    ///
+    /// 只在**跨越边界**时才重建：拿当前记录数重跑一遍选择器，选出的算法与在用的不同才动手。
+    /// 记录数每变一次就重建是不可行的——重建代价是 O(n)。
+    pub async fn reevaluate_indexes(&self) -> crate::Result<Vec<String>> {
+        let candidates: Vec<(String, usize, IndexAlgorithm)> = {
+            let tables = self.tables.read().await;
+            tables
+                .values()
+                .map(|d| {
+                    (
+                        d.table.name.clone(),
+                        d.records.len(),
+                        d.selected_algorithm.clone(),
+                    )
+                })
+                .collect()
+        };
+
+        let selector = IntelligentIndexSelector::new();
+        let mut rebuilt = Vec::new();
+
+        for (name, count, current) in candidates {
+            // An empty table has nothing to cluster and nothing to gain.
+            if count == 0 {
+                continue;
+            }
+
+            let config = IndexConfig {
+                dataset_size: count,
+                dimension: 0, // filled in below from the live table
+                distance_metric: DistanceMetric::Cosine,
+                memory_budget_mb: (self.hardware_capabilities.available_memory_gb as usize) * 512,
+                performance_requirements: self.performance_requirements.clone(),
+                cost_constraints: self.cost_constraints.clone(),
+                hardware_capabilities: self.hardware_capabilities.clone(),
+            };
+            let config = {
+                let tables = self.tables.read().await;
+                match tables.get(&name) {
+                    Some(d) => IndexConfig {
+                        dimension: d.table.dimension,
+                        distance_metric: d.table.distance_metric,
+                        ..config
+                    },
+                    // Evicted or dropped while we were iterating; nothing to do.
+                    None => continue,
+                }
+            };
+
+            let want = selector
+                .select_optimal_index(&config)
+                .await?
+                .selected_algorithm;
+            if std::mem::discriminant(&want) == std::mem::discriminant(&current) {
+                continue;
+            }
+
+            info!(
+                "Table '{}' has grown to {} records; {:?} no longer fits, rebuilding as {:?}",
+                name,
+                count,
+                std::mem::discriminant(&current),
+                want
+            );
+            match self.rebuild_index(&name).await {
+                Ok(()) => rebuilt.push(name),
+                // A failed rebuild leaves the old index in place — that is the whole point of
+                // building the replacement before swapping — so this costs efficiency, not
+                // correctness.
+                Err(e) => warn!(
+                    "Re-evaluating '{}' failed, keeping the current index: {}",
+                    name, e
+                ),
+            }
+        }
+
+        Ok(rebuilt)
+    }
+
     /// 把冷表从内存里放掉。返回被驱逐的表名。
     ///
     /// **先快照再驱逐**，而且只驱逐这次快照确实覆盖到的表。反过来会丢数据：一张表若有
@@ -2419,11 +2503,11 @@ impl IntelligentIndexedStorage {
     /// 2. Re-insert all record vectors into the new index (outside lock).
     pub async fn rebuild_index(&self, table_name: &str) -> crate::Result<()> {
         // Phase 1: snapshot + select + swap (write lock)
-        let (new_wrapper, records_snapshot) = {
-            let mut tables = self.tables.write().await;
+        let (new_wrapper, records_snapshot, algorithm, decision) = {
+            let tables = self.tables.read().await;
 
             let table_data = tables
-                .get_mut(table_name)
+                .get(table_name)
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
 
             let dimension = table_data.table.dimension;
@@ -2484,24 +2568,55 @@ impl IntelligentIndexedStorage {
                 .map(|(id, r)| (id.clone(), r.vector.clone()))
                 .collect();
 
-            // Swap in the empty new index; update table_data bookkeeping
+            // Deliberately *not* swapped in yet. Publishing the empty index here and filling
+            // it afterwards does not expose a half-built index — IndexWrapper's own RwLock
+            // makes readers wait instead — but that is its own problem: queries then block on
+            // the rebuild. Measured at 3,000 vectors, a single search waited 102ms against a
+            // 243ms rebuild. The old index stays live until the replacement is complete.
+            info!(
+                "rebuild_index: table='{}' records={} algorithm={:?}",
+                table_name, record_count, algorithm
+            );
+
+            (new_wrapper, records_snapshot, algorithm, decision)
+        };
+
+        // Phase 2: build the replacement outside any lock. bulk_build rather than a loop of
+        // inserts, because a partitioned index has to see every vector at once to cluster it —
+        // inserting one at a time would leave the lot in its overflow buffer.
+        let indexed: std::collections::HashSet<RecordId> =
+            records_snapshot.iter().map(|(id, _)| id.clone()).collect();
+        new_wrapper.bulk_build(records_snapshot).await?;
+
+        // Phase 3: catch up on anything written while phase 2 ran, then swap. Both under the
+        // write lock, so no write can slip between the catch-up and the swap and be lost.
+        {
+            let mut tables = self.tables.write().await;
+            let table_data = tables
+                .get_mut(table_name)
+                .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
+
+            let mut caught_up = 0usize;
+            for (id, record) in table_data.records.iter() {
+                if !indexed.contains(id) {
+                    new_wrapper
+                        .insert(id.clone(), record.vector.clone())
+                        .await?;
+                    caught_up += 1;
+                }
+            }
+            if caught_up > 0 {
+                info!(
+                    "rebuild_index: caught up {} records written during the rebuild",
+                    caught_up
+                );
+            }
+
             table_data.index = new_wrapper.clone();
             table_data.table.index_type = index_type_of(&algorithm);
             table_data.selected_algorithm = algorithm;
             table_data.index_decision = decision;
-
-            info!(
-                "rebuild_index: table='{}' records={} algorithm={:?}",
-                table_name, record_count, table_data.selected_algorithm
-            );
-
-            (new_wrapper, records_snapshot)
-        };
-
-        // Phase 2: populate the new index outside the write lock. bulk_build rather than a
-        // loop of inserts, because a partitioned index has to see every vector at once to
-        // cluster it — inserting one at a time would leave the lot in its overflow buffer.
-        new_wrapper.bulk_build(records_snapshot).await?;
+        }
 
         // A rebuild is the one moment we know the index is both current and expensive to
         // reproduce, so snapshot it. Failure is logged, not propagated: the rebuild itself

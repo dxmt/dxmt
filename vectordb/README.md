@@ -96,7 +96,8 @@ larger than RAM, which table-level eviction cannot do.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) §W3 for what remains.
 
-Index selection runs once, when the table is created:
+Index selection is re-checked on a timer (`DB_REINDEX_INTERVAL_SECS`, default 900) and the
+index is rebuilt when a table's size no longer suits the algorithm it has:
 
 | Dataset size | Algorithm         |
 | ------------ | ----------------- |
@@ -105,10 +106,13 @@ Index selection runs once, when the table is created:
 | 100K–1M      | HNSW-PQ           |
 | ≥ 1M         | DiskANN Enhanced  |
 
-Two caveats. This table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`)
-takes a separate path that yields HNSW below 100K and HNSW-PQ above it. And the size fed to
-the selector at `CREATE TABLE` time is a fixed estimate, not the eventual row count — call
-`POST /api/v1/tables/{name}/index/rebuild` to re-select against the real count.
+One caveat: this table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
+a separate path that yields HNSW below 100K and HNSW-PQ above it.
+
+`CREATE TABLE` still picks from a fixed estimate, because a new table has no rows to size
+against — the periodic re-evaluation is what corrects it. `POST /api/v1/tables/{name}/index/rebuild`
+forces it immediately. A rebuild builds the replacement before swapping it in, so queries keep
+being served by the old index throughout.
 
 Interfaces: REST (`src/api/handlers.rs`), a Chroma-compatible simple mode
 (`src/api/simple_core.rs`), GraphQL, and WebSocket. Standard-mode REST routes are served
@@ -125,6 +129,7 @@ DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables persistence
 DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
 DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
+DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```

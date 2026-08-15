@@ -17,6 +17,12 @@ that matter, and the differences are easy to miss from the module names alone.
 - Single binary runs from embedded to single-node server modes
 - Distributed/cluster features exist but are not the current priority
 
+**Rebuilds do not block reads.** `rebuild_index` builds the replacement outside any lock,
+catches up on records written meanwhile, and swaps under the write lock. Publishing the new
+index first and filling it afterwards does not expose a half-built index — the wrapper's RwLock
+makes readers wait — but it makes every query wait for the rebuild: 102ms for one search against
+a 243ms rebuild, measured.
+
 **What the server actually does today:** both `serve` and `serve --simple` construct
 `IntelligentIndexedStorage`, which holds every record in an in-process `HashMap`. Standard mode
 opens it through `new_with_wal` (`src/api/server.rs`), so writes are logged to `./data/wal`
@@ -116,10 +122,10 @@ Three things this table does not tell you:
 1. It only applies when `DB_MEMORY_OPTIMIZATION=false`. The default is **true**, which routes
    to `select_memory_optimized_index` — HNSW below 100K, HNSW-PQ above, with two branches
    carrying `// … not yet available` fallback comments.
-2. Selection happens once at `CREATE TABLE`, against a hardcoded `estimated_size = 10_000`
-   (`intelligent_indexed_storage.rs:474`), not the eventual row count. Automatic
-   re-evaluation is commented out at `:1608`. Only `POST /tables/{name}/index/rebuild`
-   re-selects against reality.
+2. `CREATE TABLE` still selects against a hardcoded `estimated_size = 10_000`, because a new
+   table has no rows to size against. `reevaluate_indexes()` corrects that on a timer
+   (`DB_REINDEX_INTERVAL_SECS`, default 900): it re-runs the selector with the real row count
+   and rebuilds only when the choice would differ, since a rebuild is O(n).
 3. `DiskANN`, `ScaNN` and `QuantizedIVF` fall back to `BruteForceIndex` in
    `create_index_instance`. Of the enum's seven variants, four are real.
 

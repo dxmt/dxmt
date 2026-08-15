@@ -885,3 +885,160 @@ async fn a_backup_directory_is_enough_to_restore_from() {
         "the restored index answers differently"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queries_keep_running_while_an_index_is_rebuilt() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = Arc::new(
+        IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(tmp.path().join("wal")))
+            .await
+            .unwrap(),
+    );
+
+    storage
+        .create_table(table("t", 8, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+
+    // Enough vectors that the rebuild takes long enough to overlap with the query loop.
+    const N: usize = 3000;
+    let rows: Vec<_> = (0..N)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.31).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    let probe = rows[0].vector.clone();
+    storage.insert_records("t", rows).await.unwrap();
+
+    // The loop runs until the rebuild finishes rather than for a fixed count. A counted loop
+    // finishes before the rebuild even starts and measures nothing — the first version of this
+    // test passed against the very code it was supposed to catch.
+    let done = Arc::new(AtomicBool::new(false));
+    let searcher = {
+        let storage = storage.clone();
+        let probe = probe.clone();
+        let done = done.clone();
+        tokio::spawn(async move {
+            let mut slowest = std::time::Duration::ZERO;
+            let mut fewest = usize::MAX;
+            let mut count = 0usize;
+            while !done.load(Ordering::SeqCst) {
+                let started = Instant::now();
+                let hits = storage.search("t", query(probe.clone(), 5)).await.unwrap();
+                slowest = slowest.max(started.elapsed());
+                fewest = fewest.min(hits.hits.len());
+                count += 1;
+            }
+            (slowest, fewest, count)
+        })
+    };
+
+    let rebuild_started = Instant::now();
+    storage.rebuild_index("t").await.unwrap();
+    let rebuild_took = rebuild_started.elapsed();
+    done.store(true, Ordering::SeqCst);
+    let (slowest, fewest, count) = searcher.await.unwrap();
+
+    assert!(
+        count > 10,
+        "the query loop only managed {} searches; it did not overlap",
+        count
+    );
+    assert_eq!(
+        fewest, 5,
+        "a search returned {} of 5 hits during a rebuild",
+        fewest
+    );
+
+    // Publishing the new index before filling it does not expose a half-built one — the
+    // wrapper's RwLock makes readers wait instead — but queries then block on the rebuild.
+    // Against the pre-fix code this assertion reports a 102ms search over a 243ms rebuild.
+    // Building the replacement first and swapping at the end keeps the old index answering.
+    assert!(
+        slowest * 4 < rebuild_took,
+        "slowest search {:?} against a {:?} rebuild — queries are waiting on the rebuild",
+        slowest,
+        rebuild_took
+    );
+}
+
+#[tokio::test]
+async fn an_index_is_rebuilt_once_the_table_outgrows_it() {
+    let tmp = TempDir::new().unwrap();
+    let storage =
+        IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(tmp.path().join("wal")))
+            .await
+            .unwrap();
+
+    storage
+        .create_table(table("t", 8, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+
+    // A handful of rows. CREATE TABLE picks from a fixed estimate of 10,000 regardless, so the
+    // table starts out with an index chosen for a size it does not have.
+    let small: Vec<_> = (0..20)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.1 + d as f32 * 0.7).collect();
+            record(&format!("s{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", small).await.unwrap();
+
+    // At 20 records the selector wants BruteForce, so re-evaluation has something to correct.
+    let rebuilt = storage.reevaluate_indexes().await.unwrap();
+    assert_eq!(
+        rebuilt,
+        vec!["t".to_string()],
+        "a 20-row table kept an index chosen for 10,000 rows"
+    );
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "brute_force"
+    );
+
+    // Nothing changed since, so a second pass must be a no-op. Rebuilding on every sweep would
+    // cost O(n) forever for no benefit.
+    assert!(
+        storage.reevaluate_indexes().await.unwrap().is_empty(),
+        "re-evaluation rebuilt an index that was already the right one"
+    );
+
+    // Grow past the BruteForce boundary and it should move again.
+    let more: Vec<_> = (0..6000)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.31).collect();
+            record(&format!("b{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", more).await.unwrap();
+
+    let rebuilt = storage.reevaluate_indexes().await.unwrap();
+    assert_eq!(
+        rebuilt,
+        vec!["t".to_string()],
+        "the table outgrew BruteForce unnoticed"
+    );
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "hnsw"
+    );
+
+    // And it still answers.
+    let hits = storage
+        .search(
+            "t",
+            query(vec![0.0, 0.31, 0.62, 0.93, 1.24, 1.55, 1.86, 2.17], 1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.hits[0].id, "b0",
+        "the rebuilt index answers differently"
+    );
+}
