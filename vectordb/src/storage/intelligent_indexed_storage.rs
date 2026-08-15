@@ -1145,6 +1145,7 @@ impl IntelligentIndexedStorage {
         };
 
         let mut rebuilt = Vec::new();
+        let mut maintained: Vec<String> = Vec::new();
 
         for (name, count, current) in candidates {
             // An empty table has nothing to cluster and nothing to gain.
@@ -1165,7 +1166,25 @@ impl IntelligentIndexedStorage {
                 .decide_algorithm(count, dimension, metric)
                 .await?
                 .selected_algorithm;
+
             if std::mem::discriminant(&want) == std::mem::discriminant(&current) {
+                // The algorithm still fits, but a partitioned index has upkeep to do: writes
+                // since the last pass are sitting in its overflow buffer, and partitions drift
+                // out of their size range as data lands. Doing nothing here would leave the
+                // buffer growing until something forced a full rebuild.
+                let wrapper = {
+                    let tables = self.tables.read().await;
+                    tables.get(&name).map(|d| d.index.clone())
+                };
+                if let Some(wrapper) = wrapper {
+                    match wrapper.maintain().await {
+                        Ok(true) => {
+                            maintained.push(name.clone());
+                        }
+                        Ok(false) => {}
+                        Err(e) => warn!("Maintaining '{}' failed: {}", name, e),
+                    }
+                }
                 continue;
             }
 
@@ -1188,6 +1207,13 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        if !maintained.is_empty() {
+            info!(
+                "Maintained {} partitioned index(es): {:?}",
+                maintained.len(),
+                maintained
+            );
+        }
         Ok(rebuilt)
     }
 
@@ -3016,6 +3042,7 @@ impl IntelligentIndexedStorage {
                         nprobe: *nprobe,
                         max_resident_partitions: *max_resident_partitions,
                         max_iterations: 20,
+                        ..Default::default()
                     }),
                 )
                 .with_store(self.storage.clone());

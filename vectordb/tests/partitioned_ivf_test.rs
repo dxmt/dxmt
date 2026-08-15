@@ -52,6 +52,7 @@ async fn partitions_are_not_resident_until_a_query_probes_them() {
             nprobe: 3,
             max_resident_partitions: 4,
             max_iterations: 10,
+            ..Default::default()
         }),
     )
     .with_store(store(&dir));
@@ -87,6 +88,7 @@ async fn resident_partitions_stay_under_the_cap() {
             nprobe: 4,
             max_resident_partitions: 6,
             max_iterations: 10,
+            ..Default::default()
         }),
     )
     .with_store(store(&dir));
@@ -119,6 +121,7 @@ async fn probing_every_partition_matches_an_exact_scan() {
             nprobe: 8,
             max_resident_partitions: 8,
             max_iterations: 15,
+            ..Default::default()
         }),
     )
     .with_store(store(&dir));
@@ -169,6 +172,7 @@ async fn deletes_apply_to_partitions_that_are_not_even_loaded() {
             nprobe: 8,
             max_resident_partitions: 8,
             max_iterations: 10,
+            ..Default::default()
         }),
     )
     .with_store(store(&dir));
@@ -208,4 +212,169 @@ async fn saving_the_index_does_not_write_the_partitions_again() {
 
     let reloaded = PartitionedIvfIndex::load(&path).unwrap();
     assert_eq!(reloaded.partition_count(), index.partition_count());
+}
+
+fn maintained(nlist: usize, split: usize, merge: usize) -> PartitionedIvfConfig {
+    PartitionedIvfConfig {
+        nlist,
+        nprobe: nlist,
+        max_resident_partitions: nlist,
+        max_iterations: 10,
+        split_threshold: split,
+        merge_threshold: merge,
+    }
+}
+
+#[tokio::test]
+async fn maintenance_rewrites_only_the_partitions_it_touched() {
+    let dir = TempDir::new().unwrap();
+    let data = vectors(600, 8);
+
+    let mut index = PartitionedIvfIndex::new(
+        DistanceMetric::Euclidean,
+        "t",
+        Some(maintained(24, 1000, 0)),
+    )
+    .with_store(store(&dir));
+    index.rebuild(data.clone()).await.unwrap();
+    let partitions = index.partition_count();
+    assert!(
+        partitions >= 20,
+        "expected a spread of partitions, got {}",
+        partitions
+    );
+
+    // Three vectors, clustered together so they land in the same one or two partitions.
+    for i in 0..3 {
+        index
+            .add(format!("late{}", i), vec![0.5 + i as f32 * 0.001; 8])
+            .await
+            .unwrap();
+    }
+
+    let report = index.maintain().await.unwrap();
+
+    assert_eq!(report.absorbed, 3);
+    // The point of incremental maintenance: cost tracks the new data, not the total. A full
+    // rebuild would rewrite all 24 segments and re-run k-means over 600 vectors.
+    assert!(
+        report.rewritten <= 3,
+        "maintenance rewrote {} of {} partitions for 3 new vectors",
+        report.rewritten,
+        partitions
+    );
+    assert_eq!(report.split, 0);
+    assert_eq!(report.merged, 0);
+}
+
+#[tokio::test]
+async fn an_oversized_partition_splits() {
+    let dir = TempDir::new().unwrap();
+
+    // One partition to start with, then push it past the split threshold.
+    let mut index =
+        PartitionedIvfIndex::new(DistanceMetric::Euclidean, "t", Some(maintained(1, 40, 0)))
+            .with_store(store(&dir));
+    index.rebuild(vectors(30, 8)).await.unwrap();
+    assert_eq!(index.partition_count(), 1);
+
+    for (id, v) in vectors(60, 8).into_iter().skip(30) {
+        index.add(format!("x{}", id), v).await.unwrap();
+    }
+    let report = index.maintain().await.unwrap();
+
+    assert_eq!(
+        report.split, 1,
+        "a 60-vector partition did not split at a threshold of 40"
+    );
+    assert_eq!(index.partition_count(), 2);
+
+    // Splitting must not lose anything.
+    assert_eq!(index.len(), 60, "vectors went missing across the split");
+}
+
+#[tokio::test]
+async fn an_undersized_partition_merges_away() {
+    let dir = TempDir::new().unwrap();
+    let data = vectors(200, 8);
+
+    let mut index = PartitionedIvfIndex::new(
+        DistanceMetric::Euclidean,
+        "t",
+        Some(maintained(8, 10_000, 10_000)),
+    )
+    .with_store(store(&dir));
+    index.rebuild(data.clone()).await.unwrap();
+    let before = index.partition_count();
+    assert!(before > 1);
+
+    // Every partition is under a 10,000 merge threshold, so touching them all collapses the
+    // index down. Merging must stop at one rather than emptying itself.
+    index
+        .add("trigger".into(), data[0].1.clone())
+        .await
+        .unwrap();
+    let report = index.maintain().await.unwrap();
+
+    assert!(report.merged > 0 || before == 1, "nothing merged");
+    assert!(
+        index.partition_count() >= 1,
+        "merging removed the last partition"
+    );
+    assert!(
+        index.partition_count() < before,
+        "partition count did not fall: {} -> {}",
+        before,
+        index.partition_count()
+    );
+}
+
+#[tokio::test]
+async fn maintenance_keeps_search_results_correct() {
+    let dir = TempDir::new().unwrap();
+    let data = vectors(400, 12);
+
+    let mut index =
+        PartitionedIvfIndex::new(DistanceMetric::Euclidean, "t", Some(maintained(8, 60, 20)))
+            .with_store(store(&dir));
+    index.rebuild(data.clone()).await.unwrap();
+
+    // Add, delete, then maintain — the combination that exercises absorb, split, merge and
+    // tombstone purging in one pass.
+    let extra = vectors(500, 12);
+    for (id, v) in extra.iter().skip(400) {
+        index.add(id.clone(), v.clone()).await.unwrap();
+    }
+    index.delete(&data[7].0).await.unwrap();
+    index.maintain().await.unwrap();
+
+    // nprobe == nlist, so this is exhaustive and any divergence is a bug in maintenance rather
+    // than IVF's usual recall loss.
+    let mut expected: Vec<_> = extra.clone();
+    expected.retain(|(id, _)| id != &data[7].0);
+
+    for (_, query) in expected.iter().step_by(97) {
+        let got: Vec<String> = index
+            .search(query, 3)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            got,
+            exact_nearest(&expected, query, 3),
+            "maintenance changed the answer"
+        );
+    }
+
+    assert!(
+        !index
+            .search(&data[7].1, 5)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == &data[7].0),
+        "a deleted vector came back after maintenance"
+    );
 }

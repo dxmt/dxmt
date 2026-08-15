@@ -35,6 +35,10 @@ pub struct PartitionedIvfConfig {
     pub max_resident_partitions: usize,
     /// k-means iterations when building.
     pub max_iterations: usize,
+    /// A partition longer than this splits in two.
+    pub split_threshold: usize,
+    /// A partition shorter than this merges into its nearest neighbour.
+    pub merge_threshold: usize,
 }
 
 impl Default for PartitionedIvfConfig {
@@ -46,8 +50,28 @@ impl Default for PartitionedIvfConfig {
             // nlist on purpose: if every partition can be resident there is no tiering.
             max_resident_partitions: 16,
             max_iterations: 20,
+            // SPANN's defaults, as shipped in chroma: a posting list splits at 100 and merges
+            // below 50. The gap matters — split and merge thresholds that meet would make a
+            // partition oscillate between the two on every maintenance pass.
+            split_threshold: 100,
+            merge_threshold: 50,
         }
     }
+}
+
+/// 一次 [`PartitionedIvfIndex::maintain`] 做了什么。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MaintenanceReport {
+    /// 从溢出缓冲折进分区的向量数。
+    pub absorbed: usize,
+    /// 分裂的分区数。
+    pub split: usize,
+    /// 合并掉的分区数。
+    pub merged: usize,
+    /// 实际重写的分区数——增量维护的意义就在这个数远小于分区总数。
+    pub rewritten: usize,
+    /// 顺带清掉的墓碑记录数。
+    pub purged: usize,
 }
 
 /// One partition's vectors, as stored in object storage.
@@ -59,6 +83,10 @@ struct PartitionData {
 /// What the index keeps about a partition regardless of residency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PartitionMeta {
+    /// Stable identity, never reused. Segment keys are built from this rather than from the
+    /// position in `partitions`, because merging removes an entry and would otherwise renumber
+    /// every segment after it — turning a local edit into a full rewrite.
+    id: u64,
     centroid: DenseVector,
     /// Vector count, so `len()` and planning work without loading anything.
     count: usize,
@@ -78,6 +106,8 @@ struct PartitionedIvfState {
     overflow: Vec<(RecordId, DenseVector)>,
     /// Tombstones, applied to whatever a partition yields on load.
     deleted: Vec<RecordId>,
+    /// Next partition id to hand out.
+    next_partition_id: u64,
 }
 
 pub struct PartitionedIvfIndex {
@@ -86,9 +116,9 @@ pub struct PartitionedIvfIndex {
     /// which is the case in tests that never offload.
     store: Option<Arc<dyn ObjectStorage + Send + Sync>>,
     /// Loaded partitions, keyed by index. Bounded by `max_resident_partitions`.
-    resident: Arc<RwLock<HashMap<usize, PartitionData>>>,
+    resident: Arc<RwLock<HashMap<u64, PartitionData>>>,
     /// Least-recently-used ordering over `resident`, most recent last.
-    lru: Arc<RwLock<Vec<usize>>>,
+    lru: Arc<RwLock<Vec<u64>>>,
 }
 
 impl PartitionedIvfIndex {
@@ -106,6 +136,7 @@ impl PartitionedIvfIndex {
                 prefix: prefix.into(),
                 overflow: Vec::new(),
                 deleted: Vec::new(),
+                next_partition_id: 0,
             },
             store: None,
             resident: Arc::new(RwLock::new(HashMap::new())),
@@ -132,8 +163,8 @@ impl PartitionedIvfIndex {
         self.state.partitions.len()
     }
 
-    fn partition_key(&self, i: usize) -> String {
-        format!("{}/partition-{:06}.seg", self.state.prefix, i)
+    fn partition_key(&self, id: u64) -> String {
+        format!("{}/partition-{:06}.seg", self.state.prefix, id)
     }
 
     /// Rebuild every partition from `vectors`, writing each to object storage.
@@ -173,25 +204,30 @@ impl PartitionedIvfIndex {
         self.state.partitions = centroids
             .iter()
             .zip(buckets.iter())
-            .map(|(c, b)| PartitionMeta {
-                centroid: c.clone(),
-                count: b.vectors.len(),
+            .map(|(c, b)| {
+                let id = self.state.next_partition_id;
+                self.state.next_partition_id += 1;
+                PartitionMeta {
+                    id,
+                    centroid: c.clone(),
+                    count: b.vectors.len(),
+                }
             })
             .collect();
 
         if let Some(ref store) = self.store {
-            for (i, bucket) in buckets.iter().enumerate() {
+            for (meta, bucket) in self.state.partitions.iter().zip(buckets.iter()) {
                 let bytes = bincode::serialize(bucket)
                     .map_err(|e| crate::Error::Serialization(e.to_string()))?;
                 store
                     .put_object(
-                        &self.partition_key(i),
+                        &self.partition_key(meta.id),
                         bytes::Bytes::from(bytes),
                         Some("application/octet-stream"),
                     )
                     .await
                     .map_err(|e| {
-                        crate::Error::Internal(format!("writing partition {}: {}", i, e))
+                        crate::Error::Internal(format!("writing partition {}: {}", meta.id, e))
                     })?;
             }
             // Everything is durable in object storage now, so drop the local copies and let
@@ -204,9 +240,9 @@ impl PartitionedIvfIndex {
             let mut lru = self.lru.write().await;
             resident.clear();
             lru.clear();
-            for (i, bucket) in buckets.into_iter().enumerate() {
-                resident.insert(i, bucket);
-                lru.push(i);
+            for (meta, bucket) in self.state.partitions.iter().zip(buckets) {
+                resident.insert(meta.id, bucket);
+                lru.push(meta.id);
             }
         }
 
@@ -215,10 +251,205 @@ impl PartitionedIvfIndex {
         Ok(())
     }
 
-    /// Make partition `i` resident, fetching it if necessary, and return its vectors.
-    async fn load_partition(&self, i: usize) -> crate::Result<PartitionData> {
-        if let Some(data) = self.resident.read().await.get(&i) {
-            self.touch(i).await;
+    /// 把溢出缓冲折进分区，并把过大的分裂、过小的合并。
+    ///
+    /// 这是 [`Self::rebuild`] 的增量替代品，也是它存在的理由：全量重建要跑一遍 k-means，
+    /// 代价 O(n · nlist · iterations)。千万行的表——正是这个索引为之设计的规模——每次维护都
+    /// 重跑一遍是不可行的。这里只碰被写入影响到的那几个分区，代价与**新增量**成正比，
+    /// 而不是与总量成正比。
+    ///
+    /// 阈值取自 SPANN（chroma 的实现用 split=100 / merge=50）：一个列表长过 `split_threshold`
+    /// 就一分为二，短于 `merge_threshold` 就并进最近的邻居。
+    pub async fn maintain(&mut self) -> crate::Result<MaintenanceReport> {
+        let mut report = MaintenanceReport::default();
+
+        if self.state.partitions.is_empty() {
+            // Nothing to maintain — the caller wants rebuild(), not this.
+            return Ok(report);
+        }
+
+        // 1. Assign every buffered vector to its nearest centroid.
+        let overflow = std::mem::take(&mut self.state.overflow);
+        report.absorbed = overflow.len();
+
+        let mut touched: HashMap<u64, PartitionData> = HashMap::new();
+        for (id, vector) in overflow {
+            let pid = self.nearest_partition(&vector);
+            let data = match touched.entry(pid) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(self.load_partition(pid).await?)
+                }
+            };
+            data.vectors.retain(|(existing, _)| existing != &id);
+            data.vectors.push((id, vector));
+        }
+
+        // 2. Apply tombstones to the partitions we are already rewriting. The rest keep theirs
+        //    until something else brings them here — a tombstone costs a comparison at search
+        //    time, which is cheaper than fetching a segment to remove one row from it.
+        if !self.state.deleted.is_empty() {
+            let deleted: std::collections::HashSet<&RecordId> = self.state.deleted.iter().collect();
+            for data in touched.values_mut() {
+                let before = data.vectors.len();
+                data.vectors.retain(|(id, _)| !deleted.contains(id));
+                report.purged += before - data.vectors.len();
+            }
+        }
+
+        // 3. Split what has grown too large.
+        let split_threshold = self.state.config.split_threshold;
+        let mut split_from: Vec<u64> = touched
+            .iter()
+            .filter(|(_, d)| d.vectors.len() > split_threshold)
+            .map(|(pid, _)| *pid)
+            .collect();
+        split_from.sort_unstable();
+
+        for pid in split_from {
+            let Some(data) = touched.remove(&pid) else {
+                continue;
+            };
+            let metric = self.state.distance_metric;
+            let centroids = kmeans(&data.vectors, 2, self.state.config.max_iterations, metric);
+
+            let mut halves = vec![PartitionData::default(), PartitionData::default()];
+            for (id, vector) in data.vectors {
+                let side = nearest_centroid(&centroids, &vector, metric);
+                halves[side].vectors.push((id, vector));
+            }
+
+            // A split that puts everything on one side has not split anything; keeping the
+            // partition whole is better than writing an empty segment and probing it forever.
+            if halves.iter().any(|h| h.vectors.is_empty()) {
+                let merged = PartitionData {
+                    vectors: halves.into_iter().flat_map(|h| h.vectors).collect(),
+                };
+                touched.insert(pid, merged);
+                continue;
+            }
+
+            self.remove_partition(pid, &mut touched).await;
+            for (centroid, half) in centroids.into_iter().zip(halves) {
+                let new_id = self.state.next_partition_id;
+                self.state.next_partition_id += 1;
+                self.state.partitions.push(PartitionMeta {
+                    id: new_id,
+                    centroid,
+                    count: half.vectors.len(),
+                });
+                touched.insert(new_id, half);
+            }
+            report.split += 1;
+        }
+
+        // 4. Merge what has shrunk too far. Only partitions we already hold, for the same
+        //    reason as the tombstones above.
+        let merge_threshold = self.state.config.merge_threshold;
+        let mut merge_from: Vec<u64> = touched
+            .iter()
+            .filter(|(_, d)| d.vectors.len() < merge_threshold)
+            .map(|(pid, _)| *pid)
+            .collect();
+        merge_from.sort_unstable();
+
+        for pid in merge_from {
+            if self.state.partitions.len() <= 1 {
+                break;
+            }
+            let Some(data) = touched.remove(&pid) else {
+                continue;
+            };
+            let Some(target) = self.nearest_other_partition(pid) else {
+                touched.insert(pid, data);
+                continue;
+            };
+
+            let into = match touched.entry(target) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(self.load_partition(target).await?)
+                }
+            };
+            into.vectors.extend(data.vectors);
+            self.remove_partition(pid, &mut touched).await;
+            report.merged += 1;
+        }
+
+        // 5. Persist only what changed, and refresh the counts the planner reads.
+        for (pid, data) in &touched {
+            if let Some(meta) = self.state.partitions.iter_mut().find(|m| m.id == *pid) {
+                meta.count = data.vectors.len();
+            }
+            self.write_partition(*pid, data).await?;
+        }
+        report.rewritten = touched.len();
+
+        // Tombstones that survive here still apply to partitions we did not touch.
+        Ok(report)
+    }
+
+    /// 最近质心所属分区的 id。
+    fn nearest_partition(&self, vector: &[f32]) -> u64 {
+        let metric = self.state.distance_metric;
+        self.state
+            .partitions
+            .iter()
+            .map(|p| (p.id, distance(metric, vector, &p.centroid)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id)
+            .unwrap_or(0)
+    }
+
+    /// 除 `pid` 之外质心最近的分区。
+    fn nearest_other_partition(&self, pid: u64) -> Option<u64> {
+        let metric = self.state.distance_metric;
+        let me = self.state.partitions.iter().find(|p| p.id == pid)?;
+        self.state
+            .partitions
+            .iter()
+            .filter(|p| p.id != pid)
+            .map(|p| (p.id, distance(metric, &me.centroid, &p.centroid)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id)
+    }
+
+    /// 从元数据、常驻缓存和对象存储里彻底移除一个分区。
+    async fn remove_partition(&mut self, pid: u64, touched: &mut HashMap<u64, PartitionData>) {
+        self.state.partitions.retain(|p| p.id != pid);
+        touched.remove(&pid);
+        self.resident.write().await.remove(&pid);
+        self.lru.write().await.retain(|&x| x != pid);
+
+        if let Some(ref store) = self.store {
+            // A leaked segment costs storage, not correctness — nothing references it once the
+            // metadata is gone.
+            let _ = store.delete_object(&self.partition_key(pid)).await;
+        }
+    }
+
+    /// 写一个分区，并把它放进常驻缓存。
+    async fn write_partition(&self, pid: u64, data: &PartitionData) -> crate::Result<()> {
+        if let Some(ref store) = self.store {
+            let bytes =
+                bincode::serialize(data).map_err(|e| crate::Error::Serialization(e.to_string()))?;
+            store
+                .put_object(
+                    &self.partition_key(pid),
+                    bytes::Bytes::from(bytes),
+                    Some("application/octet-stream"),
+                )
+                .await
+                .map_err(|e| crate::Error::Internal(format!("writing partition {}: {}", pid, e)))?;
+        }
+        self.admit(pid, data.clone()).await;
+        Ok(())
+    }
+
+    /// Make partition `id` resident, fetching it if necessary, and return its vectors.
+    async fn load_partition(&self, id: u64) -> crate::Result<PartitionData> {
+        if let Some(data) = self.resident.read().await.get(&id) {
+            self.touch(id).await;
             return Ok(data.clone());
         }
 
@@ -228,27 +459,27 @@ impl PartitionedIvfIndex {
         };
 
         let bytes = store
-            .get_object(&self.partition_key(i))
+            .get_object(&self.partition_key(id))
             .await
-            .map_err(|e| crate::Error::Internal(format!("fetching partition {}: {}", i, e)))?;
+            .map_err(|e| crate::Error::Internal(format!("fetching partition {}: {}", id, e)))?;
         let data: PartitionData =
             bincode::deserialize(&bytes).map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
-        debug!("Loaded partition {} ({} vectors)", i, data.vectors.len());
-        self.admit(i, data.clone()).await;
+        debug!("Loaded partition {} ({} vectors)", id, data.vectors.len());
+        self.admit(id, data.clone()).await;
         Ok(data)
     }
 
-    async fn touch(&self, i: usize) {
+    async fn touch(&self, id: u64) {
         let mut lru = self.lru.write().await;
-        if let Some(pos) = lru.iter().position(|&x| x == i) {
+        if let Some(pos) = lru.iter().position(|&x| x == id) {
             lru.remove(pos);
         }
-        lru.push(i);
+        lru.push(id);
     }
 
     /// Insert a partition, evicting the least recently used one if we are at the cap.
-    async fn admit(&self, i: usize, data: PartitionData) {
+    async fn admit(&self, id: u64, data: PartitionData) {
         let mut resident = self.resident.write().await;
         let mut lru = self.lru.write().await;
 
@@ -257,9 +488,9 @@ impl PartitionedIvfIndex {
             resident.remove(&victim);
         }
 
-        resident.insert(i, data);
-        lru.retain(|&x| x != i);
-        lru.push(i);
+        resident.insert(id, data);
+        lru.retain(|&x| x != id);
+        lru.push(id);
     }
 }
 
@@ -280,23 +511,27 @@ impl VectorIndex for PartitionedIvfIndex {
         self.rebuild(vectors).await
     }
 
+    async fn maintain(&mut self) -> crate::Result<bool> {
+        let report = PartitionedIvfIndex::maintain(self).await?;
+        Ok(report != MaintenanceReport::default())
+    }
+
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
         let metric = self.state.distance_metric;
         let mut hits: Vec<(String, f32)> = Vec::new();
 
         // Rank partitions by centroid distance and probe only the closest. This is the whole
         // point: the decision about what to read is made from centroids alone.
-        let mut ranked: Vec<(usize, f32)> = self
+        let mut ranked: Vec<(u64, f32)> = self
             .state
             .partitions
             .iter()
-            .enumerate()
-            .map(|(i, p)| (i, distance(metric, query, &p.centroid)))
+            .map(|p| (p.id, distance(metric, query, &p.centroid)))
             .collect();
         ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        for (i, _) in ranked.into_iter().take(self.state.config.nprobe) {
-            match self.load_partition(i).await {
+        for (pid, _) in ranked.into_iter().take(self.state.config.nprobe) {
+            match self.load_partition(pid).await {
                 Ok(data) => {
                     for (id, vector) in &data.vectors {
                         if self.state.deleted.contains(id) {
@@ -309,7 +544,7 @@ impl VectorIndex for PartitionedIvfIndex {
                 // whole query because one segment is unavailable would be worse.
                 Err(e) => warn!(
                     "Partition {} unavailable, results may be incomplete: {}",
-                    i, e
+                    pid, e
                 ),
             }
         }

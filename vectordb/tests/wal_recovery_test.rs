@@ -1204,3 +1204,61 @@ async fn replay_never_reaches_below_the_truncation_point() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_partitioned_table_gets_maintained_not_rebuilt() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 64, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    let rows: Vec<_> = (0..500)
+        .map(|i| {
+            let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    // 500 x 64 x 4 = 128 KB, so a 0 MB threshold partitions it.
+    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    storage.rebuild_index("t").await.unwrap();
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "partitioned_ivf"
+    );
+
+    // Write more, then re-evaluate. The algorithm is already right, so this must not rebuild —
+    // but it must not do nothing either: the new vectors are sitting in the overflow buffer,
+    // and leaving them there means every search scans a buffer that only grows.
+    let more: Vec<_> = (500..560)
+        .map(|i| {
+            let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", more).await.unwrap();
+
+    let rebuilt = storage.reevaluate_indexes().await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+
+    assert!(
+        rebuilt.is_empty(),
+        "a partitioned table was rebuilt when maintenance would have done: {:?}",
+        rebuilt
+    );
+
+    // And everything is still findable, buffered or absorbed.
+    for id in ["r0", "r499", "r559"] {
+        let i: f32 = id[1..].parse().unwrap();
+        let probe: Vec<f32> = (0..64).map(|d| i * 0.01 + d as f32 * 0.03).collect();
+        let hits = storage.search("t", query(probe, 1)).await.unwrap();
+        assert_eq!(hits.hits[0].id, id, "{} was lost around maintenance", id);
+    }
+}

@@ -123,6 +123,15 @@ impl IndexWrapper {
             .await
     }
 
+    /// Run the index's incremental upkeep; false means it has none.
+    ///
+    /// This takes the index write lock, so searches wait — but only for as long as the new data
+    /// takes to absorb, not for a pass over the whole index.
+    pub async fn maintain(&self) -> Result<bool> {
+        let mut index = self.index.write().await;
+        index.maintain().await
+    }
+
     /// Write the index to `path`; false means this index type has no on-disk form.
     pub async fn snapshot_to(&self, path: &std::path::Path) -> Result<bool> {
         let index = self.index.read().await;

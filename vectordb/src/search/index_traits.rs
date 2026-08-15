@@ -52,6 +52,16 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// Perform incremental upkeep, returning false if the implementation has none to do.
+    ///
+    /// Partitioned indexes use this to fold buffered writes into their segments and to split or
+    /// merge those that have drifted out of range — work proportional to what has changed
+    /// rather than to the whole index, which is the difference between maintenance and a
+    /// rebuild.
+    async fn maintain(&mut self) -> crate::Result<bool> {
+        Ok(false)
+    }
+
     /// Write this index to `path`, returning false if the implementation has no on-disk form.
     ///
     /// `SerializableIndex::load` is a static constructor, so it cannot live on this trait — the

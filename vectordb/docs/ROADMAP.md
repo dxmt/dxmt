@@ -196,6 +196,38 @@ commit 的说明。
 
 ---
 
+## 6.5 与其他向量数据库的对照
+
+`~/code/dxmt_vectordb/reference/db` 下有 chroma / lancedb / qdrant / weaviate 的源码
+（milvus 目录是空的，turbopuffer 只有客户端）。以下是按**我们实际做过的决策**逐条对照的结果，
+定向阅读关键模块，不是全量审计。
+
+**WAL 放对象存储 —— chroma 的 `wal3` 比我们完整得多。** 它**不要本地日志**：`Fragment`
+不可变、`Manifest` 可变（靠 S3 `If-Match` 做 CAS，因此不需要任何额外的锁或协调）、
+`Snapshot` 作为树的内部节点收拢老 fragment 以免 manifest 无限增长、`Setsum`（可交换可结合的
+密码学哈希）支持增量完整性校验、`Cursor` 钉住位置防 GC、fragment 按 4096 一组分前缀
+**因为 S3 按前缀限流**。
+
+我们的四个缺口：没有 manifest（每次恢复 LIST 一次）、没有完整性校验、没有前缀分桶、
+没有 GC 钉扎。**其中 manifest 是下一步该做的。**
+
+**重建不阻塞 —— qdrant 的 `ProxySegment` 比我们的 catch-up 更彻底。** 优化期间把只读段包起来，
+新写入落到临时 segment，全程不持全局写锁；我们的 catch-up 阶段持写锁。
+他们那个文件里还记录了一个同类坑：`deleted_mask` 在段冻结前拍快照，中间的 upsert 会让过滤
+KNN 静默丢点——修法是**类型状态**，`new()` 返回不可用类型，只有持锁调 `finalize` 才拿得到可用的。
+
+**"自适应索引"—— 没有一家在多种算法间自动切换。** qdrant 的 `Indexes` 枚举只有 `Plain` 和
+`Hnsw` 两个变体，所谓自适应就是"段超过 `indexing_threshold_kb` 就建 HNSW"；chroma 是
+HNSW + SPANN，由配置决定。四家独立做到生产规模的系统都没往"按规模自动选四种算法"的方向走，
+这个信号值得认真对待。
+
+**近 3 个月各家在改什么**：qdrant 的 WAL 提交几乎全是**回放与截断交互**的 bug（其中
+`Clamp WAL replay target to the truncated prefix` 与我们 W7 做的完全同类）；chroma 的 wal3
+全在加**条件写与 admission predicate**，外加一串 GC frontier 的 bug。
+结论：**对象存储 WAL 的难点不在写，在 frontier / GC 边界的交互。**
+
+---
+
 ## 7. 工作项清单
 
 每一项都写成自包含的：换个会话、上下文丢了，照着这一节也能接着做。**动手前先读 §1 和 §5。**
