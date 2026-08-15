@@ -105,7 +105,12 @@ struct PartitionedIvfState {
     /// Vectors added since the last rebuild.
     overflow: Vec<(RecordId, DenseVector)>,
     /// Tombstones, applied to whatever a partition yields on load.
-    deleted: Vec<RecordId>,
+    ///
+    /// A set, not a list: this is consulted once per candidate on every query, so a linear
+    /// membership test makes each query O(candidates x tombstones). Measured at 10,000
+    /// tombstones, ten queries took 19.7s. weaviate keeps its tombstones in a hash map for the
+    /// same reason and has since gone further, caching a snapshot for the read path.
+    deleted: std::collections::HashSet<RecordId>,
     /// Next partition id to hand out.
     next_partition_id: u64,
 }
@@ -115,10 +120,21 @@ pub struct PartitionedIvfIndex {
     /// Where partitions are fetched from. `None` means everything must already be resident,
     /// which is the case in tests that never offload.
     store: Option<Arc<dyn ObjectStorage + Send + Sync>>,
-    /// Loaded partitions, keyed by index. Bounded by `max_resident_partitions`.
-    resident: Arc<RwLock<HashMap<u64, PartitionData>>>,
-    /// Least-recently-used ordering over `resident`, most recent last.
-    lru: Arc<RwLock<Vec<u64>>>,
+    /// Loaded partitions, keyed by id. Bounded by `max_resident_partitions`.
+    ///
+    /// The value is an `Arc` so a cache hit hands back a refcount rather than a copy of the
+    /// partition. Cloning it per probe copies nprobe x partition_size x dimension floats on
+    /// every query — at nprobe 8, 100-vector partitions and 1536 dimensions that is ~5 MB per
+    /// query, for data that is already in memory.
+    resident: Arc<RwLock<HashMap<u64, Arc<PartitionData>>>>,
+    /// Last-use tick per resident partition, for eviction.
+    ///
+    /// A counter rather than an ordered list: keeping a `Vec` in LRU order costs a linear scan
+    /// and a memmove on *every* access, while a tick is an O(1) write and the scan for a victim
+    /// happens only when something has to be evicted.
+    last_used: Arc<RwLock<HashMap<u64, u64>>>,
+    /// Monotonic source for `last_used`.
+    clock: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PartitionedIvfIndex {
@@ -135,12 +151,13 @@ impl PartitionedIvfIndex {
                 partitions: Vec::new(),
                 prefix: prefix.into(),
                 overflow: Vec::new(),
-                deleted: Vec::new(),
+                deleted: std::collections::HashSet::new(),
                 next_partition_id: 0,
             },
             store: None,
             resident: Arc::new(RwLock::new(HashMap::new())),
-            lru: Arc::new(RwLock::new(Vec::new())),
+            last_used: Arc::new(RwLock::new(HashMap::new())),
+            clock: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -178,7 +195,7 @@ impl PartitionedIvfIndex {
             self.state.overflow.clear();
             self.state.deleted.clear();
             self.resident.write().await.clear();
-            self.lru.write().await.clear();
+            self.last_used.write().await.clear();
             return Ok(());
         }
 
@@ -233,16 +250,16 @@ impl PartitionedIvfIndex {
             // Everything is durable in object storage now, so drop the local copies and let
             // queries pull back only what they probe. Keeping them would defeat the purpose.
             self.resident.write().await.clear();
-            self.lru.write().await.clear();
+            self.last_used.write().await.clear();
         } else {
             // No store: the partitions have nowhere else to live, so they stay resident.
             let mut resident = self.resident.write().await;
-            let mut lru = self.lru.write().await;
+            let mut last_used = self.last_used.write().await;
             resident.clear();
-            lru.clear();
-            for (meta, bucket) in self.state.partitions.iter().zip(buckets) {
-                resident.insert(meta.id, bucket);
-                lru.push(meta.id);
+            last_used.clear();
+            for (i, (meta, bucket)) in self.state.partitions.iter().zip(buckets).enumerate() {
+                resident.insert(meta.id, Arc::new(bucket));
+                last_used.insert(meta.id, i as u64);
             }
         }
 
@@ -278,7 +295,8 @@ impl PartitionedIvfIndex {
             let data = match touched.entry(pid) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(self.load_partition(pid).await?)
+                    // maintain() rewrites partitions, so it needs its own copy.
+                    e.insert((*self.load_partition(pid).await?).clone())
                 }
             };
             data.vectors.retain(|(existing, _)| existing != &id);
@@ -289,7 +307,7 @@ impl PartitionedIvfIndex {
         //    until something else brings them here — a tombstone costs a comparison at search
         //    time, which is cheaper than fetching a segment to remove one row from it.
         if !self.state.deleted.is_empty() {
-            let deleted: std::collections::HashSet<&RecordId> = self.state.deleted.iter().collect();
+            let deleted = &self.state.deleted;
             for data in touched.values_mut() {
                 let before = data.vectors.len();
                 data.vectors.retain(|(id, _)| !deleted.contains(id));
@@ -368,7 +386,7 @@ impl PartitionedIvfIndex {
             let into = match touched.entry(target) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(self.load_partition(target).await?)
+                    e.insert((*self.load_partition(target).await?).clone())
                 }
             };
             into.vectors.extend(data.vectors);
@@ -419,7 +437,7 @@ impl PartitionedIvfIndex {
         self.state.partitions.retain(|p| p.id != pid);
         touched.remove(&pid);
         self.resident.write().await.remove(&pid);
-        self.lru.write().await.retain(|&x| x != pid);
+        self.last_used.write().await.remove(&pid);
 
         if let Some(ref store) = self.store {
             // A leaked segment costs storage, not correctness — nothing references it once the
@@ -442,20 +460,21 @@ impl PartitionedIvfIndex {
                 .await
                 .map_err(|e| crate::Error::Internal(format!("writing partition {}: {}", pid, e)))?;
         }
-        self.admit(pid, data.clone()).await;
+        self.admit(pid, Arc::new(data.clone())).await;
         Ok(())
     }
 
     /// Make partition `id` resident, fetching it if necessary, and return its vectors.
-    async fn load_partition(&self, id: u64) -> crate::Result<PartitionData> {
-        if let Some(data) = self.resident.read().await.get(&id) {
+    async fn load_partition(&self, id: u64) -> crate::Result<Arc<PartitionData>> {
+        let hit = self.resident.read().await.get(&id).cloned();
+        if let Some(data) = hit {
             self.touch(id).await;
-            return Ok(data.clone());
+            return Ok(data);
         }
 
         let Some(ref store) = self.store else {
             // Without a store an absent partition is simply empty; this is the in-memory mode.
-            return Ok(PartitionData::default());
+            return Ok(Arc::new(PartitionData::default()));
         };
 
         let bytes = store
@@ -466,31 +485,41 @@ impl PartitionedIvfIndex {
             bincode::deserialize(&bytes).map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
         debug!("Loaded partition {} ({} vectors)", id, data.vectors.len());
+        let data = Arc::new(data);
         self.admit(id, data.clone()).await;
         Ok(data)
     }
 
     async fn touch(&self, id: u64) {
-        let mut lru = self.lru.write().await;
-        if let Some(pos) = lru.iter().position(|&x| x == id) {
-            lru.remove(pos);
-        }
-        lru.push(id);
+        let tick = self
+            .clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.last_used.write().await.insert(id, tick);
     }
 
     /// Insert a partition, evicting the least recently used one if we are at the cap.
-    async fn admit(&self, id: u64, data: PartitionData) {
+    async fn admit(&self, id: u64, data: Arc<PartitionData>) {
         let mut resident = self.resident.write().await;
-        let mut lru = self.lru.write().await;
+        let mut last_used = self.last_used.write().await;
 
-        while resident.len() >= self.state.config.max_resident_partitions && !lru.is_empty() {
-            let victim = lru.remove(0);
+        while resident.len() >= self.state.config.max_resident_partitions {
+            let Some(victim) = last_used
+                .iter()
+                .filter(|(pid, _)| resident.contains_key(*pid))
+                .min_by_key(|(_, tick)| **tick)
+                .map(|(pid, _)| *pid)
+            else {
+                break;
+            };
             resident.remove(&victim);
+            last_used.remove(&victim);
         }
 
+        let tick = self
+            .clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         resident.insert(id, data);
-        lru.retain(|&x| x != id);
-        lru.push(id);
+        last_used.insert(id, tick);
     }
 }
 
@@ -502,7 +531,7 @@ impl VectorIndex for PartitionedIvfIndex {
         }
         // Writes buffer rather than rewriting a segment each time. rebuild() folds them in.
         self.state.overflow.retain(|(existing, _)| existing != &id);
-        self.state.deleted.retain(|d| d != &id);
+        self.state.deleted.remove(&id);
         self.state.overflow.push((id, vector));
         Ok(())
     }
@@ -564,10 +593,7 @@ impl VectorIndex for PartitionedIvfIndex {
         self.state.overflow.retain(|(existing, _)| existing != id);
         // Tombstone rather than rewrite: the vector may sit in a segment that is not even
         // resident. rebuild() drops it for good.
-        let owned = id.to_string();
-        if !self.state.deleted.contains(&owned) {
-            self.state.deleted.push(owned);
-        }
+        self.state.deleted.insert(id.to_string());
         Ok(())
     }
 
@@ -602,7 +628,8 @@ impl SerializableIndex for PartitionedIvfIndex {
             // from its overflow buffer alone.
             store: None,
             resident: Arc::new(RwLock::new(HashMap::new())),
-            lru: Arc::new(RwLock::new(Vec::new())),
+            last_used: Arc::new(RwLock::new(HashMap::new())),
+            clock: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 

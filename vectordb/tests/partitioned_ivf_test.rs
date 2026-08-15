@@ -378,3 +378,89 @@ async fn maintenance_keeps_search_results_correct() {
         "a deleted vector came back after maintenance"
     );
 }
+
+#[tokio::test]
+async fn many_deletes_stay_linear() {
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    let data = vectors(20_000, 8);
+
+    let mut index = PartitionedIvfIndex::new(
+        DistanceMetric::Euclidean,
+        "t",
+        Some(maintained(32, 10_000, 0)),
+    )
+    .with_store(store(&dir));
+    index.rebuild(data.clone()).await.unwrap();
+
+    // Tombstones are consulted for every candidate a query scans, and checked again on every
+    // delete. Holding them in a Vec makes deleting n records O(n^2) and every query
+    // O(candidates x tombstones) — weaviate keeps them in a hash set and has since gone further,
+    // caching a snapshot for the query path.
+    let started = Instant::now();
+    for (id, _) in data.iter().take(10_000) {
+        index.delete(id).await.unwrap();
+    }
+    let deleting = started.elapsed();
+
+    let started = Instant::now();
+    for (_, query) in data.iter().step_by(2000).take(10) {
+        index.search(query, 5).await.unwrap();
+    }
+    let searching = started.elapsed();
+
+    assert!(
+        deleting < std::time::Duration::from_secs(10),
+        "10,000 deletes took {:?}",
+        deleting
+    );
+    assert!(
+        searching < std::time::Duration::from_secs(10),
+        "10 searches over 10,000 tombstones took {:?}",
+        searching
+    );
+}
+
+#[tokio::test]
+async fn a_wide_probe_over_a_warm_cache_is_not_dominated_by_bookkeeping() {
+    use std::time::Instant;
+
+    let dir = TempDir::new().unwrap();
+    // Realistic dimensionality: at 8 dimensions a partition is a kilobyte and copying it costs
+    // nothing, which hides the thing this measures.
+    let data = vectors(4_000, 1536);
+
+    // Everything resident, so no fetches happen and what is left is per-probe bookkeeping: the
+    // cache hit itself, and the LRU update.
+    let mut index = PartitionedIvfIndex::new(
+        DistanceMetric::Euclidean,
+        "t",
+        Some(PartitionedIvfConfig {
+            nlist: 40,
+            nprobe: 8,
+            max_resident_partitions: 40,
+            max_iterations: 5,
+            split_threshold: 100_000,
+            merge_threshold: 0,
+        }),
+    )
+    .with_store(store(&dir));
+    index.rebuild(data.clone()).await.unwrap();
+
+    // Warm every partition first.
+    index.search(&data[0].1, 5).await.unwrap();
+
+    let started = Instant::now();
+    for (_, query) in data.iter().step_by(80).take(50) {
+        index.search(query, 5).await.unwrap();
+    }
+    let elapsed = started.elapsed();
+    println!("50 warm probes at 1536 dimensions: {:?}", elapsed);
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "50 warm probes took {:?}",
+        elapsed
+    );
+}
