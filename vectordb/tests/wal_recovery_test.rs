@@ -6,6 +6,12 @@
 //! `wal_sync_interval_ms` / `wal_consistency_mode`, and a `WalConsistencyMode` type. None of
 //! those exist any more, so there was nothing to re-enable — only something to rewrite.
 //!
+//! Several of these tests set `DB_PARTITION_THRESHOLD_MB` and friends to force a decision.
+//! Environment variables are process-global while cargo runs a binary's tests in parallel
+//! threads, so those tests carry `#[serial_test::serial]` — without it one test's threshold
+//! silently changes another's outcome, which is the kind of flake that only shows up under a
+//! loaded machine.
+//!
 //! Each test drops the storage and builds a fresh one over the same directory. That is the
 //! honest simulation of a crash for an in-memory store: the new process starts with nothing and
 //! must reconstruct its state from the log alone.
@@ -752,6 +758,7 @@ async fn writes_after_the_last_snapshot_survive_losing_the_machine() {
     );
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn a_large_table_is_partitioned_on_rebuild_and_still_answers() {
     let tmp = TempDir::new().unwrap();
@@ -1043,6 +1050,7 @@ async fn an_index_is_rebuilt_once_the_table_outgrows_it() {
     );
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn re_evaluation_settles_instead_of_rebuilding_forever() {
     let tmp = TempDir::new().unwrap();
@@ -1088,6 +1096,7 @@ async fn re_evaluation_settles_instead_of_rebuilding_forever() {
     );
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn partitioning_triggers_on_bytes_not_row_count() {
     let tmp = TempDir::new().unwrap();
@@ -1205,6 +1214,7 @@ async fn replay_never_reaches_below_the_truncation_point() {
     }
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn a_partitioned_table_gets_maintained_not_rebuilt() {
     let tmp = TempDir::new().unwrap();
@@ -1354,4 +1364,135 @@ async fn a_corrupt_wal_manifest_falls_back_to_scanning_the_prefix() {
     let tables = recovered.list_tables().await.unwrap();
     assert_eq!(tables.len(), 1, "a corrupt manifest lost the log");
     assert_eq!(tables[0].record_count, 1);
+}
+
+/// Worst-case latency for an unrelated table while `busy` is under write load, optionally with
+/// a rebuild running. Returns (slowest observation, samples, writes landed).
+async fn bystander_latency_under_load(
+    storage: std::sync::Arc<IntelligentIndexedStorage>,
+    rebuild: bool,
+) -> (std::time::Duration, usize, usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    let writer = {
+        let storage = storage.clone();
+        let done = done.clone();
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            while !done.load(Ordering::SeqCst) {
+                let _ = storage
+                    .insert_records(
+                        "busy",
+                        vec![record(&format!("w{}", n), vec![n as f32 * 0.001; 8])],
+                    )
+                    .await;
+                n += 1;
+            }
+            n
+        })
+    };
+
+    let watcher = {
+        let storage = storage.clone();
+        let done = done.clone();
+        tokio::spawn(async move {
+            let mut slowest = std::time::Duration::ZERO;
+            let mut count = 0usize;
+            while !done.load(Ordering::SeqCst) {
+                let started = Instant::now();
+                storage
+                    .search("bystander", query(vec![1.0; 8], 1))
+                    .await
+                    .unwrap();
+                slowest = slowest.max(started.elapsed());
+                count += 1;
+            }
+            (slowest, count)
+        })
+    };
+
+    if rebuild {
+        storage.rebuild_index("busy").await.unwrap();
+    } else {
+        // Same wall-clock shape as a rebuild, so the two runs sample comparable windows.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    done.store(true, Ordering::SeqCst);
+
+    let written = writer.await.unwrap();
+    let (slowest, count) = watcher.await.unwrap();
+    (slowest, count, written)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebuild_under_write_load_does_not_stall_other_tables() {
+    use std::sync::Arc;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = Arc::new(
+        IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(tmp.path().join("wal")))
+            .await
+            .unwrap(),
+    );
+
+    // Two tables: one being rebuilt, one an innocent bystander. The lock at stake is the global
+    // table map's, so a rebuild that holds it punishes every table, not only its own.
+    for name in ["busy", "bystander"] {
+        storage
+            .create_table(table(name, 8, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+    }
+    let rows: Vec<_> = (0..2000)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.31).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("busy", rows).await.unwrap();
+    storage
+        .insert_records("bystander", vec![record("b", vec![1.0; 8])])
+        .await
+        .unwrap();
+
+    // A concurrent writer contends for the table map's write lock all by itself, so measuring
+    // the rebuild against zero would blame it for latency it did not cause. Baseline first,
+    // same load, no rebuild.
+    let (baseline, base_count, base_writes) =
+        bystander_latency_under_load(storage.clone(), false).await;
+    let (with_rebuild, count, writes) = bystander_latency_under_load(storage.clone(), true).await;
+
+    assert!(
+        base_count > 10 && count > 10,
+        "the watcher did not overlap the load"
+    );
+    assert!(
+        base_writes > 0 && writes > 0,
+        "the writer never landed anything"
+    );
+
+    // The catch-up converges outside the lock and only the final delta is applied under it, so
+    // a rebuild should not move this materially beyond what the write load already costs.
+    //
+    // Be clear about what this does and does not show. It passes against the version that did
+    // the whole catch-up under the write lock too: at this scale the rebuild is short enough
+    // that only a handful of writes land during it, so the delta is small either way. Raising
+    // the load to make the delta large starves the bystander on the writers' own lock
+    // contention, and the measurement stops being about the rebuild at all. So this is a
+    // regression guard, not a demonstration — the argument for converging outside the lock is
+    // that the hold time is otherwise unbounded in the number of writes that arrive during a
+    // long rebuild, which is a property, not a benchmark.
+    assert!(
+        with_rebuild < baseline * 3,
+        "an unrelated table waited {:?} during a rebuild against {:?} under the same write load \
+         alone ({} vs {} writes)",
+        with_rebuild,
+        baseline,
+        writes,
+        base_writes
+    );
 }

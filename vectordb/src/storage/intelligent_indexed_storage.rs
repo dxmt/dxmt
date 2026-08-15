@@ -2854,27 +2854,66 @@ impl IntelligentIndexedStorage {
             records_snapshot.iter().map(|(id, _)| id.clone()).collect();
         new_wrapper.bulk_build(records_snapshot).await?;
 
-        // Phase 3: catch up on anything written while phase 2 ran, then swap. Both under the
-        // write lock, so no write can slip between the catch-up and the swap and be lost.
+        // Phase 3: converge, then swap. The catch-up runs *outside* the lock and repeats,
+        // because each pass can only be overtaken by writes that landed while it ran — and
+        // those are fewer each time. Only the final delta is applied under the write lock.
+        //
+        // Doing the whole catch-up under that lock, as this did, stalls every table: it is the
+        // global table map's lock, not this table's. qdrant avoids the same stall with a proxy
+        // segment that absorbs writes during an optimisation; converging outside the lock gets
+        // the same property with far less machinery.
+        let mut indexed = indexed;
+        let mut caught_up = 0usize;
+
+        // Bounded so a table under continuous write load cannot spin here forever. After this
+        // many passes the remaining delta is applied under the lock however large it is —
+        // finishing slowly beats not finishing.
+        const MAX_CONVERGENCE_PASSES: usize = 8;
+        for _ in 0..MAX_CONVERGENCE_PASSES {
+            let missing: Vec<(RecordId, Vec<f32>)> = {
+                let tables = self.tables.read().await;
+                let table_data = tables
+                    .get(table_name)
+                    .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
+                table_data
+                    .records
+                    .iter()
+                    .filter(|(id, _)| !indexed.contains(*id))
+                    .map(|(id, r)| (id.clone(), r.vector.clone()))
+                    .collect()
+            };
+            if missing.is_empty() {
+                break;
+            }
+            for (id, vector) in missing {
+                new_wrapper.insert(id.clone(), vector).await?;
+                indexed.insert(id);
+                caught_up += 1;
+            }
+        }
+
         {
             let mut tables = self.tables.write().await;
             let table_data = tables
                 .get_mut(table_name)
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
 
-            let mut caught_up = 0usize;
+            // Whatever arrived since the last pass. No write can slip between this and the swap
+            // because both happen under the same lock acquisition.
+            let mut final_delta = 0usize;
             for (id, record) in table_data.records.iter() {
                 if !indexed.contains(id) {
                     new_wrapper
                         .insert(id.clone(), record.vector.clone())
                         .await?;
-                    caught_up += 1;
+                    final_delta += 1;
                 }
             }
-            if caught_up > 0 {
+
+            if caught_up > 0 || final_delta > 0 {
                 info!(
-                    "rebuild_index: caught up {} records written during the rebuild",
-                    caught_up
+                    "rebuild_index: caught up {} records outside the lock, {} under it",
+                    caught_up, final_delta
                 );
             }
 
