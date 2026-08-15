@@ -1087,3 +1087,120 @@ async fn re_evaluation_settles_instead_of_rebuilding_forever() {
         second
     );
 }
+
+#[tokio::test]
+async fn partitioning_triggers_on_bytes_not_row_count() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    // Same row count, 150x apart in vector bytes: 500 x 4 x 4 = 8 KB against
+    // 500 x 600 x 4 = 1.2 MB. Row count cannot tell these apart, which is the whole argument
+    // for thresholding on size — one of them needs to leave memory and the other does not.
+    for (name, dim) in [("narrow", 4usize), ("wide", 600usize)] {
+        storage
+            .create_table(table(name, dim, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        let rows: Vec<_> = (0..500)
+            .map(|i| {
+                let v: Vec<f32> = (0..dim)
+                    .map(|d| i as f32 * 0.01 + d as f32 * 0.03)
+                    .collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records(name, rows).await.unwrap();
+    }
+
+    std::env::remove_var("DB_PARTITION_THRESHOLD");
+    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "1");
+    storage.rebuild_index("narrow").await.unwrap();
+    storage.rebuild_index("wide").await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+
+    assert_ne!(
+        storage
+            .get_table("narrow")
+            .await
+            .unwrap()
+            .index_type
+            .to_string(),
+        "partitioned_ivf",
+        "8 KB of vectors was partitioned; the threshold is not being read as bytes"
+    );
+    assert_eq!(
+        storage
+            .get_table("wide")
+            .await
+            .unwrap()
+            .index_type
+            .to_string(),
+        "partitioned_ivf",
+        "1.2 MB of vectors stayed resident under a 1 MB threshold"
+    );
+}
+
+#[tokio::test]
+async fn replay_never_reaches_below_the_truncation_point() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        for i in 0..30 {
+            storage
+                .insert_records(
+                    "t",
+                    vec![record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0])],
+                )
+                .await
+                .unwrap();
+        }
+        storage.snapshot().await.unwrap();
+        // More writes after the snapshot, so recovery has a genuine tail to replay.
+        for i in 30..40 {
+            storage
+                .insert_records(
+                    "t",
+                    vec![record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0])],
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    // qdrant hit a class of bug here worth guarding against: a replay target computed from a
+    // stale applied-sequence can sit *before* the truncation point, and the log no longer holds
+    // those entries — their fix was to clamp the target at the first surviving index. Ours
+    // derives the target from the snapshot manifest, which is written with the same sequence
+    // the truncation uses, so the two cannot disagree. This test is what makes that a
+    // guarantee rather than a coincidence.
+    let recovered = open(&wal_dir).await;
+    let tables = recovered.list_tables().await.unwrap();
+    assert_eq!(
+        tables[0].record_count, 40,
+        "recovery lost records across the truncation point"
+    );
+
+    for i in [0usize, 29, 30, 39] {
+        let hits = recovered
+            .search("t", query(vec![i as f32, 0.0, 0.0, 0.0], 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.hits[0].id,
+            format!("r{}", i),
+            "r{} did not survive; it sits {} the truncation point",
+            i,
+            if i < 30 { "below" } else { "above" }
+        );
+    }
+}

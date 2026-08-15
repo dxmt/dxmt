@@ -1090,15 +1090,26 @@ impl IntelligentIndexedStorage {
             .select_optimal_index(&config)
             .await?;
 
-        // Above this size, and with somewhere to put the segments, partition instead. Below it
-        // a resident index is simply faster — fetching a segment costs a round trip a small
-        // table never needs to pay.
-        let partition_threshold = std::env::var("DB_PARTITION_THRESHOLD")
+        // Threshold on bytes of vector data, not row count. Row count says nothing about
+        // memory: a million 1536-dimension vectors is 6 GB, a million 64-dimension vectors is
+        // 256 MB, and only one of those needs to leave memory. qdrant makes the same call —
+        // its indexing trigger is `indexing_threshold_kb`.
+        //
+        // `DB_PARTITION_THRESHOLD` (a row count) is still read so existing configurations do
+        // not silently change meaning, but it is deprecated.
+        let vector_bytes = record_count * dimension * std::mem::size_of::<f32>();
+        let threshold_bytes = std::env::var("DB_PARTITION_THRESHOLD_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100_000);
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(512 * 1024 * 1024);
 
-        if self.object_storage_enabled && record_count >= partition_threshold {
+        let by_rows = std::env::var("DB_PARTITION_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .is_some_and(|rows| record_count >= rows);
+
+        if self.object_storage_enabled && (vector_bytes >= threshold_bytes || by_rows) {
             let nlist = ((record_count as f64).sqrt() as usize).clamp(16, 4096);
             decision.selected_algorithm = IndexAlgorithm::PartitionedIvf {
                 nlist,

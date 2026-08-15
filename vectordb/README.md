@@ -89,7 +89,8 @@ dropped from memory entirely — records and index — leaving only its segments
 store. The next query on it rehydrates transparently, so memory tracks the working set rather
 than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.
 
-A table past `DB_PARTITION_THRESHOLD` rows (default 100,000) switches to a partitioned IVF index
+A table whose vectors exceed `DB_PARTITION_THRESHOLD_MB` (default 512) switches to a partitioned
+IVF index
 — on its next `index/rebuild`, or automatically at the next re-evaluation sweep: centroids stay in memory and each partition is an immutable segment
 in object storage, fetched only when a query probes it. That bounds memory for a single table
 larger than RAM, which table-level eviction cannot do.
@@ -130,6 +131,7 @@ DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables
 DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
 DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
 DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
+DB_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none
 ```
