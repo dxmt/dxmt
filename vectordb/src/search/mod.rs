@@ -1,5 +1,6 @@
 pub mod index_persistence;
 pub mod index_traits;
+pub mod partitioned_ivf;
 // Core search modules
 pub mod batch_operations;
 pub mod binary_hnsw; // NEW: Binary HNSW with RaBitQ quantization
