@@ -1042,3 +1042,48 @@ async fn an_index_is_rebuilt_once_the_table_outgrows_it() {
         "the rebuilt index answers differently"
     );
 }
+
+#[tokio::test]
+async fn re_evaluation_settles_instead_of_rebuilding_forever() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 8, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+
+    let rows: Vec<_> = (0..300)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.37).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    // Low enough that this table partitions, as a large one would in production.
+    std::env::set_var("DB_PARTITION_THRESHOLD", "100");
+    storage.rebuild_index("t").await.unwrap();
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "partitioned_ivf"
+    );
+
+    // The selector does not know about partitioning — that decision lives in rebuild_index — so
+    // a naive comparison finds the current algorithm "wrong" every single time, rebuilds, gets
+    // a partitioned index back, and does it again on the next sweep. Forever, at O(n) each.
+    let first = storage.reevaluate_indexes().await.unwrap();
+    let second = storage.reevaluate_indexes().await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD");
+
+    assert!(
+        first.is_empty() && second.is_empty(),
+        "re-evaluation keeps rebuilding a table that is already correct: {:?} then {:?}",
+        first,
+        second
+    );
+}

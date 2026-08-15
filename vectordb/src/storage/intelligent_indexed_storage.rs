@@ -1063,6 +1063,53 @@ impl IntelligentIndexedStorage {
         self.tables.write().await.remove(name);
     }
 
+    /// 给定规模，决定这张表该用什么索引。
+    ///
+    /// **只能有这一处。** 分区的判断原本只写在 `rebuild_index` 里，而 `reevaluate_indexes`
+    /// 直接比较选择器的输出——于是一张已经分区的表每次扫描都被判为"不对"，重建一次又拿回
+    /// 分区索引，下次扫描再来一遍。O(n) 的无限循环，有测试专门盯着。
+    async fn decide_algorithm(
+        &self,
+        record_count: usize,
+        dimension: usize,
+        distance_metric: DistanceMetric,
+    ) -> crate::Result<IndexDecision> {
+        let config = IndexConfig {
+            dataset_size: record_count,
+            dimension,
+            distance_metric,
+            // Not hardcoded: a rebuild that assumed a different machine than table creation did
+            // would pick a different algorithm on the same box.
+            memory_budget_mb: (self.hardware_capabilities.available_memory_gb as usize) * 512,
+            performance_requirements: self.performance_requirements.clone(),
+            cost_constraints: self.cost_constraints.clone(),
+            hardware_capabilities: self.hardware_capabilities.clone(),
+        };
+
+        let mut decision = IntelligentIndexSelector::new()
+            .select_optimal_index(&config)
+            .await?;
+
+        // Above this size, and with somewhere to put the segments, partition instead. Below it
+        // a resident index is simply faster — fetching a segment costs a round trip a small
+        // table never needs to pay.
+        let partition_threshold = std::env::var("DB_PARTITION_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100_000);
+
+        if self.object_storage_enabled && record_count >= partition_threshold {
+            let nlist = ((record_count as f64).sqrt() as usize).clamp(16, 4096);
+            decision.selected_algorithm = IndexAlgorithm::PartitionedIvf {
+                nlist,
+                nprobe: (nlist / 8).max(4),
+                max_resident_partitions: (nlist / 4).max(8),
+            };
+        }
+
+        Ok(decision)
+    }
+
     /// 检查每张表当前的索引算法是否仍与其规模相称，不相称的重建。
     ///
     /// 这是"自适应索引"真正成立的地方。此前算法只在建表时选一次，用的还是写死的
@@ -1086,7 +1133,6 @@ impl IntelligentIndexedStorage {
                 .collect()
         };
 
-        let selector = IntelligentIndexSelector::new();
         let mut rebuilt = Vec::new();
 
         for (name, count, current) in candidates {
@@ -1095,30 +1141,17 @@ impl IntelligentIndexedStorage {
                 continue;
             }
 
-            let config = IndexConfig {
-                dataset_size: count,
-                dimension: 0, // filled in below from the live table
-                distance_metric: DistanceMetric::Cosine,
-                memory_budget_mb: (self.hardware_capabilities.available_memory_gb as usize) * 512,
-                performance_requirements: self.performance_requirements.clone(),
-                cost_constraints: self.cost_constraints.clone(),
-                hardware_capabilities: self.hardware_capabilities.clone(),
-            };
-            let config = {
+            let (dimension, metric) = {
                 let tables = self.tables.read().await;
                 match tables.get(&name) {
-                    Some(d) => IndexConfig {
-                        dimension: d.table.dimension,
-                        distance_metric: d.table.distance_metric,
-                        ..config
-                    },
+                    Some(d) => (d.table.dimension, d.table.distance_metric),
                     // Evicted or dropped while we were iterating; nothing to do.
                     None => continue,
                 }
             };
 
-            let want = selector
-                .select_optimal_index(&config)
+            let want = self
+                .decide_algorithm(count, dimension, metric)
                 .await?
                 .selected_algorithm;
             if std::mem::discriminant(&want) == std::mem::discriminant(&current) {
@@ -2514,47 +2547,12 @@ impl IntelligentIndexedStorage {
             let distance_metric = table_data.table.distance_metric;
             let record_count = table_data.records.len();
 
-            // Re-run adaptive selection for the current dataset size
-            let config = IndexConfig {
-                dataset_size: record_count,
-                dimension,
-                distance_metric,
-                // These used to be hardcoded — 512 MB of budget, no AVX2, no SIMD — which
-                // meant a rebuild could pick a different algorithm than table creation did on
-                // the very same machine. Use what was actually detected, and the same
-                // requirements the storage was constructed with.
-                memory_budget_mb: (self.hardware_capabilities.available_memory_gb as usize) * 512,
-                performance_requirements: self.performance_requirements.clone(),
-                cost_constraints: self.cost_constraints.clone(),
-                hardware_capabilities: self.hardware_capabilities.clone(),
-            };
-
-            let selector = IntelligentIndexSelector::new();
-            let mut decision = selector.select_optimal_index(&config).await?;
-
-            // Above this size, and with somewhere to put the segments, partition instead. This
-            // is the only point where partitioning can be decided: it needs the vectors in hand
-            // to cluster them, and at CREATE TABLE there are none. Below the threshold a
-            // resident index is simply faster — fetching a segment costs a round trip that a
-            // small table never needs to pay.
-            let partition_threshold = std::env::var("DB_PARTITION_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(100_000);
-
-            if self.object_storage_enabled && record_count >= partition_threshold {
-                let nlist = ((record_count as f64).sqrt() as usize).clamp(16, 4096);
-                decision.selected_algorithm = IndexAlgorithm::PartitionedIvf {
-                    nlist,
-                    nprobe: (nlist / 8).max(4),
-                    max_resident_partitions: (nlist / 4).max(8),
-                };
-                info!(
-                    "rebuild_index: {} records with object storage configured — partitioning \
-                     into {} segments",
-                    record_count, nlist
-                );
-            }
+            // One decision function, shared with reevaluate_indexes. Keeping a copy of the
+            // partitioning rule here made a partitioned table look wrong to every re-evaluation
+            // sweep, which rebuilt it, got a partitioned index back, and repeated — forever.
+            let decision = self
+                .decide_algorithm(record_count, dimension, distance_metric)
+                .await?;
 
             let algorithm = decision.selected_algorithm.clone();
             let table_id = table_data.table.id.to_string();

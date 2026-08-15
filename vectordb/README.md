@@ -90,7 +90,7 @@ store. The next query on it rehydrates transparently, so memory tracks the worki
 than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.
 
 A table past `DB_PARTITION_THRESHOLD` rows (default 100,000) switches to a partitioned IVF index
-on its next `index/rebuild`: centroids stay in memory and each partition is an immutable segment
+— on its next `index/rebuild`, or automatically at the next re-evaluation sweep: centroids stay in memory and each partition is an immutable segment
 in object storage, fetched only when a query probes it. That bounds memory for a single table
 larger than RAM, which table-level eviction cannot do.
 
