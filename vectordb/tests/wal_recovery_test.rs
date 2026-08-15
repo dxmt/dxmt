@@ -1262,3 +1262,96 @@ async fn a_partitioned_table_gets_maintained_not_rebuilt() {
         assert_eq!(hits.hits[0].id, id, "{} was lost around maintenance", id);
     }
 }
+
+#[tokio::test]
+async fn the_wal_manifest_replaces_listing_and_catches_a_missing_chunk() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("a")))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        for i in 0..5 {
+            storage
+                .insert_records(
+                    "t",
+                    vec![record(&format!("r{}", i), vec![i as f32, 0.0, 0.0, 0.0])],
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    // The manifest is the root: without it, finding chunks means listing the prefix, which
+    // costs more as the log grows and — the part that matters — cannot tell a complete set from
+    // one with a hole in it.
+    let manifest_path = shared
+        .join("ssd")
+        .join("test-bucket")
+        .join("wal")
+        .join("MANIFEST");
+    assert!(manifest_path.exists(), "no WAL manifest was written");
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let chunks = manifest["chunks"].as_array().unwrap();
+    assert!(!chunks.is_empty(), "the manifest lists no chunks");
+
+    // Chunks are bucketed by prefix. S3 rate-limits per prefix, so a flat namespace throttles
+    // once the log is busy enough.
+    let path = chunks[0]["path"].as_str().unwrap();
+    assert!(
+        path.starts_with("wal/") && path.matches('/').count() == 2,
+        "chunk path {} is not bucketed",
+        path
+    );
+
+    // A fresh node recovers from the manifest alone.
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("b")))
+        .await
+        .unwrap();
+    assert_eq!(recovered.list_tables().await.unwrap()[0].record_count, 5);
+}
+
+#[tokio::test]
+async fn a_corrupt_wal_manifest_falls_back_to_scanning_the_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("a")))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+    }
+
+    // Unlike the snapshot, a damaged WAL manifest is recoverable: the chunks are still there and
+    // can be scanned. Refusing to start would be the wrong trade here — the data is intact.
+    let manifest_path = shared
+        .join("ssd")
+        .join("test-bucket")
+        .join("wal")
+        .join("MANIFEST");
+    std::fs::write(&manifest_path, b"not json").unwrap();
+
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("b")))
+        .await
+        .unwrap();
+    let tables = recovered.list_tables().await.unwrap();
+    assert_eq!(tables.len(), 1, "a corrupt manifest lost the log");
+    assert_eq!(tables[0].record_count, 1);
+}

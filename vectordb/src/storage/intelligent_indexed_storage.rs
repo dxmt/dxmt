@@ -65,6 +65,51 @@ struct TableSnapshot {
 /// 索引写入在 `tables` 写锁之外进行，所以要先把这些从表数据里摘出来。
 type PendingIndexInsert = (RecordId, DenseVector, Option<HashMap<String, DenseVector>>);
 
+/// 一个 WAL 分块在对象存储里的位置与覆盖范围。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WalChunkRef {
+    /// 完整路径而不是序号推导。分桶方案将来若要改，旧清单仍然指得对——
+    /// chroma 的 wal3 出于同样理由在 fragment 里存全路径。
+    path: String,
+    first_seq: u64,
+    last_seq: u64,
+    entries: usize,
+}
+
+/// 对象存储上 WAL 的根。
+///
+/// 没有它就只能 LIST 前缀来发现分块：代价随日志增长，而且分块是不是齐的无从判断。
+/// 清单让恢复变成"读一个对象"，并且能校验完整性。
+///
+/// **单写者。** 更新清单是读-改-写，没有 CAS——`ObjectStorage` trait 没有条件写
+/// （`If-Match`），而 wal3 正是靠它做到多写者安全的。两个进程共用同一个桶会互相覆盖清单。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct WalManifest {
+    chunks: Vec<WalChunkRef>,
+    /// 已被快照覆盖、从清单里裁掉的条目数。
+    pruned_entries: u64,
+    /// 有史以来写入的条目总数。
+    ///
+    /// 不变式：`chunks 里的条目数之和 + pruned_entries == total_entries`。
+    /// 这是完整性校验——少一个分块就对不上，而不是静默少几条记录。
+    total_entries: u64,
+}
+
+impl WalManifest {
+    fn live_entries(&self) -> u64 {
+        self.chunks.iter().map(|c| c.entries as u64).sum()
+    }
+
+    fn is_consistent(&self) -> bool {
+        self.live_entries() + self.pruned_entries == self.total_entries
+    }
+}
+
+/// `Vec::retain` 的闭包不能同时可变借用外面的 vec，所以收集走这个自由函数。
+fn guard_pruned(into: &mut Vec<WalChunkRef>, chunk: &WalChunkRef) {
+    into.push(chunk.clone());
+}
+
 /// 插入请求（用于 channel-based 架构）
 struct InsertRequest {
     table_name: String,
@@ -115,6 +160,9 @@ pub struct IntelligentIndexedStorage {
 
     /// WAL 目录，快照写在它下面的 `snapshot/`。
     wal_dir: Option<PathBuf>,
+
+    /// 对象存储上 WAL 的清单，常驻内存，每次变更后回写。
+    wal_manifest: Arc<StdMutex<WalManifest>>,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -499,6 +547,11 @@ impl IntelligentIndexedStorage {
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
 
+            // Before anything reads chunks: the manifest is how they are found.
+            if storage.object_storage_enabled {
+                storage.load_wal_manifest().await?;
+            }
+
             // Snapshot first, then only the log written after it. Replay has to run with the
             // snapshot already in place: the tail may delete or overwrite records the snapshot
             // restored, and applying it to an empty store would lose those edits.
@@ -630,6 +683,7 @@ impl IntelligentIndexedStorage {
             insert_tx,
             wal: None,
             wal_dir: None,
+            wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             replaying: replaying_flag,
             #[cfg(feature = "gpu")]
             gpu_calculator,
@@ -1487,12 +1541,125 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
-    /// 一段 WAL 分块在对象存储里的键。用定宽序号，好让字典序等于序号序。
-    fn wal_chunk_key(first_seq: u64) -> String {
-        format!("wal/{:020}.chunk", first_seq)
+    /// WAL 清单的键。
+    fn wal_manifest_key() -> &'static str {
+        "wal/MANIFEST"
     }
 
-    /// 把一批 WAL 条目作为不可变分块推到对象存储。
+    /// 一段 WAL 分块的键。
+    ///
+    /// 按 4096 一组分前缀：S3 是**按前缀限流**的，所有分块挤在一个前缀下，写入速率到一定
+    /// 程度就会被限。chroma 的 wal3 出于同样的理由按 4096 分桶。定宽序号让字典序等于序号序。
+    fn wal_chunk_key(first_seq: u64) -> String {
+        format!("wal/{:08}/{:020}.chunk", first_seq / 4096, first_seq)
+    }
+
+    /// 读回内存里那份清单。
+    fn manifest(&self) -> crate::Result<WalManifest> {
+        self.wal_manifest
+            .lock()
+            .map(|m| m.clone())
+            .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))
+    }
+
+    /// 把清单写到对象存储。
+    async fn put_manifest(&self, manifest: &WalManifest) -> crate::Result<()> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let bytes =
+            serde_json::to_vec(manifest).map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        self.storage
+            .put_object(
+                Self::wal_manifest_key(),
+                bytes::Bytes::from(bytes),
+                Some("application/json"),
+            )
+            .await
+            .map_err(|e| crate::Error::Internal(format!("writing WAL manifest: {}", e)))
+    }
+
+    /// 启动时把清单读进内存；没有清单就从前缀里重建一份。
+    async fn load_wal_manifest(&self) -> crate::Result<()> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let manifest = match self.storage.get_object(Self::wal_manifest_key()).await {
+            Ok(bytes) => match serde_json::from_slice::<WalManifest>(&bytes) {
+                Ok(m) => {
+                    if !m.is_consistent() {
+                        warn!(
+                            "WAL manifest is inconsistent: {} live + {} pruned != {} total; \
+                             rebuilding from the prefix",
+                            m.live_entries(),
+                            m.pruned_entries,
+                            m.total_entries
+                        );
+                        self.rebuild_wal_manifest().await?
+                    } else {
+                        m
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "WAL manifest unreadable ({}); rebuilding from the prefix",
+                        e
+                    );
+                    self.rebuild_wal_manifest().await?
+                }
+            },
+            // No manifest is the normal first-boot case — and also the upgrade case, where
+            // chunks already exist under the old flat prefix. Both are handled by scanning.
+            Err(_) => self.rebuild_wal_manifest().await?,
+        };
+
+        *self
+            .wal_manifest
+            .lock()
+            .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))? =
+            manifest;
+        Ok(())
+    }
+
+    /// 扫描 `wal/` 前缀重建清单。仅用于首次启动、升级，或清单损坏。
+    async fn rebuild_wal_manifest(&self) -> crate::Result<WalManifest> {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let mut chunks = Vec::new();
+        for key in self.list_wal_chunk_keys().await {
+            let Ok(bytes) = self.storage.get_object(&key).await else {
+                continue;
+            };
+            let Ok(entries) = rmp_serde::from_slice::<Vec<(u64, WalEntry)>>(&bytes) else {
+                continue;
+            };
+            let (Some((first, _)), Some((last, _))) = (entries.first(), entries.last()) else {
+                continue;
+            };
+            chunks.push(WalChunkRef {
+                path: key,
+                first_seq: *first,
+                last_seq: *last,
+                entries: entries.len(),
+            });
+        }
+        chunks.sort_by_key(|c| c.first_seq);
+
+        let total_entries = chunks.iter().map(|c| c.entries as u64).sum();
+        if !chunks.is_empty() {
+            info!(
+                "Rebuilt WAL manifest from prefix scan: {} chunks",
+                chunks.len()
+            );
+        }
+        Ok(WalManifest {
+            chunks,
+            // Anything already pruned is unknowable from a scan; treating it as zero keeps the
+            // invariant satisfied for everything still present, which is what it is for.
+            pruned_entries: 0,
+            total_entries,
+        })
+    }
+
+    /// 把一批 WAL 条目作为不可变分块推到对象存储，并登记进清单。
     async fn offload_wal_chunk(
         &self,
         first_seq: u64,
@@ -1505,14 +1672,35 @@ impl IntelligentIndexedStorage {
         let bytes =
             rmp_serde::to_vec(entries).map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
+        let path = Self::wal_chunk_key(first_seq);
         self.storage
             .put_object(
-                &Self::wal_chunk_key(first_seq),
+                &path,
                 bytes::Bytes::from(bytes),
                 Some("application/octet-stream"),
             )
             .await
-            .map_err(|e| crate::Error::Internal(format!("uploading WAL chunk: {}", e)))
+            .map_err(|e| crate::Error::Internal(format!("uploading WAL chunk: {}", e)))?;
+
+        // Chunk first, then the manifest that references it. The other order publishes a
+        // manifest pointing at an object that may not exist, and recovery fails outright; this
+        // way a failed manifest write leaves an unreferenced object — wasted space, nothing
+        // more.
+        let manifest = {
+            let mut guard = self
+                .wal_manifest
+                .lock()
+                .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))?;
+            guard.chunks.push(WalChunkRef {
+                path,
+                first_seq,
+                last_seq: entries.last().map(|(s, _)| *s).unwrap_or(first_seq),
+                entries: entries.len(),
+            });
+            guard.total_entries += entries.len() as u64;
+            guard.clone()
+        };
+        self.put_manifest(&manifest).await
     }
 
     /// 列出 `wal/` 下所有分块的键，按序号（即字典序）排好。
@@ -1537,57 +1725,100 @@ impl IntelligentIndexedStorage {
     }
 
     /// 从对象存储取回序号 >= `from_seq` 的 WAL 条目。
+    ///
+    /// 走清单，不 LIST 前缀：LIST 的代价随日志增长，而且**列不出"少了一块"**——
+    /// 清单记了条目总数，对不上就说得出来。
     async fn fetch_wal_chunks(&self, from_seq: u64) -> crate::Result<Vec<(u64, WalEntry)>> {
         use crate::storage::object::traits::ObjectStorage;
 
+        let manifest = self.manifest()?;
         let mut out = Vec::new();
-        for key in self.list_wal_chunk_keys().await {
-            let Ok(bytes) = self.storage.get_object(&key).await else {
-                warn!("WAL chunk {} could not be read; skipping", key);
+        let mut expected = 0usize;
+        let mut missing = 0usize;
+
+        for chunk in &manifest.chunks {
+            // last_seq, not first_seq: a chunk straddling the cutoff still holds entries we
+            // need.
+            if chunk.last_seq < from_seq {
+                continue;
+            }
+            expected += chunk.entries;
+
+            let Ok(bytes) = self.storage.get_object(&chunk.path).await else {
+                warn!("WAL chunk {} is listed but unreadable", chunk.path);
+                missing += 1;
                 continue;
             };
             let entries: Vec<(u64, WalEntry)> = match rmp_serde::from_slice(&bytes) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("WAL chunk {} is unreadable ({}); skipping", key, e);
+                    warn!("WAL chunk {} could not be decoded: {}", chunk.path, e);
+                    missing += 1;
                     continue;
                 }
             };
             out.extend(entries.into_iter().filter(|(seq, _)| *seq >= from_seq));
         }
+
+        if missing > 0 {
+            // Loud, and specific about the consequence. Without the manifest this would have
+            // been invisible: a LIST simply would not have mentioned the chunk.
+            warn!(
+                "{} of {} WAL chunks after sequence {} could not be read; recovery will be \
+                 missing up to {} entries",
+                missing,
+                manifest.chunks.len(),
+                from_seq,
+                expected.saturating_sub(out.len())
+            );
+        }
+
         Ok(out)
     }
 
-    /// 删掉序号全部低于 `keep_from` 的 WAL 分块。
+    /// 删掉全部条目都低于 `keep_from` 的 WAL 分块。
+    ///
+    /// **先更新清单再删对象。** 反过来的话，中途失败会留下一份指向已删对象的清单，
+    /// 恢复就会报"分块读不出来"——而实际上那些数据已经在快照里了，警告是假的。
     async fn prune_wal_chunks(&self, keep_from: u64) {
         use crate::storage::object::traits::ObjectStorage;
 
-        for key in self.list_wal_chunk_keys().await {
-            // The key embeds the chunk's first sequence number. A chunk whose *last* entry is
-            // still below the cutoff is fully covered by the snapshot; parse the first and only
-            // prune when the next chunk also starts below the cutoff, which the sorted order
-            // gives us for free — so compare conservatively against the first sequence.
-            let Some(seq) = key
-                .rsplit('/')
-                .next()
-                .and_then(|f| f.strip_suffix(".chunk"))
-                .and_then(|s| s.parse::<u64>().ok())
-            else {
-                continue;
+        let (manifest, dropped) = {
+            let Ok(mut guard) = self.wal_manifest.lock() else {
+                return;
             };
-            if seq < keep_from {
-                if let Ok(bytes) = self.storage.get_object(&key).await {
-                    if let Ok(entries) = rmp_serde::from_slice::<Vec<(u64, WalEntry)>>(&bytes) {
-                        // Only drop the chunk when every entry in it is covered.
-                        if entries.iter().all(|(s, _)| *s < keep_from) {
-                            let _ = self.storage.delete_object(&key).await;
-                        }
-                    }
+            let mut dropped = Vec::new();
+            guard.chunks.retain(|c| {
+                if c.last_seq < keep_from {
+                    guard_pruned(&mut dropped, c);
+                    false
+                } else {
+                    true
                 }
-            }
+            });
+            let pruned: u64 = dropped.iter().map(|c: &WalChunkRef| c.entries as u64).sum();
+            guard.pruned_entries += pruned;
+            (guard.clone(), dropped)
+        };
+
+        if dropped.is_empty() {
+            return;
+        }
+        if self.put_manifest(&manifest).await.is_err() {
+            // Leave the objects alone: a manifest that still lists them is consistent, just
+            // larger than it needs to be.
+            warn!(
+                "WAL manifest update failed; leaving {} chunks in place",
+                dropped.len()
+            );
+            return;
+        }
+        for chunk in dropped {
+            let _ = self.storage.delete_object(&chunk.path).await;
         }
     }
 
+    /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
         // Check if table exists (quickly release the lock)

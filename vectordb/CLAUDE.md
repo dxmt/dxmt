@@ -153,6 +153,15 @@ literal write-ahead ordering, but the in-memory state is rebuilt from the log an
 still guarantees no acknowledged write is lost — and it avoids logging operations that the
 insertion processor then rejects.
 
+On object storage the log is a set of immutable chunks under `wal/{seq/4096}/{seq}.chunk`
+plus a `wal/MANIFEST` naming them. Recovery reads the manifest rather than listing the prefix —
+a list cannot distinguish a complete set from one with a hole in it, and the manifest's
+`live + pruned == total` invariant can. Chunks are bucketed because S3 rate-limits per prefix.
+
+**Single writer.** Updating the manifest is read-modify-write; the `ObjectStorage` trait has no
+conditional put, so two processes sharing a bucket would clobber each other. chroma's wal3 uses
+`If-Match` for exactly this.
+
 `src/storage/atomic_ops.rs` also uses `wal.rs`, on a separate path reachable only from the
 `cluster/shard_router.rs` stub. Do not confuse the two.
 
