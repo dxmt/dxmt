@@ -3023,6 +3023,9 @@ impl IntelligentIndexedStorage {
     /// 字段名对齐 dxmt-js-sdk 的 `TableStats`——它的 `getTableStats()` 一直在调用一个不存在的
     /// 路由，所以这个方法对每个 JS 客户端用户都是抛异常的。
     pub async fn get_table_stats(&self, tablename: &str) -> crate::Result<serde_json::Value> {
+        // Residency *before* touching it, or the answer is always true — asking is what makes
+        // it resident.
+        let was_resident = self.tables.read().await.contains_key(tablename);
         self.ensure_resident(tablename).await?;
 
         let tables = self.tables.read().await;
@@ -3049,6 +3052,12 @@ impl IntelligentIndexedStorage {
 
         Ok(serde_json::json!({
             "name": data.table.name,
+            // Whether this table was in memory before the call. A query against an evicted
+            // table rehydrates it transparently, which is convenient and hides a latency cliff:
+            // the caller has no way to know the next query will pay for a fetch. weaviate makes
+            // the same state explicit and goes further — an OFFLOADED tenant is simply not
+            // queryable until reactivated. Exposing it is the least we can do.
+            "resident": was_resident,
             "record_count": record_count,
             "dimension": dimension,
             "index_type": data.table.index_type.to_string(),

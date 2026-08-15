@@ -45,6 +45,10 @@ each one widens the exposed surface, so opt in per process:
 | `--graphql`   | `POST /graphql`                                      |
 | `--websocket` | `GET /ws` (upgrade)                                  |
 
+`GET /api/v1/tables/{name}/stats` reports `resident`: whether the table was in memory when
+asked. A query against an evicted table rehydrates it transparently, so without this a caller
+has no way to know the next one will pay for a fetch from object storage.
+
 ### MCP server
 
 The database also speaks the Model Context Protocol over stdio, backed by the same durable

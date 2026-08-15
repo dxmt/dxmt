@@ -223,10 +223,45 @@ commit 的说明。
 他们那个文件里还记录了一个同类坑：`deleted_mask` 在段冻结前拍快照，中间的 upsert 会让过滤
 KNN 静默丢点——修法是**类型状态**，`new()` 返回不可用类型，只有持锁调 `finalize` 才拿得到可用的。
 
-**"自适应索引"—— 没有一家在多种算法间自动切换。** qdrant 的 `Indexes` 枚举只有 `Plain` 和
-`Hnsw` 两个变体，所谓自适应就是"段超过 `indexing_threshold_kb` 就建 HNSW"；chroma 是
-HNSW + SPANN，由配置决定。四家独立做到生产规模的系统都没往"按规模自动选四种算法"的方向走，
-这个信号值得认真对待。
+**"自适应索引"—— 我先前说"没有一家自动切换算法"，这是错的。**（只看了 qdrant 和 chroma
+就下了结论。）
+
+**weaviate 有专门的 `dynamic` 索引类型**（`adapters/repos/db/vector/dynamic`）：起始是
+flat（暴力），对象数超过 `DefaultThreshold = 10_000` 自动升级为 HNSW；升级后还会向内层索引
+继续问 `ShouldUpgrade()`，第二级是量化（SQ/RQ）。
+
+不过看清楚层次之后，结论要改成更准确的说法：**大家自动的都是"何时建/何时压"，不是"选哪一族
+算法"**。
+
+| | 自动的部分 | 配置的部分 |
+|---|---|---|
+| weaviate | flat → HNSW（10,000 对象）、量化的时机 | 用不用量化、用哪种 |
+| qdrant | 不建索引 → HNSW（`indexing_threshold_kb`） | 量化 |
+| chroma | — | HNSW 还是 SPANN |
+| lancedb | — | 索引类型；连 `optimize()` 都要应用自己调 |
+| **我们** | **五选一**（BruteForce / HNSW / HNSW-PQ / EnhancedDiskANN / PartitionedIvf） | — |
+
+所以我们的五路自动选择确实比任何一家都激进。这不必然是错的，但**没有先例**这件事本身是信息。
+
+**"先建好再换上"weaviate 独立走到了同一处。** 它 `doUpgrade()` 里的注释写着：
+*"The read lock keeps the current index alive (not dropped/closed) while the new one is built;
+searches continue throughout."* ——和我们那次改动一字不差地是同一个性质。
+
+**阈值单位并没有业界共识。** weaviate 用对象数（10,000），qdrant 用字节
+（`indexing_threshold_kb`）。我们改成按字节的理由（不同维度下同样行数内存差几十倍）站得住，
+但不能说成"大家都这么做"。
+
+**冷数据卸载：weaviate 是显式的，而且卸载后不可查。** 租户有 `ACTIVE` / `INACTIVE` /
+`OFFLOADED` 三态（外加 `OFFLOADING` / `ONLOADING` 两个只读中间态），转换由用户通过 API 驱动，
+**`OFFLOADED` 的租户直接不可查询**，必须显式激活。
+
+我们是热度驱动自动驱逐 + 查询时透明回填。更方便，但**藏了一个延迟悬崖**：调用方无从知道
+下一次查询要付一次对象存储拉取的代价。weaviate 把它变成一个必须显式处理的状态。
+折中做法已经实现：`GET /tables/{name}/stats` 现在返回 `resident` 字段。
+
+**维护的调度方式四家四样**：qdrant 后台 optimizer、chroma 独立 compactor 服务、
+weaviate 自动升级 + 显式租户生命周期、lancedb **完全交给应用**（文档原话：改动超过 10 万条
+或 20 次修改操作就该调一次 `optimize()`）。我们是后台定时器。
 
 **近 3 个月各家在改什么**：qdrant 的 WAL 提交几乎全是**回放与截断交互**的 bug（其中
 `Clamp WAL replay target to the truncated prefix` 与我们 W7 做的完全同类）；chroma 的 wal3

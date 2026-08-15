@@ -1496,3 +1496,46 @@ async fn a_rebuild_under_write_load_does_not_stall_other_tables() {
         base_writes
     );
 }
+
+#[tokio::test]
+async fn table_stats_say_whether_the_table_was_in_memory() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage.get_table_stats("t").await.unwrap()["resident"],
+        true
+    );
+
+    storage.snapshot().await.unwrap();
+    storage.evict_table_for_test("t").await;
+
+    // Rehydration is transparent, which is convenient and hides a latency cliff: without this
+    // field a caller cannot tell that the next query will pay for a fetch from object storage.
+    let stats = storage.get_table_stats("t").await.unwrap();
+    assert_eq!(
+        stats["resident"], false,
+        "an evicted table reported itself resident"
+    );
+
+    // And asking must not be what makes it true — the check has to happen before the
+    // rehydration that answering the rest of the call performs.
+    assert_eq!(stats["record_count"], 1);
+    assert_eq!(
+        storage.get_table_stats("t").await.unwrap()["resident"],
+        true
+    );
+}
