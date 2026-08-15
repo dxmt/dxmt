@@ -89,8 +89,12 @@ dropped from memory entirely — records and index — leaving only its segments
 store. The next query on it rehydrates transparently, so memory tracks the working set rather
 than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.
 
-Records still live in memory while a table is resident; per-vector tiering within a table is
-not implemented. See [docs/ROADMAP.md](docs/ROADMAP.md) §W3.
+A table past `DB_PARTITION_THRESHOLD` rows (default 100,000) switches to a partitioned IVF index
+on its next `index/rebuild`: centroids stay in memory and each partition is an immutable segment
+in object storage, fetched only when a query probes it. That bounds memory for a single table
+larger than RAM, which table-level eviction cannot do.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) §W3 for what remains.
 
 Index selection runs once, when the table is created:
 

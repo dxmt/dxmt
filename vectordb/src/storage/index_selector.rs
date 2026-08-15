@@ -33,6 +33,16 @@ pub enum IndexAlgorithm {
         num_pq_subvectors: usize,
         cache_size: usize,
     },
+    /// IVF whose partitions live in object storage and load on demand.
+    ///
+    /// Chosen at rebuild time rather than at CREATE TABLE: partitioning needs the vectors to
+    /// cluster, and there are none when the table is created.
+    PartitionedIvf {
+        nlist: usize,
+        nprobe: usize,
+        max_resident_partitions: usize,
+    },
+
     ScaNN {
         num_leaves: usize,
         num_leaves_to_search: usize,

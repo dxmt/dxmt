@@ -66,6 +66,9 @@ pub enum IndexType {
     /// 磁盘常驻图索引
     #[serde(rename = "enhanced_diskann")]
     EnhancedDiskAnn,
+    /// 分区 IVF，分区常驻对象存储、按需加载
+    #[serde(rename = "partitioned_ivf")]
+    PartitionedIvf,
 }
 
 impl fmt::Display for IndexType {
@@ -78,6 +81,7 @@ impl fmt::Display for IndexType {
             IndexType::Lsh => write!(f, "lsh"),
             IndexType::HnswPq => write!(f, "hnsw_pq"),
             IndexType::EnhancedDiskAnn => write!(f, "enhanced_diskann"),
+            IndexType::PartitionedIvf => write!(f, "partitioned_ivf"),
             IndexType::IvfPq => write!(f, "ivf_pq"),
         }
     }

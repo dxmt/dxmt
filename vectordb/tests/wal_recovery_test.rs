@@ -751,3 +751,71 @@ async fn writes_after_the_last_snapshot_survive_losing_the_machine() {
         ids
     );
 }
+
+#[tokio::test]
+async fn a_large_table_is_partitioned_on_rebuild_and_still_answers() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 8, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+
+    // Distinct vectors on purpose. A modular formula wraps and produces exact duplicates, and
+    // then the "nearest neighbour" is a tie whose ordering says nothing about the index.
+    let rows: Vec<_> = (0..500)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.37).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    let probe = rows[123].vector.clone();
+    storage.insert_records("t", rows).await.unwrap();
+
+    let before = storage.search("t", query(probe.clone(), 5)).await.unwrap();
+    assert_eq!(
+        before.hits[0].id, "r123",
+        "the pre-rebuild index did not find the exact match"
+    );
+
+    // Below the default threshold nothing should change; force it down instead of inserting
+    // a hundred thousand rows in a unit test.
+    std::env::set_var("DB_PARTITION_THRESHOLD", "100");
+    storage.rebuild_index("t").await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD");
+
+    let table_meta = storage.get_table("t").await.unwrap();
+    assert_eq!(
+        table_meta.index_type.to_string(),
+        "partitioned_ivf",
+        "the table did not switch to a partitioned index"
+    );
+
+    // Segments must exist in the object store, not just in memory.
+    let bucket = shared.join("ssd").join("test-bucket").join("partitions");
+    assert!(
+        bucket.exists(),
+        "no partition segments were written to object storage"
+    );
+
+    // The query vector is one of the indexed rows, so the exact match must come back first.
+    // IVF is approximate in general, but a vector cannot miss the partition its own centroid
+    // chose — if this fails, partitioning or the distance function is wrong, not recall.
+    let after = storage.search("t", query(probe, 5)).await.unwrap();
+    assert_eq!(
+        after.hits[0].id,
+        "r123",
+        "the exact match was lost after partitioning: {:?}",
+        after.hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.hits.len(),
+        5,
+        "partitioned search returned fewer hits"
+    );
+}

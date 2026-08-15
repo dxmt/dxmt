@@ -110,6 +110,19 @@ impl IndexWrapper {
         index.is_empty()
     }
 
+    /// Build the whole index from `vectors` in one pass.
+    pub async fn bulk_build(&self, vectors: Vec<(RecordId, DenseVector)>) -> Result<()> {
+        let mut index = self.index.write().await;
+        index
+            .bulk_build(
+                vectors
+                    .into_iter()
+                    .map(|(id, v)| (id.to_string(), v))
+                    .collect(),
+            )
+            .await
+    }
+
     /// Write the index to `path`; false means this index type has no on-disk form.
     pub async fn snapshot_to(&self, path: &std::path::Path) -> Result<bool> {
         let index = self.index.read().await;

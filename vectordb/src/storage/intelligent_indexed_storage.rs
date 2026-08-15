@@ -467,6 +467,7 @@ fn index_type_of(algorithm: &IndexAlgorithm) -> crate::types::table::IndexType {
         IndexAlgorithm::HNSW { .. } => IndexType::Hnsw,
         IndexAlgorithm::HnswPQ { .. } => IndexType::HnswPq,
         IndexAlgorithm::EnhancedDiskANN { .. } => IndexType::EnhancedDiskAnn,
+        IndexAlgorithm::PartitionedIvf { .. } => IndexType::PartitionedIvf,
         IndexAlgorithm::QuantizedIVF { .. } => IndexType::IvfPq,
         // Unreachable in practice: create_index_instance rejects these before a table exists.
         IndexAlgorithm::DiskANN { .. } => IndexType::EnhancedDiskAnn,
@@ -2376,10 +2377,36 @@ impl IntelligentIndexedStorage {
             };
 
             let selector = IntelligentIndexSelector::new();
-            let decision = selector.select_optimal_index(&config).await?;
-            let algorithm = decision.selected_algorithm.clone();
+            let mut decision = selector.select_optimal_index(&config).await?;
 
-            let new_index = self.create_index_instance(&algorithm, dimension, distance_metric)?;
+            // Above this size, and with somewhere to put the segments, partition instead. This
+            // is the only point where partitioning can be decided: it needs the vectors in hand
+            // to cluster them, and at CREATE TABLE there are none. Below the threshold a
+            // resident index is simply faster — fetching a segment costs a round trip that a
+            // small table never needs to pay.
+            let partition_threshold = std::env::var("DB_PARTITION_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100_000);
+
+            if self.object_storage_enabled && record_count >= partition_threshold {
+                let nlist = ((record_count as f64).sqrt() as usize).clamp(16, 4096);
+                decision.selected_algorithm = IndexAlgorithm::PartitionedIvf {
+                    nlist,
+                    nprobe: (nlist / 8).max(4),
+                    max_resident_partitions: (nlist / 4).max(8),
+                };
+                info!(
+                    "rebuild_index: {} records with object storage configured — partitioning \
+                     into {} segments",
+                    record_count, nlist
+                );
+            }
+
+            let algorithm = decision.selected_algorithm.clone();
+            let table_id = table_data.table.id.to_string();
+            let new_index =
+                self.create_index_instance_for(&algorithm, dimension, distance_metric, &table_id)?;
             let new_wrapper = crate::search::IndexWrapper::new(new_index);
 
             let records_snapshot: Vec<(RecordId, Vec<f32>)> = table_data
@@ -2390,6 +2417,7 @@ impl IntelligentIndexedStorage {
 
             // Swap in the empty new index; update table_data bookkeeping
             table_data.index = new_wrapper.clone();
+            table_data.table.index_type = index_type_of(&algorithm);
             table_data.selected_algorithm = algorithm;
             table_data.index_decision = decision;
 
@@ -2401,10 +2429,10 @@ impl IntelligentIndexedStorage {
             (new_wrapper, records_snapshot)
         };
 
-        // Phase 2: populate the new index outside the write lock
-        for (id, vector) in records_snapshot {
-            new_wrapper.insert(id, vector).await?;
-        }
+        // Phase 2: populate the new index outside the write lock. bulk_build rather than a
+        // loop of inserts, because a partitioned index has to see every vector at once to
+        // cluster it — inserting one at a time would leave the lot in its overflow buffer.
+        new_wrapper.bulk_build(records_snapshot).await?;
 
         // A rebuild is the one moment we know the index is both current and expensive to
         // reproduce, so snapshot it. Failure is logged, not propagated: the rebuild itself
@@ -2598,6 +2626,16 @@ impl IntelligentIndexedStorage {
         dimension: usize,
         distance_metric: DistanceMetric,
     ) -> crate::Result<Box<dyn VectorIndex + Send + Sync>> {
+        self.create_index_instance_for(algorithm, dimension, distance_metric, "default")
+    }
+
+    fn create_index_instance_for(
+        &self,
+        algorithm: &IndexAlgorithm,
+        dimension: usize,
+        distance_metric: DistanceMetric,
+        table_id: &str,
+    ) -> crate::Result<Box<dyn VectorIndex + Send + Sync>> {
         match algorithm {
             IndexAlgorithm::BruteForce { .. } => {
                 // BruteForce索引, with optional GPU acceleration
@@ -2723,6 +2761,29 @@ impl IntelligentIndexedStorage {
                     index_dir,
                     Some(config),
                 )?))
+            }
+
+            IndexAlgorithm::PartitionedIvf {
+                nlist,
+                nprobe,
+                max_resident_partitions,
+            } => {
+                use crate::search::partitioned_ivf::{PartitionedIvfConfig, PartitionedIvfIndex};
+
+                // The prefix must be stable for a table and safe as an object key, so it uses
+                // the table's UUID rather than its name — names come from user input.
+                let index = PartitionedIvfIndex::new(
+                    distance_metric,
+                    format!("partitions/{}", table_id),
+                    Some(PartitionedIvfConfig {
+                        nlist: *nlist,
+                        nprobe: *nprobe,
+                        max_resident_partitions: *max_resident_partitions,
+                        max_iterations: 20,
+                    }),
+                )
+                .with_store(self.storage.clone());
+                Ok(Box::new(index))
             }
 
             IndexAlgorithm::ScaNN { .. } => Err(crate::Error::InvalidInput(

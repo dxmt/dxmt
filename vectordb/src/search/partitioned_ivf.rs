@@ -276,6 +276,10 @@ impl VectorIndex for PartitionedIvfIndex {
         Ok(())
     }
 
+    async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        self.rebuild(vectors).await
+    }
+
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
         let metric = self.state.distance_metric;
         let mut hits: Vec<(String, f32)> = Vec::new();

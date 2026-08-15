@@ -56,6 +56,10 @@ impl IndexFactory {
                 "Enhanced DiskANN is built by IntelligentIndexedStorage, not this factory"
                     .to_string(),
             )),
+            IndexType::PartitionedIvf => Err(crate::Error::InvalidInput(
+                "Partitioned IVF needs an object store; it is built by IntelligentIndexedStorage"
+                    .to_string(),
+            )),
         }
     }
 

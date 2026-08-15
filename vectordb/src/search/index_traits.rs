@@ -40,6 +40,18 @@ pub trait VectorIndex: Send + Sync {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;
 
+    /// Build the index from a complete vector set in one pass.
+    ///
+    /// The default inserts one at a time, which is right for graph indexes. Partitioned indexes
+    /// override it because they need every vector at once to cluster — feeding them one by one
+    /// would leave everything in an overflow buffer and build no partitions at all.
+    async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        for (id, vector) in vectors {
+            self.add(id, vector).await?;
+        }
+        Ok(())
+    }
+
     /// Write this index to `path`, returning false if the implementation has no on-disk form.
     ///
     /// `SerializableIndex::load` is a static constructor, so it cannot live on this trait — the
