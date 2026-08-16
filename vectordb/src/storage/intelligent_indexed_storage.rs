@@ -1500,6 +1500,19 @@ impl IntelligentIndexedStorage {
                         .map(|i| Box::new(i) as Box<dyn VectorIndex>)
                         .ok()
                 }
+                IndexAlgorithm::PartitionedIvf { .. } => {
+                    // The saved state holds centroids and partition metadata, not the segments —
+                    // those live in object storage — so the store has to be re-attached or every
+                    // probe reads an empty partition. Falling through to the catch-all instead
+                    // silently downgraded the table to whatever a zero-row table would get,
+                    // orphaned its segments, and paid the full re-insert that snapshots exist to
+                    // avoid.
+                    crate::search::partitioned_ivf::PartitionedIvfIndex::load(idx_path)
+                        .map(|i| {
+                            Box::new(i.with_store(self.storage.clone())) as Box<dyn VectorIndex>
+                        })
+                        .ok()
+                }
                 // BruteForce and the variants that fall back to it have no on-disk form worth
                 // loading; re-inserting is as cheap as reading the file would be.
                 _ => None,
@@ -1516,6 +1529,12 @@ impl IntelligentIndexedStorage {
         let index_restored = restored_index.is_some();
         if let Some(index) = restored_index {
             data.index.replace(index).await;
+            // create_table above decided an algorithm for a table with no rows in it. The
+            // snapshot knows which one this table actually had; without carrying it over the
+            // metadata reports the wrong index type and the next re-evaluation sweep sees a
+            // mismatch and rebuilds a table that was already correct.
+            data.table.index_type = index_type_of(&meta.algorithm);
+            data.selected_algorithm = meta.algorithm.clone();
         }
 
         for record in &meta.records {

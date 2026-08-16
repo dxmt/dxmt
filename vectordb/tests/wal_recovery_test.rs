@@ -1649,3 +1649,165 @@ fn walk_files(dir: &std::path::Path) -> Vec<String> {
     }
     out
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_selective_filter_works_on_a_partitioned_table() {
+    use dxmt_vectordb::types::record::{Condition, Filter, FilterOperation};
+
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+        .await
+        .unwrap();
+
+    storage
+        .create_table(table("t", 32, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+
+    // One record in fifty carries the rare tag, so a filter on it is ~2% selective — the range
+    // where the strategy switches away from a plain post-filter.
+    let rows: Vec<_> = (0..1000)
+        .map(|i| {
+            let v: Vec<f32> = (0..32).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+            CreateRecordRequest {
+                id: format!("r{}", i),
+                vector: v,
+                sparse_vector: None,
+                named_vectors: None,
+                payload: Some(serde_json::json!({
+                    "tag": if i % 50 == 0 { "rare" } else { "common" }
+                })),
+            }
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    let filter = Filter {
+        must: Some(vec![Condition {
+            key: "tag".to_string(),
+            operation: FilterOperation::Equal(serde_json::json!("rare")),
+        }]),
+        must_not: None,
+        should: None,
+    };
+
+    let filtered_query = |v: Vec<f32>| SearchQuery {
+        vector: v,
+        top_k: 5,
+        limit: 5,
+        filter: Some(filter.clone()),
+        with_payload: true,
+        include_metadata: true,
+        ..Default::default()
+    };
+
+    let probe: Vec<f32> = (0..32).map(|d| 5.0 + d as f32 * 0.03).collect();
+    let before = storage
+        .search("t", filtered_query(probe.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        before.hits.len(),
+        5,
+        "the filter found nothing before partitioning"
+    );
+
+    // Now partition the table and ask again. The partitioned index does not implement in-graph
+    // filtering, so this exercises whatever the storage layer falls back to — a combination
+    // nothing else covers.
+    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    storage.rebuild_index("t").await.unwrap();
+    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "partitioned_ivf"
+    );
+
+    let after = storage.search("t", filtered_query(probe)).await.unwrap();
+    assert_eq!(
+        after.hits.len(),
+        5,
+        "a selective filter returned {} of 5 hits on a partitioned table",
+        after.hits.len()
+    );
+    for hit in &after.hits {
+        assert_eq!(
+            hit.payload
+                .as_ref()
+                .and_then(|p| p.get("tag"))
+                .and_then(|t| t.as_str()),
+            Some("rare"),
+            "the filter let a non-matching record through"
+        );
+    }
+    let before_ids: Vec<_> = before.hits.iter().map(|h| &h.id).collect();
+    let after_ids: Vec<_> = after.hits.iter().map(|h| &h.id).collect();
+    assert_eq!(
+        before_ids, after_ids,
+        "partitioning changed the filtered answer"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_partitioned_table_is_still_partitioned_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir.clone()))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 64, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        let rows: Vec<_> = (0..400)
+            .map(|i| {
+                let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records("t", rows).await.unwrap();
+
+        std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+        storage.rebuild_index("t").await.unwrap();
+        std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+        assert_eq!(
+            storage.get_table("t").await.unwrap().index_type.to_string(),
+            "partitioned_ivf"
+        );
+        storage.snapshot().await.unwrap();
+    }
+
+    // Restoring only knew how to rebuild HNSW and HNSW-PQ from their segments; anything else
+    // fell through to "re-insert every record", which silently downgrades a partitioned table
+    // to whatever a zero-row table would have been given, orphans its segments, and pays the
+    // full rebuild cost that snapshots exist to avoid.
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recovered
+            .get_table("t")
+            .await
+            .unwrap()
+            .index_type
+            .to_string(),
+        "partitioned_ivf",
+        "a partitioned table came back as something else"
+    );
+
+    let probe: Vec<f32> = (0..64).map(|d| 123.0 * 0.01 + d as f32 * 0.03).collect();
+    let hits = recovered.search("t", query(probe, 1)).await.unwrap();
+    assert_eq!(
+        hits.hits[0].id, "r123",
+        "the restored partitioned index answers differently"
+    );
+}
