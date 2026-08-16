@@ -439,11 +439,14 @@ impl PartitionedIvfIndex {
         self.resident.write().await.remove(&pid);
         self.last_used.write().await.remove(&pid);
 
-        if let Some(ref store) = self.store {
-            // A leaked segment costs storage, not correctness — nothing references it once the
-            // metadata is gone.
-            let _ = store.delete_object(&self.partition_key(pid)).await;
-        }
+        // Deliberately not deleted. A snapshot taken before this maintenance still names this
+        // partition, and recovering from it has to be able to read the records inside — a split
+        // writes two segments under ids that snapshot has never heard of, so removing the
+        // original loses everything in it. The segment becomes garbage only once a snapshot
+        // exists that does not reference it, which is when the storage layer collects it.
+        //
+        // chroma's garbage collector states the same rule: nothing a live version references
+        // gets deleted.
     }
 
     /// 写一个分区，并把它放进常驻缓存。
@@ -538,6 +541,16 @@ impl VectorIndex for PartitionedIvfIndex {
 
     async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
         self.rebuild(vectors).await
+    }
+
+    fn live_segment_keys(&self) -> Option<Vec<String>> {
+        Some(
+            self.state
+                .partitions
+                .iter()
+                .map(|p| self.partition_key(p.id))
+                .collect(),
+        )
     }
 
     async fn maintain(&mut self) -> crate::Result<bool> {

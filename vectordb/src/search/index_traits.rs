@@ -62,6 +62,15 @@ pub trait VectorIndex: Send + Sync {
         Ok(false)
     }
 
+    /// Object-storage keys this index still needs, or None if it keeps nothing there.
+    ///
+    /// Used to collect segments that maintenance superseded. They cannot be deleted when they
+    /// are superseded, because a snapshot taken earlier still names them — dropping them then
+    /// makes that snapshot unable to recover the records they hold.
+    fn live_segment_keys(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Write this index to `path`, returning false if the implementation has no on-disk form.
     ///
     /// `SerializableIndex::load` is a static constructor, so it cannot live on this trait — the

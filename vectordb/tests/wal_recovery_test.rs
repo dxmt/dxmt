@@ -1811,3 +1811,73 @@ async fn a_partitioned_table_is_still_partitioned_after_a_restart() {
         "the restored partitioned index answers differently"
     );
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn maintenance_after_a_snapshot_does_not_strand_that_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir.clone()))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 64, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        let rows: Vec<_> = (0..600)
+            .map(|i| {
+                let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records("t", rows).await.unwrap();
+
+        // Held for the whole block: without it re-evaluation decides the table is too small to
+        // partition and rebuilds it as HNSW, so maintenance never runs and this tests nothing.
+        std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+        storage.rebuild_index("t").await.unwrap();
+
+        // A snapshot pins this shape of the index: its metadata names the partition ids that
+        // existed at this moment.
+        storage.snapshot().await.unwrap();
+
+        // Then maintenance runs, as the periodic sweep would. Enough new records that
+        // partitions cross the split threshold: a split deletes the old segment and writes two
+        // new ones under ids the snapshot has never heard of, so recovering from that snapshot
+        // afterwards probes a partition that is gone and never probes the two that replaced it.
+        // A missing segment costs recall silently — search warns and carries on.
+        //
+        // Merges are benign by comparison: the absorbing partition's id is already in the
+        // snapshot, so its records are still reachable. Splits are the case that loses data.
+        let more: Vec<_> = (600..3600)
+            .map(|i| {
+                let v: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records("t", more).await.unwrap();
+        storage.reevaluate_indexes().await.unwrap();
+        std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    }
+
+    // Crash here: recovery uses the snapshot taken before maintenance ran.
+    let recovered = IntelligentIndexedStorage::new_with_wal(&config, Some(wal_dir))
+        .await
+        .unwrap();
+
+    // Every record must still be findable, from before and after the snapshot alike.
+    for i in [0usize, 300, 599, 700, 3599] {
+        let probe: Vec<f32> = (0..64).map(|d| i as f32 * 0.01 + d as f32 * 0.03).collect();
+        let hits = recovered.search("t", query(probe, 1)).await.unwrap();
+        assert_eq!(
+            hits.hits[0].id,
+            format!("r{}", i),
+            "r{} was not found after maintenance ran past a snapshot",
+            i
+        );
+    }
+}

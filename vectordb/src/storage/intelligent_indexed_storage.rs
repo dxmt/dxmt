@@ -937,6 +937,17 @@ impl IntelligentIndexedStorage {
             Err(e) => warn!("Snapshot written but WAL compaction failed: {}", e),
         }
 
+        // Now, and only now, collect segments that maintenance superseded. The snapshot just
+        // written names the partitions the index currently has, and the WAL below `seq` is
+        // gone, so nothing that can still be recovered refers to anything else.
+        //
+        // Maintenance cannot do this itself: at the moment it splits a partition, the previous
+        // snapshot still names the original, and recovery from it has to be able to read the
+        // records inside.
+        if self.object_storage_enabled {
+            self.collect_superseded_segments().await;
+        }
+
         info!(
             "Snapshot written: {} tables at WAL sequence {}",
             written, seq
@@ -2826,6 +2837,51 @@ impl IntelligentIndexedStorage {
         }
 
         Ok(())
+    }
+
+    /// 删掉已被维护取代、且当前快照不再引用的分区段。
+    async fn collect_superseded_segments(&self) {
+        use crate::storage::object::traits::ObjectStorage;
+
+        let live: Vec<(String, Vec<String>)> = {
+            let tables = self.tables.read().await;
+            let mut out = Vec::new();
+            for data in tables.values() {
+                if let Some(keys) = data.index.live_segment_keys().await {
+                    out.push((data.table.id.to_string(), keys));
+                }
+            }
+            out
+        };
+
+        for (table_id, keys) in live {
+            let live: std::collections::HashSet<String> = keys.into_iter().collect();
+            let prefix = format!("partitions/{}/", table_id);
+            let options = crate::storage::object::types::ListObjectsOptions {
+                prefix: Some(prefix.clone()),
+                max_keys: None,
+                continuation_token: None,
+                delimiter: None,
+            };
+            let Ok(listed) = self.storage.list_objects(&options).await else {
+                continue;
+            };
+
+            let mut collected = 0usize;
+            for object in listed.objects {
+                if !live.contains(&object.key)
+                    && self.storage.delete_object(&object.key).await.is_ok()
+                {
+                    collected += 1;
+                }
+            }
+            if collected > 0 {
+                debug!(
+                    "Collected {} superseded segment(s) under {}",
+                    collected, prefix
+                );
+            }
+        }
     }
 
     /// 删掉一张表在对象存储上的全部分区段。

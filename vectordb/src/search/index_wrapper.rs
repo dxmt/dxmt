@@ -132,6 +132,12 @@ impl IndexWrapper {
         index.maintain().await
     }
 
+    /// Object-storage keys this index still needs, if it keeps any.
+    pub async fn live_segment_keys(&self) -> Option<Vec<String>> {
+        let index = self.index.read().await;
+        index.live_segment_keys()
+    }
+
     /// Write the index to `path`; false means this index type has no on-disk form.
     pub async fn snapshot_to(&self, path: &std::path::Path) -> Result<bool> {
         let index = self.index.read().await;
