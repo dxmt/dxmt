@@ -161,6 +161,12 @@ pub struct IntelligentIndexedStorage {
     /// WAL 目录，快照写在它下面的 `snapshot/`。
     wal_dir: Option<PathBuf>,
 
+    /// 快照必须串行。四个调用点能在同一进程里并发：定期快照、淘汰前快照、重建后快照、
+    /// `POST /snapshot`。它们共用一个 staging 目录、一套位置命名（`t0`/`t1`…）和同一次
+    /// 日志截断，并发跑会互相拆台——后果从"索引被静默丢掉"一路到"日志被截断到落盘快照
+    /// 覆盖不到的位置"，也就是静默丢数据。
+    snapshotting: Arc<tokio::sync::Mutex<()>>,
+
     /// 对象存储上 WAL 的清单，常驻内存，每次变更后回写。
     wal_manifest: Arc<StdMutex<WalManifest>>,
 
@@ -683,6 +689,7 @@ impl IntelligentIndexedStorage {
             insert_tx,
             wal: None,
             wal_dir: None,
+            snapshotting: Arc::new(tokio::sync::Mutex::new(())),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             replaying: replaying_flag,
             #[cfg(feature = "gpu")]
@@ -796,6 +803,11 @@ impl IntelligentIndexedStorage {
             ));
         };
 
+        // Serialize before reading the sequence number, not after: two snapshots that both
+        // sampled the sequence and then queued would still truncate the log to the later one's
+        // position while the earlier one's manifest is what ends up on disk.
+        let _serialized = self.snapshotting.lock().await;
+
         let seq = {
             let mut guard = wal
                 .lock()
@@ -819,7 +831,18 @@ impl IntelligentIndexedStorage {
             // 表名来自用户输入，不能直接当文件名。用序号命名，真实名字放进元数据。
             let stem = format!("t{}", written);
             let idx_path = staging.join(format!("{}.idx", stem));
-            let has_index = data.index.snapshot_to(&idx_path).await.unwrap_or(false);
+            // `Ok(false)` means this index type has no on-disk form, which is normal for
+            // BruteForce. An `Err` means one that does have a form failed to write it, and
+            // recording that as `has_index: false` is a lie the restore path cannot detect —
+            // it just rebuilds the graph from the rows, correctly and arbitrarily slowly.
+            // Fail the snapshot instead: the WAL still covers everything, so the cost is a
+            // warning and one skipped snapshot.
+            let has_index = data.index.snapshot_to(&idx_path).await.map_err(|e| {
+                crate::Error::Internal(format!(
+                    "table '{}': index would not write itself to the snapshot: {}",
+                    name, e
+                ))
+            })?;
 
             let meta = TableSnapshot {
                 table: data.table.clone(),
@@ -1296,12 +1319,12 @@ impl IntelligentIndexedStorage {
                 continue;
             }
 
+            // Name both algorithms. This printed `std::mem::discriminant(&current)`, which
+            // renders as `Discriminant(0)` — the reader has to know the variant order of
+            // `IndexAlgorithm` to decode which index the table is actually leaving.
             info!(
-                "Table '{}' has grown to {} records; {:?} no longer fits, rebuilding as {:?}",
-                name,
-                count,
-                std::mem::discriminant(&current),
-                want
+                "Table '{}' at {} records: {:?} no longer suits it, rebuilding as {:?}",
+                name, count, current, want
             );
             match self.rebuild_index(&name).await {
                 Ok(()) => rebuilt.push(name),
@@ -1501,16 +1524,31 @@ impl IntelligentIndexedStorage {
         };
         self.create_table(config).await?;
 
+        // A load failure is not the same as "this index has no on-disk form". The snapshot said
+        // it wrote one; if it will not read back, the fallback below silently pays the full
+        // re-index that the snapshot existed to avoid, and the only symptom is a startup that
+        // takes minutes instead of seconds. Say so.
+        let loaded = |r: crate::Result<Box<dyn VectorIndex>>| match r {
+            Ok(i) => Some(i),
+            Err(e) => {
+                warn!(
+                    "Table '{}': the snapshot's index would not load ({}); rebuilding it from \
+                     the rows instead",
+                    name, e
+                );
+                None
+            }
+        };
         let restored_index = if meta.has_index {
             match &meta.algorithm {
-                IndexAlgorithm::HNSW { .. } => crate::search::hnsw::HnswIndex::load(idx_path)
-                    .map(|i| Box::new(i) as Box<dyn VectorIndex>)
-                    .ok(),
-                IndexAlgorithm::HnswPQ { .. } => {
+                IndexAlgorithm::HNSW { .. } => loaded(
+                    crate::search::hnsw::HnswIndex::load(idx_path)
+                        .map(|i| Box::new(i) as Box<dyn VectorIndex>),
+                ),
+                IndexAlgorithm::HnswPQ { .. } => loaded(
                     crate::search::hnsw_pq::HnswPqIndex::load(idx_path)
-                        .map(|i| Box::new(i) as Box<dyn VectorIndex>)
-                        .ok()
-                }
+                        .map(|i| Box::new(i) as Box<dyn VectorIndex>),
+                ),
                 IndexAlgorithm::PartitionedIvf { .. } => {
                     // The saved state holds centroids and partition metadata, not the segments —
                     // those live in object storage — so the store has to be re-attached or every
@@ -1518,11 +1556,13 @@ impl IntelligentIndexedStorage {
                     // silently downgraded the table to whatever a zero-row table would get,
                     // orphaned its segments, and paid the full re-insert that snapshots exist to
                     // avoid.
-                    crate::search::partitioned_ivf::PartitionedIvfIndex::load(idx_path)
-                        .map(|i| {
-                            Box::new(i.with_store(self.storage.clone())) as Box<dyn VectorIndex>
-                        })
-                        .ok()
+                    loaded(
+                        crate::search::partitioned_ivf::PartitionedIvfIndex::load(idx_path).map(
+                            |i| {
+                                Box::new(i.with_store(self.storage.clone())) as Box<dyn VectorIndex>
+                            },
+                        ),
+                    )
                 }
                 // BruteForce and the variants that fall back to it have no on-disk form worth
                 // loading; re-inserting is as cheap as reading the file would be.
@@ -1540,13 +1580,25 @@ impl IntelligentIndexedStorage {
         let index_restored = restored_index.is_some();
         if let Some(index) = restored_index {
             data.index.replace(index).await;
-            // create_table above decided an algorithm for a table with no rows in it. The
-            // snapshot knows which one this table actually had; without carrying it over the
-            // metadata reports the wrong index type and the next re-evaluation sweep sees a
-            // mismatch and rebuilds a table that was already correct.
-            data.table.index_type = index_type_of(&meta.algorithm);
-            data.selected_algorithm = meta.algorithm.clone();
+        } else {
+            // No on-disk form, so the rows get re-indexed below — but into *which* index? The
+            // one `create_table` just chose from its fixed 10,000-row estimate, which is how a
+            // 94,000-row BruteForce table came back as HNSW and spent over ten minutes building
+            // a graph it never had, before the server could bind its port. The snapshot recorded
+            // the algorithm; use it.
+            let fresh = self.create_index_instance_for(
+                &meta.algorithm,
+                dimension,
+                metric,
+                &data.table.id.to_string(),
+            )?;
+            data.index.replace(fresh).await;
         }
+        // Either way the snapshot, not the estimate, is the authority on this table's index.
+        // Without carrying it over the metadata reports the wrong type and the next
+        // re-evaluation sweep sees a mismatch and rebuilds a table that was already correct.
+        data.table.index_type = index_type_of(&meta.algorithm);
+        data.selected_algorithm = meta.algorithm.clone();
 
         for record in &meta.records {
             data.records.insert(record.id.clone(), record.clone());
@@ -1564,10 +1616,12 @@ impl IntelligentIndexedStorage {
         let wrapper = data.index.clone();
         drop(tables);
 
-        // Only reached when the index had no on-disk form. Doing it outside the write lock
-        // keeps a large table from blocking every reader for the duration.
-        for (id, vector) in to_index {
-            wrapper.insert(id, vector).await?;
+        // Only reached when the index had no on-disk form, or would not load. Outside the write
+        // lock, so a large table does not block every reader for the duration — and through
+        // bulk_build rather than a loop of inserts, because a partitioned index has to see every
+        // vector at once to cluster it; fed one at a time the lot ends up in its overflow buffer.
+        if !to_index.is_empty() {
+            wrapper.bulk_build(to_index).await?;
         }
 
         Ok(())
@@ -2966,6 +3020,8 @@ impl IntelligentIndexedStorage {
     /// 1. Snapshot records + choose algorithm + swap in a fresh empty index (write lock).
     /// 2. Re-insert all record vectors into the new index (outside lock).
     pub async fn rebuild_index(&self, table_name: &str) -> crate::Result<()> {
+        let started = std::time::Instant::now();
+
         // Phase 1: snapshot + select + swap (write lock)
         let (new_wrapper, records_snapshot, algorithm, decision) = {
             let tables = self.tables.read().await;
@@ -3073,12 +3129,18 @@ impl IntelligentIndexedStorage {
                 }
             }
 
-            if caught_up > 0 || final_delta > 0 {
-                info!(
-                    "rebuild_index: caught up {} records outside the lock, {} under it",
-                    caught_up, final_delta
-                );
-            }
+            // Unconditional, because this is the only line that says the swap happened. With it
+            // conditional on there being a delta, a rebuild that was still running looked
+            // identical to one that had finished: the start line and nothing after it. A 37k-row
+            // HNSW rebuild ran for 47s under write load and I could not tell which it was.
+            info!(
+                "rebuild_index: table='{}' swapped in after {:.2}s ({} records caught up outside \
+                 the lock, {} under it)",
+                table_name,
+                started.elapsed().as_secs_f64(),
+                caught_up,
+                final_delta
+            );
 
             table_data.index = new_wrapper.clone();
             table_data.table.index_type = index_type_of(&algorithm);

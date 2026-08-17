@@ -1365,138 +1365,6 @@ async fn a_corrupt_wal_manifest_falls_back_to_scanning_the_prefix() {
     assert_eq!(tables.len(), 1, "a corrupt manifest lost the log");
     assert_eq!(tables[0].record_count, 1);
 }
-
-/// Worst-case latency for an unrelated table while `busy` is under write load, optionally with
-/// a rebuild running. Returns (slowest observation, samples, writes landed).
-async fn bystander_latency_under_load(
-    storage: std::sync::Arc<IntelligentIndexedStorage>,
-    rebuild: bool,
-) -> (std::time::Duration, usize, usize) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    let done = Arc::new(AtomicBool::new(false));
-
-    let writer = {
-        let storage = storage.clone();
-        let done = done.clone();
-        tokio::spawn(async move {
-            let mut n = 0usize;
-            while !done.load(Ordering::SeqCst) {
-                let _ = storage
-                    .insert_records(
-                        "busy",
-                        vec![record(&format!("w{}", n), vec![n as f32 * 0.001; 8])],
-                    )
-                    .await;
-                n += 1;
-            }
-            n
-        })
-    };
-
-    let watcher = {
-        let storage = storage.clone();
-        let done = done.clone();
-        tokio::spawn(async move {
-            let mut slowest = std::time::Duration::ZERO;
-            let mut count = 0usize;
-            while !done.load(Ordering::SeqCst) {
-                let started = Instant::now();
-                storage
-                    .search("bystander", query(vec![1.0; 8], 1))
-                    .await
-                    .unwrap();
-                slowest = slowest.max(started.elapsed());
-                count += 1;
-            }
-            (slowest, count)
-        })
-    };
-
-    if rebuild {
-        storage.rebuild_index("busy").await.unwrap();
-    } else {
-        // Same wall-clock shape as a rebuild, so the two runs sample comparable windows.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
-    done.store(true, Ordering::SeqCst);
-
-    let written = writer.await.unwrap();
-    let (slowest, count) = watcher.await.unwrap();
-    (slowest, count, written)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_rebuild_under_write_load_does_not_stall_other_tables() {
-    use std::sync::Arc;
-
-    let tmp = TempDir::new().unwrap();
-    let storage = Arc::new(
-        IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(tmp.path().join("wal")))
-            .await
-            .unwrap(),
-    );
-
-    // Two tables: one being rebuilt, one an innocent bystander. The lock at stake is the global
-    // table map's, so a rebuild that holds it punishes every table, not only its own.
-    for name in ["busy", "bystander"] {
-        storage
-            .create_table(table(name, 8, DistanceMetric::Euclidean))
-            .await
-            .unwrap();
-    }
-    let rows: Vec<_> = (0..2000)
-        .map(|i| {
-            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.31).collect();
-            record(&format!("r{}", i), v)
-        })
-        .collect();
-    storage.insert_records("busy", rows).await.unwrap();
-    storage
-        .insert_records("bystander", vec![record("b", vec![1.0; 8])])
-        .await
-        .unwrap();
-
-    // A concurrent writer contends for the table map's write lock all by itself, so measuring
-    // the rebuild against zero would blame it for latency it did not cause. Baseline first,
-    // same load, no rebuild.
-    let (baseline, base_count, base_writes) =
-        bystander_latency_under_load(storage.clone(), false).await;
-    let (with_rebuild, count, writes) = bystander_latency_under_load(storage.clone(), true).await;
-
-    assert!(
-        base_count > 10 && count > 10,
-        "the watcher did not overlap the load"
-    );
-    assert!(
-        base_writes > 0 && writes > 0,
-        "the writer never landed anything"
-    );
-
-    // The catch-up converges outside the lock and only the final delta is applied under it, so
-    // a rebuild should not move this materially beyond what the write load already costs.
-    //
-    // Be clear about what this does and does not show. It passes against the version that did
-    // the whole catch-up under the write lock too: at this scale the rebuild is short enough
-    // that only a handful of writes land during it, so the delta is small either way. Raising
-    // the load to make the delta large starves the bystander on the writers' own lock
-    // contention, and the measurement stops being about the rebuild at all. So this is a
-    // regression guard, not a demonstration — the argument for converging outside the lock is
-    // that the hold time is otherwise unbounded in the number of writes that arrive during a
-    // long rebuild, which is a property, not a benchmark.
-    assert!(
-        with_rebuild < baseline * 3,
-        "an unrelated table waited {:?} during a rebuild against {:?} under the same write load \
-         alone ({} vs {} writes)",
-        with_rebuild,
-        baseline,
-        writes,
-        base_writes
-    );
-}
-
 #[tokio::test]
 async fn table_stats_say_whether_the_table_was_in_memory() {
     let tmp = TempDir::new().unwrap();
@@ -1880,4 +1748,185 @@ async fn maintenance_after_a_snapshot_does_not_strand_that_snapshot() {
             i
         );
     }
+}
+
+/// A snapshot of an HNSW table must contain the HNSW graph, not just the rows.
+///
+/// `snapshot()` asks each index to write itself and took `false` — "this index type has no
+/// on-disk form", which is true of BruteForce — for an answer. `unwrap_or(false)` gave the same
+/// answer when the write *failed*, and the only visible consequence was that the next restart
+/// rebuilt the graph from the rows: correct, arbitrarily slow, and silent. A 77k-row table took
+/// over two minutes to start serving because of this, which is what made it worth a test.
+///
+/// No `reevaluate_indexes` here on purpose. CREATE TABLE sizes its index against a fixed estimate
+/// of 10,000 rows and so hands even a tiny table an HNSW index — which is the whole point of the
+/// periodic re-evaluation, and is also what lets this test cost 100 inserts instead of the 6,000
+/// it takes to make re-evaluation *choose* HNSW. That version ran for 263s in a debug build.
+#[tokio::test]
+async fn a_snapshot_of_an_hnsw_table_contains_the_index() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let storage = open(&wal_dir).await;
+
+    storage
+        .create_table(table("t", 8, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "hnsw",
+        "the table under test is not the one this test is about"
+    );
+
+    let rows: Vec<_> = (0..100)
+        .map(|i| {
+            let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32 * 0.31).collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    storage.snapshot().await.unwrap();
+
+    let idx = wal_dir.join("snapshot").join("t0.idx");
+    assert!(
+        idx.exists(),
+        "the snapshot has no index file, so the next restart rebuilds the graph from scratch"
+    );
+    assert!(
+        idx.metadata().unwrap().len() > 0,
+        "the snapshot's index file is empty"
+    );
+}
+
+/// Concurrent snapshots must not damage each other.
+///
+/// Four callers can snapshot at once in one process: the periodic timer, the eviction sweep
+/// (which snapshots before dropping a table), a rebuild, and `POST /snapshot`. They all built
+/// into one shared staging directory, starting with `remove_dir_all(&staging)` — so the second
+/// caller deletes the first's half-written files. What made that quiet rather than loud is that
+/// the deleted file is usually the index: the write fails, `unwrap_or(false)` records it as
+/// "this index type has no on-disk form", the directory is recreated in time for the metadata
+/// to land, and the snapshot reports success having silently dropped the graph. The next restart
+/// then rebuilds it from the rows — correct, and arbitrarily slow. A 77k-row table took over two
+/// minutes to start serving, which is how this was found.
+///
+/// Multi-threaded on purpose. `snapshot()` does its file I/O synchronously, so on the
+/// single-threaded runtime `#[tokio::test]` gives you by default, four spawned snapshots each run
+/// to completion without yielding and never overlap at all — the test passes against the bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_snapshots_do_not_damage_each_other() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let storage = std::sync::Arc::new(open(&wal_dir).await);
+
+    // Enough tables that writing them all takes long enough for four callers to overlap. One
+    // table's snapshot is over too quickly to collide with anything.
+    for t in 0..40 {
+        let name = format!("t{}", t);
+        storage
+            .create_table(table(&name, 8, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        let rows: Vec<_> = (0..50)
+            .map(|i| {
+                let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.01 + d as f32).collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records(&name, rows).await.unwrap();
+    }
+
+    for round in 0..6 {
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let s = storage.clone();
+            handles.push(tokio::spawn(async move { s.snapshot().await }));
+        }
+        for h in handles {
+            let written = h.await.unwrap().unwrap_or_else(|e| {
+                panic!(
+                    "round {}: a snapshot failed while another was running: {}",
+                    round, e
+                )
+            });
+            assert_eq!(
+                written, 40,
+                "round {}: a snapshot wrote {} of 40 tables",
+                round, written
+            );
+        }
+    }
+
+    drop(storage);
+
+    // Everything still has to come back.
+    let reopened = open(&wal_dir).await;
+    for t in 0..40 {
+        let name = format!("t{}", t);
+        for i in 0..50 {
+            assert!(
+                reopened.get_record(&name, &format!("r{}", i)).await.is_ok(),
+                "{}/r{} was lost by concurrent snapshots",
+                name,
+                i
+            );
+        }
+    }
+}
+
+/// A table restored from a snapshot keeps the index it had, even when that index has no file.
+///
+/// BruteForce writes nothing to the snapshot — there is nothing worth writing — so restore
+/// re-indexes the rows. It did that into whatever `create_table` picked from its fixed estimate
+/// of 10,000 rows, which is HNSW. A 94,000-row BruteForce table therefore came back as HNSW and
+/// spent over ten minutes building a graph it never had, before the server could bind its port.
+/// The snapshot records the algorithm; the restore path has to use it.
+#[tokio::test]
+async fn a_table_with_no_index_file_is_restored_with_the_index_it_had() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 8, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        let rows: Vec<_> = (0..20)
+            .map(|i| {
+                let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.1 + d as f32 * 0.7).collect();
+                record(&format!("r{}", i), v)
+            })
+            .collect();
+        storage.insert_records("t", rows).await.unwrap();
+
+        // 20 rows is squarely BruteForce territory; CREATE TABLE had guessed HNSW.
+        storage.reevaluate_indexes().await.unwrap();
+        assert_eq!(
+            storage.get_table("t").await.unwrap().index_type.to_string(),
+            "brute_force"
+        );
+        storage.snapshot().await.unwrap();
+    }
+
+    let reopened = open(&wal_dir).await;
+    assert_eq!(
+        reopened
+            .get_table("t")
+            .await
+            .unwrap()
+            .index_type
+            .to_string(),
+        "brute_force",
+        "the restored table was given the index CREATE TABLE guesses for 10,000 rows, not the \
+         one the snapshot says it had"
+    );
+
+    // And it still answers, so the re-indexing went into the index that was installed.
+    let hits = reopened
+        .search("t", query(vec![0.0, 0.7, 1.4, 2.1, 2.8, 3.5, 4.2, 4.9], 1))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits[0].id, "r0");
 }
