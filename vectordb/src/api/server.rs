@@ -52,6 +52,53 @@ pub async fn create_app() -> Result<Router> {
     create_app_with_features(false, false, false).await
 }
 
+/// Warn when the runtime cannot get round to a one-second timer.
+///
+/// This task does nothing but wake up every second and check how late it was. Lateness is not a
+/// property of this task — it is the scheduling delay every other task on the runtime is also
+/// paying, requests included, so it separates two failure modes that look identical from
+/// outside: a request hanging because something holds a lock, and a request hanging because no
+/// worker thread is free to poll it. Only the second one shows up here.
+///
+/// Cheap enough to leave on: one wakeup a second, one comparison, and it logs nothing at all
+/// unless the runtime is already in trouble.
+fn spawn_stall_detector(threshold: std::time::Duration) {
+    if threshold.is_zero() {
+        return;
+    }
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(1);
+        loop {
+            // `sleep` rather than `interval`: an interval has missed-tick semantics — it decides
+            // for itself what to do about deadlines that passed while nothing polled it — and
+            // that is precisely the case being measured here. A version built on `interval` did
+            // not fire at all against a 20-second SIGSTOP, and its silence then got mistaken for
+            // evidence that the runtime was healthy. A sleep is unambiguous: it asked for one
+            // second, so anything past that is scheduling delay.
+            let expected = std::time::Instant::now() + period;
+            tokio::time::sleep(period).await;
+            let late = std::time::Instant::now().saturating_duration_since(expected);
+            if late >= threshold {
+                tracing::warn!(
+                    "Runtime stalled: a 1s timer fired {:.1}s late. Every task on this runtime \
+                     waited that long, so requests did too. Something is holding a worker thread \
+                     without yielding — index builds and searches are the usual candidates.",
+                    late.as_secs_f64()
+                );
+            }
+        }
+    });
+}
+
+/// How late a one-second tick has to be before it is reported, in seconds; 0 disables. Default 3.
+fn stall_threshold_from_env() -> std::time::Duration {
+    let secs = std::env::var("DB_STALL_WARN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Snapshot interval in seconds; 0 disables. Default 300.
 ///
 /// Without a periodic snapshot the WAL only shrinks when someone calls POST /snapshot, so
@@ -342,6 +389,7 @@ pub async fn create_app_with_storage(
     spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
     spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
     spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+    spawn_stall_detector(stall_threshold_from_env());
 
     Ok((app, storage))
 }

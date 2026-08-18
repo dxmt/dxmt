@@ -12,6 +12,81 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use crate::wal::{WalEntry, WalManager};
 use tracing::{debug, error, info, warn};
 
+/// A write guard over the table map that says how long it was held, and by whom.
+///
+/// The table map's lock is the one every request goes through, and tokio's `RwLock` is
+/// write-preferring: while a writer waits, later readers queue behind it too. So one slow writer
+/// stops the whole server, and from outside it looks exactly like a hang. A soak turned up a
+/// 97-second stall where the only thing measurable was the *victim* — a snapshot waiting on the
+/// lock — with nothing naming the holder. This names the holder.
+///
+/// Costs one `Instant::now()` per acquisition and logs nothing under a second.
+struct TimedWrite<'a> {
+    guard: tokio::sync::RwLockWriteGuard<'a, HashMap<String, IntelligentTableData>>,
+    who: &'static str,
+    since: std::time::Instant,
+}
+
+impl std::ops::Deref for TimedWrite<'_> {
+    type Target = HashMap<String, IntelligentTableData>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for TimedWrite<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+/// As [`TimedWrite`], for the read side.
+///
+/// Readers do not block each other, so a long-held read lock looks harmless — until a writer
+/// queues behind it. tokio's `RwLock` is write-preferring, so from that moment every later reader
+/// queues too, and the server stops answering anything. The 97-second stall had no long *writer*
+/// at all; it was one reader holding on while a writer waited behind it.
+struct TimedRead<'a> {
+    guard: tokio::sync::RwLockReadGuard<'a, HashMap<String, IntelligentTableData>>,
+    who: &'static str,
+    since: std::time::Instant,
+}
+
+impl std::ops::Deref for TimedRead<'_> {
+    type Target = HashMap<String, IntelligentTableData>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl Drop for TimedRead<'_> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed();
+        if held >= std::time::Duration::from_secs(1) {
+            warn!(
+                "{} held the table read lock for {:.1}s; anything that wanted to write queued \
+                 behind it, and every later read queued behind that",
+                self.who,
+                held.as_secs_f64()
+            );
+        }
+    }
+}
+
+impl Drop for TimedWrite<'_> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed();
+        if held >= std::time::Duration::from_secs(1) {
+            warn!(
+                "{} held the table write lock for {:.1}s; every read and write on every table \
+                 queued behind it",
+                self.who,
+                held.as_secs_f64()
+            );
+        }
+    }
+}
+
 pub use crate::storage::index_selector::{
     CostConstraints, ExpectedPerformance, HardwareCapabilities, IndexAlgorithm, IndexConfig,
     IndexDecision, IntelligentIndexSelector, PerformanceRequirements,
@@ -350,7 +425,11 @@ async fn insertion_processor(
         // the index insert lands, exactly as before, because search goes through the index.
         let result = async {
             let (index, named_indexes, table_meta, to_remove, to_insert, records) = {
-                let mut tables = tables.write().await;
+                let mut tables = TimedWrite {
+                    guard: tables.write().await,
+                    who: "insertion_processor",
+                    since: std::time::Instant::now(),
+                };
 
                 let table_data = tables
                     .get_mut(&req.table_name)
@@ -823,7 +902,15 @@ impl IntelligentIndexedStorage {
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
 
-        let tables = self.tables.read().await;
+        // Two separate numbers, because they accuse different code. Waiting means somebody else
+        // holds the table map's write lock; holding means this loop is slow. tokio's RwLock is
+        // write-preferring, so either one stops every later reader as well — a soak turned up one
+        // thread at 90% CPU and eight asleep for a minute and a half, and a single combined
+        // figure would not have said which end to look at.
+        let before_lock = std::time::Instant::now();
+        let tables = self.read_tables("snapshot").await;
+        let waited = before_lock.elapsed();
+        let lock_held = std::time::Instant::now();
         let mut written = 0usize;
         let mut names = Vec::new();
 
@@ -860,6 +947,16 @@ impl IntelligentIndexedStorage {
             written += 1;
         }
         drop(tables);
+        let lock_held = lock_held.elapsed();
+        if waited + lock_held >= std::time::Duration::from_secs(1) {
+            warn!(
+                "Snapshot waited {:.1}s for the table lock, then held it {:.1}s across {} \
+                 table(s); writes and every read queued behind it for the total",
+                waited.as_secs_f64(),
+                lock_held.as_secs_f64(),
+                written
+            );
+        }
 
         // Carry over tables that are not in memory. Eviction removes a table from `tables`
         // while leaving it perfectly valid in the previous snapshot — writing only what is
@@ -1070,12 +1167,36 @@ impl IntelligentIndexedStorage {
     ///
     /// 驱逐只发生在快照覆盖了该表之后，所以段文件一定存在——找不到就说明这张表真的不存在，
     /// 交给调用方的 TableNotFound 去报。
+    /// Take the table map's read lock, reporting it if it is held for long enough to matter.
+    async fn read_tables(&self, who: &'static str) -> TimedRead<'_> {
+        let guard = self.tables.read().await;
+        TimedRead {
+            guard,
+            who,
+            since: std::time::Instant::now(),
+        }
+    }
+
+    /// Take the table map's write lock, reporting it if it is held for long enough to matter.
+    async fn write_tables(&self, who: &'static str) -> TimedWrite<'_> {
+        let guard = self.tables.write().await;
+        TimedWrite {
+            guard,
+            who,
+            since: std::time::Instant::now(),
+        }
+    }
+
     async fn ensure_resident(&self, table_name: &str) -> crate::Result<()> {
         use crate::storage::tier_promotion::Tier;
 
         self.tier_policy.record_access(table_name);
 
-        if self.tables.read().await.contains_key(table_name) {
+        if self
+            .read_tables("ensure_resident")
+            .await
+            .contains_key(table_name)
+        {
             // Resident tables sit in Warm so the policy's demote_to_cold rule applies to them;
             // it only demotes out of Warm.
             self.tier_policy.set_current_tier(table_name, Tier::Warm);
@@ -1107,7 +1228,11 @@ impl IntelligentIndexedStorage {
         // Two concurrent readers can both find the table missing and both start restoring. The
         // second one finds it present by the time it takes the write lock, and restore_table's
         // create_table would fail on the duplicate — so check again and let the loser bail.
-        if self.tables.read().await.contains_key(table_name) {
+        if self
+            .read_tables("ensure_resident")
+            .await
+            .contains_key(table_name)
+        {
             return Ok(());
         }
 
@@ -1191,7 +1316,7 @@ impl IntelligentIndexedStorage {
     ///
     /// 生产路径请用 [`Self::evict_cold_tables`]——它会先快照，这一步不会。
     pub async fn evict_table_for_test(&self, name: &str) {
-        self.tables.write().await.remove(name);
+        self.write_tables("evict_table_for_test").await.remove(name);
     }
 
     /// 给定规模，决定这张表该用什么索引。
@@ -1262,7 +1387,7 @@ impl IntelligentIndexedStorage {
     /// 记录数每变一次就重建是不可行的——重建代价是 O(n)。
     pub async fn reevaluate_indexes(&self) -> crate::Result<Vec<String>> {
         let candidates: Vec<(String, usize, IndexAlgorithm)> = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("reevaluate_indexes").await;
             tables
                 .values()
                 .map(|d| {
@@ -1285,7 +1410,7 @@ impl IntelligentIndexedStorage {
             }
 
             let (dimension, metric) = {
-                let tables = self.tables.read().await;
+                let tables = self.read_tables("reevaluate_indexes").await;
                 match tables.get(&name) {
                     Some(d) => (d.table.dimension, d.table.distance_metric),
                     // Evicted or dropped while we were iterating; nothing to do.
@@ -1304,7 +1429,7 @@ impl IntelligentIndexedStorage {
                 // out of their size range as data lands. Doing nothing here would leave the
                 // buffer growing until something forced a full rebuild.
                 let wrapper = {
-                    let tables = self.tables.read().await;
+                    let tables = self.read_tables("reevaluate_indexes").await;
                     tables.get(&name).map(|d| d.index.clone())
                 };
                 if let Some(wrapper) = wrapper {
@@ -1361,7 +1486,7 @@ impl IntelligentIndexedStorage {
         }
 
         let covered: Vec<String> = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("evict_cold_tables").await;
             tables.keys().cloned().collect()
         };
         if covered.is_empty() {
@@ -1381,7 +1506,7 @@ impl IntelligentIndexedStorage {
             if !self.tier_policy.should_demote_to_cold(&name) {
                 continue;
             }
-            let mut tables = self.tables.write().await;
+            let mut tables = self.write_tables("evict_cold_tables").await;
             if tables.remove(&name).is_some() {
                 evicted.push(name.clone());
             }
@@ -1572,7 +1697,7 @@ impl IntelligentIndexedStorage {
             None
         };
 
-        let mut tables = self.tables.write().await;
+        let mut tables = self.write_tables("restore_table").await;
         let data = tables
             .get_mut(&name)
             .ok_or_else(|| crate::Error::TableNotFound(name.clone()))?;
@@ -1950,7 +2075,7 @@ impl IntelligentIndexedStorage {
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
         // Check if table exists (quickly release the lock)
         {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("create_table").await;
             if tables.contains_key(&config.name) {
                 return Err(crate::Error::TableAlreadyExists(config.name.clone()));
             }
@@ -2077,7 +2202,7 @@ impl IntelligentIndexedStorage {
 
         // Re-acquire the lock to insert the table
         {
-            let mut tables = self.tables.write().await;
+            let mut tables = self.write_tables("create_table").await;
             tables.insert(table.name.clone(), table_data);
         }
 
@@ -2136,7 +2261,7 @@ impl IntelligentIndexedStorage {
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         self.ensure_resident(tablename).await?;
         let start_time = std::time::Instant::now();
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("search").await;
 
         let table_data = tables
             .get(tablename)
@@ -2376,7 +2501,7 @@ impl IntelligentIndexedStorage {
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
         let start_time = std::time::Instant::now();
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("full_text_search").await;
 
         let table_data = tables
             .get(tablename)
@@ -2643,7 +2768,7 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         let start_time = std::time::Instant::now();
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("hybrid_search").await;
 
         let table_data = tables
             .get(tablename)
@@ -2813,7 +2938,7 @@ impl IntelligentIndexedStorage {
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
         self.ensure_resident(name).await?;
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_table").await;
 
         tables
             .get(name)
@@ -2827,7 +2952,7 @@ impl IntelligentIndexedStorage {
     /// 驱逐是内存管理，不是删除，列表必须照旧。
     pub async fn list_tables(&self) -> crate::Result<Vec<Table>> {
         let mut out: Vec<Table> = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("list_tables").await;
             tables.values().map(|data| data.table.clone()).collect()
         };
 
@@ -2864,7 +2989,7 @@ impl IntelligentIndexedStorage {
     /// 删除表
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
         let table_id = {
-            let mut tables = self.tables.write().await;
+            let mut tables = self.write_tables("delete_table").await;
             let data = tables
                 .remove(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
@@ -2898,7 +3023,7 @@ impl IntelligentIndexedStorage {
         use crate::storage::object::traits::ObjectStorage;
 
         let live: Vec<(String, Vec<String>)> = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("collect_superseded_segments").await;
             let mut out = Vec::new();
             for data in tables.values() {
                 if let Some(keys) = data.index.live_segment_keys().await {
@@ -2979,7 +3104,7 @@ impl IntelligentIndexedStorage {
     pub async fn drop_index(&self, table_name: &str) -> crate::Result<()> {
         // Phase 1: snapshot records and create new brute-force wrapper under the write lock
         let (new_wrapper, records_snapshot) = {
-            let mut tables = self.tables.write().await;
+            let mut tables = self.write_tables("drop_index").await;
 
             let table_data = tables
                 .get_mut(table_name)
@@ -3023,8 +3148,9 @@ impl IntelligentIndexedStorage {
         let started = std::time::Instant::now();
 
         // Phase 1: snapshot + select + swap (write lock)
+        let t_phase1 = std::time::Instant::now();
         let (new_wrapper, records_snapshot, algorithm, decision) = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("rebuild_index").await;
 
             let table_data = tables
                 .get(table_name)
@@ -3065,13 +3191,16 @@ impl IntelligentIndexedStorage {
 
             (new_wrapper, records_snapshot, algorithm, decision)
         };
+        let t_phase1 = t_phase1.elapsed();
 
         // Phase 2: build the replacement outside any lock. bulk_build rather than a loop of
         // inserts, because a partitioned index has to see every vector at once to cluster it —
         // inserting one at a time would leave the lot in its overflow buffer.
+        let t_build = std::time::Instant::now();
         let indexed: std::collections::HashSet<RecordId> =
             records_snapshot.iter().map(|(id, _)| id.clone()).collect();
         new_wrapper.bulk_build(records_snapshot).await?;
+        let t_build = t_build.elapsed();
 
         // Phase 3: converge, then swap. The catch-up runs *outside* the lock and repeats,
         // because each pass can only be overtaken by writes that landed while it ran — and
@@ -3081,6 +3210,7 @@ impl IntelligentIndexedStorage {
         // global table map's lock, not this table's. qdrant avoids the same stall with a proxy
         // segment that absorbs writes during an optimisation; converging outside the lock gets
         // the same property with far less machinery.
+        let t_catchup = std::time::Instant::now();
         let mut indexed = indexed;
         let mut caught_up = 0usize;
 
@@ -3090,7 +3220,7 @@ impl IntelligentIndexedStorage {
         const MAX_CONVERGENCE_PASSES: usize = 8;
         for _ in 0..MAX_CONVERGENCE_PASSES {
             let missing: Vec<(RecordId, Vec<f32>)> = {
-                let tables = self.tables.read().await;
+                let tables = self.read_tables("rebuild_index").await;
                 let table_data = tables
                     .get(table_name)
                     .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
@@ -3111,8 +3241,12 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        let t_catchup = t_catchup.elapsed();
+
+        let t_swap_wait = std::time::Instant::now();
         {
-            let mut tables = self.tables.write().await;
+            let mut tables = self.write_tables("rebuild_index").await;
+            let t_swap_wait = t_swap_wait.elapsed();
             let table_data = tables
                 .get_mut(table_name)
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
@@ -3133,12 +3267,19 @@ impl IntelligentIndexedStorage {
             // conditional on there being a delta, a rebuild that was still running looked
             // identical to one that had finished: the start line and nothing after it. A 37k-row
             // HNSW rebuild ran for 47s under write load and I could not tell which it was.
+            // Broken out by phase. A rebuild that ran for 101s and said only "101s" cost me a
+            // reproduction cycle: the phases accuse different code, and only the swap wait
+            // implicates lock contention rather than the build itself.
             info!(
-                "rebuild_index: table='{}' swapped in after {:.2}s ({} records caught up outside \
-                 the lock, {} under it)",
+                "rebuild_index: table='{}' swapped in after {:.2}s (select {:.2}s, build {:.2}s, \
+                 catch-up {:.2}s for {} records, waited {:.2}s for the write lock, {} under it)",
                 table_name,
                 started.elapsed().as_secs_f64(),
+                t_phase1.as_secs_f64(),
+                t_build.as_secs_f64(),
+                t_catchup.as_secs_f64(),
                 caught_up,
+                t_swap_wait.as_secs_f64(),
                 final_delta
             );
 
@@ -3175,7 +3316,7 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<Table> {
         // Snapshot source records under the read lock
         let (source_config, records_snapshot) = {
-            let tables = self.tables.read().await;
+            let tables = self.read_tables("branch_table").await;
             let src = tables
                 .get(source_table)
                 .ok_or_else(|| crate::Error::TableNotFound(source_table.to_string()))?;
@@ -3227,7 +3368,7 @@ impl IntelligentIndexedStorage {
 
     /// 列出表中所有记录 ID（用于一致性检查和数据迁移）
     pub async fn list_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("list_all_record_ids").await;
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3236,7 +3377,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取向量索引中的记录数（用于一致性检查）
     pub async fn get_index_record_count(&self, tablename: &str) -> crate::Result<usize> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_index_record_count").await;
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3250,10 +3391,13 @@ impl IntelligentIndexedStorage {
     pub async fn get_table_stats(&self, tablename: &str) -> crate::Result<serde_json::Value> {
         // Residency *before* touching it, or the answer is always true — asking is what makes
         // it resident.
-        let was_resident = self.tables.read().await.contains_key(tablename);
+        let was_resident = self
+            .read_tables("get_table_stats")
+            .await
+            .contains_key(tablename);
         self.ensure_resident(tablename).await?;
 
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_table_stats").await;
         let data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3297,7 +3441,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取表的性能统计
     pub async fn get_performance_stats(&self, tablename: &str) -> crate::Result<PerformanceStats> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_performance_stats").await;
 
         let table_data = tables
             .get(tablename)
@@ -3707,7 +3851,7 @@ impl IntelligentIndexedStorage {
     /// Get a single record
     pub async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
         self.ensure_resident(tablename).await?;
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_record").await;
         let table = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3726,7 +3870,7 @@ impl IntelligentIndexedStorage {
         record_id: &RecordId,
         request: CreateRecordRequest,
     ) -> crate::Result<Record> {
-        let mut tables = self.tables.write().await;
+        let mut tables = self.write_tables("update_record").await;
         let table_data = tables
             .get_mut(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3845,7 +3989,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         record_ids: Vec<RecordId>,
     ) -> crate::Result<()> {
-        let mut tables = self.tables.write().await;
+        let mut tables = self.write_tables("delete_records").await;
         let table_data = tables
             .get_mut(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -3914,7 +4058,7 @@ impl IntelligentIndexedStorage {
     /// Get statistics
     pub async fn get_stats(&self) -> HashMap<String, serde_json::Value> {
         let mut stats = HashMap::new();
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_stats").await;
 
         stats.insert("table_count".to_string(), serde_json::json!(tables.len()));
         let total_records: usize = tables.values().map(|t| t.records.len()).sum();
@@ -4006,7 +4150,7 @@ impl IntelligentIndexedStorage {
         limit: usize,
         filter: Option<serde_json::Value>,
     ) -> crate::Result<Vec<(Record, f32)>> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("search_records").await;
 
         let table_data = tables
             .get(tablename)
@@ -4084,7 +4228,7 @@ impl IntelligentIndexedStorage {
         offset: usize,
     ) -> crate::Result<(Vec<Record>, usize)> {
         self.ensure_resident(tablename).await?;
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("list_records").await;
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -4184,7 +4328,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn get_table(&self, name: &str) -> crate::Result<Table> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_table").await;
         tables
             .get(name)
             .map(|data| data.table.clone())
@@ -4192,12 +4336,12 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn list_tables(&self) -> crate::Result<Vec<Table>> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("list_tables").await;
         Ok(tables.values().map(|data| data.table.clone()).collect())
     }
 
     async fn delete_table(&self, name: &str) -> crate::Result<()> {
-        let mut tables = self.tables.write().await;
+        let mut tables = self.write_tables("delete_table").await;
         tables
             .remove(name)
             .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
@@ -4205,7 +4349,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
-        let mut tables = self.tables.write().await;
+        let mut tables = self.write_tables("alter_table").await;
         let data = tables
             .get_mut(name)
             .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
@@ -4239,7 +4383,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("get_record").await;
         let table = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
@@ -4291,7 +4435,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
             table: &'a Table,
             records: Vec<&'a Record>,
         }
-        let tables = self.tables.read().await;
+        let tables = self.read_tables("backup").await;
         let data = tables
             .get(table_name)
             .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
