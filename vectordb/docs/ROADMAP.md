@@ -749,6 +749,29 @@ W1–W7 的验证全是进程内的：直接调 `snapshot()` / `evict_cold_table
       这是**假说**，不是结论——健康那次的逐线程 CPU 采样（重建期间 84%→199%，4 核占 2 核）
       对停摆没有解释力，而停摆本身没能在采样窗口里复现。先复现再修。
 
+**参考实现怎么解这两条**（qdrant 和 weaviate 都把它当一等问题处理，我们完全没做）：
+
+- **qdrant：优化任务要向一个信号量 CPU 预算申请配额才能开跑。**
+  `lib/common/common/src/budget.rs` 的 `ResourceBudget` 持有 `Semaphore::new(cpu_budget)`；
+  `get_cpu_budget` 的默认策略按机器规模给服务**留核**（`default_cpu_budget_unallocated`：
+  3–32 核留 1，33–48 留 2，129 核以上留 1/16）。申请时拿到多少算多少，但
+  **低于期望值的一半就干脆不启动**（`min_cpu_permits` = `div_ceil(2)`），转而
+  `notify_on_budget_available` 等着。Linux 上还给优化线程 `set_current_thread_priority` 降优先级。
+  我们的重建是 900 秒 sweep 一到就无条件开跑，和查询在同一个 tokio worker 池里抢。
+
+- **qdrant 的 HNSW 图是并行建的，线程数就等于申请到的配额。**
+  `hnsw/build.rs:199` 用 `ThreadPoolBuilder::new().num_threads(permit.num_cpus)` 起专用 rayon 池，
+  `pool.install(|| ids.into_par_iter().try_for_each(insert_point))` 并行插点。
+  我们的 `bulk_build` 是 `index_traits` 里的默认实现——单线程 `add` 循环，跑在 tokio 上。
+  `thread_count_for_hnsw` 还有条经验注释值得记：**超过 16 线程不再有收益，反而更容易建出断连的图**。
+
+- **weaviate：索引构建整体挪到队列后面**（`adapters/repos/db/queue/`）。worker 数是
+  `max(1, GOMAXPROCS(0)-1)`——同样是显式留一个核。关键是待索引的向量先落
+  **DiskQueue**（`vector_index_queue.go:172`），崩了不丢；而且**异步索引是 opt-in，
+  默认仍是同步的 `AddVectorsToIndex`**，因为它拿读的新鲜度换吞吐。
+
+  这条比 qdrant 那条更彻底，但代价也更大——我们要先有 W8 那个停摆的诊断，才知道该不该走这么远。
+
 - [ ] **算法在阈值附近抖动。** soak 里 `hot` 在 1,000 条时被从 HNSW 降级成 BruteForce，10 秒后
       到 38,400 条又升回 HNSW，各付一次全量重建。weaviate 的 `dynamic` 索引是**单向**的：
       flat 起步，过 10,000 升 HNSW，不再降回。我们的 re-evaluation 是对称的，一张正在长大的表
