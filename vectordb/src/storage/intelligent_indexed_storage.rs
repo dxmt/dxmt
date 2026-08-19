@@ -12,6 +12,34 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use crate::wal::{WalEntry, WalManager};
 use tracing::{debug, error, info, warn};
 
+/// Longest the table map's lock has been held since the last reset, in microseconds.
+///
+/// The warnings the guards emit are for operators; this is for tests. Four separate call paths
+/// in this file have held that lock across an index search or a disk write, each one turning
+/// "one slow operation" into "the whole server stops", and each was found only by measuring a
+/// running server. A counter makes the property testable directly: a search may take as long as
+/// it likes, but the map lock must be free again long before it finishes.
+static MAX_TABLE_LOCK_HOLD_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn record_lock_hold(held: std::time::Duration) {
+    let micros = held.as_micros() as u64;
+    MAX_TABLE_LOCK_HOLD_MICROS.fetch_max(micros, Ordering::Relaxed);
+}
+
+/// Longest single hold of the table map's lock since [`reset_max_table_lock_hold`].
+///
+/// Process-wide rather than per-instance: the point is to catch a code path that holds the lock
+/// too long, and which storage instance it ran on does not change that.
+pub fn max_table_lock_hold() -> std::time::Duration {
+    std::time::Duration::from_micros(MAX_TABLE_LOCK_HOLD_MICROS.load(Ordering::Relaxed))
+}
+
+/// Reset the high-water mark. Tests that read it must not run in parallel with each other.
+pub fn reset_max_table_lock_hold() {
+    MAX_TABLE_LOCK_HOLD_MICROS.store(0, Ordering::Relaxed);
+}
+
 /// A write guard over the table map that says how long it was held, and by whom.
 ///
 /// The table map's lock is the one every request goes through, and tokio's `RwLock` is
@@ -62,6 +90,7 @@ impl std::ops::Deref for TimedRead<'_> {
 impl Drop for TimedRead<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
+        record_lock_hold(held);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table read lock for {:.1}s; anything that wanted to write queued \
@@ -76,6 +105,7 @@ impl Drop for TimedRead<'_> {
 impl Drop for TimedWrite<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
+        record_lock_hold(held);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table write lock for {:.1}s; every read and write on every table \
@@ -2456,8 +2486,14 @@ impl IntelligentIndexedStorage {
                 };
                 (r, false)
             } else if *selectivity < 0.3 {
-                // PRE-FILTERING: still fetch amplified and post-filter
-                let safety = 2.0;
+                // PRE-FILTERING: still fetch amplified and post-filter.
+                //
+                // The safety factor is what decides whether a request comes back short.
+                // Fetching `limit/selectivity` yields `limit` survivors *on average*, so half
+                // the time fewer. At 2.0 and 5% selectivity a top-10 fetches 400, expects 20
+                // survivors, and falls under 10 roughly once in a hundred requests; at 3.0 that
+                // is about four in a million.
+                let safety = 3.0;
                 let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
                     .min(total_records)
                     .max(result_limit * 2);
@@ -2471,8 +2507,21 @@ impl IntelligentIndexedStorage {
                     .await?;
                 (r, true)
             } else {
-                // POST-FILTERING: selectivity >= 30%, fetch extra and filter
-                let fetch = result_limit * 3;
+                // POST-FILTERING: selectivity >= 30%, fetch extra and filter.
+                //
+                // Scaled by selectivity, as the pre-filtering branch above already does. A flat
+                // `result_limit * 3` ignores how many of the fetched rows the filter will throw
+                // away: at 50% selectivity it fetches 30 for a top-10, and the number that
+                // survive is a coin toss repeated 30 times — under ten about 2% of the time, so
+                // roughly one request in fifty silently returned short. That is what made
+                // `test_filter_with_in_operation` fail intermittently; the test was reporting a
+                // real defect, not being flaky.
+                //
+                // Still not a guarantee — see the retry below, which is.
+                let safety = 3.0;
+                let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
+                    .min(total_records)
+                    .max(result_limit * 3);
                 info!(
                     "POST-FILTERING: selectivity={:.2}%, fetch={}",
                     selectivity * 100.0,
@@ -2596,23 +2645,25 @@ impl IntelligentIndexedStorage {
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
         let start_time = std::time::Instant::now();
-        let tables = self.read_tables("full_text_search").await;
+        // The engine is behind an Arc, so take it out of the map and drop the guard rather than
+        // running a BM25 query with every other table's reads and writes queued behind it.
+        let engine = {
+            let tables = self.read_tables("full_text_search").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        let table_data = tables
-            .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            // Check if full-text search is enabled
+            if !table_data.table.enable_full_text_search {
+                return Err(crate::Error::InvalidInput(
+                    "Full-text search is not enabled for this table".to_string(),
+                ));
+            }
 
-        // Check if full-text search is enabled
-        if !table_data.table.enable_full_text_search {
-            return Err(crate::Error::InvalidInput(
-                "Full-text search is not enabled for this table".to_string(),
-            ));
-        }
-
-        // Get the full-text engine
-        let engine = table_data.full_text_engine.as_ref().ok_or_else(|| {
-            crate::Error::Internal("Full-text search engine not initialized".to_string())
-        })?;
+            table_data.full_text_engine.clone().ok_or_else(|| {
+                crate::Error::Internal("Full-text search engine not initialized".to_string())
+            })?
+        };
 
         // 如果有过滤器，获取更多结果以补偿过滤后的损失
         let fetch_limit = if request.filter.is_some() {
@@ -2642,8 +2693,14 @@ impl IntelligentIndexedStorage {
             sort_by: None,
         };
 
-        // Perform the search
+        // Perform the search, holding no map lock.
         let search_results = engine.search(&engine_request).await?;
+
+        // Back under the map for the record lookups behind the filter and the payloads.
+        let tables = self.read_tables("full_text_search").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Convert engine results to API results
         let hits: Vec<FullTextSearchHit> = search_results
@@ -2863,11 +2920,6 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         let start_time = std::time::Instant::now();
-        let tables = self.read_tables("hybrid_search").await;
-
-        let table_data = tables
-            .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let fetch_limit = if request.filter.is_some() {
             request.limit * 10
@@ -2875,35 +2927,60 @@ impl IntelligentIndexedStorage {
             request.limit * 3
         };
 
-        // Validate dense vector dimension if provided
-        let expected_dim = table_data.table.dimension;
-        if let Some(ref v) = request.vector {
-            if !v.is_empty() && v.len() != expected_dim {
-                return Err(crate::Error::DimensionMismatch {
-                    expected: expected_dim,
-                    actual: v.len(),
-                });
-            }
-        }
+        // Phase 1: validate, take the index and the text engine out of the map, run the sparse
+        // search, then release. Both indexes are Arc-backed so taking them costs a refcount.
+        //
+        // The sparse search stays here because `SparseIndex` is a plain struct of hash maps —
+        // taking a copy would cost more than the search does. It is a WAND-pruned walk over
+        // posting lists, far cheaper than the dense side, which is what actually needed moving.
+        #[allow(unused_mut)]
+        let (index, mut sparse_results, text_engine, text_enabled) = {
+            let tables = self.read_tables("hybrid_search").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        // 1. Dense vector search
+            // Validate dense vector dimension if provided
+            let expected_dim = table_data.table.dimension;
+            if let Some(ref v) = request.vector {
+                if !v.is_empty() && v.len() != expected_dim {
+                    return Err(crate::Error::DimensionMismatch {
+                        expected: expected_dim,
+                        actual: v.len(),
+                    });
+                }
+            }
+
+            let sparse_results: Vec<(RecordId, f32)> = match request.sparse_vector {
+                Some(ref sv) => table_data.sparse_index.search(sv, fetch_limit),
+                None => Vec::new(),
+            };
+
+            #[cfg(feature = "text-bm25")]
+            let engine = table_data.full_text_engine.clone();
+            #[cfg(not(feature = "text-bm25"))]
+            let engine: Option<()> = None;
+
+            (
+                table_data.index.clone(),
+                sparse_results,
+                engine,
+                table_data.table.enable_full_text_search,
+            )
+        };
+
+        // 1. Dense vector search — no map lock held.
         let mut vector_results: Vec<(RecordId, f32)> = Vec::new();
         if let Some(ref vector) = request.vector {
-            vector_results = table_data.index.search(vector, fetch_limit).await?;
-        }
-
-        // 2. Sparse vector MIPS (WAND pruning)
-        let mut sparse_results: Vec<(RecordId, f32)> = Vec::new();
-        if let Some(ref sv) = request.sparse_vector {
-            sparse_results = table_data.sparse_index.search(sv, fetch_limit);
+            vector_results = index.search(vector, fetch_limit).await?;
         }
 
         // 3. Full-text search
         let mut text_results: Vec<(RecordId, f32)> = Vec::new();
         #[cfg(feature = "text-bm25")]
         if let Some(ref text_query) = request.text {
-            if table_data.table.enable_full_text_search {
-                if let Some(engine) = &table_data.full_text_engine {
+            if text_enabled {
+                if let Some(engine) = &text_engine {
                     let text_request = EngineSearchRequest {
                         query: text_query.clone(),
                         search_fields: None,
@@ -2922,6 +2999,13 @@ impl IntelligentIndexedStorage {
                 }
             }
         }
+
+        // Phase 3: fusion and assembly need the records, so take the map again — for hash
+        // lookups only, with every search already done.
+        let tables = self.read_tables("hybrid_search").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 4. Fuse results using the selected method
         let combined_scores = match request.fusion_method {
@@ -4245,20 +4329,24 @@ impl IntelligentIndexedStorage {
         limit: usize,
         filter: Option<serde_json::Value>,
     ) -> crate::Result<Vec<(Record, f32)>> {
-        let tables = self.read_tables("search_records").await;
+        // Take the index out of the map and let go, as `search` does — an index search is the
+        // slowest thing this function does, and holding the map across it stops every table.
+        let (index, metric) = {
+            let tables = self.read_tables("search_records").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        let table_data = tables
-            .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-
-        // Validate query vector dimension
-        let expected_dim = table_data.table.dimension;
-        if !query.is_empty() && query.len() != expected_dim {
-            return Err(crate::Error::DimensionMismatch {
-                expected: expected_dim,
-                actual: query.len(),
-            });
-        }
+            // Validate query vector dimension
+            let expected_dim = table_data.table.dimension;
+            if !query.is_empty() && query.len() != expected_dim {
+                return Err(crate::Error::DimensionMismatch {
+                    expected: expected_dim,
+                    actual: query.len(),
+                });
+            }
+            (table_data.index.clone(), table_data.table.distance_metric)
+        };
 
         // 如果有过滤器，获取更多结果以补偿过滤后的损失
         let fetch_limit = if filter.is_some() {
@@ -4267,8 +4355,13 @@ impl IntelligentIndexedStorage {
             limit
         };
 
-        // Use the index to search
-        let results = table_data.index.search(query, fetch_limit).await?;
+        let results = index.search(query, fetch_limit).await?;
+
+        // Back under the map for the record lookups, which are hash hits.
+        let tables = self.read_tables("search_records").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // Retrieve records and apply filter if provided
         let mut records_with_scores = Vec::new();
@@ -4283,7 +4376,7 @@ impl IntelligentIndexedStorage {
                 }
 
                 // Convert distance to similarity score
-                let similarity_score = match table_data.table.distance_metric {
+                let similarity_score = match metric {
                     DistanceMetric::Cosine => 1.0 - score.clamp(0.0, 1.0),
                     DistanceMetric::Dot => -score,
                     DistanceMetric::Euclidean | DistanceMetric::Manhattan => 1.0 / (1.0 + score),
@@ -4526,17 +4619,22 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
 
     async fn backup(&self, table_name: &str, backup_path: &str) -> crate::Result<()> {
         #[derive(serde::Serialize)]
-        struct Snapshot<'a> {
-            table: &'a Table,
-            records: Vec<&'a Record>,
+        struct Snapshot {
+            table: Table,
+            records: Vec<Record>,
         }
-        let tables = self.read_tables("backup").await;
-        let data = tables
-            .get(table_name)
-            .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
-        let snap = Snapshot {
-            table: &data.table,
-            records: data.records.values().collect(),
+        // Copy under the lock, serialise and write without it — the same split the periodic
+        // snapshot needed. Measured there: copying 60,000 rows is under 50ms while serialising
+        // and writing them is a full second, and a second of held lock stops every table.
+        let snap = {
+            let tables = self.read_tables("backup").await;
+            let data = tables
+                .get(table_name)
+                .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
+            Snapshot {
+                table: data.table.clone(),
+                records: data.records.values().cloned().collect(),
+            }
         };
         let json =
             serde_json::to_vec(&snap).map_err(|e| crate::Error::Serialization(e.to_string()))?;

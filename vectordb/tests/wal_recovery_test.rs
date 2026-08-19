@@ -1930,3 +1930,62 @@ async fn a_table_with_no_index_file_is_restored_with_the_index_it_had() {
         .unwrap();
     assert_eq!(hits.hits[0].id, "r0");
 }
+
+/// A search must not hold the table map's lock while it searches.
+///
+/// That lock is the one every request on every table goes through, and tokio's `RwLock` is
+/// write-preferring: while a writer waits behind a reader, later readers queue behind the writer.
+/// So a path that holds it across its own slow work does not merely slow that table down, it
+/// stops the server. Measured before the fix, a forced rebuild under load gave a read p99 of
+/// 25.6s and a write max of 27.1s with no single holder over a second — the holders were a
+/// second each, back to back.
+///
+/// The assertion is a ratio, not a deadline. An earlier attempt at guarding this compared
+/// latencies against a baseline of tens of milliseconds and went red two runs in three on a busy
+/// machine; it was deleted. How long the search takes here does not matter, only that the lock
+/// was free for almost all of it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_search_does_not_hold_the_table_lock_while_it_searches() {
+    let tmp = TempDir::new().unwrap();
+    let storage = open(&tmp.path().join("wal")).await;
+
+    storage
+        .create_table(table("t", 128, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+
+    // Enough rows that a search takes long enough to measure against.
+    let rows: Vec<_> = (0..20_000)
+        .map(|i| {
+            let v: Vec<f32> = (0..128)
+                .map(|d| ((i * 37 + d * 11) % 997) as f32 / 997.0)
+                .collect();
+            record(&format!("r{}", i), v)
+        })
+        .collect();
+    storage.insert_records("t", rows).await.unwrap();
+
+    dxmt_vectordb::storage::intelligent_indexed_storage::reset_max_table_lock_hold();
+
+    // Fifty searches, not five: the denominator grows with every one of them while the
+    // numerator is a maximum, so the headroom against a stray scheduling hiccup inside a
+    // microsecond-long critical section grows too.
+    let started = std::time::Instant::now();
+    for _ in 0..50 {
+        storage
+            .search("t", query((0..128).map(|d| d as f32 / 128.0).collect(), 10))
+            .await
+            .unwrap();
+    }
+    let searching = started.elapsed();
+    let held = dxmt_vectordb::storage::intelligent_indexed_storage::max_table_lock_hold();
+
+    assert!(
+        held * 4 < searching,
+        "a search held the table map's lock for {:?} of the {:?} it spent searching; the lock \
+         has to be released across the index search, not held through it",
+        held,
+        searching
+    );
+}
