@@ -2261,24 +2261,6 @@ impl IntelligentIndexedStorage {
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         self.ensure_resident(tablename).await?;
         let start_time = std::time::Instant::now();
-        let tables = self.read_tables("search").await;
-
-        let table_data = tables
-            .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-
-        // Validate query vector dimension against the default space only when no named vector
-        // space is requested (named spaces may have different dimensions).
-        if query.vector_name.is_none() {
-            let expected_dim = table_data.table.dimension;
-            if !query.vector.is_empty() && query.vector.len() != expected_dim {
-                return Err(crate::Error::DimensionMismatch {
-                    expected: expected_dim,
-                    actual: query.vector.len(),
-                });
-            }
-        }
-
         // 优先使用 limit，如果 limit 未设置或为默认值则使用 top_k
         // Python SDK 发送 "limit" 字段，Rust API 使用 "top_k"
         let result_limit = if query.limit > 0 && query.limit != 10 {
@@ -2287,66 +2269,85 @@ impl IntelligentIndexedStorage {
             query.top_k
         };
 
-        // Resolve named index (if vector_name is specified in the query).
-        // get_index() returns an owned clone of the IndexWrapper (Arc-backed, cheap clone).
-        let named_index_opt: Option<crate::search::IndexWrapper> =
-            if let Some(ref vec_name) = query.vector_name {
-                if let Some(ref named_indexes) = table_data.named_indexes {
-                    named_indexes.get_index(vec_name).await
+        // Phase 1: take everything out of the table map that the search needs, then let go of it.
+        //
+        // This used to hold the map's read lock for the whole function, index search included,
+        // and that is enough to stop the entire server. A brute-force search over 60,000 vectors
+        // takes about a second; three concurrent readers overlap so the read lock is never free;
+        // the insertion processor queues for the write lock and starves; and because tokio's
+        // `RwLock` is write-preferring, every later read queues behind that pending writer. Under
+        // a forced rebuild the measured effect was read p99 of 25.6s and write max of 27.1s,
+        // exactly the length of the rebuild — with no single lock holder over one second, because
+        // the holders were one second each, back to back. qdrant never takes a global lock for a
+        // search at all; segments carry their own.
+        let (
+            index,
+            metric,
+            total_records,
+            cardinality_and_sel,
+            precomputed_filter_ids,
+            exact_scored,
+        ) = {
+            let tables = self.read_tables("search").await;
+
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+            // Validate query vector dimension against the default space only when no named vector
+            // space is requested (named spaces may have different dimensions).
+            if query.vector_name.is_none() {
+                let expected_dim = table_data.table.dimension;
+                if !query.vector.is_empty() && query.vector.len() != expected_dim {
+                    return Err(crate::Error::DimensionMismatch {
+                        expected: expected_dim,
+                        actual: query.vector.len(),
+                    });
+                }
+            }
+
+            // Resolve named index (if vector_name is specified in the query).
+            // get_index() returns an owned clone of the IndexWrapper (Arc-backed, cheap clone).
+            let named_index_opt: Option<crate::search::IndexWrapper> =
+                if let Some(ref vec_name) = query.vector_name {
+                    if let Some(ref named_indexes) = table_data.named_indexes {
+                        named_indexes.get_index(vec_name).await
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
+                };
+            // An `IndexWrapper` is Arc-backed, so this clone costs a refcount and buys the
+            // whole point of the phase split: the search below runs without the map lock.
+            let index = named_index_opt.unwrap_or_else(|| table_data.index.clone());
+            let metric = table_data.table.distance_metric;
+            let total_records = table_data.records.len();
+
+            // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
+            let cardinality_and_sel = if let Some(ref filter) = query.filter {
+                let cardinality = table_data.payload_index.estimate_cardinality(filter);
+                let selectivity = if total_records > 0 {
+                    cardinality.exp as f64 / total_records as f64
+                } else {
+                    1.0
+                };
+                Some((cardinality, selectivity))
             } else {
                 None
             };
-        let active_index: &crate::search::IndexWrapper =
-            named_index_opt.as_ref().unwrap_or(&table_data.index);
 
-        // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
-        let cardinality_and_sel = if let Some(ref filter) = query.filter {
-            let cardinality = table_data.payload_index.estimate_cardinality(filter);
-            let total_records = table_data.records.len();
-            let selectivity = if total_records > 0 {
-                cardinality.exp as f64 / total_records as f64
-            } else {
-                1.0
-            };
-            Some((cardinality, selectivity))
-        } else {
-            None
-        };
-
-        let default_ef = 100usize;
-        // Use adaptive EF when SearchMode::Auto and a filter is present
-        let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
-            query
-                .search_mode
-                .ef_search_adaptive(default_ef, result_limit, *selectivity)
-        } else {
-            query.search_mode.ef_search(default_ef, result_limit)
-        };
-
-        // Determine strategy and execute search
-        let (results, post_filter) =
-            if let (Some(ref filter), Some((ref cardinality, selectivity))) =
+            // The in-graph filter branch needs the matching ids, and its small-set special case
+            // needs those records' vectors. Both are cheap and both need the map, so they happen
+            // here rather than forcing the search to hold the lock for them.
+            let mut precomputed_filter_ids = None;
+            let mut exact_scored = None;
+            if let (Some(filter), Some((cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                let total_records = table_data.records.len();
-
                 if *selectivity < 0.05 && cardinality.exp < 10000 {
-                    // Acorn-style in-graph filter: selectivity < 5%
                     let filter_ids = table_data.payload_index.get_matching_ids(filter);
-                    info!(
-                        "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
-                        selectivity * 100.0,
-                        filter_ids.len()
-                    );
-
-                    // When filter_ids is very small, kNN approximation is unreliable:
-                    // fetching top-K from the full index may miss all filter candidates.
-                    // Instead, compute exact distances only for the matching IDs (O(|filter_ids|)).
-                    let r = if filter_ids.len() <= result_limit * 4 {
-                        let metric = table_data.table.distance_metric;
+                    if filter_ids.len() <= result_limit * 4 {
                         let mut scored: Vec<(RecordId, f32)> = filter_ids
                             .iter()
                             .filter_map(|id| {
@@ -2362,48 +2363,104 @@ impl IntelligentIndexedStorage {
                             a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
                         });
                         scored.truncate(result_limit);
-                        scored
-                    } else {
+                        exact_scored = Some(scored);
+                    }
+                    precomputed_filter_ids = Some(filter_ids);
+                }
+            }
+
+            (
+                index,
+                metric,
+                total_records,
+                cardinality_and_sel,
+                precomputed_filter_ids,
+                exact_scored,
+            )
+        };
+        let active_index = &index;
+
+        let default_ef = 100usize;
+        // Use adaptive EF when SearchMode::Auto and a filter is present
+        let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
+            query
+                .search_mode
+                .ef_search_adaptive(default_ef, result_limit, *selectivity)
+        } else {
+            query.search_mode.ef_search(default_ef, result_limit)
+        };
+
+        // Determine strategy and execute search
+        let (results, post_filter) = if let (Some(_), Some((ref cardinality, selectivity))) =
+            (&query.filter, &cardinality_and_sel)
+        {
+            if *selectivity < 0.05 && cardinality.exp < 10000 {
+                // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
+                // for a small enough set, their exact scores were computed in phase 1 while
+                // the map lock was held.
+                let filter_ids = precomputed_filter_ids.unwrap_or_default();
+                info!(
+                    "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
+                    selectivity * 100.0,
+                    filter_ids.len()
+                );
+
+                // When filter_ids is very small, kNN approximation is unreliable:
+                // fetching top-K from the full index may miss all filter candidates.
+                // Instead, exact distances over just the matching IDs (O(|filter_ids|)).
+                let r = match exact_scored {
+                    Some(scored) => scored,
+                    None => {
                         active_index
                             .search_with_filter(&query.vector, result_limit, ef_hint, &filter_ids)
                             .await?
-                    };
-                    (r, false)
-                } else if *selectivity < 0.3 {
-                    // PRE-FILTERING: still fetch amplified and post-filter
-                    let safety = 2.0;
-                    let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
-                        .min(total_records)
-                        .max(result_limit * 2);
-                    info!(
-                        "PRE-FILTERING: selectivity={:.2}%, fetch={}",
-                        selectivity * 100.0,
-                        fetch
-                    );
-                    let r = active_index
-                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
-                        .await?;
-                    (r, true)
-                } else {
-                    // POST-FILTERING: selectivity >= 30%, fetch extra and filter
-                    let fetch = result_limit * 3;
-                    info!(
-                        "POST-FILTERING: selectivity={:.2}%, fetch={}",
-                        selectivity * 100.0,
-                        fetch
-                    );
-                    let r = active_index
-                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
-                        .await?;
-                    (r, true)
-                }
-            } else {
-                // No filter
-                let r = active_index
-                    .search_with_ef_hint(&query.vector, result_limit, ef_hint)
-                    .await?;
+                    }
+                };
                 (r, false)
-            };
+            } else if *selectivity < 0.3 {
+                // PRE-FILTERING: still fetch amplified and post-filter
+                let safety = 2.0;
+                let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
+                    .min(total_records)
+                    .max(result_limit * 2);
+                info!(
+                    "PRE-FILTERING: selectivity={:.2}%, fetch={}",
+                    selectivity * 100.0,
+                    fetch
+                );
+                let r = active_index
+                    .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                    .await?;
+                (r, true)
+            } else {
+                // POST-FILTERING: selectivity >= 30%, fetch extra and filter
+                let fetch = result_limit * 3;
+                info!(
+                    "POST-FILTERING: selectivity={:.2}%, fetch={}",
+                    selectivity * 100.0,
+                    fetch
+                );
+                let r = active_index
+                    .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                    .await?;
+                (r, true)
+            }
+        } else {
+            // No filter
+            let r = active_index
+                .search_with_ef_hint(&query.vector, result_limit, ef_hint)
+                .await?;
+            (r, false)
+        };
+
+        // Phase 3: assemble. Back under the map lock, but only for hash lookups this time — the
+        // expensive part is already done. The table can have been dropped while the search ran,
+        // and a returned id can have been deleted; both are handled below rather than pretended
+        // away, because that window is the price of not holding the lock across the search.
+        let tables = self.read_tables("search").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 应用filter并构建搜索结果
         let hits: Vec<SearchHit> = results
@@ -2447,7 +2504,7 @@ impl IntelligentIndexedStorage {
 
                 // Convert distance to similarity score based on distance metric
                 // Index returns distance (lower is better), but API should return similarity (higher is better)
-                let similarity_score = match table_data.table.distance_metric {
+                let similarity_score = match metric {
                     DistanceMetric::Cosine => {
                         // Cosine distance = 1.0 - cosine_similarity
                         // Convert back: similarity = 1.0 - distance
