@@ -133,8 +133,10 @@ async fn an_hnsw_file_is_refused_as_hnsw_pq() {
         Ok(_) => panic!("an hnsw file loaded as hnsw-pq"),
         Err(e) => e.to_string(),
     };
+    // "hnsw-v2": the kind was renamed when cosine vectors started being stored unit length, so
+    // that a v1 file is refused rather than scored against normalised queries.
     assert!(
-        err.contains("holds a 'hnsw' index"),
+        err.contains("holds a 'hnsw-v2' index"),
         "expected a kind mismatch, got: {}",
         err
     );

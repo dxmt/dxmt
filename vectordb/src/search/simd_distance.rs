@@ -16,6 +16,38 @@ pub trait SimdDistance {
     fn supports_simd(&self) -> bool;
 }
 
+/// Dot product, dispatched once to the widest SIMD this CPU has.
+///
+/// Two things this does that the `DistanceMetric::calculate_simd` path does not. It is a bare dot
+/// product, which is all a cosine comparison needs once both sides are unit length — the general
+/// path recomputes both norms and two square roots on every call. And it resolves the CPU feature
+/// check **once** rather than per call: `is_x86_feature_detected!` caches its answer, but the
+/// branch and the atomic load are still on the hot path of every distance evaluation, and this is
+/// the hot path of both search and index construction. qdrant resolves its metric function the
+/// same way, at construction rather than per comparison.
+type DotProductFn = fn(&[f32], &[f32]) -> f32;
+
+pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
+    DISPATCH.get_or_init(resolve_dot_product)(a, b)
+}
+
+fn resolve_dot_product() -> DotProductFn {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            return |a, b| unsafe { dot_product_avx512(a, b) };
+        }
+        if is_x86_feature_detected!("avx2") {
+            return |a, b| unsafe { dot_product_avx2(a, b) };
+        }
+        if is_x86_feature_detected!("sse4.1") {
+            return |a, b| unsafe { dot_product_sse(a, b) };
+        }
+    }
+    |a, b| a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
 impl SimdDistance for DistanceMetric {
     fn calculate_simd(&self, a: &[f32], b: &[f32]) -> crate::Result<f32> {
         if a.len() != b.len() {

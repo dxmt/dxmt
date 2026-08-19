@@ -23,6 +23,10 @@ path = "src/bin/benchmark.rs"
 
 
 [[example]]
+name = "hnsw_build_scaling"
+path = "examples/hnsw_build_scaling.rs"
+
+[[example]]
 name = "full_text_search"
 path = "examples/full_text_search_example.rs"
 
