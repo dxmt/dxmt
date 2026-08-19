@@ -135,6 +135,16 @@ struct TableSnapshot {
     has_index: bool,
 }
 
+/// Everything a snapshot has to copy out of a table while the map lock is held.
+///
+/// It is `TableSnapshot` minus `has_index`, because that field is the *result* of writing the
+/// index to disk, which now happens after the lock is released.
+struct TableTemplate {
+    table: Table,
+    algorithm: IndexAlgorithm,
+    records: Vec<Record>,
+}
+
 /// 一条待写入索引的记录：id、稠密向量，以及可选的命名向量。
 ///
 /// 索引写入在 `tables` 写锁之外进行，所以要先把这些从表数据里摘出来。
@@ -907,14 +917,41 @@ impl IntelligentIndexedStorage {
         // write-preferring, so either one stops every later reader as well — a soak turned up one
         // thread at 90% CPU and eight asleep for a minute and a half, and a single combined
         // figure would not have said which end to look at.
+        // Under the lock: copy out what a consistent snapshot needs, and nothing else. The
+        // serialising and the disk writes happen afterwards.
+        //
+        // This loop used to serialise every table and write both its index and its metadata to
+        // disk while holding the table map's read lock — measured at 1.0-1.2s for a single
+        // 60,000-row table, and tokio's `RwLock` is write-preferring, so for that whole time
+        // writes queue and every later read queues behind them. Copying the rows is the one part
+        // that genuinely has to happen under the lock: it is what makes the snapshot a point in
+        // time rather than a smear across one.
         let before_lock = std::time::Instant::now();
-        let tables = self.read_tables("snapshot").await;
+        let pending: Vec<(String, crate::search::IndexWrapper, TableTemplate)> = {
+            let tables = self.read_tables("snapshot").await;
+            tables
+                .iter()
+                .map(|(name, data)| {
+                    (
+                        name.clone(),
+                        data.index.clone(),
+                        TableTemplate {
+                            table: data.table.clone(),
+                            algorithm: data.selected_algorithm.clone(),
+                            records: data.records.values().cloned().collect(),
+                        },
+                    )
+                })
+                .collect()
+        };
         let waited = before_lock.elapsed();
         let lock_held = std::time::Instant::now();
+        let copied_out = lock_held.duration_since(before_lock) - waited;
+
         let mut written = 0usize;
         let mut names = Vec::new();
 
-        for (name, data) in tables.iter() {
+        for (name, index, template) in pending {
             // 表名来自用户输入，不能直接当文件名。用序号命名，真实名字放进元数据。
             let stem = format!("t{}", written);
             let idx_path = staging.join(format!("{}.idx", stem));
@@ -924,7 +961,7 @@ impl IntelligentIndexedStorage {
             // it just rebuilds the graph from the rows, correctly and arbitrarily slowly.
             // Fail the snapshot instead: the WAL still covers everything, so the cost is a
             // warning and one skipped snapshot.
-            let has_index = data.index.snapshot_to(&idx_path).await.map_err(|e| {
+            let has_index = index.snapshot_to(&idx_path).await.map_err(|e| {
                 crate::Error::Internal(format!(
                     "table '{}': index would not write itself to the snapshot: {}",
                     name, e
@@ -932,9 +969,9 @@ impl IntelligentIndexedStorage {
             })?;
 
             let meta = TableSnapshot {
-                table: data.table.clone(),
-                algorithm: data.selected_algorithm.clone(),
-                records: data.records.values().cloned().collect(),
+                table: template.table,
+                algorithm: template.algorithm,
+                records: template.records,
                 has_index,
             };
             crate::search::index_persistence::write_index(
@@ -943,18 +980,19 @@ impl IntelligentIndexedStorage {
                 &meta,
             )?;
 
-            names.push(name.clone());
+            names.push(name);
             written += 1;
         }
-        drop(tables);
-        let lock_held = lock_held.elapsed();
-        if waited + lock_held >= std::time::Duration::from_secs(1) {
+        let total = lock_held.elapsed() + waited + copied_out;
+        if total >= std::time::Duration::from_secs(1) {
             warn!(
-                "Snapshot waited {:.1}s for the table lock, then held it {:.1}s across {} \
-                 table(s); writes and every read queued behind it for the total",
+                "Snapshot took {:.1}s for {} table(s): {:.1}s waiting for the table lock, \
+                 {:.1}s holding it to copy the rows out, {:.1}s writing to disk with it released",
+                total.as_secs_f64(),
+                written,
                 waited.as_secs_f64(),
-                lock_held.as_secs_f64(),
-                written
+                copied_out.as_secs_f64(),
+                lock_held.elapsed().as_secs_f64()
             );
         }
 
