@@ -412,10 +412,10 @@ const results = await client.search({ ... });
 
 ## API Reference
 
-For complete API documentation, see:
-- [Client API](./docs/client.md)
-- [Types](./docs/types.md)
-- [Errors](./docs/errors.md)
+There is no generated reference yet; the public surface is the source:
+- [Client](./src/client.ts)
+- [Types](./src/types.ts)
+- [Errors](./src/errors.ts)
 
 ## DXMT Server
 
@@ -438,7 +438,7 @@ docker run -p 9999:9999 dxmt/vectordb:latest
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
+Contributions are welcome — please open an issue or a pull request.
 
 ## License
 

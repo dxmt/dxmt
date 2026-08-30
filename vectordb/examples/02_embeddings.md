@@ -564,10 +564,8 @@ let local = SentenceTransformer::new("all-MiniLM-L6-v2")?;
 
 ## Next Steps
 
-- [Tutorial 3: Advanced Search Techniques](./03_advanced_search.md)
-- [Tutorial 4: Production Deployment](./04_production.md)
-- [API Reference: Embeddings](/docs/api/embeddings)
-- [Benchmarks: Embedding Performance](/benchmarks/embeddings)
+- [Getting Started](./01_getting_started.md)
+- [Filtering](./filter_example.md)
 
 ## Summary
 

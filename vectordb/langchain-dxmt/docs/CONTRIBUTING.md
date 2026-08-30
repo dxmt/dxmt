@@ -446,7 +446,7 @@ git push origin fix/connection-timeout
 
 ## Getting Help
 
-- **Documentation**: [README.md](README.md), [API Reference](docs/API_REFERENCE.md)
+- **Documentation**: [README.md](../README.md), [API Reference](API_REFERENCE.md)
 - **Issues**: [GitHub Issues](https://github.com/dxmt/vectordb/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/dxmt/vectordb/discussions)
 - **Discord**: [Join our community](#)
