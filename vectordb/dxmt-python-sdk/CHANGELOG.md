@@ -118,5 +118,5 @@ We follow [Semantic Versioning](https://semver.org/):
 - Reason: Internal Tantivy schema mapping
 - Impact: Breaking change for full-text/hybrid search users
 
-[Unreleased]: https://github.com/dxmt/vectordb/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/dxmt/vectordb/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dxmt/dxmt/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dxmt/dxmt/releases/tag/v0.1.0

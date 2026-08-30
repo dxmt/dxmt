@@ -388,7 +388,7 @@ See the [examples](./examples) directory:
 
 - [DXMT JavaScript SDK](./README.md)
 - [LangChain Documentation](https://js.langchain.com/)
-- [DXMT VectorDB](https://github.com/your-org/dxmt)
+- [DXMT VectorDB](https://github.com/dxmt/dxmt)
 
 ## License
 

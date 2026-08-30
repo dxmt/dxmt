@@ -204,7 +204,7 @@ upload_pypi() {
     echo "     git push origin v$version"
     echo ""
     print_info "2. Create GitHub release:"
-    echo "     Go to: https://github.com/dxmt/vectordb/releases/new"
+    echo "     Go to: https://github.com/dxmt/dxmt/releases/new"
     echo "     Tag: v$version"
     echo "     Copy CHANGELOG.md content for this version"
     echo ""

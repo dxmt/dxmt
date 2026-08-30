@@ -238,7 +238,7 @@ query_engine = index.as_query_engine(
 - **详细故障排除：** 见 `RAGAS_TROUBLESHOOTING.md`
 - **快速入门指南：** 见 `RAGAS_QUICKSTART.md`
 - **所有示例文档：** 见 `README.md`
-- **GitHub Issues：** https://github.com/dxmt/vectordb/issues
+- **GitHub Issues：** https://github.com/dxmt/dxmt/issues
 
 ---
 

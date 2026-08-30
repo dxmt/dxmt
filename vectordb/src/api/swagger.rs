@@ -47,7 +47,7 @@ use crate::types::{
         version = "1.0.0",
         contact(
             name = "DXMT Team",
-            url = "https://github.com/dxmt/vectordb"
+            url = "https://github.com/dxmt/dxmt"
         ),
         license(
             name = "Apache-2.0",

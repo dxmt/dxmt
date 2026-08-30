@@ -248,7 +248,7 @@ git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push origin vX.Y.Z
 
 # Create GitHub release (manual)
-# Go to: https://github.com/dxmt/vectordb/releases/new
+# Go to: https://github.com/dxmt/dxmt/releases/new
 # - Select tag vX.Y.Z
 # - Copy CHANGELOG.md content
 # - Publish
@@ -404,7 +404,7 @@ When adding new scripts:
 ## Support
 
 For issues with scripts:
-- [GitHub Issues](https://github.com/dxmt/vectordb/issues)
+- [GitHub Issues](https://github.com/dxmt/dxmt/issues)
 - [Contributing Guide](../docs/CONTRIBUTING.md)
 
 ---

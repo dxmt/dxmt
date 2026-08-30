@@ -3,7 +3,7 @@
 [![PyPI version](https://badge.fury.io/py/langchain-dxmt.svg)](https://badge.fury.io/py/langchain-dxmt)
 [![Python Version](https://img.shields.io/pypi/pyversions/langchain-dxmt)](https://pypi.org/project/langchain-dxmt/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests](https://github.com/dxmt/vectordb/workflows/Tests/badge.svg)](https://github.com/dxmt/vectordb/actions)
+[![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/dxmt/vectordb/branch/main/graph/badge.svg)](https://codecov.io/gh/dxmt/vectordb)
 
 Official LangChain integration for DXMT VectorDB - a lightweight, horizontally scalable vector database with storage native architecture written in Rust.
@@ -23,7 +23,7 @@ Official LangChain integration for DXMT VectorDB - a lightweight, horizontally s
 
 ## Architecture
 
-`langchain-dxmt` is a **thin adapter layer** that provides LangChain VectorStore integration for DXMT VectorDB. It depends on [`dxmt-python-sdk`](https://github.com/dxmt/vectordb/tree/main/dxmt-python-sdk) for all communication with the DXMT server.
+`langchain-dxmt` is a **thin adapter layer** that provides LangChain VectorStore integration for DXMT VectorDB. It depends on [`dxmt-python-sdk`](https://github.com/dxmt/dxmt/tree/main/vectordb/dxmt-python-sdk) for all communication with the DXMT server.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -69,7 +69,7 @@ For more details, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 pip install langchain-dxmt
 ```
 
-This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/vectordb/tree/main/dxmt-python-sdk) as a dependency.
+This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/dxmt/tree/main/vectordb/dxmt-python-sdk) as a dependency.
 
 ### Requirements
 
@@ -328,7 +328,7 @@ Complete working examples are available in the [`examples/`](./examples/) direct
 - **[Testing Guide](./tests/README.md)** - Running and writing tests
 - **[Contributing Guide](./docs/CONTRIBUTING.md)** - How to contribute
 - **[Changelog](./docs/CHANGELOG.md)** - Version history
-- **[dxmt-python-sdk Documentation](https://github.com/dxmt/vectordb/tree/main/dxmt-python-sdk)** - Core SDK documentation
+- **[dxmt-python-sdk Documentation](https://github.com/dxmt/dxmt/tree/main/vectordb/dxmt-python-sdk)** - Core SDK documentation
 
 ## Development
 
@@ -352,8 +352,8 @@ Apache License 2.0 - see LICENSE file for details
 
 ## Support
 
-- [GitHub Issues](https://github.com/dxmt/vectordb/issues)
-- [Documentation](https://github.com/dxmt/vectordb)
+- [GitHub Issues](https://github.com/dxmt/dxmt/issues)
+- [Documentation](https://github.com/dxmt/dxmt)
 - [Community Discord](https://discord.gg/dxmt)
 
 ## Contributing

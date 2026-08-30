@@ -72,10 +72,10 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dxmt/vectordb"
-Documentation = "https://github.com/dxmt/vectordb/tree/main/langchain-dxmt"
-Repository = "https://github.com/dxmt/vectordb"
-"Bug Tracker" = "https://github.com/dxmt/vectordb/issues"
+Homepage = "https://github.com/dxmt/dxmt"
+Documentation = "https://github.com/dxmt/dxmt/tree/main/vectordb/langchain-dxmt"
+Repository = "https://github.com/dxmt/dxmt"
+"Bug Tracker" = "https://github.com/dxmt/dxmt/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

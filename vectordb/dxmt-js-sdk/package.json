@@ -48,12 +48,13 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/dxmt"
+    "url": "https://github.com/dxmt/dxmt",
+    "directory": "vectordb/dxmt-js-sdk"
   },
   "bugs": {
-    "url": "https://github.com/your-org/dxmt/issues"
+    "url": "https://github.com/dxmt/dxmt/issues"
   },
-  "homepage": "https://github.com/your-org/dxmt#readme",
+  "homepage": "https://github.com/dxmt/dxmt#readme",
   "dependencies": {
     "cross-fetch": "^4.0.0"
   },

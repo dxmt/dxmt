@@ -480,7 +480,7 @@ pip install ragas datasets
 ## Resources
 
 ### Documentation
-- [DXMT Documentation](https://github.com/dxmt/vectordb)
+- [DXMT Documentation](https://github.com/dxmt/dxmt)
 - [LlamaIndex Documentation](https://docs.llamaindex.ai/)
 - [RAGAS Documentation](https://docs.ragas.io/)
 - [OpenAI Embeddings Guide](https://platform.openai.com/docs/guides/embeddings)
@@ -492,4 +492,4 @@ pip install ragas datasets
 
 ## Contributing
 
-Found an issue or have a suggestion? Please open an issue or pull request on the [DXMT GitHub repository](https://github.com/dxmt/vectordb).
+Found an issue or have a suggestion? Please open an issue or pull request on the [DXMT GitHub repository](https://github.com/dxmt/dxmt).

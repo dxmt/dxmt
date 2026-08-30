@@ -32,7 +32,7 @@ This project follows the [Contributor Covenant Code of Conduct](https://www.cont
 
 ### Finding Issues
 
-- Check the [issue tracker](https://github.com/dxmt/vectordb/issues)
+- Check the [issue tracker](https://github.com/dxmt/dxmt/issues)
 - Look for issues labeled `good first issue` or `help wanted`
 - Feel free to create new issues for bugs or feature requests
 
@@ -48,7 +48,7 @@ git clone https://github.com/YOUR_USERNAME/vectordb.git
 cd vectordb/langchain-dxmt
 
 # Add upstream remote
-git remote add upstream https://github.com/dxmt/vectordb.git
+git remote add upstream https://github.com/dxmt/dxmt.git
 ```
 
 ### 2. Create Virtual Environment
@@ -316,7 +316,7 @@ git push origin feature/your-feature-name
 
 ### 2. Create Pull Request
 
-1. Go to the [repository on GitHub](https://github.com/dxmt/vectordb)
+1. Go to the [repository on GitHub](https://github.com/dxmt/dxmt)
 2. Click "New Pull Request"
 3. Select your fork and branch
 4. Fill in the PR template:
@@ -447,8 +447,8 @@ git push origin fix/connection-timeout
 ## Getting Help
 
 - **Documentation**: [README.md](../README.md), [API Reference](API_REFERENCE.md)
-- **Issues**: [GitHub Issues](https://github.com/dxmt/vectordb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/dxmt/vectordb/discussions)
+- **Issues**: [GitHub Issues](https://github.com/dxmt/dxmt/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/dxmt/dxmt/discussions)
 - **Discord**: [Join our community](#)
 
 ---

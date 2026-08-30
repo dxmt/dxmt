@@ -226,5 +226,5 @@ A: The preferred parameter (`k`) takes precedence. No error is raised.
 ---
 
 **Need Help?**
-- GitHub Issues: https://github.com/dxmt/vectordb/issues
-- Documentation: https://github.com/dxmt/vectordb
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
+- Documentation: https://github.com/dxmt/dxmt

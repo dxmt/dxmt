@@ -394,7 +394,7 @@ eval_questions = generator.generate_questions_from_nodes()
 - [RAGAS Documentation](https://docs.ragas.io/)
 - [RAGAS GitHub](https://github.com/explodinggradients/ragas)
 - [Evaluation Strategies Blog Post](https://www.llamaindex.ai/blog/evaluating-rag)
-- [DXMT Documentation](https://github.com/dxmt/vectordb)
+- [DXMT Documentation](https://github.com/dxmt/dxmt)
 
 ## Next Steps
 

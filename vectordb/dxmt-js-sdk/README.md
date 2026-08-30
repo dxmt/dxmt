@@ -1,6 +1,6 @@
 # DXMT JavaScript SDK
 
-Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/your-org/dxmt) - A lightweight, horizontally scalable vector database with storage native architecture.
+Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/dxmt/dxmt) - A lightweight, horizontally scalable vector database with storage native architecture.
 
 [![npm version](https://badge.fury.io/js/dxmt-js-sdk.svg)](https://www.npmjs.com/package/dxmt-js-sdk)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -423,8 +423,8 @@ This SDK requires a running DXMT VectorDB server. To start the server:
 
 ```bash
 # Clone DXMT repository
-git clone https://github.com/your-org/dxmt
-cd dxmt
+git clone https://github.com/dxmt/dxmt
+cd dxmt/vectordb
 
 # Build and run
 cargo run -- serve --host 0.0.0.0 --port 9999
@@ -446,14 +446,14 @@ Apache License 2.0 - See [LICENSE](./LICENSE) for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/your-org/dxmt/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/dxmt/discussions)
+- **Issues**: [GitHub Issues](https://github.com/dxmt/dxmt/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/dxmt/dxmt/discussions)
 - **Documentation**: [DXMT Docs](https://docs.dxmt.io)
 
 ## Related Projects
 
 - [DXMT Python SDK](../dxmt-python-sdk) - Official Python SDK
-- [DXMT VectorDB](https://github.com/your-org/dxmt) - Core database
+- [DXMT VectorDB](https://github.com/dxmt/dxmt) - Core database
 - [LangChain DXMT](../langchain-dxmt) - LangChain integration
 
 ---

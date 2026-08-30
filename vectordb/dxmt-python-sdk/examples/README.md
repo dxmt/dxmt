@@ -718,4 +718,4 @@ These examples are part of the DXMT VectorDB project and are released under the 
 - 📧 Email: support@dxmt.com
 - 💬 Discord: [DXMT Community](https://discord.gg/dxmt)
 - 📚 Docs: [docs.dxmt.com](https://docs.dxmt.com)
-- 🐛 Issues: [GitHub Issues](https://github.com/dxmt/vectordb/issues)
+- 🐛 Issues: [GitHub Issues](https://github.com/dxmt/dxmt/issues)

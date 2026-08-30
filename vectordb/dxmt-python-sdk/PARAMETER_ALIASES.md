@@ -388,8 +388,8 @@ client.search(..., k=5, limit=10)  # Uses k=5
 ## Support
 
 If you have questions or suggestions about parameter names:
-- GitHub Issues: https://github.com/dxmt/vectordb/issues
-- Documentation: https://github.com/dxmt/vectordb
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
+- Documentation: https://github.com/dxmt/dxmt
 
 ---
 

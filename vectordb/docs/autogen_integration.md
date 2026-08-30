@@ -152,13 +152,13 @@ AutoGen is Microsoft's multi-agent conversation framework that enables building 
 
 ```bash
 # Clone DXMT repository
-git clone https://github.com/your-org/dxmt-vectordb
-cd dxmt-vectordb
+git clone https://github.com/dxmt/dxmt
+cd dxmt/vectordb
 
 # Build release version
 cargo build --release
 
-# The binary will be at target/release/dxmt
+# The binary will be at target/release/vectordb
 ```
 
 ### Step 2: Install Python Dependencies
@@ -1352,8 +1352,8 @@ aws s3 sync s3://dxmt-bucket s3://dxmt-backup
 - Advanced: `examples/autogen_dxmt_advanced.py`
 
 ### Community
-- GitHub Issues: https://github.com/your-org/dxmt-vectordb/issues
-- Discussions: https://github.com/your-org/dxmt-vectordb/discussions
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
+- Discussions: https://github.com/dxmt/dxmt/discussions
 
 ### Commercial Support
 Contact: support@dxmt.io

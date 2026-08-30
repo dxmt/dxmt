@@ -373,7 +373,7 @@ python paul_graham_essay.py
 ## Getting More Help
 
 1. **Check server logs**: The DXMT server prints detailed logs
-2. **GitHub Issues**: https://github.com/dxmt/vectordb/issues
+2. **GitHub Issues**: https://github.com/dxmt/dxmt/issues
 3. **Examples README**: See `README.md` in this directory
 4. **Documentation**: Check individual example files for detailed docstrings
 
@@ -430,7 +430,7 @@ If none of the above helps:
    - Python version
    - Package versions (`pip list`)
    - Full error traceback
-3. **Report issue**: https://github.com/dxmt/vectordb/issues
+3. **Report issue**: https://github.com/dxmt/dxmt/issues
 
 Include:
 - What you tried

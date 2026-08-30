@@ -663,7 +663,7 @@ echo "✓✓✓ 所有验证通过！集成正常工作！✓✓✓"
 
 ## 联系支持
 
-- **GitHub Issues**: https://github.com/dxmt/vectordb/issues
+- **GitHub Issues**: https://github.com/dxmt/dxmt/issues
 - **文档**: `README.md` 和其他文档文件
 - **示例**: `examples/` 目录
 
