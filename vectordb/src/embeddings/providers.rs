@@ -274,7 +274,7 @@ impl EmbeddingFunction for LocalSentenceTransformerFunction {
     }
 
     async fn embed(&self, _input: &str) -> Result<DenseVector, EmbeddingError> {
-        // Stub — blocked on ort 2.0 stable; see CLAUDE.md multimodal section
+        // Stub — blocked on ort 2.0 stable
         Ok(vec![0.3; self.dimension])
     }
 }

@@ -23,8 +23,8 @@ pub trait SimdDistance {
 /// path recomputes both norms and two square roots on every call. And it resolves the CPU feature
 /// check **once** rather than per call: `is_x86_feature_detected!` caches its answer, but the
 /// branch and the atomic load are still on the hot path of every distance evaluation, and this is
-/// the hot path of both search and index construction. qdrant resolves its metric function the
-/// same way, at construction rather than per comparison.
+/// the hot path of both search and index construction. Resolving the metric function once, at
+/// construction, keeps it off every comparison.
 type DotProductFn = fn(&[f32], &[f32]) -> f32;
 
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {

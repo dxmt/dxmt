@@ -9,7 +9,7 @@
 //! - Fast Hamming distance computation with SIMD
 //! - Optimized for high-dimensional vectors (128-1536 dimensions)
 //!
-//! Reference: turbopuffer blog post on RaBitQ
+//! Reference: Gao & Long, "RaBitQ" (2024).
 
 use crate::search::quantization::QuantizationStats;
 use crate::types::{vector::DenseVector, DistanceMetric};

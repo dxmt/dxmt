@@ -172,7 +172,7 @@ fn test_recall_with_sift_sample() {
 
     let stats = evaluator.evaluate_batch(&results, &ground_truths);
 
-    println!("\n=== SIFT Sample Recall Benchmark ===");
+    println!("\n=== Synthetic SIFT-shaped Recall Benchmark ===");
     println!("Dataset: {} training vectors, {}D", sample.train_vectors.len(), sample.dimension);
     println!("Queries: {}", sample.test_queries.len());
     println!("{}", stats.format_percent());

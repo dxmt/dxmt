@@ -119,7 +119,7 @@ pub struct UpdateRecordRequest {
 ///
 /// Controls HNSW ef_search: Fast uses top_k (minimum scanning), Normal uses the
 /// configured default, Accurate uses 4× the configured value for higher recall.
-/// Auto dynamically scales ef based on top_k and filter selectivity (Weaviate DynamicEF pattern).
+/// Auto dynamically scales ef based on top_k and filter selectivity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -149,8 +149,9 @@ impl SearchMode {
 
     /// Dynamic ef calculation: scales proportionally to top_k / selectivity.
     ///
-    /// Weaviate uses DynamicEFFactor = 8 × (top_k / selectivity). We cap at
-    /// 4× configured_ef to prevent unbounded memory usage.
+    /// A selective filter discards most of what the traversal visits, so the budget has to
+    /// grow to compensate: `8 × (top_k / selectivity)`. Capped at 4× `configured_ef` so a
+    /// near-zero selectivity estimate cannot turn one query into a full scan.
     ///
     /// `filter_selectivity` is in [0.0, 1.0]; 1.0 = no filter, 0.01 = 1% of records match.
     pub fn ef_search_adaptive(
@@ -162,7 +163,6 @@ impl SearchMode {
         match self {
             SearchMode::Auto => {
                 let effective_selectivity = filter_selectivity.clamp(0.001, 1.0);
-                // DynamicEFFactor = 8 (Weaviate default)
                 let base = (8.0 * top_k as f64 / effective_selectivity).ceil() as usize;
                 base.max(top_k).min(configured_ef * 4)
             }

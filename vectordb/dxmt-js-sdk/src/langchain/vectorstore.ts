@@ -8,12 +8,11 @@ import type { EmbeddingsInterface } from '@langchain/core/embeddings';
 import { VectorStore } from '@langchain/core/vectorstores';
 import { Document } from '@langchain/core/documents';
 import { DXMTClient } from '../client';
-import { DXMTError, DXMTValidationError } from '../errors';
-import type { Filter, SearchResult } from '../types';
+import { DXMTValidationError } from '../errors';
+import type { Filter } from '../types';
 import type {
   DXMTVectorStoreConfig,
   AddDocumentOptions,
-  SimilaritySearchOptions,
 } from './types';
 
 /**
@@ -131,26 +130,6 @@ export class DXMTVectorStore extends VectorStore {
     return mustConditions.length > 0
       ? { must: mustConditions }
       : undefined;
-  }
-
-  /**
-   * Convert DXMT search results to LangChain documents.
-   */
-  private convertResults(results: SearchResult[]): Document[] {
-    return results.map((result) => {
-      const metadata = result.metadata || {};
-      const text = metadata.text || '';
-      delete metadata.text;
-
-      return new Document({
-        pageContent: text,
-        metadata: {
-          ...metadata,
-          id: result.id,
-          score: result.score,
-        },
-      });
-    });
   }
 
   /**

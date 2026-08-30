@@ -313,17 +313,6 @@ const response2 = await chain.call({
    const results = await vectorStore.similaritySearch('query', 3);
    ```
 
-## Comparison with Other Vector Stores
-
-| Feature | DXMT | Pinecone | Qdrant | Chroma |
-| ------- | ---- | -------- | ------ | ------ |
-| **LangChain Integration** | ✅ | ✅ | ✅ | ✅ |
-| **Self-Hosted** | ✅ | ❌ | ✅ | ✅ |
-| **TypeScript Support** | ✅ | ✅ | ✅ | ✅ |
-| **Metadata Filtering** | ✅ | ✅ | ✅ | ⚠️ Limited |
-| **Cost (98% savings)** | ✅ | ❌ | ❌ | ❌ |
-| **Tiered Storage** | ✅ | ❌ | ❌ | ❌ |
-
 ## API Reference
 
 ### DXMTVectorStore

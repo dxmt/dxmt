@@ -99,6 +99,7 @@ pub enum Error {
     ServiceUnavailable { message: String },
 }
 
+#[cfg(feature = "api-graphql")]
 impl From<async_graphql::Error> for Error {
     fn from(err: async_graphql::Error) -> Self {
         Error::Internal(format!("{:?}", err))
@@ -137,6 +138,7 @@ pub enum ErrorCode {
     Storage,
     Timeout,
     NotImplemented,
+    ServiceUnavailable,
     ClusterError,
 }
 
@@ -167,9 +169,8 @@ impl Error {
             crate::Error::CompressionError { .. } | crate::Error::DecompressionError { .. } => {
                 ErrorCode::Storage
             }
-            crate::Error::RemoteError { .. } | crate::Error::ServiceUnavailable { .. } => {
-                ErrorCode::ClusterError
-            }
+            crate::Error::RemoteError { .. } => ErrorCode::ClusterError,
+            crate::Error::ServiceUnavailable { .. } => ErrorCode::ServiceUnavailable,
             crate::Error::Unauthorized => ErrorCode::Unauthorized,
             _ => ErrorCode::Internal,
         }
@@ -185,6 +186,7 @@ impl Error {
             }
             ErrorCode::Unauthorized => 401,
             ErrorCode::NotImplemented => 501,
+            ErrorCode::ServiceUnavailable => 503,
             _ => 500,
         }
     }
@@ -193,7 +195,10 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            crate::Error::Timeout(_) | crate::Error::NotLeader | crate::Error::NoAvailableNodes
+            crate::Error::Timeout(_)
+                | crate::Error::NotLeader
+                | crate::Error::NoAvailableNodes
+                | crate::Error::ServiceUnavailable { .. }
         )
     }
 }

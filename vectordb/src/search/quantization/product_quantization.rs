@@ -62,6 +62,19 @@ impl AdcLookupTable {
 }
 
 impl ProductQuantizer {
+    /// Whether codebooks have been trained on representative vectors.
+    ///
+    /// A newly-created quantizer has zero-filled codebooks. Encoding with
+    /// those codebooks is technically possible, but every vector receives the
+    /// same code and ADC reranking degenerates into an arbitrary tie-break.
+    pub fn is_trained(&self) -> bool {
+        self.codebooks
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|value| *value != 0.0)
+    }
+
     /// Create a new Product Quantizer
     ///
     /// # Arguments

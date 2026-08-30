@@ -6,6 +6,22 @@ Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/your-o
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 
+## Breaking changes in 2.0.0
+
+The 1.x client did not match the server's wire format in several places, so these are fixes
+that change the published types:
+
+- `listTables()` returns `TableInfo[]`, not `string[]`. The server has always returned table
+  objects.
+- Successful responses are unwrapped from the `{ success, data }` envelope before they are
+  returned. 1.x handed the envelope back for some calls and the payload for others.
+- `searchVectors()` reads the server's `hits` (it read `results`, which is never sent) and
+  sends `top_k` (it sent `k`, which the server ignores in favour of its default of 10).
+- `deleteRecords()` sends `ids`, the field the server reads. Deleting by `filter` now throws
+  instead of silently deleting nothing — the server has no such route yet.
+- `insertRecords()` maps `metadata` to the server's `payload`; 1.x dropped it.
+- New: `updateRecord()` and `healthMetrics()`.
+
 ## Features
 
 - ✅ **Full TypeScript support** with complete type definitions
@@ -419,18 +435,6 @@ Or use Docker:
 ```bash
 docker run -p 9999:9999 dxmt/vectordb:latest
 ```
-
-## Comparison with Other Vector DBs
-
-| Feature | DXMT | Pinecone | Qdrant | Chroma |
-|---------|------|----------|--------|--------|
-| **Open Source** | ✅ | ❌ | ✅ | ✅ |
-| **Self-Hosted** | ✅ | ❌ | ✅ | ✅ |
-| **TypeScript SDK** | ✅ | ✅ | ✅ | ✅ |
-| **Tiered Storage** | ✅ | ❌ | ❌ | ❌ |
-| **98% Cost Savings** | ✅ | ❌ | ❌ | ❌ |
-| **Single Binary** | ✅ | N/A | ✅ | ❌ |
-| **Hybrid Search** | ✅ | ✅ | ✅ | ❌ |
 
 ## Contributing
 

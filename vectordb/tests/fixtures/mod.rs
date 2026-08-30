@@ -8,12 +8,11 @@
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
     storage::IntelligentIndexedStorage,
-    types::{
-        record::CreateRecordRequest,
-        table::{TableConfig, TextAnalyzer, TextFieldConfig, TextSource},
-        vector::DistanceMetric,
-    },
+    types::{record::CreateRecordRequest, table::TableConfig, vector::DistanceMetric},
 };
+
+#[cfg(feature = "text-bm25")]
+use dxmt_vectordb::types::table::{TextAnalyzer, TextFieldConfig, TextSource};
 
 /// Create a test storage instance with default memory configuration
 pub async fn create_test_storage() -> IntelligentIndexedStorage {
@@ -138,7 +137,12 @@ pub fn create_test_records_with_metadata(
         .collect()
 }
 
-/// Sample dataset for SIFT-like testing (128D)
+/// Deterministic synthetic SIFT-shaped sample for fast tests (128D).
+///
+/// This is intentionally not the public SIFT1M corpus: it has the same
+/// dimensionality but is generated locally so unit/CI tests need no download.
+/// Use the ANN benchmark loader with explicit SIFT fvecs/ivecs fixtures when
+/// measuring results against the real dataset.
 pub struct SiftSample {
     pub dimension: usize,
     pub train_vectors: Vec<Vec<f32>>,

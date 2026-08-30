@@ -3,7 +3,6 @@
 This example demonstrates auto-retrieval: using an LLM to automatically infer
 metadata filters from natural language queries.
 
-Based on: reference/llama_index/docs/examples/vector_stores/chroma_auto_retriever.ipynb
 
 Auto-retrieval allows more dynamic, expressive queries:
 - Pure metadata filtering (e.g., "Show me all Sports from USA")
@@ -462,7 +461,6 @@ def main():
 
     print("=" * 70)
     print("DXMT Vector Store - Auto-Retrieval Example")
-    print("Adapted from LlamaIndex Chroma Auto-Retriever Demo")
     print("=" * 70)
 
     # Check environment

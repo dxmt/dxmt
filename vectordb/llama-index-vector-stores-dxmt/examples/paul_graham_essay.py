@@ -1,9 +1,7 @@
-"""Paul Graham Essay Example - Classic LlamaIndex demo adapted for DXMT.
+"""Paul Graham Essay Example — long-document indexing and querying with DXMT.
 
-This example demonstrates the classic Paul Graham essay indexing and querying,
-originally shown with Chroma but now using DXMT VectorDB.
+Loads a long essay, indexes it, and runs several query patterns against it.
 
-Based on: reference/llama_index/docs/examples/vector_stores/ChromaIndexDemo.ipynb
 
 Usage:
     python paul_graham_essay.py          # Normal run
@@ -108,8 +106,8 @@ def basic_example(clean_start=False):
 def persistent_example(existing_index):
     """Example showing how DXMT naturally persists data.
 
-    Unlike Chroma which needs explicit PersistentClient, DXMT server
-    handles persistence automatically when connected to a database backend.
+    The server handles persistence automatically once it is connected to a
+    database backend; the client does not choose a persistence mode.
     """
     print("\n" + "=" * 70)
     print("Part 2: Persistence (Built-in with DXMT)")
@@ -133,14 +131,9 @@ def persistent_example(existing_index):
        - SSD and memory as cache layers
        - Automatic tiering based on access patterns
 
-    Chroma Equivalent:
     ```python
-    # Chroma needs this:
-    db = chromadb.PersistentClient(path="./chroma_db")
-
-    # DXMT: just connect to the server
+    # Just connect to the server; data is persisted automatically.
     vector_store = DXMTVectorStore(host="localhost", port=9999)
-    # Data is automatically persisted!
     ```
     """)
 
@@ -222,74 +215,12 @@ def retriever_example(index):
         print()
 
 
-def comparison_summary():
-    """Print comparison between Chroma and DXMT approaches."""
-    print("\n" + "=" * 70)
-    print("Chroma vs DXMT Comparison")
-    print("=" * 70)
-
-    print("""
-    ┌─────────────────────┬──────────────────────────┬──────────────────────────┐
-    │ Feature             │ Chroma                   │ DXMT                     │
-    ├─────────────────────┼──────────────────────────┼──────────────────────────┤
-    │ Architecture        │ Embedded or Client/Server│ Client/Server            │
-    │ Persistence         │ Optional (need flag)     │ Always persistent        │
-    │ Concurrent Access   │ Limited in memory mode   │ Full multi-client        │
-    │ Deployment          │ Embedded or Docker       │ Server binary            │
-    │ Storage Tiers       │ Memory or disk           │ Memory/SSD/S3            │
-    │ Index Types         │ HNSW                     │ HNSW/IVF/DiskANN/BF      │
-    │ Cost Optimization   │ Manual                   │ Auto tiering             │
-    │ Metadata Filters    │ ✓ Supported              │ ✓ Supported              │
-    │ Hybrid Search       │ Limited                  │ ✓ Full support           │
-    │ Recovery Time       │ Depends on size          │ <5 min from S3           │
-    └─────────────────────┴──────────────────────────┴──────────────────────────┘
-
-    Code Comparison:
-
-    Chroma (Ephemeral):
-    ```python
-    import chromadb
-    client = chromadb.EphemeralClient()
-    collection = client.create_collection("my_collection")
-    vector_store = ChromaVectorStore(chroma_collection=collection)
-    ```
-
-    Chroma (Persistent):
-    ```python
-    import chromadb
-    client = chromadb.PersistentClient(path="./chroma_db")
-    collection = client.get_or_create_collection("my_collection")
-    vector_store = ChromaVectorStore(chroma_collection=collection)
-    ```
-
-    DXMT (Always Persistent):
-    ```python
-    from llama_index.vector_stores.dxmt import DXMTVectorStore
-    vector_store = DXMTVectorStore(
-        table_name="my_collection",
-        host="localhost",
-        port=9999,
-    )
-    ```
-
-    Key Advantages of DXMT:
-
-    1. ✓ No need to choose between ephemeral/persistent
-    2. ✓ Built for cloud-native deployments
-    3. ✓ Automatic cost optimization through tiering
-    4. ✓ Runtime adaptive index selection
-    5. ✓ Sub-5min recovery from object storage
-    6. ✓ Scales from embedded to distributed
-    """)
-
-
 def main():
     """Run all examples."""
     import sys
 
     print("=" * 70)
     print("DXMT Vector Store - Paul Graham Essay Example")
-    print("Adapted from LlamaIndex Chroma demos")
     print("=" * 70)
 
     # Check environment
@@ -310,7 +241,6 @@ def main():
         persistent_example(index)
         multi_query_example(index)
         retriever_example(index)
-        comparison_summary()
 
         print("\n" + "=" * 70)
         print("Example Completed Successfully!")
@@ -320,9 +250,8 @@ def main():
 
         1. ✓ Loading and indexing documents (Paul Graham essay)
         2. ✓ Querying with different parameters
-        3. ✓ DXMT's built-in persistence (vs Chroma's explicit modes)
+        3. ✓ DXMT's built-in persistence
         4. ✓ Using retrievers for semantic search only
-        5. ✓ Key differences between Chroma and DXMT
 
         Next steps:
         - Try modifying the queries

@@ -5,30 +5,43 @@ use axum::{
 use std::sync::Arc;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
+#[cfg(feature = "api-graphql")]
+use crate::api::graphql;
+#[cfg(feature = "api-swagger")]
+use crate::api::swagger;
+#[cfg(feature = "api-ws")]
+use crate::api::websocket;
+#[cfg(feature = "multimodal")]
+use crate::{
+    api::multimodal::{
+        create_multimodal_record, cross_modal_search, generate_embedding,
+        validate_multimodal_content, MultimodalAppState,
+    },
+    embeddings::EmbeddingManager,
+};
 use crate::{
     api::{
         cluster::{get_cluster_status, handle_announce, handle_heartbeat},
-        graphql,
         handlers::{
             create_backup, create_table, delete_records, delete_table, get_record, get_status,
-            get_table, health_check, insert_records, list_tables, search_vectors, update_record,
-            AppState,
+            get_table, health_check, health_metrics, insert_records, list_tables, liveness,
+            readiness, search_vectors, update_record, AppState,
         },
-        multimodal::{
-            create_multimodal_record, cross_modal_search, generate_embedding,
-            validate_multimodal_content, MultimodalAppState,
-        },
-        swagger, websocket,
     },
     cluster::SimpleDiscovery,
     config::AppConfig,
-    embeddings::EmbeddingManager,
 };
 
 /// 创建带集群功能的应用程序路由器
 pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router> {
     // 创建优化的存储实例
-    let storage = Arc::new(crate::storage::IntelligentIndexedStorage::new(&config.storage).await?);
+    let storage = Arc::new(
+        crate::storage::IntelligentIndexedStorage::new_with_wal(
+            &config.storage,
+            crate::api::server::wal_dir_from_env(),
+        )
+        .await?,
+    );
 
     // Initialize server health monitor
     let server_health = Arc::new(crate::api::server_health::ServerHealth::default());
@@ -39,8 +52,9 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
         server_health,
     };
 
-    // 创建多模态状态
+    #[cfg(feature = "multimodal")]
     let embedding_manager = Arc::new(EmbeddingManager::new());
+    #[cfg(feature = "multimodal")]
     let multimodal_state = MultimodalAppState {
         basestate: base_state.clone(),
         embeddingmanager: embedding_manager,
@@ -50,6 +64,11 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
     let system_routes = Router::new()
         .route("/health", get(health_check))
         .route("/status", get(get_status))
+        .route("/live", get(liveness))
+        .route("/ready", get(readiness))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
+        .route("/health/metrics", get(health_metrics))
         .with_state(base_state.clone());
 
     // 创建API v1路由
@@ -67,6 +86,10 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
         .route("/tables/:table_name/search", post(search_vectors))
         // Backup is a single endpoint now; the catalogue routes returned 500 unconditionally.
         .route("/backup", post(create_backup))
+        .route("/health", get(health_check))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
+        .route("/health/metrics", get(health_metrics))
         .with_state(base_state.clone());
 
     // 初始化应用
@@ -100,7 +123,7 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
         None
     };
 
-    // 创建多模态路由（带有自己的状态）
+    #[cfg(feature = "multimodal")]
     let multimodal_routes = Router::new()
         // .route("/embedding-functions", get(list_embedding_functions))
         // .route("/embeddings/functions/:name", post(load_embedding_function))
@@ -115,13 +138,24 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
         )
         .route("/multimodal/validate", post(validate_multimodal_content))
         .with_state(multimodal_state);
-    app = app.nest("/api/v1", multimodal_routes);
+    #[cfg(feature = "multimodal")]
+    {
+        app = app.nest("/api/v1", multimodal_routes);
+    }
 
     // GraphQL 与 WebSocket 路由
-    let graphql_routes = graphql::create_graphql_router();
-    let websocket_routes = websocket::create_websocket_router();
-    app = app.merge(graphql_routes).merge(websocket_routes);
+    #[cfg(feature = "api-graphql")]
+    {
+        let graphql_routes = graphql::create_graphql_router();
+        app = app.merge(graphql_routes);
+    }
+    #[cfg(feature = "api-ws")]
+    {
+        let websocket_routes = websocket::create_websocket_router();
+        app = app.merge(websocket_routes);
+    }
 
+    #[cfg(feature = "api-swagger")]
     // 合并Swagger UI路由
     app = app.merge(swagger::create_swagger_ui());
 
@@ -147,8 +181,6 @@ pub async fn create_app_with_cluster(config: &AppConfig) -> crate::Result<Router
                 .max_age(std::time::Duration::from_secs(3600)),
         )
         .layer(TraceLayer::new_for_http())
-        // 合并Swagger UI路由
-        .merge(swagger::create_swagger_ui())
         // 应用主状态到所有需要AppState的路由
         .with_state(base_state);
 

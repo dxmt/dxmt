@@ -66,6 +66,7 @@ impl From<std::io::Error> for ObjectStorageError {
     }
 }
 
+#[cfg(feature = "s3-storage")]
 impl From<reqwest::Error> for ObjectStorageError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {

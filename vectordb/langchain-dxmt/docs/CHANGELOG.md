@@ -20,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration tests for real-world scenarios
 - Performance benchmarks
 - Complete API reference documentation
-- Migration guides from major vector databases (Chroma, Pinecone, Qdrant, Weaviate, Milvus)
 - Multiple usage examples (basic, hybrid search, async, Chinese text, advanced config)
 
 ### Changed

@@ -14,6 +14,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUSTFLAGS: -C debuginfo=0
 
 defaults:
   run:
@@ -40,7 +44,9 @@ jobs:
       - name: Formatting
         run: cargo fmt -- --check
 
-      - name: Clippy
+      # All test targets are part of the supported default build. Keep the feature-gated
+      # experimental tests out of this job, while making the default surface warning-free.
+      - name: Clippy (all default targets)
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Unit tests
@@ -49,8 +55,60 @@ jobs:
       # These spawn the server binary and exercise recovery, snapshots, the MCP transport and
       # the routes the client SDKs call. They are the tests that catch the things unit tests
       # cannot: a lost write, a 404 on a documented endpoint, a log line on MCP's stdout.
+      # `--tests`, not a hand-picked subset: these spawn the server binary and exercise
+      # recovery, snapshots, the MCP transport and the routes the client SDKs call. Naming
+      # individual targets here is how a suite quietly stops being run — the tests keep
+      # passing locally and nothing notices when one of them starts failing.
       - name: Integration tests
         run: cargo test --tests
+
+  minimal-core:
+    name: minimal feature compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+      # This job checks the supported single-node core without optional text, remote, or
+      # experimental integrations. The text feature has a separate compile check below.
+      - run: cargo check --no-default-features --features tokio-runtime,basic-storage
+
+      - name: Text feature compile
+        run: cargo check --no-default-features --features tokio-runtime,basic-storage,text-bm25
+
+  optional-features:
+    name: optional integration compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+      # Everything here used to be in `default`, so it was compiled by every job. Now that the
+      # default build is the minimal supported surface, nothing else would ever build these —
+      # and the conditional compilation that gates them is exactly the kind of code that rots
+      # unseen. `--all-targets` because the cfg work reaches into the test targets too.
+      # `clippy -D warnings`, not `check`: the default build already holds that bar, and the
+      # first strict run over the gated code found a lint in the WAL failpoint that nothing had
+      # ever compiled under `-D warnings`. A weaker gate here means the opt-in features drift
+      # to a different standard than the code they sit next to.
+      - name: API and text integrations
+        run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,metrics -- -D warnings
+
+      - name: Object store and embedded backends
+        run: cargo check --features s3-storage,storage-lmdb
+
+      # The feature-gated test files (benchmarks, dataset, phase 3, LMDB persistence, the
+      # failpoint suite) compile to nothing in the default build. Without this step they are
+      # not merely unrun, they are unbuilt, and they rot against the code they test.
+      - name: Feature-gated test targets
+        run: >
+          cargo clippy --all-targets
+          --features benchmarks,adaptive-index,index-management,experimental-indexes,storage-lmdb,test-failpoints
+          -- -D warnings
 
   build:
     name: release build
@@ -62,3 +120,53 @@ jobs:
         with:
           workspaces: vectordb
       - run: cargo build --release --bins
+
+  sdk-live:
+    name: Python and JavaScript SDK live contract
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build server binary
+        run: cargo build --bin vectordb
+        working-directory: vectordb
+
+      - name: Start server
+        run: |
+          DB_WAL_DIR="$RUNNER_TEMP/dxmt-sdk-wal" \
+          DB_SNAPSHOT_INTERVAL_SECS=0 \
+          DB_EVICTION_INTERVAL_SECS=0 \
+          target/debug/vectordb serve --host 127.0.0.1 --port 19999 >"$RUNNER_TEMP/dxmt-sdk-server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:19999/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/dxmt-sdk-server.log"
+          exit 1
+        working-directory: vectordb
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python SDK live tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q tests/test_integration.py
+        working-directory: vectordb/dxmt-python-sdk
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: JavaScript SDK unit, build, and live tests
+        run: |
+          npm ci
+          npm test
+          npm run build
+          DXMT_LIVE_URL=http://127.0.0.1:19999 npm test -- --run test/live.test.ts
+        working-directory: vectordb/dxmt-js-sdk

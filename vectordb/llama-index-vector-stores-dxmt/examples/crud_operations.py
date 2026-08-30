@@ -3,7 +3,6 @@
 This example demonstrates Create, Read, Update, and Delete operations,
 showing how to manage documents in DXMT beyond just inserting and querying.
 
-Based on: reference/llama_index/docs/examples/vector_stores/ChromaIndexDemo.ipynb
 (Update and Delete section)
 
 Usage:

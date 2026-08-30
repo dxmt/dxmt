@@ -15,10 +15,15 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "vectordb"
 path = "src/main.rs"
+# The server binary is not part of Criterion benches.  Building it together
+# with a benchmark enables the heavy release/LTO link and can exhaust memory
+# before the benchmark itself is even compiled.
+bench = false
 
 [[bin]]
 name = "benchmark"
 path = "src/bin/benchmark.rs"
+required-features = ["benchmarks"]
 
 
 
@@ -29,10 +34,16 @@ path = "examples/hnsw_build_scaling.rs"
 [[example]]
 name = "full_text_search"
 path = "examples/full_text_search_example.rs"
+required-features = ["text-bm25"]
 
 [[example]]
 name = "dxql_demo"
 path = "examples/dxql_demo.rs"
+
+[[example]]
+name = "adaptive_index_demo"
+path = "examples/adaptive_index_demo.rs"
+required-features = ["adaptive-index"]
 
 [[example]]
 name = "chinese_tokenizer_demo"
@@ -70,7 +81,6 @@ rmp-serde = "1.1"  # MessagePack for WAL serialization (supports dynamic types)
 uuid = { version = "1.7", features = ["v4", "serde", "fast-rng"] }
 chrono = { version = "0.4.31", features = ["serde"] }
 bytes = "1.5"
-byteorder = "1.5"
 
 # Vector and mathematical operations
 ndarray = { version = "0.15", features = ["rayon", "serde"] }
@@ -87,7 +97,6 @@ flate2 = "1.0"
 
 # Memory and caching
 lru = "0.12"
-moka = { version = "0.12", features = ["future"] }
 memmap2 = "0.9"
 zerocopy = { version = "0.7", features = ["derive"] }
 
@@ -95,15 +104,11 @@ zerocopy = { version = "0.7", features = ["derive"] }
 parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
-crossbeam-epoch = "0.9"
-crossbeam-queue = "0.3"
-crossbeam-utils = "0.8"
 dashmap = "5.5"
 oneshot = "0.1"
 
 # System and OS interaction
 libc = "0.2"
-nix = { version = "0.27", features = ["fs", "uio", "zerocopy"] }
 num_cpus = "1.16"
 sysinfo = "0.30"
 core_affinity = "0.8"
@@ -128,7 +133,6 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 sha2 = "0.10"
 md5 = "0.7"
-jsonwebtoken = "9.2"
 zeroize = { version = "1.7", features = ["derive"] }
 subtle = "2.5"
 
@@ -143,7 +147,6 @@ consul = { version = "0.4", optional = true }
 tonic = { version = "0.11", optional = true }
 prost = { version = "0.12", optional = true }
 hash_ring = { version = "0.2", optional = true }
-priority-queue = "1.3"
 
 # Search and indexing
 tantivy = { version = "0.25", optional = true }
@@ -162,12 +165,10 @@ pest = "2.7"
 pest_derive = "2.7"
 
 # Missing dependencies for new modules
-backoff = { version = "0.4", features = ["tokio"] }
+backoff = { version = "0.4", features = ["tokio"], optional = true }
 # Multimodal support (optional) - using RC version, consider updating when stable
 ort = { version = "2.0.0-rc.10", optional = true }
-statrs = "0.16"
 image = { version = "0.24", features = ["jpeg", "png"], optional = true }
-tokenizers = "0.15"
 
 # GPU acceleration (optional)
 cudarc = { version = "0.12", optional = true, features = ["cuda-11050"] }
@@ -188,7 +189,6 @@ rand_distr = "0.4"
 regex = "1.10"
 base64 = "0.22"
 itertools = "0.12"
-petgraph = "0.6"
 tempfile = "3.10"
 
 # Performance and optimization
@@ -197,42 +197,31 @@ crc32fast = "1.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # External services
-redis = { version = "0.24", default-features = false, features = ["tokio-comp", "connection-manager"] }
 prometheus = { version = "0.13", optional = true }
 
 # CLI and UI
 clap = { version = "4.5", features = ["derive", "env"] }
 colored = "2.1"
-indicatif = "0.17"
-prettytable-rs = "0.10"
 
 # OpenAPI documentation
 utoipa = { version = "4.2", features = ["axum_extras"], optional = true }
 utoipa-swagger-ui = { version = "6.0", features = ["axum"], optional = true }
 ordered-float = "5.0.0"
 roaring = "0.11.2"
-hyper = "1.7.0"
+# axum 0.6 is built on hyper 0.14; keeping this dependency on the same
+# version avoids two incompatible `tower_service` traits in the server binary.
+hyper = "0.14.32"
 
 [dev-dependencies]
 # Testing frameworks
-tokio-test = "0.4"
-axum-test = "15.3"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 proptest = "1.4"
-quickcheck = "1.0"
-quickcheck_macros = "1.0"
-rstest = "0.18"
 
 # Assertion and testing utilities
-pretty_assertions = "1.4"
-approx = "0.5"
 serial_test = "3.1"
 
 # Additional test dependencies
-half = "2.3"
 # kmeans = "0.2" # Commented out due to packed_simd compilation issues
-opentelemetry = { version = "0.21", default-features = false }
-opentelemetry-otlp = { version = "0.14", default-features = false }
 # rdkafka = { version = "0.35", default-features = false, features = ["cmake-build"] }
 
 [profile.release]
@@ -249,14 +238,33 @@ inherits = "release"
 opt-level = "z"
 panic = "abort"
 
+# Integration tests use Rust's unwind-based harness.  Keep the production
+# release profile's smaller aborting panic strategy, while providing an
+# optimized profile for release-level correctness/ANN measurements.
+[profile.release-unwind]
+inherits = "release"
+panic = "unwind"
+lto = false
+codegen-units = 16
+debug = false
+strip = false
+
+[profile.bench]
+# Criterion needs optimized database code, but fat LTO over both the rlib and
+# cdylib exhausts memory on normal development/CI machines before benchmarks
+# can start. Benchmarks are intended for repeatable local/CI validation, so
+# avoiding LTO entirely keeps linker memory and time bounded.
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = false
+strip = false
+
 [profile.dev]
 debug = true
 opt-level = 0
 incremental = true
-
-[profile.bench]
-inherits = "release"
-debug = true
 
 # Dependency resolution overrides for compatibility
 [patch.crates-io]
@@ -264,10 +272,32 @@ debug = true
 
 # Feature flags for conditional compilation
 [features]
-default = ["tokio-runtime", "basic-storage", "s3-storage", "text-bm25", "storage-lmdb", "api-swagger", "api-graphql"]
+# The default build is the supported single-node Alpha surface. Heavy or experimental
+# integrations must be opted into explicitly so a normal build does not require AWS, LMDB,
+# GraphQL, ONNX, or GPU toolchains.
+default = ["tokio-runtime", "basic-storage"]
+experimental = [
+    "benchmarks",
+    "worker-pool",
+    "adaptive-index",
+    "index-management",
+    "async-wal",
+    "memory-pool",
+    "multi-tenant",
+    "experimental-indexes",
+]
 python = ["pyo3", "pyo3/extension-module"]
 tokio-runtime = []
 basic-storage = []
+benchmarks = []
+worker-pool = []
+adaptive-index = ["experimental-indexes"]
+index-management = ["adaptive-index"]
+async-wal = []
+memory-pool = []
+multi-tenant = []
+experimental-indexes = []
+test-failpoints = []
 s3-storage = ["aws-config", "aws-sdk-s3", "aws-smithy-async", "reqwest"]
 storage-lmdb = ["heed"]
 storage-rocksdb = ["rocksdb"]
@@ -276,13 +306,15 @@ hybrid-search = ["text-bm25"]
 api-graphql = ["async-graphql", "async-graphql-axum"]
 api-swagger = ["utoipa", "utoipa-swagger-ui"]
 api-ws = []
-gpu = ["cudarc"]
-simd = []
+embeddings = ["reqwest", "backoff"]
+gpu = ["embeddings", "cudarc"]
+simd = ["embeddings"]
 jemalloc = []
 metrics = ["prometheus"]
-cluster = ["consul", "tonic", "prost", "hash_ring"]
+cluster = ["consul", "tonic", "prost", "hash_ring", "consensus"]
+consensus = []
 # Multimodal support (experimental - ONNX Runtime API changes in progress)
-multimodal = ["ort", "image"]
+multimodal = ["embeddings", "ort", "image"]
 # HuggingFace dataset integration
 hf-datasets = ["parquet", "arrow", "reqwest"]
 

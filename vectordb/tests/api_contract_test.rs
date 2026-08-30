@@ -79,11 +79,36 @@ const CONTRACTS: &[Contract] = &[
         path: "/query",
         caller: "python",
     },
-    // JS SDK.
+    // JS SDK and operational probes.
     Contract {
         method: "GET",
         path: "/health",
+        caller: "js (root probe)",
+    },
+    Contract {
+        method: "GET",
+        path: "/api/v1/health",
         caller: "js",
+    },
+    Contract {
+        method: "GET",
+        path: "/ready",
+        caller: "orchestrator",
+    },
+    Contract {
+        method: "GET",
+        path: "/live",
+        caller: "orchestrator",
+    },
+    Contract {
+        method: "GET",
+        path: "/api/v1/health/ready",
+        caller: "sdk",
+    },
+    Contract {
+        method: "GET",
+        path: "/api/v1/health/metrics",
+        caller: "sdk",
     },
     Contract {
         method: "DELETE",
@@ -149,9 +174,15 @@ fn start_server() -> Server {
 
 /// Issue a request and return (status, body), or None if the connection failed.
 fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
-    let url = if path == "/health" {
-        // The JS SDK's health check is the one path served at the root, not under /api/v1.
-        format!("http://127.0.0.1:{}/health", port)
+    let root_probe = matches!(
+        path,
+        "/health" | "/live" | "/ready" | "/health/live" | "/health/ready" | "/health/metrics"
+    );
+    let url = if root_probe {
+        // System probes are served at the root for orchestrators.
+        format!("http://127.0.0.1:{}{}", port, path)
+    } else if path.starts_with("/api/v1/") {
+        format!("http://127.0.0.1:{}{}", port, path)
     } else {
         format!("http://127.0.0.1:{}/api/v1{}", port, path)
     };
@@ -276,4 +307,88 @@ fn every_route_the_sdks_call_exists() {
         missing.len(),
         missing.join("\n  ")
     );
+}
+
+#[test]
+fn standard_response_and_probe_contract_is_stable() {
+    let server = start_server();
+
+    let ready = curl(server.port, "GET", "/ready", None).expect("readiness request failed");
+    assert_eq!(ready.0, 200);
+    let ready_json: serde_json::Value = serde_json::from_str(&ready.1).unwrap();
+    assert_eq!(ready_json["status"], "ready");
+    assert_eq!(ready_json["storage"]["wal_enabled"], true);
+
+    let live = curl(server.port, "GET", "/live", None).expect("liveness request failed");
+    assert_eq!(live.0, 200);
+    let live_json: serde_json::Value = serde_json::from_str(&live.1).unwrap();
+    assert_eq!(live_json["status"], "alive");
+
+    let metrics = curl(server.port, "GET", "/health/metrics", None).unwrap();
+    assert_eq!(metrics.0, 200);
+    let metrics_json: serde_json::Value = serde_json::from_str(&metrics.1).unwrap();
+    assert_eq!(metrics_json["success"], true);
+    assert_eq!(metrics_json["data"]["storage"]["snapshot_failures"], 0);
+
+    let created = curl(
+        server.port,
+        "POST",
+        "/tables",
+        Some(r#"{"name":"shape","dimension":2,"distance_metric":"cosine"}"#),
+    )
+    .unwrap();
+    assert_eq!(created.0, 200);
+    let created_json: serde_json::Value = serde_json::from_str(&created.1).unwrap();
+    assert_eq!(created_json["success"], true);
+    assert_eq!(created_json["data"]["name"], "shape");
+
+    let inserted = curl(
+        server.port,
+        "POST",
+        "/tables/shape/records",
+        Some(
+            r#"{"records":[{"id":"r1","vector":[1,0],"sparse_vector":{"indices":[0],"values":[1.0],"dimension":2}}]}"#,
+        ),
+    )
+    .unwrap();
+    assert_eq!(inserted.0, 200);
+
+    // Updating metadata must not silently discard auxiliary vectors that hybrid search uses.
+    let updated = curl(
+        server.port,
+        "PUT",
+        "/tables/shape/records/r1",
+        Some(r#"{"payload":{"kind":"note"}}"#),
+    )
+    .unwrap();
+    assert_eq!(updated.0, 200);
+    let fetched = curl(server.port, "GET", "/tables/shape/records/r1", None).unwrap();
+    assert_eq!(fetched.0, 200);
+    let fetched_json: serde_json::Value = serde_json::from_str(&fetched.1).unwrap();
+    assert_eq!(fetched_json["data"]["sparse_vector"]["indices"][0], 0);
+
+    let searched = curl(
+        server.port,
+        "POST",
+        "/tables/shape/search",
+        Some(r#"{"vector":[1,0],"top_k":1}"#),
+    )
+    .unwrap();
+    assert_eq!(searched.0, 200);
+    let searched_json: serde_json::Value = serde_json::from_str(&searched.1).unwrap();
+    assert!(searched_json["data"]["hits"].is_array());
+    assert_eq!(searched_json["data"]["hits"][0]["id"], "r1");
+
+    // A validation/storage error must retain its machine-readable envelope and status code.
+    let missing = curl(
+        server.port,
+        "POST",
+        "/tables/unknown/records",
+        Some(r#"{"records":[{"id":"r1","vector":[1,0]}]}"#),
+    )
+    .unwrap();
+    assert_eq!(missing.0, 404);
+    let missing_json: serde_json::Value = serde_json::from_str(&missing.1).unwrap();
+    assert_eq!(missing_json["success"], false);
+    assert_eq!(missing_json["error"]["code"], "TABLE_NOT_FOUND");
 }

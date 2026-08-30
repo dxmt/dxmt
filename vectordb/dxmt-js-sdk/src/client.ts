@@ -10,17 +10,18 @@ import {
   ClientConfig,
   TableConfig,
   TableInfo,
-  Record,
+  Record as VectorRecord,
   SearchParams,
   SearchResult,
   InsertRecordsParams,
   DeleteParams,
+  UpdateRecordParams,
   BatchOperationResult,
   TableStats,
   HealthCheckResponse,
   FullTextSearchParams,
   HybridSearchParams,
-  Filter,
+  Metadata,
 } from './types';
 import {
   DXMTError,
@@ -152,6 +153,16 @@ export class DXMTClient {
         throw parseErrorResponse(response.status, data);
       }
 
+      // The Rust API wraps successful responses in { success, data, timestamp }, while a few
+      // compatibility endpoints return a plain JSON body. Accept both forms so the SDK reflects
+      // the wire contract instead of leaking the server envelope into every call site.
+      if (
+        data &&
+        data.success === true &&
+        Object.prototype.hasOwnProperty.call(data, 'data')
+      ) {
+        return data.data as T;
+      }
       return data as T;
     } catch (error: any) {
       // Handle timeout
@@ -230,9 +241,9 @@ export class DXMTClient {
    * console.log('Tables:', tables);
    * ```
    */
-  async listTables(): Promise<string[]> {
+  async listTables(): Promise<TableInfo[]> {
     try {
-      const response = await this.request<{ tables: string[] }>(
+      const response = await this.request<{ tables: TableInfo[] }>(
         'GET',
         '/tables'
       );
@@ -264,10 +275,16 @@ export class DXMTClient {
     }
 
     try {
-      return await this.request<TableInfo>(
+      const response = await this.request<
+        TableInfo | { table: TableInfo; record_count: number }
+      >(
         'GET',
         `/tables/${encodeURIComponent(tableName)}`
       );
+      if ('table' in response) {
+        return { ...response.table, record_count: response.record_count };
+      }
+      return response;
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTTableError(
@@ -380,20 +397,35 @@ export class DXMTClient {
       if (!record.id) {
         throw new DXMTValidationError('Record ID is required');
       }
-      if (!record.vector || !Array.isArray(record.vector)) {
+      if (!record.vector || !Array.isArray(record.vector) || record.vector.length === 0) {
         throw new DXMTValidationError('Record vector must be an array');
       }
     }
 
     try {
-      return await this.request<BatchOperationResult>(
+      const response = await this.request<{
+        inserted_ids?: string[];
+        count?: number;
+      }>(
         'POST',
         `/tables/${encodeURIComponent(params.table_name)}/records`,
         {
-          records: params.records,
+          // The public SDK calls this field `metadata`; the Rust wire contract calls it
+          // `payload`. Send the server shape explicitly so metadata is not silently discarded.
+          records: params.records.map(({ metadata, ...record }) => ({
+            ...record,
+            ...(metadata === undefined ? {} : { payload: metadata }),
+          })),
           mode: params.mode || 'append',
         }
       );
+      const insertedIds = response.inserted_ids || [];
+      return {
+        success: true,
+        inserted: response.count ?? insertedIds.length,
+        inserted_ids: insertedIds,
+        count: response.count ?? insertedIds.length,
+      };
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTRecordError(
@@ -416,7 +448,7 @@ export class DXMTClient {
    * console.log('Metadata:', record.metadata);
    * ```
    */
-  async getRecord(tableName: string, recordId: string): Promise<Record> {
+  async getRecord(tableName: string, recordId: string): Promise<VectorRecord> {
     if (!tableName) {
       throw new DXMTValidationError('Table name is required');
     }
@@ -425,14 +457,56 @@ export class DXMTClient {
     }
 
     try {
-      return await this.request<Record>(
+      const response = await this.request<
+        VectorRecord & { payload?: Metadata; payload_json?: string }
+      >(
         'GET',
         `/tables/${encodeURIComponent(tableName)}/records/${encodeURIComponent(recordId)}`
       );
+      return this.normalizeRecord(response);
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTRecordError(
         `Failed to get record: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /** Update a record's vector and/or metadata without losing auxiliary vectors. */
+  async updateRecord(params: UpdateRecordParams): Promise<BatchOperationResult> {
+    if (!params.table_name) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    if (!params.record_id) {
+      throw new DXMTValidationError('Record ID is required');
+    }
+    if (params.vector !== undefined &&
+        (!Array.isArray(params.vector) || params.vector.length === 0)) {
+      throw new DXMTValidationError('Record vector must be an array');
+    }
+    if (params.metadata === undefined && params.vector === undefined && !params.upsert) {
+      throw new DXMTValidationError('At least one field (vector or metadata) is required');
+    }
+
+    try {
+      await this.request<{
+        message?: string;
+        record?: { id: string; version?: number };
+      }>(
+        'PUT',
+        `/tables/${encodeURIComponent(params.table_name)}/records/${encodeURIComponent(params.record_id)}`,
+        {
+          ...(params.vector === undefined ? {} : { vector: params.vector }),
+          ...(params.metadata === undefined ? {} : { payload: params.metadata }),
+          merge_mode: params.merge_mode || 'replace',
+          upsert: params.upsert || false,
+        }
+      );
+      return { success: true, updated: 1, count: 1 };
+    } catch (error) {
+      if (error instanceof DXMTError) throw error;
+      throw new DXMTRecordError(
+        `Failed to update record: ${(error as Error).message}`
       );
     }
   }
@@ -468,14 +542,18 @@ export class DXMTClient {
         'Either record_ids or filter is required'
       );
     }
+    if (!params.record_ids && params.filter) {
+      throw new DXMTValidationError(
+        'The server API currently supports delete by record_ids only'
+      );
+    }
 
     try {
       await this.request<void>(
         'DELETE',
         `/tables/${encodeURIComponent(params.table_name)}/records`,
         {
-          record_ids: params.record_ids,
-          filter: params.filter,
+          ids: params.record_ids,
         }
       );
     } catch (error) {
@@ -519,25 +597,25 @@ export class DXMTClient {
     if (!params.table_name) {
       throw new DXMTValidationError('Table name is required');
     }
-    if (!params.vector || !Array.isArray(params.vector)) {
+    if (!params.vector || !Array.isArray(params.vector) || params.vector.length === 0) {
       throw new DXMTValidationError('Query vector must be an array');
     }
 
     try {
-      const response = await this.request<{ results: SearchResult[] }>(
+      const response = await this.request<{ hits: Array<SearchResult & { payload?: Metadata }> }>(
         'POST',
         `/tables/${encodeURIComponent(params.table_name)}/search`,
         {
           vector: params.vector,
-          k: params.k || 10,
+          top_k: params.k || 10,
           filter: params.filter,
           ef_search: params.ef_search,
-          include_metadata: params.include_metadata !== false,
-          include_vectors: params.include_vectors || false,
+          with_payload: params.include_metadata !== false,
+          with_vector: params.include_vectors || false,
         }
       );
 
-      return response.results;
+      return (response.hits || []).map((hit) => this.normalizeRecord(hit));
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTSearchError(
@@ -572,17 +650,17 @@ export class DXMTClient {
     }
 
     try {
-      const response = await this.request<{ results: SearchResult[] }>(
+      const response = await this.request<{ hits: Array<SearchResult & { payload?: Metadata }> }>(
         'POST',
         `/tables/${encodeURIComponent(params.table_name)}/search/text`,
         {
           query: params.query,
-          k: params.k || 10,
+          limit: params.k || 10,
           filter: params.filter,
         }
       );
 
-      return response.results;
+      return (response.hits || []).map((hit) => this.normalizeRecord(hit));
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTSearchError(
@@ -620,20 +698,19 @@ export class DXMTClient {
     }
 
     try {
-      const response = await this.request<{ results: SearchResult[] }>(
+      const response = await this.request<{ hits: Array<SearchResult & { payload?: Metadata }> }>(
         'POST',
         `/tables/${encodeURIComponent(params.table_name)}/search/hybrid`,
         {
           vector: params.vector,
-          text_query: params.text_query,
-          k: params.k || 10,
+          text: params.text_query,
+          limit: params.k || 10,
           filter: params.filter,
-          vector_weight: params.vector_weight || 0.5,
-          text_weight: params.text_weight || 0.5,
+          vector_weight: params.vector_weight ?? 0.5,
         }
       );
 
-      return response.results;
+      return (response.hits || []).map((hit) => this.normalizeRecord(hit));
     } catch (error) {
       if (error instanceof DXMTError) throw error;
       throw new DXMTSearchError(
@@ -669,6 +746,18 @@ export class DXMTClient {
     }
   }
 
+  /** Return detailed health and storage durability metrics. */
+  async healthMetrics(): Promise<HealthCheckResponse> {
+    try {
+      return await this.request<HealthCheckResponse>('GET', '/health/metrics');
+    } catch (error) {
+      if (error instanceof DXMTError) throw error;
+      throw new DXMTConnectionError(
+        `Health metrics request failed: ${(error as Error).message}`
+      );
+    }
+  }
+
   /**
    * Get the base URL of the client.
    */
@@ -691,5 +780,25 @@ export class DXMTClient {
       ...this.headers,
       ...headers,
     };
+  }
+
+  /** Convert the server's `payload` field to the SDK's `metadata` field. */
+  private normalizeRecord<
+    T extends { payload?: Metadata; payload_json?: string }
+  >(record: T): T & VectorRecord {
+    const normalized = { ...record } as T & VectorRecord;
+    let payload = record.payload;
+    if (payload === undefined && record.payload_json) {
+      try {
+        payload = JSON.parse(record.payload_json) as Metadata;
+      } catch {
+        // Keep malformed payloads non-fatal; the raw payload_json remains
+        // available for diagnostics and metadata is simply omitted.
+      }
+    }
+    if (normalized.metadata === undefined && payload !== undefined) {
+      normalized.metadata = payload;
+    }
+    return normalized;
   }
 }

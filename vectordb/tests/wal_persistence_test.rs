@@ -1,3 +1,5 @@
+#![cfg(feature = "storage-lmdb")]
+
 //! WAL Persistence Test
 //!
 //! Tests that WAL entries are properly persisted to LMDB storage

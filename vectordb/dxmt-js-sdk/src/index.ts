@@ -67,6 +67,7 @@ export type {
 
   // Operations
   InsertRecordsParams,
+  UpdateRecordParams,
   DeleteParams,
   BatchOperationResult,
 

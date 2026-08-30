@@ -1,11 +1,7 @@
-"""Retrieval quality evaluation — DXMT port of Chroma experimentation-playground pattern.
+"""Retrieval quality evaluation — measure recall and ranking against a labelled set.
 
 Measures Recall@K and MRR (Mean Reciprocal Rank) on a labelled dataset where
 ground-truth relevant documents are known for each query.
-
-Reference:
-    reference/examples/chroma-cookbooks/experimentation-playground/
-        src/experimentation_playground/eval/simple_eval.py
 
 Evaluation metrics:
     Recall@K  — fraction of relevant docs returned in top-K results
@@ -293,7 +289,6 @@ def main() -> None:
 
     print("=" * 60)
     print("  DXMT Retrieval Evaluation")
-    print("  (Chroma experimentation-playground pattern)")
     print("=" * 60)
     print(f"  Queries:    {len(QUERIES)}")
     print(f"  Documents:  {len(DOCUMENTS)}")

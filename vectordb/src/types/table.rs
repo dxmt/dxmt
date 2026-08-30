@@ -181,7 +181,7 @@ pub struct TableAlterRequest {
     pub drop_fields: Vec<String>,
 }
 
-/// Named vector space configuration (Qdrant-style multi-vector support)
+/// Named vector space configuration (multi-vector support)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct VectorSpaceConfig {
@@ -214,7 +214,7 @@ pub struct TableConfig {
     /// Schema version, incremented on each alter_table call
     #[serde(default = "default_schema_version")]
     pub schema_version: u64,
-    /// Optional named vector spaces (multi-vector support, Qdrant-style).
+    /// Optional named vector spaces (multi-vector support).
     /// When set, `dimension` serves as the default vector space named "default".
     #[serde(default)]
     pub named_vectors: Option<Vec<VectorSpaceConfig>>,

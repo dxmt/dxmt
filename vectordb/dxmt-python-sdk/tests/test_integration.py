@@ -1,6 +1,7 @@
 """Integration tests for DXMT SDK.
 
-These tests require a running DXMT server at localhost:9999.
+These tests require a running DXMT server; host/port default to localhost:9999
+and can be overridden with DXMT_TEST_HOST / DXMT_TEST_PORT.
 
 Run with:
     pytest tests/test_integration.py -v
@@ -10,16 +11,20 @@ Or skip if no server:
 """
 
 import asyncio
+import os
 import random
 from typing import Generator
 
 import pytest
 
 from dxmt import Client
-from dxmt.exceptions import DXMTTableError
+from dxmt.exceptions import DXMTSearchError, DXMTTableError
 
 # Mark all tests in this module as integration tests
 pytestmark = pytest.mark.integration
+
+TEST_HOST = os.environ.get("DXMT_TEST_HOST", "localhost")
+TEST_PORT = int(os.environ.get("DXMT_TEST_PORT", "9999"))
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +36,7 @@ def test_table_name() -> str:
 @pytest.fixture(scope="module")
 def client() -> Generator[Client, None, None]:
     """Create a client for testing."""
-    client = Client(host="localhost", port=9999)
+    client = Client(host=TEST_HOST, port=TEST_PORT)
     yield client
     client.close()
 
@@ -90,7 +95,7 @@ def setup_hybrid_table(client: Client) -> Generator[str, None, None]:
     records = [
         {
             "id": f"hybrid_{i}",
-            "vector": [float(i) / 10] * 128,
+            "vector": [float(i + 1) / 10] * 128,
             "metadata": {
                 "text": f"This is document {i} about machine learning",
                 "category": "AI",
@@ -182,7 +187,7 @@ class TestRecordOperations:
         records = [
             {
                 "id": f"doc_{i}",
-                "vector": [float(i) / 10] * 128,
+                "vector": [float(i + 1) / 10] * 128,
                 "metadata": {"index": i, "text": f"Document {i}"},
             }
             for i in range(10)
@@ -218,6 +223,17 @@ class TestRecordOperations:
         result = client.delete_records(table_name=setup_table, ids=["delete_1"])
         assert result["success"] is True
 
+    def test_payload_only_update_preserves_vector(self, client: Client, setup_table: str) -> None:
+        """A metadata update must not erase the dense vector used for search."""
+        client.insert_records(
+            table_name=setup_table,
+            records=[{"id": "update_1", "vector": [1.0] + [0.0] * 127, "metadata": {"v": 1}}],
+        )
+        client.update_record(table_name=setup_table, record_id="update_1", payload={"v": 2})
+        record = client.get_records(table_name=setup_table, ids=["update_1"])[0]
+        assert record["vector"][0] == 1.0
+        assert record["metadata"] == {"v": 2}
+
 
 class TestVectorSearch:
     """Test vector search operations."""
@@ -228,7 +244,7 @@ class TestVectorSearch:
         records = [
             {
                 "id": f"search_{i}",
-                "vector": [float(i) / 100] * 128,
+                "vector": [float(i + 1) / 100] * 128,
                 "metadata": {"index": i, "category": "test"},
             }
             for i in range(20)
@@ -273,7 +289,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_table_operations(self, test_table_name: str) -> None:
         """Test async table operations."""
-        async with Client(host="localhost", port=9999) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
             # Create table
             async_table = f"{test_table_name}_async"
             result = await client.acreate_table(
@@ -295,7 +311,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_record_operations(self, setup_table: str) -> None:
         """Test async record operations."""
-        async with Client(host="localhost", port=9999) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
             # Insert records
             records = [
                 {"id": "async_1", "vector": [0.8] * 128, "metadata": {}},
@@ -318,10 +334,10 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_search(self, setup_table: str) -> None:
         """Test async search."""
-        async with Client(host="localhost", port=9999) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
             # Insert test data
             records = [
-                {"id": f"async_search_{i}", "vector": [float(i) / 10] * 128, "metadata": {}}
+                {"id": f"async_search_{i}", "vector": [float(i + 1) / 10] * 128, "metadata": {}}
                 for i in range(5)
             ]
             await client.ainsert_records(table_name=setup_table, records=records)
@@ -336,9 +352,9 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_concurrent_searches(self, setup_table: str) -> None:
         """Test concurrent async searches."""
-        async with Client(host="localhost", port=9999) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
             # Perform multiple searches concurrently
-            queries = [[float(i) / 100] * 128 for i in range(5)]
+            queries = [[float(i + 1) / 100] * 128 for i in range(5)]
             tasks = [
                 client.asearch(table_name=setup_table, vector=q, k=3) for q in queries
             ]
@@ -406,9 +422,14 @@ class TestFullTextSearch:
 
     def test_full_text_search(self, client: Client, setup_hybrid_table: str) -> None:
         """Test pure full-text search."""
-        results = client.full_text_search(
-            table_name=setup_hybrid_table, query="machine learning", k=5
-        )
+        try:
+            results = client.full_text_search(
+                table_name=setup_hybrid_table, query="machine learning", k=5
+            )
+        except DXMTSearchError as exc:
+            if "FEATURE_DISABLED" in str(exc):
+                pytest.skip("server was built without the text-bm25 feature")
+            raise
 
         assert isinstance(results, list)
         assert len(results) <= 5
@@ -441,3 +462,7 @@ class TestEdgeCases:
 
         # Should return all available records (likely < 1000)
         assert isinstance(results, list)
+
+    def test_health_metrics_expose_storage_state(self, client: Client) -> None:
+        body = client.health_metrics()
+        assert body["storage"]["ready"] is True

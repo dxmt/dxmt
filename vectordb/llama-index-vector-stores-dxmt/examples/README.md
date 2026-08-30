@@ -41,7 +41,7 @@ The server should be accessible at `http://localhost:9999`.
 
 ## Examples Overview
 
-This directory contains **8 comprehensive examples**, including **3 adapted from LlamaIndex Chroma demos**:
+This directory contains **8 comprehensive examples**:
 
 | # | Example | Type | Description |
 |---|---------|------|-------------|
@@ -49,9 +49,9 @@ This directory contains **8 comprehensive examples**, including **3 adapted from
 | 2 | `advanced_filters.py` | Foundation | Complex metadata filtering |
 | 3 | `rag_example.py` | Foundation | Complete RAG pipeline |
 | 4 | `hybrid_search.py` | Advanced | Vector + keyword search |
-| 5 | `paul_graham_essay.py` | **Chroma Port** | Classic LlamaIndex demo |
-| 6 | `auto_retriever.py` | **Chroma Port** | Auto metadata inference |
-| 7 | `crud_operations.py` | **Chroma Port** | Full CRUD lifecycle |
+| 5 | `paul_graham_essay.py` | **Integration** | Classic LlamaIndex demo |
+| 6 | `auto_retriever.py` | **Integration** | Auto metadata inference |
+| 7 | `crud_operations.py` | **Integration** | Full CRUD lifecycle |
 | 8 | `ragas_evaluation.py` | Evaluation | RAG quality metrics |
 
 ---
@@ -173,14 +173,13 @@ python hybrid_search.py
 
 ---
 
-### 5. Paul Graham Essay (`paul_graham_essay.py`) ⭐ **CHROMA EQUIVALENT**
+### 5. Paul Graham Essay (`paul_graham_essay.py`)
 
 **What it demonstrates:**
-- Classic LlamaIndex example adapted from Chroma
+- Classic LlamaIndex document-indexing example
 - Loading and indexing long documents
-- DXMT's built-in persistence vs Chroma's modes
+- DXMT's built-in persistence
 - Multiple query patterns
-- Side-by-side comparison with Chroma approach
 
 **Run:**
 ```bash
@@ -193,14 +192,8 @@ python paul_graham_essay.py
 - Multiple query examples
 - Retriever vs query engine
 
-**Chroma equivalent:**
-- `reference/llama_index/docs/examples/vector_stores/ChromaIndexDemo.ipynb`
-
 **Highlights:**
 ```python
-# Chroma needs explicit persistence mode
-client = chromadb.PersistentClient(path="./chroma_db")
-
 # DXMT is always persistent (server-based)
 vector_store = DXMTVectorStore(host="localhost", port=9999)
 # Data automatically persists!
@@ -208,7 +201,7 @@ vector_store = DXMTVectorStore(host="localhost", port=9999)
 
 ---
 
-### 6. Auto-Retrieval (`auto_retriever.py`) ⭐ **CHROMA EQUIVALENT**
+### 6. Auto-Retrieval (`auto_retriever.py`)
 
 **What it demonstrates:**
 - Automatic metadata filter inference from queries
@@ -227,9 +220,6 @@ python auto_retriever.py
 - Dynamic query optimization
 - When to use auto vs manual retrieval
 
-**Chroma equivalent:**
-- `reference/llama_index/docs/examples/vector_stores/chroma_auto_retriever.ipynb`
-
 **Example queries:**
 ```python
 # Natural language queries that automatically become filtered searches
@@ -245,7 +235,7 @@ python auto_retriever.py
 
 ---
 
-### 7. CRUD Operations (`crud_operations.py`) ⭐ **CHROMA EQUIVALENT**
+### 7. CRUD Operations (`crud_operations.py`)
 
 **What it demonstrates:**
 - Complete lifecycle: Create, Read, Update, Delete
@@ -263,9 +253,6 @@ python crud_operations.py
 - Updating with same doc_id (upsert)
 - Deletion strategies
 - Best practices for production
-
-**Chroma equivalent:**
-- `reference/llama_index/docs/examples/vector_stores/ChromaIndexDemo.ipynb` (Update/Delete section)
 
 **CRUD patterns:**
 ```python
@@ -502,133 +489,6 @@ pip install ragas datasets
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Complete troubleshooting guide for all examples
 - **[RAGAS_TROUBLESHOOTING.md](RAGAS_TROUBLESHOOTING.md)** - RAGAS-specific issues
 - **[RAGAS_QUICKFIX.md](RAGAS_QUICKFIX.md)** - Quick fixes for common RAGAS problems
-- **[CHROMA_MIGRATION.md](CHROMA_MIGRATION.md)** - Migration guide from Chroma
-
-## Migrating from Chroma
-
-If you're familiar with LlamaIndex + Chroma and want to switch to DXMT, here's a migration guide:
-
-### Basic Migration
-
-**Chroma Code:**
-```python
-import chromadb
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.core import VectorStoreIndex, StorageContext
-
-# Create Chroma client and collection
-chroma_client = chromadb.EphemeralClient()
-chroma_collection = chroma_client.create_collection("my_collection")
-
-# Create vector store
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-# Build index
-index = VectorStoreIndex.from_documents(
-    documents,
-    storage_context=storage_context
-)
-```
-
-**DXMT Code:**
-```python
-from llama_index.vector_stores.dxmt import DXMTVectorStore
-from llama_index.core import VectorStoreIndex
-
-# Create DXMT vector store (no collection setup needed)
-vector_store = DXMTVectorStore(
-    table_name="my_collection",
-    dimension=1536,
-    host="localhost",
-    port=9999,
-)
-
-# Build index (same as Chroma!)
-index = VectorStoreIndex.from_documents(
-    documents,
-    vector_store=vector_store
-)
-```
-
-### Key Differences
-
-| Aspect | Chroma | DXMT |
-|--------|--------|------|
-| **Client Setup** | `chromadb.EphemeralClient()` or `chromadb.PersistentClient()` | `DXMTVectorStore()` (always server-based) |
-| **Persistence** | Must choose mode | Always persistent |
-| **Collection** | Explicit creation | Auto-created on first use |
-| **Querying** | Same LlamaIndex API | Same LlamaIndex API ✓ |
-| **Filters** | Same LlamaIndex API | Same LlamaIndex API ✓ |
-| **Server** | Optional (Docker) | Required (binary or Docker) |
-
-### Migration Checklist
-
-- [ ] Start DXMT server: `cargo run -- serve --simple --memory-limit 1024`
-- [ ] Replace `chromadb` imports with `DXMTVectorStore`
-- [ ] Remove client/collection creation code
-- [ ] Add `dimension` parameter (required in DXMT)
-- [ ] Update connection details (`host`, `port`)
-- [ ] Test queries (API is the same!)
-- [ ] Verify metadata filters work
-- [ ] Check performance (DXMT may be faster for large datasets)
-
-### Side-by-Side Examples
-
-See these examples for direct comparisons:
-- `paul_graham_essay.py` - Includes Chroma vs DXMT comparison
-- `auto_retriever.py` - Shows identical auto-retrieval functionality
-- `crud_operations.py` - CRUD operations work the same way
-
-### Why Migrate?
-
-**Chroma Strengths:**
-- ✓ Simple embedded mode
-- ✓ Quick prototyping
-- ✓ Wide adoption
-
-**DXMT Advantages:**
-- ✓ Production-ready architecture (server-based)
-- ✓ Automatic tiered storage (Memory → SSD → S3)
-- ✓ Cost optimization (70-90% savings vs all-memory)
-- ✓ Runtime adaptive indexes
-- ✓ Sub-5min recovery from object storage
-- ✓ Native hybrid search (vector + text)
-- ✓ Built for cloud-native deployments
-
-### Common Migration Issues
-
-**Issue 1: Missing dimension parameter**
-```python
-# Chroma (infers from embeddings)
-vector_store = ChromaVectorStore(chroma_collection=collection)
-
-# DXMT (explicit dimension required)
-vector_store = DXMTVectorStore(
-    table_name="collection",
-    dimension=1536,  # Must specify!
-)
-```
-
-**Issue 2: Server not running**
-```bash
-# Error: Connection refused
-# Solution: Start DXMT server
-cargo run -- serve --simple --memory-limit 1024
-```
-
-**Issue 3: Port conflicts**
-```python
-# If port 9999 is busy, use a different port
-vector_store = DXMTVectorStore(
-    table_name="collection",
-    dimension=1536,
-    port=9998,  # Custom port
-)
-
-# Start server on same port:
-cargo run -- serve --port 9998
-```
 
 ## Contributing
 

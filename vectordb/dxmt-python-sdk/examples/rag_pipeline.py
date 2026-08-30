@@ -1,4 +1,4 @@
-"""Local RAG pipeline — DXMT port of LanceDB vectordb-recipes local-RAG pattern.
+"""Local RAG pipeline — retrieval-augmented generation against a local corpus.
 
 End-to-end Retrieval-Augmented Generation without any cloud dependency:
     1. Chunk documents
@@ -96,7 +96,7 @@ values improve recall but increase memory and latency.
 
 ## Payload Filtering
 
-DXMT and Qdrant support attaching structured metadata (payload) to each vector.
+DXMT supports attaching structured metadata (payload) to each vector.
 Filters can be applied at search time to restrict results to a subset of
 records. For example, filtering by {"category": "science"} returns only vectors
 whose payload contains that field.
@@ -319,7 +319,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  DXMT Local RAG Pipeline (LanceDB local-RAG pattern)")
+    print("  DXMT Local RAG Pipeline")
     print("=" * 70)
 
     rag = RAGPipeline(use_openai=args.openai)

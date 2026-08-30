@@ -1,6 +1,6 @@
 """Agent memory — conversation history stored as vectors in DXMT.
 
-Implements the agentic memory pattern from Chroma's agentic-memory cookbook:
+Implements an agentic memory pattern:
 each conversation turn (user message + agent reply) is embedded and stored.
 At recall time, memories are scored by a hybrid of:
 
@@ -11,10 +11,6 @@ where recency_score = exp(-λ × turns_ago).
 Optionally, "consolidation" periodically merges redundant memories (simulated
 here with a dedup pass by cosine threshold, since we don't have an LLM in the
 default mode).
-
-Reference:
-    reference/examples/chroma-cookbooks/agentic-memory/
-        packages/inbox-agent/src/memory.ts
 
 This example is self-contained: no external APIs required.
 

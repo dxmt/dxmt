@@ -1,14 +1,17 @@
+#[cfg(feature = "s3-storage")]
 pub mod batch_s3;
 pub mod compression;
 pub mod errors;
 pub mod filesystem;
 pub mod metrics;
+#[cfg(feature = "s3-storage")]
 pub mod s3;
 pub mod scheduler;
 pub mod tiered;
 pub mod traits;
 pub mod types;
 
+#[cfg(feature = "s3-storage")]
 pub use batch_s3::BatchS3Storage;
 pub use compression::{CompressionManager, CompressionMetadata, CompressionType, Compressor};
 pub use errors::ObjectStorageError;
@@ -16,6 +19,7 @@ pub use filesystem::FilesystemStorage;
 pub use metrics::{
     CompressionMetrics, MetricsCollector, MetricsReport, OperationMetrics, TierMetrics,
 };
+#[cfg(feature = "s3-storage")]
 pub use s3::S3Storage;
 pub use scheduler::{AccessPattern, DataScheduler, SchedulerStats, SchedulingPolicy};
 pub use tiered::{StorageTier, TierStat, TierStats, TieredStorage, TieredStorageConfig};

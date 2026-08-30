@@ -6,8 +6,12 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+
+/// A single WAL payload may be large, but an unbounded length from a corrupt header must not
+/// turn recovery into a multi-gigabyte allocation. Larger frames are rejected explicitly.
+const MAX_WAL_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
 /// WAL entry types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +30,16 @@ pub enum WalEntry {
         table: String,
         dimension: usize,
     },
+    DeleteTable {
+        table: String,
+    },
+    Checkpoint {
+        timestamp: u64,
+    },
+    // Everything below this point was added after the original five variants. rmp-serde tags a
+    // variant by *name* — `{"Delete": [...]}`, as the fixtures in `historical_messagepack_entries_still_decode`
+    // show — so adding or reordering variants is safe, but renaming one, or changing the order
+    // of the fields inside one, silently breaks every log already on disk.
     /// Table creation carrying the whole config.
     ///
     /// `CreateTable` above keeps only the name and dimension, which is not enough to rebuild a
@@ -36,11 +50,26 @@ pub enum WalEntry {
     CreateTableWithConfig {
         config: crate::types::table::TableConfig,
     },
-    DeleteTable {
+    /// Upsert a record carrying the full request shape.
+    ///
+    /// The legacy `Insert` variant is kept for old logs, but it cannot restore sparse vectors
+    /// or named vectors. New writers should use this variant for both inserts and updates.
+    UpsertRecord {
         table: String,
+        request: crate::types::record::CreateRecordRequest,
     },
-    Checkpoint {
-        timestamp: u64,
+    AlterTable {
+        table: String,
+        request: crate::types::table::TableAlterRequest,
+    },
+    /// Full record form used by current writers.
+    ///
+    /// `UpsertRecord` above preserves the request fields but regenerates timestamps and derives
+    /// the version again during replay. Keep it readable for logs written during the transition;
+    /// new logs carry the exact persisted record instead.
+    UpsertRecordV2 {
+        table: String,
+        record: crate::types::record::Record,
     },
 }
 
@@ -59,6 +88,11 @@ pub struct WalManager {
     compression_enabled: bool,
     /// Compression level (1-21, 3 is default)
     compression_level: i32,
+
+    /// Test-only switch used to exercise the storage read-only degradation path without
+    /// depending on filesystem permissions or filling the host disk.
+    #[cfg(feature = "test-failpoints")]
+    fail_next_sync: bool,
 }
 
 impl WalManager {
@@ -84,9 +118,15 @@ impl WalManager {
             batch_threshold: 256 * 1024,                   // 256KB threshold
             compression_enabled: enable_compression,
             compression_level,
+            #[cfg(feature = "test-failpoints")]
+            fail_next_sync: false,
         };
 
         manager.open_current_file()?;
+        // `open_current_file` scans the framed log and restores the next sequence number. Keep
+        // payload decoding in `replay_from`: opening a WAL should still be possible when a
+        // caller wants to inspect/report a corrupt frame (for example an invalid compression
+        // flag), while recovery remains strict when it explicitly replays the log.
         Ok(manager)
     }
 
@@ -167,8 +207,20 @@ impl WalManager {
             return Ok(());
         }
 
+        // Take ownership before touching the file. Once a write or fsync reports an error the
+        // caller puts storage into read-only mode; retaining the bytes here would make Drop retry
+        // them and could append a complete frame twice after a successful `write_all` followed by
+        // a failed `sync_data`.
+        let pending = std::mem::take(&mut self.write_buffer);
         if let Some(ref mut file) = self.current_file {
-            file.write_all(&self.write_buffer).map_err(Error::Io)?;
+            file.write_all(&pending).map_err(Error::Io)?;
+            #[cfg(feature = "test-failpoints")]
+            if self.fail_next_sync {
+                self.fail_next_sync = false;
+                return Err(Error::Io(std::io::Error::other(
+                    "injected WAL sync failure",
+                )));
+            }
             // `Write::flush` on a File is a no-op — it only drains a userspace buffer, and File
             // has none. Without sync_data the entries sit in the page cache, which survives
             // `kill -9` but not power loss. A write-ahead log that loses acknowledged writes on
@@ -176,13 +228,18 @@ impl WalManager {
             file.sync_data().map_err(Error::Io)?;
         }
 
-        self.write_buffer.clear();
         Ok(())
     }
 
     /// Force flush any pending writes
     pub fn force_flush(&mut self) -> Result<()> {
         self.flush_buffer()
+    }
+
+    /// Inject one sync failure for storage failpoint tests.
+    #[cfg(feature = "test-failpoints")]
+    pub fn fail_next_sync_for_test(&mut self) {
+        self.fail_next_sync = true;
     }
 
     /// Sequence number the next entry will get.
@@ -214,19 +271,55 @@ impl WalManager {
             }
             let seq = u64::from_le_bytes(seq_bytes);
 
+            // A process can die between any two writes that make up the framed record. A
+            // complete record is authoritative; an incomplete final frame is a torn tail and is
+            // ignored so restart can recover all earlier acknowledged entries. Errors other than
+            // EOF remain fatal because they indicate an unreadable file, not a crash boundary.
             // Read compression flag (1 byte)
             let mut compressed_flag = [0u8; 1];
-            file.read_exact(&mut compressed_flag).map_err(Error::Io)?;
+            match file.read_exact(&mut compressed_flag) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::Io(e)),
+            }
+            if compressed_flag[0] > 1 {
+                return Err(Error::Serialization(format!(
+                    "Invalid WAL compression flag: {}",
+                    compressed_flag[0]
+                )));
+            }
             let is_compressed = compressed_flag[0] == 1;
 
             // Read length (4 bytes)
             let mut len_bytes = [0u8; 4];
-            file.read_exact(&mut len_bytes).map_err(Error::Io)?;
+            match file.read_exact(&mut len_bytes) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::Io(e)),
+            }
             let len = u32::from_le_bytes(len_bytes) as usize;
+            if len > MAX_WAL_FRAME_BYTES {
+                return Err(Error::Serialization(format!(
+                    "WAL frame is too large: {} bytes (maximum {})",
+                    len, MAX_WAL_FRAME_BYTES
+                )));
+            }
+
+            // A complete header whose payload extends past EOF is a torn final frame. Check this
+            // before allocating so a crash-written length cannot trigger a huge allocation.
+            let payload_start = file.stream_position().map_err(Error::Io)?;
+            let file_len = file.metadata().map_err(Error::Io)?.len();
+            if payload_start.saturating_add(len as u64) > file_len {
+                break;
+            }
 
             // Read data
             let mut data = vec![0u8; len];
-            file.read_exact(&mut data).map_err(Error::Io)?;
+            match file.read_exact(&mut data) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Error::Io(e)),
+            }
 
             // Decompress if needed
             let decompressed = if is_compressed {
@@ -236,10 +329,12 @@ impl WalManager {
                 data
             };
 
-            // Deserialize using MessagePack
+            // Deserialize even entries before `from_seq`: a snapshot may allow us to skip
+            // applying them, but silently accepting a corrupt middle frame would make the
+            // recovery frontier unknowable. Only retain entries at or after the requested point.
+            let entry: WalEntry = rmp_serde::from_slice(&decompressed)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
             if seq >= from_seq {
-                let entry: WalEntry = rmp_serde::from_slice(&decompressed)
-                    .map_err(|e| Error::Serialization(e.to_string()))?;
                 entries.push((seq, entry));
             }
         }
@@ -343,36 +438,86 @@ impl WalManager {
             let mut file = File::open(&wal_file_path).map_err(Error::Io)?;
 
             let mut last_seq = 0u64;
+            let mut saw_complete_frame = false;
+            let mut truncate_to = None;
+            let file_len = file.metadata().map_err(Error::Io)?.len();
             loop {
+                let frame_start = file.stream_position().map_err(Error::Io)?;
                 // Read sequence number (8 bytes)
                 let mut seq_bytes = [0u8; 8];
                 match file.read_exact(&mut seq_bytes) {
                     Ok(_) => {}
-                    Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        // A crash can leave only part of the next frame's sequence number.
+                        truncate_to = Some(frame_start);
+                        break;
+                    }
                     Err(_) => break, // Corrupted file, stop reading
                 }
-                last_seq = u64::from_le_bytes(seq_bytes);
+                let seq = u64::from_le_bytes(seq_bytes);
 
                 // Read compression flag (1 byte)
                 let mut compressed_flag = [0u8; 1];
-                if file.read_exact(&mut compressed_flag).is_err() {
+                match file.read_exact(&mut compressed_flag) {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        truncate_to = Some(frame_start);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+                // Invalid flags are a corruption error for replay, not a torn tail. Leave the
+                // bytes intact so `replay_from` can report the precise failure.
+                if compressed_flag[0] > 1 {
                     break;
                 }
 
                 // Read length (4 bytes) and skip data
                 let mut len_bytes = [0u8; 4];
-                if file.read_exact(&mut len_bytes).is_err() {
+                match file.read_exact(&mut len_bytes) {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        truncate_to = Some(frame_start);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+                let len = u32::from_le_bytes(len_bytes) as u64;
+                if len > MAX_WAL_FRAME_BYTES as u64 {
+                    // A complete header with an impossible length is corruption, not a crash
+                    // tail. Keep it for strict replay diagnostics.
                     break;
                 }
-                let len = u32::from_le_bytes(len_bytes) as i64;
 
-                // Skip the data bytes
-                if std::io::Seek::seek(&mut file, std::io::SeekFrom::Current(len)).is_err() {
+                let payload_start = file.stream_position().map_err(Error::Io)?;
+                if payload_start.saturating_add(len) > file_len {
+                    // The header is present but the payload is not. Remove this final frame before
+                    // opening the append handle; otherwise future writes would sit behind the
+                    // torn bytes and replay would stop before reaching them forever.
+                    truncate_to = Some(frame_start);
                     break;
                 }
+                std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(payload_start + len))
+                    .map_err(Error::Io)?;
+                saw_complete_frame = true;
+                last_seq = seq;
             }
 
-            self.sequence_number = last_seq + 1;
+            drop(file);
+            if let Some(offset) = truncate_to {
+                let repair = OpenOptions::new()
+                    .write(true)
+                    .open(&wal_file_path)
+                    .map_err(Error::Io)?;
+                repair.set_len(offset).map_err(Error::Io)?;
+                repair.sync_data().map_err(Error::Io)?;
+            }
+
+            self.sequence_number = if saw_complete_frame {
+                last_seq.saturating_add(1)
+            } else {
+                0
+            };
         }
 
         // Open file for appending
@@ -509,5 +654,238 @@ mod tests {
             let entries = wal.replay_from(0).unwrap();
             assert_eq!(entries.len(), 1);
         }
+    }
+
+    #[test]
+    fn truncated_final_frame_is_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "complete".to_string(),
+        })
+        .unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "torn".to_string(),
+        })
+        .unwrap();
+        wal.force_flush().unwrap();
+        drop(wal);
+
+        let path = temp_dir.path().join("wal.log");
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len - 2).unwrap();
+
+        let wal = WalManager::new(temp_dir.path()).unwrap();
+        let entries = wal.replay_from(0).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 0);
+    }
+
+    #[test]
+    fn truncated_frame_header_is_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).unwrap();
+        wal.write_entry(WalEntry::Checkpoint { timestamp: 1 })
+            .unwrap();
+        wal.force_flush().unwrap();
+        drop(wal);
+
+        let path = temp_dir.path().join("wal.log");
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len + 3).unwrap();
+
+        let wal = WalManager::new(temp_dir.path()).unwrap();
+        let entries = wal.replay_from(0).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 0);
+    }
+
+    #[test]
+    fn appending_after_a_torn_final_frame_replaces_the_tail() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "complete".to_string(),
+        })
+        .unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "torn".to_string(),
+        })
+        .unwrap();
+        wal.force_flush().unwrap();
+        drop(wal);
+
+        let path = temp_dir.path().join("wal.log");
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len - 2).unwrap();
+        drop(file);
+
+        let mut reopened = WalManager::new(temp_dir.path()).unwrap();
+        let seq = reopened
+            .write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: "replacement".to_string(),
+            })
+            .unwrap();
+        reopened.force_flush().unwrap();
+
+        let entries = reopened.replay_from(0).unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].0, 1);
+        match &entries[1].1 {
+            WalEntry::Delete { record_id, .. } => assert_eq!(record_id, "replacement"),
+            other => panic!("unexpected replacement entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corruption_in_a_middle_frame_is_fatal() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "first".to_string(),
+        })
+        .unwrap();
+        wal.write_entry(WalEntry::Delete {
+            table: "t".to_string(),
+            record_id: "second".to_string(),
+        })
+        .unwrap();
+        wal.force_flush().unwrap();
+        drop(wal);
+
+        // The first frame starts with a 13-byte header. 0xc1 is the MessagePack "reserved"
+        // marker, so deserializing this complete middle frame must fail rather than being treated
+        // as a crash tail and skipped.
+        let path = temp_dir.path().join("wal.log");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[13] = 0xc1;
+        std::fs::write(&path, bytes).unwrap();
+
+        let wal = WalManager::new(temp_dir.path()).unwrap();
+        for from_seq in [0, 1] {
+            let err = wal.replay_from(from_seq).unwrap_err();
+            assert!(matches!(err, Error::Serialization(_)));
+        }
+    }
+
+    #[test]
+    fn invalid_compression_flag_is_fatal() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("wal.log");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        file.write_all(&[2u8]).unwrap();
+        file.write_all(&0u32.to_le_bytes()).unwrap();
+        file.sync_all().unwrap();
+
+        let wal = WalManager::new(temp_dir.path()).unwrap();
+        let err = wal.replay_from(0).unwrap_err();
+        assert!(format!("{err}").contains("compression flag"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[test]
+    fn failed_sync_does_not_duplicate_a_frame_on_drop() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).unwrap();
+        wal.write_entry(WalEntry::Checkpoint { timestamp: 1 })
+            .unwrap();
+        wal.fail_next_sync_for_test();
+        assert!(wal.force_flush().is_err());
+        drop(wal);
+
+        let reopened = WalManager::new(temp_dir.path()).unwrap();
+        let entries = reopened.replay_from(0).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "a failed sync must not duplicate the frame"
+        );
+        assert_eq!(entries[0].0, 0);
+    }
+
+    #[test]
+    fn historical_messagepack_entries_still_decode() {
+        // These bytes were emitted by the pre-V2 WAL writer. MessagePack uses the externally
+        // tagged variant name, so this fixture also protects against accidentally changing the
+        // old field shapes while adding new variants.
+        let fixtures: &[(&[u8], &str)] = &[
+            (
+                &[
+                    0x81, 0xa6, b'D', b'e', b'l', b'e', b't', b'e', 0x92, 0xa1, b't', 0xa1, b'r',
+                ],
+                "delete",
+            ),
+            (
+                &[
+                    0x81, 0xab, b'C', b'r', b'e', b'a', b't', b'e', b'T', b'a', b'b', b'l', b'e',
+                    0x92, 0xa1, b't', 0x03,
+                ],
+                "create",
+            ),
+            (
+                &[
+                    0x81, 0xab, b'D', b'e', b'l', b'e', b't', b'e', b'T', b'a', b'b', b'l', b'e',
+                    0x91, 0xa1, b't',
+                ],
+                "drop",
+            ),
+            (
+                &[
+                    0x81, 0xaa, b'C', b'h', b'e', b'c', b'k', b'p', b'o', b'i', b'n', b't', 0x91,
+                    0x07,
+                ],
+                "checkpoint",
+            ),
+        ];
+
+        for (bytes, kind) in fixtures {
+            let entry: WalEntry = rmp_serde::from_slice(bytes).unwrap();
+            match (kind, entry) {
+                (&"delete", WalEntry::Delete { table, record_id }) => {
+                    assert_eq!(table, "t");
+                    assert_eq!(record_id, "r");
+                }
+                (&"create", WalEntry::CreateTable { table, dimension }) => {
+                    assert_eq!((table, dimension), ("t".to_string(), 3));
+                }
+                (&"drop", WalEntry::DeleteTable { table }) => assert_eq!(table, "t"),
+                (&"checkpoint", WalEntry::Checkpoint { timestamp }) => assert_eq!(timestamp, 7),
+                _ => panic!(
+                    "historical {} WAL fixture decoded as the wrong variant",
+                    kind
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_continues_after_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let first = {
+            let mut wal = WalManager::new(temp_dir.path()).unwrap();
+            let seq = wal
+                .write_entry(WalEntry::Checkpoint { timestamp: 1 })
+                .unwrap();
+            wal.force_flush().unwrap();
+            seq
+        };
+
+        let mut reopened = WalManager::new(temp_dir.path()).unwrap();
+        let next = reopened
+            .write_entry(WalEntry::Checkpoint { timestamp: 2 })
+            .unwrap();
+        assert_eq!(first, 0);
+        assert_eq!(next, 1);
     }
 }

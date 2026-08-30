@@ -255,11 +255,18 @@ impl AtomicStorageManager {
                 // Check if table exists, record doesn't already exist, etc.
                 self.validate_insert(table, record_id).await
             }
+            WalEntry::UpsertRecord { table, request } => {
+                self.validate_insert(table, &request.id).await
+            }
+            WalEntry::UpsertRecordV2 { table, record } => {
+                self.validate_insert(table, &record.id).await
+            }
             WalEntry::Delete { table, record_id } => self.validate_delete(table, record_id).await,
             WalEntry::CreateTable { table, .. } => self.validate_create_table(table).await,
             WalEntry::CreateTableWithConfig { config } => {
                 self.validate_create_table(&config.name).await
             }
+            WalEntry::AlterTable { table, .. } => self.validate_alter_table(table).await,
             WalEntry::DeleteTable { table } => self.validate_delete_table(table).await,
             WalEntry::Checkpoint { .. } => Ok(()),
         }
@@ -291,6 +298,40 @@ impl AtomicStorageManager {
                 #[cfg(feature = "storage-rocksdb")]
                 if let Some(rocksdb) = &self.storage_backends.rocksdb {
                     rocksdb.insert_record(table, record).await?;
+                }
+
+                Ok(())
+            }
+            WalEntry::UpsertRecord { table, request } => {
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    lmdb.insert_record(table, request.clone()).await?;
+                }
+
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    rocksdb.insert_record(table, request.clone()).await?;
+                }
+
+                Ok(())
+            }
+            WalEntry::UpsertRecordV2 { table, record } => {
+                let request = CreateRecordRequest {
+                    id: record.id.clone(),
+                    vector: record.vector.clone(),
+                    sparse_vector: record.sparse_vector.clone(),
+                    named_vectors: record.named_vectors.clone(),
+                    payload: Some(record.payload.clone()),
+                };
+
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    lmdb.insert_record(table, request.clone()).await?;
+                }
+
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    rocksdb.insert_record(table, request).await?;
                 }
 
                 Ok(())
@@ -350,6 +391,19 @@ impl AtomicStorageManager {
 
                 Ok(())
             }
+            WalEntry::AlterTable { table, request } => {
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    lmdb.alter_table(table, request.clone()).await?;
+                }
+
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    rocksdb.alter_table(table, request.clone()).await?;
+                }
+
+                Ok(())
+            }
             WalEntry::DeleteTable { table } => {
                 #[cfg(feature = "storage-lmdb")]
                 if let Some(lmdb) = &self.storage_backends.lmdb {
@@ -385,6 +439,26 @@ impl AtomicStorageManager {
                     let _ = rocksdb.delete_record(table, record_id).await;
                 }
             }
+            WalEntry::UpsertRecord { table, request } => {
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    let _ = lmdb.delete_record(table, &request.id).await;
+                }
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    let _ = rocksdb.delete_record(table, &request.id).await;
+                }
+            }
+            WalEntry::UpsertRecordV2 { table, record } => {
+                #[cfg(feature = "storage-lmdb")]
+                if let Some(lmdb) = &self.storage_backends.lmdb {
+                    let _ = lmdb.delete_record(table, &record.id).await;
+                }
+                #[cfg(feature = "storage-rocksdb")]
+                if let Some(rocksdb) = &self.storage_backends.rocksdb {
+                    let _ = rocksdb.delete_record(table, &record.id).await;
+                }
+            }
             WalEntry::Delete { table, record_id } => {
                 // Rollback delete by restoring from backup snapshot if available
                 let _ = (table, record_id, rollback_info); // no persistent backup for deletes yet
@@ -408,6 +482,10 @@ impl AtomicStorageManager {
                 if let Some(rocksdb) = &self.storage_backends.rocksdb {
                     let _ = rocksdb.delete_table(&config.name).await;
                 }
+            }
+            WalEntry::AlterTable { .. } => {
+                // Rolling back schema changes requires the previous schema, which this WAL
+                // entry does not carry.
             }
             WalEntry::DeleteTable { .. } => {
                 // Recreating a deleted table requires schema backup — not stored in WAL
@@ -435,6 +513,13 @@ impl AtomicStorageManager {
 
     async fn validate_delete_table(&self, _table: &str) -> Result<()> {
         // Validate table exists
+        Ok(())
+    }
+
+    async fn validate_alter_table(&self, _table: &str) -> Result<()> {
+        // Validate table exists. Kept separate from `validate_delete_table` even though both are
+        // an existence check today: an alter also has to validate the new schema against the
+        // records already stored, and a delete never will.
         Ok(())
     }
 }

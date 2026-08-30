@@ -1,5 +1,4 @@
 // 二进制量化实现
-// 参考 Qdrant 的 Binary Quantization
 
 use super::{
     BinaryQuantizationConfig, QuantizationMetadata, QuantizationParams, QuantizationStats,

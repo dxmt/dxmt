@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 // Dataset infrastructure tests
 
 mod fixtures;
@@ -52,6 +54,45 @@ fn test_synthetic_dataset_vectors_normalized() {
             norm
         );
     }
+}
+
+#[test]
+fn test_synthetic_dataset_ground_truth_is_exact_and_unique() {
+    let dataset = Dataset::synthetic("ground-truth", 16, 64, 7, 10);
+
+    for (query, neighbors) in dataset.test_queries.iter().zip(dataset.ground_truth.iter()) {
+        assert_eq!(neighbors.len(), 10);
+        let unique: std::collections::HashSet<usize> = neighbors.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            neighbors.len(),
+            "ground truth contains duplicates"
+        );
+
+        let mut exact: Vec<(usize, f32)> = dataset
+            .train_vectors
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| {
+                let similarity = query.iter().zip(vector).map(|(a, b)| a * b).sum::<f32>();
+                (index, similarity)
+            })
+            .collect();
+        exact.sort_by(|(index_a, score_a), (index_b, score_b)| {
+            score_b
+                .partial_cmp(score_a)
+                .unwrap()
+                .then_with(|| index_a.cmp(index_b))
+        });
+        let expected: Vec<usize> = exact.into_iter().take(10).map(|(index, _)| index).collect();
+        assert_eq!(neighbors, &expected);
+    }
+
+    // A second invocation must produce byte-for-byte equivalent data.
+    let repeat = Dataset::synthetic("ground-truth", 16, 64, 7, 10);
+    assert_eq!(dataset.train_vectors, repeat.train_vectors);
+    assert_eq!(dataset.test_queries, repeat.test_queries);
+    assert_eq!(dataset.ground_truth, repeat.ground_truth);
 }
 
 #[test]

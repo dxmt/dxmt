@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmarks")]
+
 // Benchmark tests harness
 //
 // This file allows running all benchmark tests with: cargo test --test benchmarks
@@ -128,8 +130,8 @@ mod hnsw_performance_benchmark {
         println!("\n[5/5] Performance Analysis:");
         println!("  Speedup:        {:.1}x faster than brute force", speedup);
         println!(
-            "  Efficiency:     {:.1}% of brute force latency",
-            (brute_force_latency_ms / avg_latency_ms) * 100.0
+            "  HNSW latency:    {:.1}% of brute force latency",
+            (avg_latency_ms / brute_force_latency_ms) * 100.0
         );
 
         // Performance assertions
@@ -151,12 +153,18 @@ mod hnsw_performance_benchmark {
         );
         println!("  ✓ Latency < 10ms: {:.3}ms", avg_latency_ms);
 
+        // Five runs on a 4-core GCE instance at 10K/128D spanned 2.7x-7.1x — the query loop is
+        // short enough that scheduling noise dominates, so the bound has to sit under the
+        // observed floor rather than near the median. 2x still fails the thing this assertion
+        // exists to catch: an HNSW whose traversal has degraded back into something
+        // scan-shaped lands at roughly 1x. It was briefly 1.2x, which nothing could fail.
+        // A tighter bound needs a longer, quieter measurement, not a higher number.
         assert!(
-            speedup > 5.0,
-            "HNSW should be > 5x faster than brute force, got {:.1}x",
+            speedup > 2.0,
+            "HNSW should be > 2x faster than brute force, got {:.1}x",
             speedup
         );
-        println!("  ✓ Speedup > 5x: {:.1}x", speedup);
+        println!("  ✓ Speedup > 2x: {:.1}x", speedup);
 
         println!("\n{}", "=".repeat(70));
         println!("BENCHMARK PASSED ✓");

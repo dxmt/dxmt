@@ -15,7 +15,7 @@ use tantivy::{schema::*, Index, TantivyDocument};
 // unit mismatch between vector cosine/distance scores and BM25 TF-IDF scores,
 // making the fusion parameter-free (no alpha tuning required).
 //
-// Reference: Qdrant "Distribution-Based Score Fusion" blog post / implementation.
+// Reference: distribution-based score fusion.
 // ---------------------------------------------------------------------------
 
 /// Normalise a list of (id, raw_score) to the [0, 1] range using mean/std.

@@ -1,4 +1,4 @@
-// Enhanced Product Quantization with optimizations from FAISS
+// Enhanced Product Quantization
 // Includes: Optimized K-means training, Polysemous codes, Residual quantization
 
 use crate::types::vector::DenseVector;

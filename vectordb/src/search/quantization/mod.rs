@@ -1,14 +1,21 @@
 // 量化模块 - 支持多种向量量化技术
-// 参考 Chroma、Qdrant、LanceDB 的实现
 
+#[cfg(feature = "experimental-indexes")]
 pub mod binary;
+#[cfg(feature = "experimental-indexes")]
 pub mod enhanced_pq;
+#[cfg(feature = "experimental-indexes")]
 pub mod hybrid;
+#[cfg(feature = "experimental-indexes")]
 pub mod product;
 pub mod product_quantization;
+#[cfg(feature = "experimental-indexes")]
 pub mod rabitq; // New: RaBitQ binary quantization
+#[cfg(feature = "experimental-indexes")]
 pub mod scalar;
+#[cfg(feature = "experimental-indexes")]
 pub mod storage;
+#[cfg(feature = "experimental-indexes")]
 pub mod utils;
 
 use crate::types::{vector::DenseVector, DistanceMetric};
@@ -237,10 +244,17 @@ impl Default for QuantizationConfig {
 }
 
 // 重新导出子模块
+#[cfg(feature = "experimental-indexes")]
 pub use binary::{BinaryQuantizedIndex, BinaryQuantizer};
+#[cfg(feature = "experimental-indexes")]
 pub use hybrid::{HybridQuantizedIndex, HybridQuantizer};
+#[cfg(feature = "experimental-indexes")]
 pub use product::{ProductQuantizedIndex, ProductQuantizer};
+#[cfg(feature = "experimental-indexes")]
 pub use rabitq::{Codebook, RaBitQConfig, RaBitQIndex, RaBitQQuantizer, RaBitQVector};
+#[cfg(feature = "experimental-indexes")]
 pub use scalar::{ScalarQuantizedIndex, ScalarQuantizer};
+#[cfg(feature = "experimental-indexes")]
 pub use storage::{QuantizedStorage, QuantizedStorageBuilder, QuantizedStorageConfig};
+#[cfg(feature = "experimental-indexes")]
 pub use utils::{QuantizationError, QuantizationUtils};

@@ -1,6 +1,6 @@
 use dxmt_vectordb::{
     config::StorageConfig,
-    storage::{IntelligentIndexedStorage, Storage},
+    storage::IntelligentIndexedStorage,
     types::{
         table::{FieldDef, FieldType, TableAlterRequest, TableConfig},
         vector::DistanceMetric,

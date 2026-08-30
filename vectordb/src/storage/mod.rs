@@ -8,9 +8,11 @@ pub mod consistency;
 pub mod consistency_check; // New: Index consistency verification
 pub mod encryption;
 pub mod factory;
+#[cfg(feature = "storage-lmdb")]
 pub mod hybrid_engine;
 pub mod index_selector;
 pub mod intelligent_indexed_storage;
+#[cfg(feature = "storage-lmdb")]
 pub mod lmdb;
 pub mod memory;
 pub mod mmap_index;
@@ -32,8 +34,10 @@ pub use factory::{
     OptimizedCostConstraints, OptimizedStorageConfig, PerformanceTargets, StorageBackend,
     StorageFactory, StorageIntegration,
 };
+#[cfg(feature = "storage-lmdb")]
 pub use hybrid_engine::{HybridConfig, HybridStats, HybridStorageEngine, ReadPreference};
 pub use intelligent_indexed_storage::IntelligentIndexedStorage;
+#[cfg(feature = "storage-lmdb")]
 pub use lmdb::{GraphEdge, GraphNode, LmdbStorage, TableMetadata, VectorRecord};
 pub use memory::MemoryStorage;
 pub use mmap_index::{IndexMetadata, MmapHnswIndex, MmapIndexStorage};

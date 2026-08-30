@@ -11,7 +11,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::storage::traits::_Storage as _;
 use crate::{
     api::response::ApiError,
     api::server_health::ServerHealth,
@@ -121,7 +120,7 @@ const MAX_RECORD_ID_LENGTH: usize = 128;
 const MAX_DIMENSION: usize = 4096;
 const MIN_DIMENSION: usize = 1;
 
-/// Comprehensive batch validation following Weaviate/Qdrant patterns
+/// Comprehensive batch validation
 fn validate_batch_insert(
     request: &BatchInsertRequest,
     table: &crate::types::table::Table,
@@ -209,6 +208,8 @@ pub enum PayloadUpdateMode {
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct UpdateRecordRequest {
+    /// Optional dense vector replacement. When omitted, the current dense, sparse and named
+    /// vectors are preserved; this makes payload-only updates safe for hybrid search.
     pub vector: Option<Vec<f32>>,
     pub payload: Option<serde_json::Value>,
     /// Payload update mode: "replace" (default) or "merge"
@@ -241,7 +242,7 @@ pub struct ListRecordsRequest {
 // ============ 表管理API ============
 
 /// 创建表
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables",
     request_body = CreateTableRequest,
@@ -251,7 +252,7 @@ pub struct ListRecordsRequest {
         (status = 409, description = "表已存在", body = ApiResponse)
     ),
     tag = "tables"
-)]
+))]
 #[axum::debug_handler]
 pub async fn create_table(
     State(state): State<AppState>,
@@ -341,7 +342,7 @@ pub async fn create_table(
 }
 
 /// 获取表信息
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/tables/{table_name}",
     params(
@@ -352,7 +353,7 @@ pub async fn create_table(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "tables"
-)]
+))]
 #[axum::debug_handler]
 pub async fn get_table(
     State(state): State<AppState>,
@@ -372,7 +373,7 @@ pub async fn get_table(
 }
 
 /// 列出所有表
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/tables",
     params(
@@ -383,7 +384,7 @@ pub async fn get_table(
         (status = 200, description = "获取表列表成功", body = ApiResponse)
     ),
     tag = "tables"
-)]
+))]
 #[axum::debug_handler]
 pub async fn list_tables(
     State(state): State<AppState>,
@@ -412,7 +413,7 @@ pub async fn list_tables(
 }
 
 /// 删除表
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     delete,
     path = "/api/v1/tables/{table_name}",
     params(
@@ -423,7 +424,7 @@ pub async fn list_tables(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "tables"
-)]
+))]
 #[axum::debug_handler]
 pub async fn delete_table(
     State(state): State<AppState>,
@@ -529,7 +530,7 @@ pub async fn create_snapshot(State(state): State<AppState>) -> impl IntoResponse
 ///
 /// Added because dxmt-js-sdk's `getTableStats()` has always called `GET /tables/{name}/stats`,
 /// a route that did not exist — the method threw for every user of the JS client.
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/tables/{table_name}/stats",
     params(("table_name" = String, Path, description = "表名")),
@@ -538,7 +539,7 @@ pub async fn create_snapshot(State(state): State<AppState>) -> impl IntoResponse
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "tables"
-)]
+))]
 pub async fn get_table_stats(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
@@ -585,7 +586,7 @@ pub async fn branch_table(
 // ============ 记录操作API ============
 
 /// 批量插入记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/records",
     params(
@@ -598,7 +599,7 @@ pub async fn branch_table(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn insert_records(
     State(state): State<AppState>,
@@ -629,13 +630,7 @@ pub async fn insert_records(
     // Get table for validation
     let table = match state.storage.get_table(&table_name).await {
         Ok(table) => table,
-        Err(e) => {
-            let error_response = serde_json::json!({
-                "error": "Table not found",
-                "details": format!("{:?}", e)
-            });
-            return (StatusCode::NOT_FOUND, Json(error_response)).into_response();
-        }
+        Err(e) => return error_response(e),
     };
 
     // Comprehensive batch validation
@@ -666,21 +661,13 @@ pub async fn insert_records(
         Err(e) => {
             // Record the error for health tracking
             state.server_health.record_error();
-
-            // Return detailed error with suggestions
-            let error_response = serde_json::json!({
-                "error": "Failed to insert records",
-                "details": format!("{:?}", e),
-                "suggestion": "If this error persists, the server may be under heavy load. Consider retrying with exponential backoff or reducing batch size."
-            });
-
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+            error_response(e)
         }
     }
 }
 
 /// 获取单个记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/tables/{table_name}/records/{record_id}",
     params(
@@ -692,7 +679,7 @@ pub async fn insert_records(
         (status = 404, description = "记录不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn get_record(
     State(state): State<AppState>,
@@ -708,7 +695,7 @@ pub async fn get_record(
 }
 
 /// 更新记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     put,
     path = "/api/v1/tables/{table_name}/records/{record_id}",
     params(
@@ -722,7 +709,7 @@ pub async fn get_record(
         (status = 404, description = "记录不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn update_record(
     State(state): State<AppState>,
@@ -783,6 +770,15 @@ pub async fn update_record(
             .map(|r: &crate::types::record::Record| r.vector.clone())
             .unwrap_or_default(),
     };
+    // The public update shape currently exposes only the dense vector. Preserve auxiliary
+    // vectors when the caller updates metadata (or otherwise omits a replacement vector),
+    // instead of silently removing the postings that hybrid/named-vector search relies on.
+    let final_sparse_vector = existing_ok
+        .as_ref()
+        .and_then(|record| record.sparse_vector.clone());
+    let final_named_vectors = existing_ok
+        .as_ref()
+        .and_then(|record| record.named_vectors.clone());
 
     let final_payload = match request.merge_mode {
         PayloadUpdateMode::Merge => {
@@ -818,9 +814,9 @@ pub async fn update_record(
     let update_request = CreateRecordRequest {
         id: record_id.clone(),
         vector: final_vector,
-        sparse_vector: None,
+        sparse_vector: final_sparse_vector,
         payload: final_payload,
-        named_vectors: None,
+        named_vectors: final_named_vectors,
     };
 
     // 5. Perform update
@@ -840,15 +836,12 @@ pub async fn update_record(
             });
             ApiResponse::success(response).into_response()
         }
-        Err(e) => {
-            let error = ApiError::new("UPDATE_FAILED", &format!("Failed to update record: {}", e));
-            (StatusCode::INTERNAL_SERVER_ERROR, ApiResponse::error(error)).into_response()
-        }
+        Err(e) => error_response(e),
     }
 }
 
 /// 批量删除记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     delete,
     path = "/api/v1/tables/{table_name}/records",
     params(
@@ -861,7 +854,7 @@ pub async fn update_record(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn delete_records(
     State(state): State<AppState>,
@@ -884,7 +877,7 @@ pub async fn delete_records(
 // ============ 搜索API ============
 
 /// 向量搜索
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search",
     params(
@@ -897,7 +890,7 @@ pub async fn delete_records(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "search"
-)]
+))]
 #[axum::debug_handler]
 pub async fn search_vectors(
     State(state): State<AppState>,
@@ -922,7 +915,7 @@ pub async fn search_vectors(
 }
 
 /// 按元数据过滤列出记录（无需向量查询）
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/records/list",
     params(
@@ -935,7 +928,7 @@ pub async fn search_vectors(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn list_records(
     State(state): State<AppState>,
@@ -964,7 +957,7 @@ pub async fn list_records(
 }
 
 /// 混合搜索（向量 + 文本 + 稀疏向量）
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/hybrid_search",
     params(
@@ -977,7 +970,7 @@ pub async fn list_records(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "search"
-)]
+))]
 #[axum::debug_handler]
 pub async fn hybrid_search(
     State(state): State<AppState>,
@@ -1034,29 +1027,31 @@ pub async fn hybrid_search(
 // ============ 系统API ============
 
 /// 获取系统状态
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/status",
     responses(
         (status = 200, description = "系统健康状态", body = ApiResponse)
     ),
     tag = "system"
-)]
+))]
 #[axum::debug_handler]
 pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.storage.get_stats().await;
+    let storage = state.storage.health_snapshot().await;
 
     let status = serde_json::json!({
-        "status": "healthy",
+        "status": if storage.ready { "ready" } else { "not_ready" },
         "version": env!("CARGO_PKG_VERSION"),
-        "storage": stats
+        "storage": stats,
+        "persistence": storage,
     });
 
     ApiResponse::success(status).into_response()
 }
 
 /// 健康检查端点（用于 Consul）
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/health",
     responses(
@@ -1064,7 +1059,7 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
         (status = 503, description = "服务不健康")
     ),
     tag = "system"
-)]
+))]
 /// Server health check endpoint
 ///
 /// Returns the current health state of the server including operation metrics.
@@ -1072,17 +1067,19 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let health_state = state.server_health.current_state().await;
     let metrics = state.server_health.get_metrics();
-
-    // 检查存储系统是否正常
-    let storage_healthy = !state.storage.get_stats().await.is_empty();
+    let storage = state.storage.health_snapshot().await;
 
     let response = serde_json::json!({
         "status": format!("{:?}", health_state),
         "service": "vectordb",
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        "storage_healthy": storage_healthy,
+        // An empty database is healthy; readiness is based on the durability boundary instead
+        // of using table count as a proxy for storage health.
+        "storage_healthy": storage.ready,
+        "ready": storage.ready,
         "description": health_state.description(),
         "retry_after_seconds": health_state.retry_after_seconds(),
+        "storage": storage,
         "metrics": {
             "ongoing_inserts": metrics.ongoing_inserts,
             "ongoing_searches": metrics.ongoing_searches,
@@ -1101,6 +1098,43 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     ApiResponse::success(response).into_response()
 }
 
+/// Process liveness probe. This endpoint intentionally does not touch storage or wait for
+/// recovery; a process that is alive but not ready must be restarted only when the orchestrator
+/// policy says so, not because a cold snapshot takes time to load.
+pub async fn liveness() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "alive",
+            "service": "vectordb",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        })),
+    )
+}
+
+/// Readiness probe for load balancers and orchestrators.
+///
+/// Readiness is separate from liveness: a read-only process after a WAL failure is still alive,
+/// but must not receive traffic that expects successful mutations.
+pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
+    let storage = state.storage.health_snapshot().await;
+    let status = if storage.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if storage.ready { "ready" } else { "not_ready" },
+            "service": "vectordb",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": storage.durability_error.clone(),
+            "storage": storage,
+        })),
+    )
+}
+
 // ============ 备份API ============
 
 #[derive(Debug, Deserialize)]
@@ -1117,7 +1151,7 @@ pub struct CreateBackupRequest {
 /// hardcoded to `None`, and the BackupManager behind them collected objects under a `tables/`
 /// prefix that nothing has ever written to — wiring it up would have produced empty backups,
 /// which is worse than an error.
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/backup",
     request_body = CreateBackupRequest,
@@ -1126,7 +1160,7 @@ pub struct CreateBackupRequest {
         (status = 400, description = "请求参数错误", body = ApiResponse)
     ),
     tag = "backup"
-)]
+))]
 pub async fn create_backup(
     State(state): State<AppState>,
     Json(request): Json<CreateBackupRequest>,
@@ -1144,7 +1178,7 @@ pub async fn create_backup(
 // ============ 优化的批量插入API ============
 
 /// 优化的批量插入记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/records/bulk",
     params(
@@ -1157,7 +1191,7 @@ pub async fn create_backup(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "records"
-)]
+))]
 #[axum::debug_handler]
 pub async fn insert_records_optimized(
     State(state): State<AppState>,
@@ -1334,7 +1368,7 @@ pub async fn insert_records_optimized(
 }
 
 /// 全文搜索
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search/text",
     params(
@@ -1348,7 +1382,7 @@ pub async fn insert_records_optimized(
         (status = 501, description = "功能未启用", body = ApiResponse)
     ),
     tag = "search"
-)]
+))]
 #[axum::debug_handler]
 pub async fn full_text_search(
     State(state): State<AppState>,
@@ -1357,11 +1391,12 @@ pub async fn full_text_search(
 ) -> impl IntoResponse {
     #[cfg(not(feature = "text-bm25"))]
     {
-        return ApiResponse::error(ApiError::new(
+        let _ = (&state, &table_name, &request);
+        ApiResponse::error(ApiError::new(
             "FEATURE_DISABLED",
             "Full-text search feature is not enabled. Compile with --features text-bm25",
         ))
-        .into_response();
+        .into_response()
     }
 
     #[cfg(feature = "text-bm25")]
@@ -1398,17 +1433,13 @@ pub async fn full_text_search(
                 serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
             )
             .into_response(),
-            Err(e) => ApiResponse::error(ApiError::new(
-                "SEARCH_FAILED",
-                &format!("Full-text search failed: {}", e),
-            ))
-            .into_response(),
+            Err(e) => error_response(e),
         }
     }
 }
 
 /// 混合搜索（向量 + 文本组合）
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search/hybrid",
     params(
@@ -1421,7 +1452,7 @@ pub async fn full_text_search(
         (status = 404, description = "表不存在", body = ApiResponse)
     ),
     tag = "search"
-)]
+))]
 #[axum::debug_handler]
 pub async fn hybrid_search_combined(
     State(state): State<AppState>,
@@ -1449,11 +1480,7 @@ pub async fn hybrid_search_combined(
             ApiResponse::success(serde_json::to_value(result).unwrap_or(serde_json::Value::Null))
                 .into_response()
         }
-        Err(e) => ApiResponse::error(ApiError::new(
-            "SEARCH_FAILED",
-            &format!("Hybrid search failed: {}", e),
-        ))
-        .into_response(),
+        Err(e) => error_response(e),
     }
 }
 
@@ -1527,16 +1554,17 @@ pub async fn execute_dxql(
 /// Detailed server health metrics endpoint
 ///
 /// Returns comprehensive health metrics for monitoring and debugging.
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/health/metrics",
     responses(
         (status = 200, description = "Detailed health metrics", body = serde_json::Value),
     ),
     tag = "health"
-)]
+))]
 pub async fn health_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let metrics = state.server_health.get_metrics();
+    let storage = state.storage.health_snapshot().await;
 
     let response = serde_json::json!({
         "ongoing_operations": {
@@ -1553,7 +1581,8 @@ pub async fn health_metrics(State(state): State<AppState>) -> impl IntoResponse 
         },
         "index_status": {
             "building": metrics.index_building,
-        }
+        },
+        "storage": storage,
     });
 
     ApiResponse::success(response).into_response()

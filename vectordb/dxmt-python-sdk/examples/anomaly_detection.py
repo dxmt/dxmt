@@ -7,7 +7,7 @@ This is the vector-database analogue of the classical kNN-based anomaly score:
 
 High scores → unusual points that don't fit any cluster → potential anomalies.
 
-Reference pattern: Qdrant / LanceDB anomaly detection recipes, vectordb-recipes.
+Pattern: embedding-distance based anomaly detection.
 
 Algorithm:
     1. Insert all records into DXMT.

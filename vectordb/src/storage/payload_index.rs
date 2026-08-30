@@ -1,6 +1,6 @@
 //! Payload索引 - 用于元数据过滤的性能优化
 //!
-//! 实现类似Qdrant的payload索引，支持：
+//! payload 索引，支持：
 //! - Cardinality估计（filter选择性评估）
 //! - 倒排索引加速查找
 //! - 智能PRE-FILTERING决策

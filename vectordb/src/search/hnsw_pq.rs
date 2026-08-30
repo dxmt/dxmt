@@ -144,6 +144,16 @@ impl HnswPqIndex {
         // HNSW graph traversal to get candidates
         let candidates = self.hnsw.search(query, candidate_k)?;
 
+        // Storage can create an HNSW-PQ index before a representative training
+        // sample is available.  Zero-filled codebooks assign the same PQ code
+        // to every row, so reranking with ADC would destroy the valid HNSW
+        // ordering and return arbitrary records.  Until training is performed,
+        // preserve the graph distances; callers still get a meaningful ANN
+        // result and a later trained index automatically uses PQ reranking.
+        if !self.pq.is_trained() {
+            return Ok(candidates.into_iter().take(k).collect());
+        }
+
         // Rerank using PQ asymmetric distance or original vectors
         let mut results = if self.config.enable_reranking {
             self.rerank_with_original(query, candidates)?
@@ -418,6 +428,33 @@ mod tests {
 
         assert!(results.len() <= 10);
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_untrained_pq_preserves_hnsw_ordering() {
+        // Storage may build an HNSW-PQ index before a training sample exists.
+        // The zero-filled codebooks must not collapse every ADC score to the
+        // same value and turn search into arbitrary insertion order.
+        let config = HnswPqConfig {
+            num_subvectors: 4,
+            hnsw_config: HnswConfig::from_params(16, 100, 100),
+            ..HnswPqConfig::default()
+        };
+        let mut index = HnswPqIndex::new(8, DistanceMetric::Euclidean, Some(config)).unwrap();
+        let vectors: Vec<DenseVector> = (0..40)
+            .map(|i| {
+                let mut v = vec![10.0; 8];
+                v[0] = i as f32;
+                v
+            })
+            .collect();
+        for (i, vector) in vectors.iter().enumerate() {
+            index.insert(format!("v{i}"), vector.clone()).unwrap();
+        }
+
+        assert!(!index.pq.is_trained());
+        let results = index.search(&vectors[0], 1).unwrap();
+        assert_eq!(results.first().map(|(id, _)| id.as_str()), Some("v0"));
     }
 
     #[test]

@@ -1,11 +1,5 @@
 // Comprehensive search quality and correctness tests for DXMT VectorDB.
 //
-// Test design inspired by:
-// - Qdrant's filterable_hnsw_test.rs (filtered recall with varying selectivity)
-// - Qdrant's exact_search_test.rs (brute-force vs HNSW regression guard)
-// - Chroma's test_multithreaded.py (concurrent add/query interleaving)
-// - Chroma's test_api.py (CRUD lifecycle correctness)
-//
 // Coverage areas not in e2e_recall_test.rs:
 // 1. HNSW vs brute-force exact regression (same data, results must match)
 // 2. Filtered recall at varying selectivity (correctness + recall)
@@ -31,7 +25,10 @@ use dxmt_vectordb::{
     },
     storage::IntelligentIndexedStorage,
     types::{
-        record::{Condition, CreateRecordRequest, Filter, FilterOperation, SearchQuery},
+        record::{
+            Condition, CreateRecordRequest, Filter, FilterOperation, FusionMethod,
+            HybridSearchRequest, SearchQuery,
+        },
         table::TableConfig,
         vector::DistanceMetric,
     },
@@ -144,7 +141,6 @@ async fn insert_batch(
 
 // ── Test 1: HNSW vs BruteForce regression guard ───────────────────────────────
 //
-// Inspired by Qdrant's exact_search_test.rs.
 // Both indexes built on identical data; their top-10 results must agree ≥95%.
 
 #[tokio::test]
@@ -202,7 +198,6 @@ async fn test_hnsw_matches_brute_force() {
 
 // ── Test 2: Filtered recall at varying selectivity ────────────────────────────
 //
-// Inspired by Qdrant's filterable_hnsw_test.rs parametrized ef test.
 // Verifies that at 10% selectivity, filtered recall stays high and every
 // returned result satisfies the filter condition.
 
@@ -412,7 +407,6 @@ async fn test_filter_excludes_nearer_non_matching() {
 
 // ── Test 4: Edge cases ────────────────────────────────────────────────────────
 //
-// Inspired by Qdrant's test_hnsw_search_top_zero and Chroma's empty-dataset handling.
 
 #[tokio::test]
 async fn test_edge_cases() {
@@ -629,7 +623,6 @@ async fn test_distance_metric_ordering() {
 
 // ── Test 6: Concurrent insert + query ─────────────────────────────────────────
 //
-// Inspired by Chroma's test_multithreaded.py.
 // Multiple writer and reader tasks run concurrently; after all complete,
 // the final state must be self-consistent.
 
@@ -828,7 +821,6 @@ async fn test_crud_lifecycle() {
 
 // ── Test 8: ef_search monotonicity ────────────────────────────────────────────
 //
-// Inspired by Qdrant's parametrized ef test.
 // recall(ef=200) ≥ recall(ef=64) ≥ recall(ef=32) within a small tolerance.
 
 #[tokio::test]
@@ -1050,4 +1042,366 @@ async fn test_multi_condition_and_filter() {
     );
 
     println!("multi-condition AND filter: {} results", result.hits.len());
+}
+
+// ── Test 11: hybrid search ranks the same way plain search does ───────────────
+//
+// The index answers in distances and the fusion ranks by score, so the dense leg has to be
+// converted on the way in. It was not: `fuse_dbsf` normalises "higher is better", so raw
+// distances put the nearest vector last. Every fusion method is checked, and against plain
+// `search` rather than a hardcoded order, because the bug is precisely a disagreement between
+// the two paths that both claim to answer "what is closest to this vector".
+
+#[tokio::test]
+async fn test_hybrid_search_orders_like_plain_search() {
+    let storage = IntelligentIndexedStorage::new(&mem_config()).await.unwrap();
+    storage
+        .create_table(table_cfg("hybrid_order", 4, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+
+    // Four one-hot vectors: for a one-hot query the nearest neighbour is unambiguous.
+    let vectors: Vec<Vec<f32>> = (0..4)
+        .map(|i| (0..4).map(|d| if d == i { 1.0 } else { 0.0 }).collect())
+        .collect();
+    let ids: Vec<String> = (0..4).map(|i| format!("v{}", i)).collect();
+    insert_batch(&storage, "hybrid_order", &ids, &vectors, None).await;
+
+    for (i, query) in vectors.iter().enumerate() {
+        let plain = storage
+            .search(
+                "hybrid_order",
+                SearchQuery {
+                    vector: query.clone(),
+                    top_k: 4,
+                    limit: 4,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            plain.hits[0].id, ids[i],
+            "plain search did not return the exact match first"
+        );
+
+        for fusion in [
+            FusionMethod::Dbsf,
+            FusionMethod::WeightedSum,
+            FusionMethod::ReciprocalRankFusion,
+        ] {
+            let hybrid = storage
+                .hybrid_search(
+                    "hybrid_order",
+                    HybridSearchRequest {
+                        vector: Some(query.clone()),
+                        sparse_vector: None,
+                        text: None,
+                        vector_weight: 0.7,
+                        fusion_method: fusion,
+                        rrf_k: 60.0,
+                        limit: 4,
+                        filter: None,
+                        with_payload: false,
+                        with_vector: false,
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                hybrid.hits[0].id, ids[i],
+                "hybrid search with {:?} ranked {} first for a query equal to {}",
+                fusion, hybrid.hits[0].id, ids[i]
+            );
+            let plain_order: Vec<&str> = plain.hits.iter().map(|h| h.id.as_str()).collect();
+            let hybrid_order: Vec<&str> = hybrid.hits.iter().map(|h| h.id.as_str()).collect();
+            assert_eq!(
+                hybrid_order[0], plain_order[0],
+                "hybrid ({:?}) and plain search disagree on the nearest neighbour",
+                fusion
+            );
+        }
+    }
+}
+
+// ── Test 12: the selector's ef_search is readable by the search path ──────────
+//
+// `ef_search` is chosen by the index selector and passed into `HnswConfig` at build time, but
+// the *search* path computed its traversal budget from a hardcoded `let default_ef = 100`. The
+// parameter was inert: changing it in the selector moved no measurable number, and `SearchMode`
+// scaled a constant instead of the index's own setting.
+//
+// The end-to-end guard is in `tests/storage_ann_benchmark_test.rs`, which compares recall under
+// Fast and Accurate on a corpus hard enough for the budget to matter — at this file's scale
+// every mode returns exact results, so a recall assertion here would pass no matter what the
+// plumbing did. What is worth checking cheaply is the accessor that carries the value across.
+
+#[tokio::test]
+async fn test_selected_algorithm_exposes_ef_search() {
+    let storage = IntelligentIndexedStorage::new(&mem_config()).await.unwrap();
+    let mut cfg = table_cfg("ef_exposed", 16, DistanceMetric::Cosine);
+    cfg.memory_optimization = Some(true);
+    storage.create_table(cfg).await.unwrap();
+
+    let vectors = make_unit_vectors(64, 16);
+    let ids: Vec<String> = (0..64).map(|i| format!("x{i:03}")).collect();
+    insert_batch(&storage, "ef_exposed", &ids, &vectors, None).await;
+
+    let decision = storage
+        .describe_index("ef_exposed")
+        .await
+        .expect("table should report its index decision");
+    let ef = decision.configured_ef_search().expect(
+        "an adaptively selected HNSW index must report the ef_search it was configured with",
+    );
+    assert!(
+        ef > 10,
+        "ef_search of {ef} is at or below top_k; the traversal budget would be meaningless"
+    );
+
+    // And a search still works with it — that the budget is applied is what the ANN benchmark
+    // measures; that it does not break the query path is checked here.
+    let result = storage
+        .search(
+            "ef_exposed",
+            SearchQuery {
+                vector: vectors[0].clone(),
+                top_k: 5,
+                limit: 5,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.hits[0].id, ids[0]);
+}
+
+// ── Test 13: a filtered graph search reaches candidates it did not start on ───
+//
+// `search_layer` seeds the traversal from the entry point. It gated *both* the exploration
+// queue and the result set on the filter, so when the entry point did not match — which, for a
+// selective filter, is nearly always — the queue started empty, the loop never ran, and the
+// search returned nothing. Measured on 20K records: at 2% selectivity 97.6% of queries came
+// back empty despite 400 matching records, and at 1% it was 98.4%. The rate is just
+// `1 - selectivity`: the probability that the one entry point happened to pass the filter.
+//
+// A single-id filter makes the assertion exact — whatever the graph does, the only admissible
+// answer is that id — and repeating over many ids means the entry point is not one of them.
+
+#[tokio::test]
+async fn test_filtered_graph_search_does_not_need_a_matching_entry_point() {
+    const N: usize = 1_000;
+    const DIM: usize = 24;
+
+    let vectors = make_unit_vectors(N, DIM);
+    let ids: Vec<String> = (0..N).map(|i| format!("g{i:04}")).collect();
+
+    let mut index = HnswIndex::new(
+        DistanceMetric::Cosine,
+        Some(HnswConfig::from_params(16, 200, 128)),
+    );
+    for (id, vector) in ids.iter().zip(&vectors) {
+        index.insert(id.clone(), vector.clone()).unwrap();
+    }
+
+    let mut empty = 0usize;
+    let trials = 40;
+    for trial in 0..trials {
+        let target = trial * (N / trials) + 3;
+        let filter: HashSet<String> = std::iter::once(ids[target].clone()).collect();
+        // Query from somewhere else entirely, so the answer cannot come from the query being
+        // its own nearest neighbour.
+        let query = &vectors[(target + N / 2) % N];
+
+        let hits = index.search_with_filter(query, 5, 128, &filter).unwrap();
+        if hits.is_empty() {
+            empty += 1;
+            continue;
+        }
+        assert_eq!(
+            hits.len(),
+            1,
+            "a one-id filter returned {} hits: {hits:?}",
+            hits.len()
+        );
+        assert_eq!(
+            hits[0].0, ids[target],
+            "filtered search returned a non-matching id"
+        );
+    }
+
+    assert_eq!(
+        empty, 0,
+        "{empty}/{trials} filtered searches returned nothing; a candidate is unreachable unless \
+         the graph entry point happens to match the filter"
+    );
+}
+
+// ── Test 14: every filter operator returns a full page ────────────────────────
+//
+// The amplified fetch that feeds post-filtering is sized from an *estimated* selectivity, and
+// the string estimates are not estimates: `Contains` is hardcoded to 0.25 and `EndsWith` to
+// 0.15 whatever the data holds. A `Contains` whose true selectivity was 1% fetched 240 rows for
+// a top-20 and returned 3 — correct rows, too few of them, no error. No constant fixes that,
+// because the error is in the input to the constant; the bounded refetch does.
+//
+// Checked against a reference predicate rather than a golden list, so the assertion is
+// "everything returned matches, and enough was returned", for each operator in the enum.
+
+#[tokio::test]
+async fn test_every_filter_operator_returns_a_full_page() {
+    const N: usize = 3_000;
+    const DIM: usize = 8;
+    const TOP_K: usize = 20;
+    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"];
+
+    let storage = IntelligentIndexedStorage::new(&mem_config()).await.unwrap();
+    let mut cfg = table_cfg("ops", DIM, DistanceMetric::Cosine);
+    cfg.memory_optimization = Some(true);
+    storage.create_table(cfg).await.unwrap();
+
+    let num_of = |i: usize| (i % 100) as i64;
+    let tag_of = |i: usize| words[(num_of(i) as usize) % 7];
+    let name_of = |i: usize| format!("rec-{}-x", num_of(i));
+
+    let vectors: Vec<Vec<f32>> = (0..N)
+        .map(|i| {
+            (0..DIM)
+                .map(|d| (((i * 31 + d * 17) % 1000) as f32) / 1000.0 - 0.5)
+                .collect()
+        })
+        .collect();
+    let ids: Vec<String> = (0..N).map(|i| format!("o{i:05}")).collect();
+    let payloads: Vec<serde_json::Value> = (0..N)
+        .map(|i| serde_json::json!({ "num": num_of(i), "tag": tag_of(i), "name": name_of(i) }))
+        .collect();
+    insert_batch(&storage, "ops", &ids, &vectors, Some(&payloads)).await;
+
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, &str, FilterOperation, Box<dyn Fn(usize) -> bool>)> = vec![
+        (
+            "Equal",
+            "num",
+            FilterOperation::Equal(serde_json::json!(42)),
+            Box::new(move |i| num_of(i) == 42),
+        ),
+        (
+            "NotEqual",
+            "num",
+            FilterOperation::NotEqual(serde_json::json!(42)),
+            Box::new(move |i| num_of(i) != 42),
+        ),
+        (
+            "GreaterThan",
+            "num",
+            FilterOperation::GreaterThan(serde_json::json!(95)),
+            Box::new(move |i| num_of(i) > 95),
+        ),
+        (
+            "GreaterThanOrEqual",
+            "num",
+            FilterOperation::GreaterThanOrEqual(serde_json::json!(95)),
+            Box::new(move |i| num_of(i) >= 95),
+        ),
+        (
+            "LessThan",
+            "num",
+            FilterOperation::LessThan(serde_json::json!(4)),
+            Box::new(move |i| num_of(i) < 4),
+        ),
+        (
+            "LessThanOrEqual",
+            "num",
+            FilterOperation::LessThanOrEqual(serde_json::json!(4)),
+            Box::new(move |i| num_of(i) <= 4),
+        ),
+        (
+            "In",
+            "num",
+            FilterOperation::In(vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3),
+            ]),
+            Box::new(move |i| (1..=3).contains(&num_of(i))),
+        ),
+        (
+            "NotIn",
+            "num",
+            FilterOperation::NotIn(vec![serde_json::json!(1), serde_json::json!(2)]),
+            Box::new(move |i| !(1..=2).contains(&num_of(i))),
+        ),
+        (
+            "Equal(string)",
+            "tag",
+            FilterOperation::Equal(serde_json::json!("alpha")),
+            Box::new(move |i| tag_of(i) == "alpha"),
+        ),
+        (
+            "Contains",
+            "name",
+            FilterOperation::Contains("-7-".to_string()),
+            Box::new(move |i| name_of(i).contains("-7-")),
+        ),
+        (
+            "StartsWith",
+            "name",
+            FilterOperation::StartsWith("rec-1".to_string()),
+            Box::new(move |i| name_of(i).starts_with("rec-1")),
+        ),
+        (
+            "EndsWith",
+            "name",
+            FilterOperation::EndsWith("9-x".to_string()),
+            Box::new(move |i| name_of(i).ends_with("9-x")),
+        ),
+    ];
+
+    for (label, key, operation, predicate) in cases {
+        let expected: HashSet<String> = (0..N)
+            .filter(|&i| predicate(i))
+            .map(|i| ids[i].clone())
+            .collect();
+        assert!(
+            expected.len() >= TOP_K,
+            "{label}: the corpus must hold more than one page of matches to test this"
+        );
+
+        let result = storage
+            .search(
+                "ops",
+                SearchQuery {
+                    vector: vectors[0].clone(),
+                    top_k: TOP_K,
+                    limit: TOP_K,
+                    filter: Some(Filter {
+                        must: Some(vec![Condition {
+                            key: key.to_string(),
+                            operation,
+                        }]),
+                        must_not: None,
+                        should: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        for hit in &result.hits {
+            assert!(
+                expected.contains(&hit.id),
+                "{label}: returned '{}', which does not match the filter",
+                hit.id
+            );
+        }
+        assert_eq!(
+            result.hits.len(),
+            TOP_K,
+            "{label}: asked for {TOP_K} and {} records match, but only {} came back",
+            expected.len(),
+            result.hits.len()
+        );
+    }
 }

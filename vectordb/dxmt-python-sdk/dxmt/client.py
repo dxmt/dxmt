@@ -6,6 +6,7 @@ the DXMT VectorDB REST API.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -91,6 +92,54 @@ class DXMTClient:
         if self._async_client:
             await self._async_client.aclose()
 
+    async def ahealth_check(self) -> dict[str, Any]:
+        """Async variant of :meth:`health_check`."""
+        try:
+            response = await self.async_client.get("/health")
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            raise DXMTConnectionError(f"Health check failed: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error during health check: {e}") from e
+
+    async def ahealth_metrics(self) -> dict[str, Any]:
+        """Async variant of :meth:`health_metrics`."""
+        try:
+            response = await self.async_client.get("/health/metrics")
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            raise DXMTConnectionError(f"Health metrics failed: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error during health metrics: {e}") from e
+
+    def health_check(self) -> dict[str, Any]:
+        """Return the server's readiness and durability health snapshot."""
+        try:
+            response = self._client.get("/health")
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            raise DXMTConnectionError(f"Health check failed: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error during health check: {e}") from e
+
+    def health_metrics(self) -> dict[str, Any]:
+        """Return detailed server and storage health metrics."""
+        try:
+            response = self._client.get("/health/metrics")
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
+        except httpx.HTTPStatusError as e:
+            raise DXMTConnectionError(f"Health metrics failed: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error during health metrics: {e}") from e
+
     @property
     def async_client(self) -> httpx.AsyncClient:
         """Get or create async client."""
@@ -102,6 +151,54 @@ class DXMTClient:
                 **self._client_kwargs,
             )
         return self._async_client
+
+    @staticmethod
+    def _response_data(response: Any) -> Any:
+        """Return the payload from a DXMT response envelope.
+
+        The API normally returns ``{"success": true, "data": ...}``, while
+        a couple of compatibility endpoints return the payload directly.  SDK
+        methods should not need to know which form a route used.
+        """
+        if (
+            isinstance(response, dict)
+            and "data" in response
+            and (response.get("success") is True or set(response) == {"data"})
+        ):
+            return response.get("data")
+        return response
+
+    @classmethod
+    def _normalize_record(cls, record: Any) -> dict[str, Any]:
+        """Normalize Rust record/search-hit fields to the public SDK shape."""
+        if not isinstance(record, dict):
+            return {}
+        normalized = dict(record)
+
+        # ``Record`` uses payload_json on the wire to avoid bincode issues;
+        # search hits already expose a decoded payload object.
+        payload = normalized.get("payload")
+        if payload is None and normalized.get("payload_json"):
+            try:
+                payload = json.loads(normalized["payload_json"])
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+            normalized["payload"] = payload
+
+        if "payload" in normalized and "metadata" not in normalized:
+            normalized["metadata"] = normalized["payload"]
+        return normalized
+
+    @classmethod
+    def _normalize_hits(cls, response: Any) -> list[dict[str, Any]]:
+        """Extract and normalize a search response's hits."""
+        data = cls._response_data(response)
+        if not isinstance(data, dict):
+            return []
+        hits = data.get("hits", [])
+        if not isinstance(hits, list):
+            return []
+        return [cls._normalize_record(hit) for hit in hits]
 
     # Table Management
 
@@ -204,9 +301,14 @@ class DXMTClient:
         try:
             response = self._client.get(f"/tables/{name}")
             response.raise_for_status()
-            data = response.json()
+            data = self._response_data(response.json())
             # API returns {"data": {"table": {...}, "record_count": N}}
-            return data.get("data", {}).get("table", {})
+            if isinstance(data, dict) and isinstance(data.get("table"), dict):
+                table = dict(data["table"])
+                if "record_count" in data:
+                    table["record_count"] = data["record_count"]
+                return table
+            return data if isinstance(data, dict) else {}
         except httpx.HTTPStatusError as e:
             msg = f"Failed to get table {name}: {e.response.text}"
             raise DXMTTableError(msg) from e
@@ -219,9 +321,14 @@ class DXMTClient:
         try:
             response = await self.async_client.get(f"/tables/{name}")
             response.raise_for_status()
-            data = response.json()
+            data = self._response_data(response.json())
             # API returns {"data": {"table": {...}, "record_count": N}}
-            return data.get("data", {}).get("table", {})
+            if isinstance(data, dict) and isinstance(data.get("table"), dict):
+                table = dict(data["table"])
+                if "record_count" in data:
+                    table["record_count"] = data["record_count"]
+                return table
+            return data if isinstance(data, dict) else {}
         except httpx.HTTPStatusError as e:
             msg = f"Failed to get table {name}: {e.response.text}"
             raise DXMTTableError(msg) from e
@@ -277,9 +384,9 @@ class DXMTClient:
         try:
             response = self._client.get("/tables")
             response.raise_for_status()
-            data = response.json()
+            data = self._response_data(response.json())
             # API returns {"data": {"tables": [...], "total": N, ...}}
-            return data.get("data", {}).get("tables", [])
+            return data.get("tables", []) if isinstance(data, dict) else []
         except httpx.HTTPStatusError as e:
             msg = f"Failed to list tables: {e.response.text}"
             raise DXMTTableError(msg) from e
@@ -292,9 +399,9 @@ class DXMTClient:
         try:
             response = await self.async_client.get("/tables")
             response.raise_for_status()
-            data = response.json()
+            data = self._response_data(response.json())
             # API returns {"data": {"tables": [...], "total": N, ...}}
-            return data.get("data", {}).get("tables", [])
+            return data.get("tables", []) if isinstance(data, dict) else []
         except httpx.HTTPStatusError as e:
             msg = f"Failed to list tables: {e.response.text}"
             raise DXMTTableError(msg) from e
@@ -448,6 +555,8 @@ class DXMTClient:
         record_id: str,
         vector: Optional[list[float]] = None,
         payload: Optional[dict[str, Any]] = None,
+        merge_mode: str = "replace",
+        upsert: bool = False,
     ) -> dict[str, Any]:
         """Async update a record in a table.
 
@@ -468,6 +577,8 @@ class DXMTClient:
             request_payload["vector"] = vector
         if payload is not None:
             request_payload["payload"] = payload
+        request_payload["merge_mode"] = merge_mode
+        request_payload["upsert"] = upsert
 
         try:
             response = await self.async_client.put(
@@ -555,7 +666,6 @@ class DXMTClient:
         Raises:
             DXMTError: If retrieval fails.
         """
-        import json
         # Note: No batch get endpoint, so we fetch individually
         records = []
         for record_id in ids:
@@ -564,16 +674,10 @@ class DXMTClient:
                     f"/tables/{table_name}/records/{record_id}"
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = self._response_data(response.json())
                 # Extract record from response envelope
-                record = data.get("data", {})
+                record = self._normalize_record(data)
                 if record:
-                    # Parse payload_json if present
-                    if "payload_json" in record and record["payload_json"]:
-                        try:
-                            record["payload"] = json.loads(record["payload_json"])
-                        except (json.JSONDecodeError, TypeError):
-                            record["payload"] = {}
                     records.append(record)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
@@ -592,7 +696,6 @@ class DXMTClient:
         ids: list[str],
     ) -> list[dict[str, Any]]:
         """Async get records by IDs."""
-        import json
         # Note: No batch get endpoint, so we fetch individually
         records = []
         for record_id in ids:
@@ -601,16 +704,10 @@ class DXMTClient:
                     f"/tables/{table_name}/records/{record_id}"
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = self._response_data(response.json())
                 # Extract record from response envelope
-                record = data.get("data", {})
+                record = self._normalize_record(data)
                 if record:
-                    # Parse payload_json if present
-                    if "payload_json" in record and record["payload_json"]:
-                        try:
-                            record["payload"] = json.loads(record["payload_json"])
-                        except (json.JSONDecodeError, TypeError):
-                            record["payload"] = {}
                     records.append(record)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
@@ -660,6 +757,7 @@ class DXMTClient:
 
         payload = {
             "vector": vector,
+            "top_k": k,
             "limit": k,
             "filter": convert_simple_filter_to_dxmt(filter),
         }
@@ -669,23 +767,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            import json
-            data = response.json()
-            # DXMT server returns "hits" not "results"
-            hits = data.get("data", {}).get("hits", [])
-
-            # Parse payload_json if present
-            for hit in hits:
-                if "payload_json" in hit and hit["payload_json"]:
-                    try:
-                        hit["payload"] = json.loads(hit["payload_json"])
-                    except (json.JSONDecodeError, TypeError):
-                        hit["payload"] = {}
-                # Map 'payload' to 'metadata' for user convenience
-                if "payload" in hit and "metadata" not in hit:
-                    hit["metadata"] = hit["payload"]
-
-            return hits
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e
@@ -721,6 +803,7 @@ class DXMTClient:
 
         payload = {
             "vector": vector,
+            "top_k": k,
             "limit": k,
             "filter": convert_simple_filter_to_dxmt(filter),
         }
@@ -730,23 +813,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            import json
-            data = response.json()
-            # DXMT server returns "hits" not "results"
-            hits = data.get("data", {}).get("hits", [])
-
-            # Parse payload_json if present
-            for hit in hits:
-                if "payload_json" in hit and hit["payload_json"]:
-                    try:
-                        hit["payload"] = json.loads(hit["payload_json"])
-                    except (json.JSONDecodeError, TypeError):
-                        hit["payload"] = {}
-                # Map 'payload' to 'metadata' for user convenience
-                if "payload" in hit and "metadata" not in hit:
-                    hit["metadata"] = hit["payload"]
-
-            return hits
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e
@@ -814,8 +881,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            data = response.json()
-            return data.get("data", {}).get("hits", [])
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Hybrid search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e
@@ -880,8 +946,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            data = response.json()
-            return data.get("data", {}).get("hits", [])
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Hybrid search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e
@@ -945,15 +1010,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            data = response.json()
-            hits = data.get("data", {}).get("hits", [])
-
-            # Map 'payload' to 'metadata' for user convenience
-            for hit in hits:
-                if "payload" in hit and "metadata" not in hit:
-                    hit["metadata"] = hit["payload"]
-
-            return hits
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Full-text search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e
@@ -985,8 +1042,8 @@ class DXMTClient:
                 json={"query": sql},
             )
             response.raise_for_status()
-            data = response.json()
-            return data.get("data", {})
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
         except httpx.HTTPStatusError as e:
             msg = f"DXQL query failed: {e.response.text}"
             raise DXMTError(msg) from e
@@ -1005,8 +1062,8 @@ class DXMTClient:
                 json={"query": sql},
             )
             response.raise_for_status()
-            data = response.json()
-            return data.get("data", {})
+            data = self._response_data(response.json())
+            return data if isinstance(data, dict) else {}
         except httpx.HTTPStatusError as e:
             msg = f"DXQL query failed: {e.response.text}"
             raise DXMTError(msg) from e
@@ -1066,15 +1123,7 @@ class DXMTClient:
                 json=payload,
             )
             response.raise_for_status()
-            data = response.json()
-            hits = data.get("data", {}).get("hits", [])
-
-            # Map 'payload' to 'metadata' for user convenience
-            for hit in hits:
-                if "payload" in hit and "metadata" not in hit:
-                    hit["metadata"] = hit["payload"]
-
-            return hits
+            return self._normalize_hits(response.json())
         except httpx.HTTPStatusError as e:
             msg = f"Full-text search failed: {e.response.text}"
             raise DXMTSearchError(msg) from e

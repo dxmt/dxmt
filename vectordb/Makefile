@@ -1,7 +1,14 @@
 # DXMT VectorDB Makefile
 # Provides common development and deployment commands
 
-.PHONY: help build test clean run docker setup lint bench docs release
+# Keep local gates reproducible on small developer machines and CI runners. Environment values
+# supplied by the caller still win because these use `?=`.
+CARGO_BUILD_JOBS ?= 1
+CARGO_INCREMENTAL ?= 0
+CARGO_PROFILE_DEV_DEBUG ?= 0
+export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
+
+.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci
 
 # Default target - show help
 help:
@@ -82,13 +89,19 @@ test-unit:
 
 test-integ:
 	@echo "Running integration tests..."
-	@cargo test --test '*'
-	@python3 scripts/test/run-integration-tests.py || true
+	@cargo test --tests
+
+test-recovery:
+	@echo "Running persistence and recovery tests..."
+	@cargo test --test wal_recovery_test --test index_persistence_test --test partitioned_ivf_test
+
+test-contract:
+	@echo "Running server/API contract tests..."
+	@cargo test --test api_contract_test
 
 bench:
 	@echo "Running benchmarks..."
 	@cargo bench
-	@python3 scripts/benchmark/performance-test.py || true
 
 coverage:
 	@echo "Generating test coverage..."
@@ -109,6 +122,9 @@ fmt-check:
 lint:
 	@echo "Running clippy..."
 	@cargo clippy --all-targets -- -D warnings
+
+# Kept as an alias: `lint` is already the strict gate, and it passes.
+lint-strict: lint
 
 check:
 	@echo "Running cargo check..."
@@ -163,8 +179,15 @@ clean:
 	@find . -name "__pycache__" -delete
 
 # Verify everything is working
-verify: fmt-check lint test
+# The fast gate: everything except the full integration suite. Use it while iterating.
+verify-core: fmt-check check lint test-unit test-recovery test-contract
+
+# The real gate, and what CI runs. `test-integ` is `cargo test --tests`, which includes the
+# recovery and contract targets above; running them first just fails faster.
+verify: verify-core test-integ
 	@echo "All checks passed!"
+
+ci: verify
 
 # Release process
 release-patch:

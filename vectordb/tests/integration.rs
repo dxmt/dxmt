@@ -18,6 +18,7 @@ mod full_text_search_test {
     include!("integration/full_text_search_test.rs");
 }
 
+#[cfg(feature = "index-management")]
 mod phase3_integration_tests {
     include!("integration/phase3_integration_tests.rs");
 }
@@ -46,6 +47,7 @@ mod ephemeral_vm_simple_test {
     include!("integration/ephemeral_vm_simple_test.rs");
 }
 
+#[cfg(feature = "benchmarks")]
 mod metrics_test {
     include!("integration/metrics_test.rs");
 }

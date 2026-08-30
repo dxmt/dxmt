@@ -4,7 +4,7 @@
 The unit and integration suites verify everything in-process, calling snapshot() /
 evict_cold_tables() / reevaluate_indexes() directly. In a real server those are three background
 timers running concurrently with read and write traffic, and that combination is what this
-exercises. It found two bugs nothing in the 35-test recovery suite could see; see ROADMAP.md W8.
+exercises. It found two bugs nothing in the 35-test recovery suite could see.
 
 The contract under test: every record the server answered 200 for must be retrievable after
 `kill -9` and restart, and the server must come back in reasonable time.

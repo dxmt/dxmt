@@ -1,15 +1,20 @@
 # DXMT VectorDB
 
 A vector database written in Rust. HNSW, HNSW-PQ and product quantization with runtime SIMD
-dispatch, full-text search via Tantivy, hybrid retrieval, and a query language — behind REST,
-GraphQL and WebSocket, plus a Chroma-compatible zero-config mode.
+dispatch, hybrid retrieval and a query language behind a REST API, plus a zero-config
+collection mode. Full-text search (Tantivy), GraphQL, WebSocket, Swagger and S3 are opt-in
+build features — see [Feature flags](#feature-flags) — so a default build is the minimal
+supported single-node server and nothing more.
 
-> **Status: pre-1.0.** Records are held in memory and made durable by a write-ahead log,
+> **Status: Alpha development, not production-ready.** Records are held in memory and made durable by a write-ahead log,
 > replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
-> `./data/wal`; set `DB_WAL_DIR` to move it. The tiered object-storage backend exists in the
-> tree but is still not on the write path, so "object storage as the source of truth" is not
-> yet true. Distributed/cluster code exists but is not production-ready. See
-> [Known Limitations](#known-limitations) and [docs/ROADMAP.md](docs/ROADMAP.md).
+> `./data/wal`; set `DB_WAL_DIR` to move it. When configured, snapshots, WAL chunks and
+> partition segments are mirrored to object storage, but that mirror is still experimental and
+> local WAL remains the readiness boundary. Distributed/cluster code exists but is not
+> production-ready. See [Known Limitations](#known-limitations).
+
+Anything this README does not describe is experimental, even when its module compiles or has
+standalone tests.
 
 ## Quick Start
 
@@ -19,7 +24,7 @@ Requires a recent stable Rust toolchain.
 # Build
 cargo build --release
 
-# Zero-config mode — Chroma-compatible API, auto-tuned
+# Zero-config mode — collection API, auto-tuned
 ./target/release/vectordb serve --simple --memory-limit 1024
 
 # Standard mode
@@ -30,12 +35,15 @@ Verify it's up:
 
 ```bash
 curl http://localhost:9999/health
+# Readiness is the deployment probe; it returns 503 after a local WAL durability failure.
+curl -f http://localhost:9999/ready
 ```
 
-Swagger, GraphQL and WebSocket are compiled in by default but not served unless asked for —
-each one widens the exposed surface, so opt in per process:
+Swagger, GraphQL and WebSocket are optional integrations and are not compiled into the default
+single-node build. Build them explicitly when needed, then opt in per process:
 
 ```bash
+cargo build --release --features api-swagger,api-graphql,api-ws
 ./target/release/vectordb serve --swagger --graphql --websocket
 ```
 
@@ -48,6 +56,11 @@ each one widens the exposed surface, so opt in per process:
 `GET /api/v1/tables/{name}/stats` reports `resident`: whether the table was in memory when
 asked. A query against an evicted table rehydrates it transparently, so without this a caller
 has no way to know the next one will pay for a fetch from object storage.
+
+`GET /health/metrics` (also `/api/v1/health/metrics`) includes the local durability frontier:
+`storage.wal_next_sequence`, `storage.last_wal_sync_at`, `storage.last_snapshot_at`, and
+`storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
+timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
 
 ### MCP server
 
@@ -77,7 +90,7 @@ Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_
 Both server modes converge on one storage implementation, `IntelligentIndexedStorage`:
 
 ```
-serve --simple  →  /collections/*   (Chroma-compatible, at the root)
+serve --simple  →  /collections/*   (zero-config collection API, at the root)
 serve           →  /api/v1/*
                         ↓
              IntelligentIndexedStorage
@@ -87,11 +100,11 @@ serve           →  /api/v1/*
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 
-Both the write-ahead log and the snapshots are uploaded to object storage — the log as immutable
-chunks, so a write acknowledged between two snapshots survives losing the machine. and a table nothing has queried for a while is
-dropped from memory entirely — records and index — leaving only its segments in the object
-store. The next query on it rehydrates transparently, so memory tracks the working set rather
-than the whole dataset. Tuned by `DB_EVICTION_INTERVAL_SECS`.
+When object storage is configured, the write-ahead log and snapshots are also mirrored there. A
+table nothing has queried for a while can be dropped from memory entirely — records and index —
+leaving its snapshot segments as the recovery source. The next query rehydrates it
+transparently. Without object storage, the durable source remains the local WAL and snapshot
+directory. This behavior is tuned by `DB_EVICTION_INTERVAL_SECS`.
 
 A table whose vectors exceed `DB_PARTITION_THRESHOLD_MB` (default 512) switches to a partitioned
 IVF index
@@ -99,7 +112,7 @@ IVF index
 in object storage, fetched only when a query probes it. That bounds memory for a single table
 larger than RAM, which table-level eviction cannot do.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) §W3 for what remains.
+This path is still experimental.
 
 Index selection is re-checked on a timer (`DB_REINDEX_INTERVAL_SECS`, default 900) and the
 index is rebuilt when a table's size no longer suits the algorithm it has:
@@ -119,9 +132,10 @@ against — the periodic re-evaluation is what corrects it. `POST /api/v1/tables
 forces it immediately. A rebuild builds the replacement before swapping it in, so queries keep
 being served by the old index throughout.
 
-Interfaces: REST (`src/api/handlers.rs`), a Chroma-compatible simple mode
+Interfaces: REST (`src/api/handlers.rs`), a zero-config simple mode
 (`src/api/simple_core.rs`), GraphQL, and WebSocket. Standard-mode REST routes are served
-under `/api/v1`; only `/health` and `/status` sit at the root.
+under `/api/v1`; system probes are available at the root (`/health`, `/live`, `/ready`) and
+under the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
 
 ## Configuration
 
@@ -144,7 +158,7 @@ DB_COMPRESSION=zstd         # zstd | lz4 | none
 `IntelligentIndexedStorage` unconditionally.
 
 Object storage credentials come from the environment only — never commit them. They are read
-into the configuration but, as above, the object-storage path is not yet on the write path:
+into the configuration. Object-storage mirroring is opt-in and best effort:
 
 ```bash
 export DB_OBJECT_STORAGE_PROVIDER=s3
@@ -156,11 +170,11 @@ export DB_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 
 ### Feature Flags
 
-Default: `tokio-runtime`, `basic-storage`, `s3-storage`, `text-bm25`, `storage-lmdb`,
-`api-swagger`, `api-graphql`.
+Default: `tokio-runtime`, `basic-storage`.
 
-Opt-in: `storage-rocksdb`, `gpu` (CUDA), `cluster`, `multimodal`, `python` (PyO3 bindings),
-`metrics`, `hf-datasets`.
+Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `s3-storage`, `storage-lmdb`,
+`storage-rocksdb`, `gpu` (CUDA), `cluster`, `multimodal`, `embeddings`, `python` (PyO3
+bindings), `metrics`, `hf-datasets`.
 
 ## Client SDKs
 
@@ -179,14 +193,19 @@ and AutoGen. See `dxmt-python-sdk/README.md`.
 ```bash
 make build              # Debug build
 make release            # Release build
-make test               # Rust tests + Python API script
+make test               # Rust tests
 cargo test --lib        # Unit tests only
 make fmt && make lint   # rustfmt + clippy
-make verify             # fmt + lint + test
+make verify             # the full gate: fmt-check, clippy -D warnings, unit + all integration tests
+make verify-core        # the same without the full integration suite, for iterating
 ```
 
-Note that `make test` and `make bench` guard their Python steps with `|| true`, so read the
-output rather than relying on the exit code.
+The broader legacy scripts under `scripts/` are not part of the Alpha quality gate.
+
+Note that a default `cargo test` does not run the feature-gated suites — the benchmark,
+dataset, adaptive-index and LMDB tests compile to zero tests without their features. CI's
+`optional-features` job compiles them; run them locally with, for example,
+`cargo test --features benchmarks --test dataset_test`.
 
 The examples in `examples/` that process PDFs do not ship with a corpus. Supply your own:
 
@@ -208,12 +227,13 @@ These are real gaps, not roadmap aspirations:
   commit yet.
 - **`POST /api/v1/tables/{name}/records` caps a request at 10,000 records** and returns
   `Validation failed` above that.
-- **Object-storage tier not on the write path.** `IntelligentIndexedStorage` holds a
-  `TieredStorage` in an `#[allow(dead_code)]` field and never reads or writes through it.
-- **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It accepts `alpha`/`beta`/
-  `gamma` weights and a sparse vector, then silently ignores the sparse and text components
-  (`src/api/handlers.rs:961-966`). For BM25 use `/search/text`; for real fusion use
-  `/search/hybrid`.
+- **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
+  uploaded when configured, and a fresh node can recover from them, but remote upload failures
+  are logged without failing an already durable local write. Multi-process coordination and full
+  failure-injection coverage are not yet part of the Alpha contract.
+- **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It rejects sparse/text fusion
+  with `NOT_IMPLEMENTED` instead of silently discarding query components. For BM25 use
+  `/search/text`; for real vector+text fusion use `/search/hybrid`.
 - **Two implementations behind one name.** `search/quantization/product_quantizer.rs` is a
   52-line stand-in whose `encode_batch` returns zeroed codes; the working one is
   `product_quantization.rs`. Only the latter is reachable from the live path.
@@ -225,9 +245,6 @@ These are real gaps, not roadmap aspirations:
   removed.
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
-
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for what is being done about these and in what order.
 
 ## License
 

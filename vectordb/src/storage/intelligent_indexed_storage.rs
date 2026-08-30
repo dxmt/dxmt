@@ -5,7 +5,7 @@ use crate::search::brute_force::BruteForceIndex;
 use crate::search::index_traits::VectorIndex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
@@ -155,6 +155,36 @@ struct SnapshotManifest {
     names: Vec<String>,
 }
 
+/// Runtime persistence state exposed to health/readiness endpoints.
+///
+/// This is deliberately a small, read-only snapshot rather than a promise that every backing
+/// store is healthy. A server is ready only when its local durability boundary is usable; object
+/// storage mirroring is an optional best-effort copy and is reported separately by its own logs.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StorageHealthSnapshot {
+    pub ready: bool,
+    pub wal_enabled: bool,
+    pub wal_directory_accessible: bool,
+    pub wal_next_sequence: Option<u64>,
+    pub snapshot_present: bool,
+    pub snapshot_manifest_valid: bool,
+    pub snapshot_wal_next_sequence: Option<u64>,
+    pub durability_degraded: bool,
+    pub durability_error: Option<String>,
+    pub resident_table_count: usize,
+    pub table_count: usize,
+    pub total_records: usize,
+    /// RFC3339 timestamp of the most recent successful local WAL fsync.
+    pub last_wal_sync_at: Option<String>,
+    /// RFC3339 timestamp of the most recent successfully installed snapshot.
+    pub last_snapshot_at: Option<String>,
+    /// Number of snapshot attempts that failed since process start.
+    pub snapshot_failures: u64,
+    /// Most recent snapshot failure, if any. A failed snapshot does not make the WAL unreadable;
+    /// it is nevertheless useful to surface the reason to operators and metrics consumers.
+    pub last_snapshot_error: Option<String>,
+}
+
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
 /// （例如 BruteForce），恢复时从 `records` 重新插入即可。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -180,11 +210,29 @@ struct TableTemplate {
 /// 索引写入在 `tables` 写锁之外进行，所以要先把这些从表数据里摘出来。
 type PendingIndexInsert = (RecordId, DenseVector, Option<HashMap<String, DenseVector>>);
 
+/// Data needed to finish an update after the table-map write lock is released.
+struct UpdateArtifacts {
+    index: crate::search::IndexWrapper,
+    named_indexes: Option<crate::search::IndexCollection>,
+    #[cfg(feature = "text-bm25")]
+    table: Table,
+    record: Record,
+    #[cfg(feature = "text-bm25")]
+    full_text_engine: Option<Arc<FullTextSearchEngine>>,
+}
+
+/// Data needed to finish a delete after the table-map write lock is released.
+struct DeleteArtifacts {
+    index: crate::search::IndexWrapper,
+    record_ids: Vec<RecordId>,
+    #[cfg(feature = "text-bm25")]
+    full_text_engine: Option<Arc<FullTextSearchEngine>>,
+}
+
 /// 一个 WAL 分块在对象存储里的位置与覆盖范围。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WalChunkRef {
-    /// 完整路径而不是序号推导。分桶方案将来若要改，旧清单仍然指得对——
-    /// chroma 的 wal3 出于同样理由在 fragment 里存全路径。
+    /// 完整路径而不是序号推导：分桶方案将来若要改，旧清单仍然指得对。
     path: String,
     first_seq: u64,
     last_seq: u64,
@@ -241,7 +289,7 @@ pub struct IntelligentIndexedStorage {
     storage: Arc<TieredStorage>,
 
     /// 表级冷热判定。key 用表名——策略本身只按字符串 key 记访问，用向量 id 还是表名都行，
-    /// 而 Turbopuffer 式的分层是整个命名空间进出内存，不是单条向量。
+    /// 而这里的分层粒度是整张表进出内存，不是单条向量。
     tier_policy: Arc<crate::storage::tier_promotion::TierPromotionPolicy>,
 
     /// 是否真的配置了对象存储。
@@ -289,6 +337,27 @@ pub struct IntelligentIndexedStorage {
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
     /// 把刚读出来的条目又写回日志。
     replaying: Arc<AtomicBool>,
+
+    /// Set after a local WAL write or sync failure. The failed mutation is deliberately not
+    /// rolled back: indexes, payload postings and text state may already have been published by
+    /// the time the filesystem reports the error. Returning an error while accepting more writes
+    /// would make the durability boundary unknowable, so the process becomes read-only until a
+    /// restart. The mutation that returned the error is not acknowledged and may or may not be
+    /// present after recovery, depending on how far the filesystem write got.
+    durability_error: Arc<StdMutex<Option<String>>>,
+
+    /// Operational durability telemetry. These fields are intentionally process-local: a
+    /// restart resets the counters, while the WAL/snapshot sequence remains the durable source
+    /// of truth.
+    last_wal_sync_at: Arc<StdMutex<Option<String>>>,
+    last_snapshot_at: Arc<StdMutex<Option<String>>>,
+    /// `wal_next_sequence` and table names of the snapshot this process last loaded or
+    /// installed. Cached so a health probe does not have to read and deserialize the manifest —
+    /// and one `.meta` file per evicted table — off disk on every call.
+    snapshot_sequence: Arc<StdMutex<Option<u64>>>,
+    snapshot_table_names: Arc<StdMutex<Vec<String>>>,
+    snapshot_failures: AtomicU64,
+    last_snapshot_error: Arc<StdMutex<Option<String>>>,
 
     /// GPU distance calculator (None if no GPU available or feature not enabled)
     #[cfg(feature = "gpu")]
@@ -493,11 +562,16 @@ async fn insertion_processor(
 
                     // UPSERT: an existing id keeps its created_at and bumps its version, and its
                     // old vector has to leave the index before the new one arrives.
-                    let (is_update, existing_created_at, existing_version) =
+                    let (is_update, existing_created_at, existing_version, old_payload) =
                         if let Some(existing) = table_data.records.get(&record_id) {
-                            (true, existing.created_at, existing.version + 1)
+                            (
+                                true,
+                                existing.created_at,
+                                existing.version + 1,
+                                Some(existing.payload.clone()),
+                            )
                         } else {
-                            (false, chrono::Utc::now(), 1)
+                            (false, chrono::Utc::now(), 1, None)
                         };
 
                     if is_update {
@@ -518,15 +592,29 @@ async fn insertion_processor(
                         status: crate::types::RecordStatus::Active,
                     };
 
+                    // Upsert is replacement semantics. Leaving the previous sparse postings or
+                    // payload values indexed makes filters and sparse search return a record for
+                    // values it no longer has.
+                    if is_update {
+                        let _ = table_data.sparse_index.delete(&record_id);
+                    }
                     if let Some(sv) = &record.sparse_vector {
                         if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
                             warn!("Failed to index sparse vector for {}: {}", record_id, e);
                         }
                     }
 
-                    table_data
-                        .payload_index
-                        .insert_record(&record_id, &record.payload);
+                    if let Some(old_payload) = old_payload.as_ref() {
+                        table_data.payload_index.update_record(
+                            &record_id,
+                            old_payload,
+                            &record.payload,
+                        );
+                    } else {
+                        table_data
+                            .payload_index
+                            .insert_record(&record_id, &record.payload);
+                    }
                     table_data.records.insert(record_id.clone(), record.clone());
 
                     to_insert.push((record_id, request.vector, request.named_vectors));
@@ -557,6 +645,18 @@ async fn insertion_processor(
             for id in &to_remove {
                 if let Err(e) = index.remove(id).await {
                     warn!("Failed to remove old vector for {}: {}", id, e);
+                }
+                if let Some(collection) = &named_indexes {
+                    for name in collection.list_index_names().await {
+                        if let Some(named_index) = collection.get_index(&name).await {
+                            if let Err(e) = named_index.remove(id).await {
+                                warn!(
+                                    "Failed to remove old named vector '{}' for {}: {}",
+                                    name, id, e
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -811,9 +911,54 @@ impl IntelligentIndexedStorage {
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             replaying: replaying_flag,
+            durability_error: Arc::new(StdMutex::new(None)),
+            last_wal_sync_at: Arc::new(StdMutex::new(None)),
+            last_snapshot_at: Arc::new(StdMutex::new(None)),
+            snapshot_sequence: Arc::new(StdMutex::new(None)),
+            snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
+            snapshot_failures: AtomicU64::new(0),
+            last_snapshot_error: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "gpu")]
             gpu_calculator,
         })
+    }
+
+    fn ensure_writable(&self) -> crate::Result<()> {
+        let failure = self
+            .durability_error
+            .lock()
+            .map_err(|_| crate::Error::Internal("durability state lock poisoned".to_string()))?
+            .clone();
+        if let Some(message) = failure {
+            return Err(crate::Error::ServiceUnavailable { message });
+        }
+        Ok(())
+    }
+
+    fn mark_durability_failed(&self, error: &crate::Error) {
+        if let Ok(mut state) = self.durability_error.lock() {
+            if state.is_none() {
+                *state = Some(format!(
+                    "local WAL failed; storage is read-only until restart: {}",
+                    error
+                ));
+            }
+        }
+    }
+
+    /// Test-only hook for forcing the next WAL sync to fail.
+    #[cfg(feature = "test-failpoints")]
+    pub fn fail_next_wal_sync_for_test(&self) -> crate::Result<()> {
+        let Some(ref wal) = self.wal else {
+            return Err(crate::Error::InvalidInput(
+                "WAL failpoint requires a WAL-backed storage".to_string(),
+            ));
+        };
+        let mut guard = wal
+            .lock()
+            .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+        guard.fail_next_sync_for_test();
+        Ok(())
     }
 
     /// 按序号顺序重放日志。
@@ -877,6 +1022,19 @@ impl IntelligentIndexedStorage {
                         records += 1;
                     })
                 }
+                WalEntry::UpsertRecord { table, request } => {
+                    self.insert_records(&table, vec![request]).await.map(|_| {
+                        records += 1;
+                    })
+                }
+                WalEntry::UpsertRecordV2 { table, record } => {
+                    self.restore_record_from_wal(&table, record).await.map(|_| {
+                        records += 1;
+                    })
+                }
+                WalEntry::AlterTable { table, request } => {
+                    self.alter_table(&table, request).await.map(|_| ())
+                }
                 WalEntry::Delete { table, record_id } => {
                     self.delete_records(&table, vec![record_id]).await
                 }
@@ -893,10 +1051,58 @@ impl IntelligentIndexedStorage {
         }
 
         self.replaying.store(false, Ordering::SeqCst);
+        // Replay inserts one record at a time, so the normal insert path skips adaptive rebuilds
+        // while the log is applied. Re-evaluate once against final table sizes so recovery
+        // converges to the same index configuration as a fresh load.
+        if let Err(e) = self.reevaluate_indexes().await {
+            warn!("WAL replay completed but index re-evaluation failed: {}", e);
+        }
         info!(
             "WAL replay finished: {} entries -> {} tables, {} records, {} skipped",
             total, tables, records, skipped
         );
+        Ok(())
+    }
+
+    /// Replay one current-format record through the normal index path, then restore metadata
+    /// that is not part of a create request. Replay is single-threaded and WAL writes are
+    /// suppressed while this runs, so replacing the map value after indexing is deterministic.
+    async fn restore_record_from_wal(&self, table: &str, record: Record) -> crate::Result<()> {
+        // A mutation is logged after it has been applied and after the table lock is released,
+        // so two concurrent updates to the same id can reach the log in the opposite order to
+        // the one in which they took effect. Replaying that log blindly would resurrect the
+        // older version. The record carries the version the writer assigned, so an entry that
+        // is behind what is already restored is a reordered write, not a new one: skip it.
+        {
+            let tables = self.read_tables("restore_record_from_wal").await;
+            if let Some(existing) = tables
+                .get(table)
+                .and_then(|data| data.records.get(&record.id))
+            {
+                if existing.version > record.version {
+                    return Ok(());
+                }
+            }
+        }
+
+        let request = CreateRecordRequest {
+            id: record.id.clone(),
+            vector: record.vector.clone(),
+            sparse_vector: record.sparse_vector.clone(),
+            named_vectors: record.named_vectors.clone(),
+            payload: Some(record.payload.clone()),
+        };
+        self.insert_records(table, vec![request]).await?;
+
+        let mut tables = self.write_tables("restore_record_from_wal").await;
+        let data = tables
+            .get_mut(table)
+            .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
+        data.records.insert(record.id.clone(), record.clone());
+        data.table.record_count = data.records.len() as u64;
+        if record.updated_at > data.table.updated_at {
+            data.table.updated_at = record.updated_at;
+        }
         Ok(())
     }
 
@@ -916,6 +1122,34 @@ impl IntelligentIndexedStorage {
     /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
     /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
     pub async fn snapshot(&self) -> crate::Result<usize> {
+        let result = self.snapshot_inner().await;
+        match &result {
+            Ok(_) => {
+                if let Ok(mut at) = self.last_snapshot_at.lock() {
+                    *at = Some(chrono::Utc::now().to_rfc3339());
+                }
+                if let Ok(mut error) = self.last_snapshot_error.lock() {
+                    *error = None;
+                }
+            }
+            Err(error) => {
+                self.snapshot_failures.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut last_error) = self.last_snapshot_error.lock() {
+                    *last_error = Some(error.to_string());
+                }
+            }
+        }
+        result
+    }
+
+    /// Snapshot implementation separated from the telemetry wrapper above. Keeping all exits
+    /// in one place ensures `snapshot_failures` is updated even when an early filesystem check
+    /// fails, without weakening the existing atomic-install/verified-before-compaction order.
+    async fn snapshot_inner(&self) -> crate::Result<usize> {
+        // A WAL fsync failure puts the process into a deliberately read-only state. Do not let a
+        // later snapshot or backup turn an unacknowledged in-memory mutation into a new durable
+        // recovery frontier; restart is the boundary at which the filesystem outcome is known.
+        self.ensure_writable()?;
         let Some(ref wal) = self.wal else {
             return Err(crate::Error::InvalidInput(
                 "snapshot requires a WAL-backed storage (use new_with_wal)".to_string(),
@@ -932,6 +1166,9 @@ impl IntelligentIndexedStorage {
                 .lock()
                 .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
             guard.force_flush()?;
+            if let Ok(mut at) = self.last_wal_sync_at.lock() {
+                *at = Some(chrono::Utc::now().to_rfc3339());
+            }
             guard.next_sequence()
         };
 
@@ -1078,6 +1315,12 @@ impl IntelligentIndexedStorage {
                 names: names.clone(),
             },
         )?;
+        if let Ok(mut sequence) = self.snapshot_sequence.lock() {
+            *sequence = Some(seq);
+        }
+        if let Ok(mut cached) = self.snapshot_table_names.lock() {
+            cached.clone_from(&names);
+        }
 
         // 落盘后先读一遍。截断日志会让快照成为唯一副本，所以"写完了"不够，必须"读得回来"
         // 才算数——否则一个写坏的快照配上被截断的日志，就是静默的数据丢失。
@@ -1326,6 +1569,29 @@ impl IntelligentIndexedStorage {
             ));
         };
 
+        // A backup must be a separate tree. Writing it into DB_WAL_DIR would make the source
+        // and destination overlap (`snapshot/snapshot/...`), and writing it below DB_WAL_DIR
+        // would make a later recursive copy increasingly self-referential. Reject both before
+        // taking a snapshot so an operator gets a deterministic configuration error instead of
+        // a partially written backup.
+        let source = std::fs::canonicalize(wal_dir).unwrap_or_else(|_| wal_dir.clone());
+        let destination = if dest.exists() {
+            std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf())
+        } else {
+            let parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+            parent.join(dest.file_name().ok_or_else(|| {
+                crate::Error::InvalidInput("backup destination must name a directory".to_string())
+            })?)
+        };
+        if destination == source || destination.starts_with(&source) {
+            return Err(crate::Error::InvalidInput(format!(
+                "backup destination {} must not be inside WAL directory {}",
+                dest.display(),
+                wal_dir.display()
+            )));
+        }
+
         let tables = self.snapshot().await?;
 
         std::fs::create_dir_all(dest)?;
@@ -1416,8 +1682,7 @@ impl IntelligentIndexedStorage {
 
         // Threshold on bytes of vector data, not row count. Row count says nothing about
         // memory: a million 1536-dimension vectors is 6 GB, a million 64-dimension vectors is
-        // 256 MB, and only one of those needs to leave memory. qdrant makes the same call —
-        // its indexing trigger is `indexing_threshold_kb`.
+        // 256 MB, and only one of those needs to leave memory.
         //
         // `DB_PARTITION_THRESHOLD` (a row count) is still read so existing configurations do
         // not silently change meaning, but it is deprecated.
@@ -1491,7 +1756,7 @@ impl IntelligentIndexedStorage {
                 .await?
                 .selected_algorithm;
 
-            if std::mem::discriminant(&want) == std::mem::discriminant(&current) {
+            if !current.requires_rebuild_to_reach(&want) {
                 // The algorithm still fits, but a partitioned index has upkeep to do: writes
                 // since the last pass are sitting in its overflow buffer, and partitions drift
                 // out of their size range as data lands. Doing nothing here would leave the
@@ -1686,6 +1951,12 @@ impl IntelligentIndexedStorage {
             "Snapshot loaded: {} tables; replaying WAL from sequence {}",
             manifest.tables, manifest.wal_next_sequence
         );
+        if let Ok(mut sequence) = self.snapshot_sequence.lock() {
+            *sequence = Some(manifest.wal_next_sequence);
+        }
+        if let Ok(mut names) = self.snapshot_table_names.lock() {
+            names.clone_from(&manifest.names);
+        }
         Ok(manifest.wal_next_sequence)
     }
 
@@ -1715,7 +1986,9 @@ impl IntelligentIndexedStorage {
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
         };
-        self.create_table(config).await?;
+        // Not `create_table`: this container is being rebuilt from a snapshot that already
+        // describes it, so re-logging the creation would grow the WAL on every restart.
+        self.create_table_inner(config, false).await?;
 
         // A load failure is not the same as "this index has no on-disk form". The snapshot said
         // it wrote one; if it will not read back, the fallback below silently pays the full
@@ -1828,11 +2101,12 @@ impl IntelligentIndexedStorage {
         if self.replaying.load(Ordering::SeqCst) {
             return Ok(());
         }
+        self.ensure_writable()?;
         let Some(ref wal) = self.wal else {
             return Ok(());
         };
 
-        let stamped: Vec<(u64, WalEntry)> = {
+        let stamped: Vec<(u64, WalEntry)> = match (|| -> crate::Result<Vec<(u64, WalEntry)>> {
             let mut guard = wal
                 .lock()
                 .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
@@ -1842,7 +2116,21 @@ impl IntelligentIndexedStorage {
                 stamped.push((seq, entry));
             }
             guard.force_flush()?;
-            stamped
+            if let Ok(mut at) = self.last_wal_sync_at.lock() {
+                *at = Some(chrono::Utc::now().to_rfc3339());
+            }
+            Ok(stamped)
+        })() {
+            Ok(stamped) => stamped,
+            Err(error) => {
+                self.mark_durability_failed(&error);
+                return Err(crate::Error::ServiceUnavailable {
+                    message: format!(
+                        "local WAL write failed; storage is read-only until restart: {}",
+                        error
+                    ),
+                });
+            }
         };
 
         // The local log alone leaves a hole in "object storage is the source of truth": every
@@ -1869,7 +2157,7 @@ impl IntelligentIndexedStorage {
     /// 一段 WAL 分块的键。
     ///
     /// 按 4096 一组分前缀：S3 是**按前缀限流**的，所有分块挤在一个前缀下，写入速率到一定
-    /// 程度就会被限。chroma 的 wal3 出于同样的理由按 4096 分桶。定宽序号让字典序等于序号序。
+    /// 程度就会被限。定宽序号让字典序等于序号序。
     fn wal_chunk_key(first_seq: u64) -> String {
         format!("wal/{:08}/{:020}.chunk", first_seq / 4096, first_seq)
     }
@@ -2141,6 +2429,19 @@ impl IntelligentIndexedStorage {
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
+        self.create_table_inner(config, true).await
+    }
+
+    /// Build the in-memory table container, optionally logging the creation.
+    ///
+    /// Recovery and rehydration rebuild the container from a snapshot that already records the
+    /// table, so they pass `log = false`. Logging it again appends a `CreateTableWithConfig`
+    /// frame on every boot and every rehydration, and the log then grows without bound across
+    /// restarts even though nothing was written. The `replaying` flag cannot be used for this:
+    /// rehydration runs concurrently with live writes, and flipping a process-wide flag would
+    /// swallow their WAL entries.
+    async fn create_table_inner(&self, config: TableConfig, log: bool) -> crate::Result<Table> {
+        self.ensure_writable()?;
         // Check if table exists (quickly release the lock)
         {
             let tables = self.read_tables("create_table").await;
@@ -2274,8 +2575,10 @@ impl IntelligentIndexedStorage {
             tables.insert(table.name.clone(), table_data);
         }
 
-        self.wal_append(vec![WalEntry::CreateTableWithConfig { config }])
-            .await?;
+        if log {
+            self.wal_append(vec![WalEntry::CreateTableWithConfig { config }])
+                .await?;
+        }
 
         Ok(table)
     }
@@ -2286,6 +2589,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        self.ensure_writable()?;
         // Writing to an evicted table has to bring it back first, or the insert lands in a
         // fresh empty table and the snapshot's records vanish on the next snapshot.
         self.ensure_resident(tablename).await?;
@@ -2312,17 +2616,34 @@ impl IntelligentIndexedStorage {
         self.wal_append(
             inserted
                 .iter()
-                .map(|r| WalEntry::Insert {
+                .map(|r| WalEntry::UpsertRecordV2 {
                     table: tablename.to_string(),
-                    record_id: r.id.clone(),
-                    vector: r.vector.clone(),
-                    payload: serde_json::to_value(&r.payload).ok(),
+                    record: r.clone(),
                 })
                 .collect(),
         )
         .await?;
 
+        // Deliberately no index re-evaluation here. A rebuild is O(n) over the whole table and
+        // runs to completion before the caller's write returns, so triggering it from the write
+        // path hands the entire cost to whichever request happened to cross a size threshold —
+        // and `reevaluate_indexes` sweeps every table, not just this one. The sweep spawned by
+        // `spawn_index_reevaluation` (DB_REINDEX_INTERVAL_SECS, default 900) already owns this
+        // job, off the serving path.
+
         Ok(inserted)
+    }
+
+    /// The index algorithm a table is currently using, with the parameters it was built from.
+    ///
+    /// `Table::index_type` names the family; this carries the numbers — `m`, `ef_construction`,
+    /// `ef_search`, partition counts — which is what anyone diagnosing a recall or latency
+    /// question actually needs.
+    pub async fn describe_index(&self, tablename: &str) -> Option<IndexAlgorithm> {
+        let tables = self.read_tables("describe_index").await;
+        tables
+            .get(tablename)
+            .map(|data| data.selected_algorithm.clone())
     }
 
     /// 搜索向量
@@ -2346,11 +2667,12 @@ impl IntelligentIndexedStorage {
         // `RwLock` is write-preferring, every later read queues behind that pending writer. Under
         // a forced rebuild the measured effect was read p99 of 25.6s and write max of 27.1s,
         // exactly the length of the rebuild — with no single lock holder over one second, because
-        // the holders were one second each, back to back. qdrant never takes a global lock for a
-        // search at all; segments carry their own.
+        // the holders were one second each, back to back. The fix is not to hold a global lock
+        // for a search at all — take what the search needs out of the map, then release it.
         let (
             index,
             metric,
+            configured_ef,
             total_records,
             cardinality_and_sel,
             precomputed_filter_ids,
@@ -2415,7 +2737,14 @@ impl IntelligentIndexedStorage {
             {
                 if *selectivity < 0.05 && cardinality.exp < 10000 {
                     let filter_ids = table_data.payload_index.get_matching_ids(filter);
-                    if filter_ids.len() <= result_limit * 4 {
+                    // Exact scoring over the candidate set, when the set is small enough that
+                    // doing so beats walking the graph. `result_limit * 4` alone made that
+                    // threshold depend on the caller's top_k rather than on the work involved:
+                    // a top-10 query over 400 candidates fell through to a filtered traversal
+                    // that measured 24 ms p50, where scoring 400 vectors takes microseconds and
+                    // is exact rather than approximate. The absolute floor is what matters —
+                    // a filtered walk visits on the order of `ef * m` nodes anyway.
+                    if filter_ids.len() <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX) {
                         let mut scored: Vec<(RecordId, f32)> = filter_ids
                             .iter()
                             .filter_map(|id| {
@@ -2440,6 +2769,13 @@ impl IntelligentIndexedStorage {
             (
                 index,
                 metric,
+                // A named vector space has its own index; the table's algorithm describes the
+                // default one, so only claim its `ef_search` when that is what is being searched.
+                if query.vector_name.is_none() {
+                    table_data.selected_algorithm.configured_ef_search()
+                } else {
+                    None
+                },
                 total_records,
                 cardinality_and_sel,
                 precomputed_filter_ids,
@@ -2448,7 +2784,11 @@ impl IntelligentIndexedStorage {
         };
         let active_index = &index;
 
-        let default_ef = 100usize;
+        // The index's own `ef_search`, not a constant. This was hardcoded to 100, which made the
+        // selector's `ef_search` inert — it reached `HnswConfig` at build time and was then
+        // ignored on every query, so tuning it moved nothing. 100 remains the fallback for
+        // indexes that have no such parameter (brute force, DiskANN).
+        let default_ef = configured_ef.unwrap_or(100);
         // Use adaptive EF when SearchMode::Auto and a filter is present
         let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
             query
@@ -2459,91 +2799,197 @@ impl IntelligentIndexedStorage {
         };
 
         // Determine strategy and execute search
-        let (results, post_filter) = if let (Some(_), Some((ref cardinality, selectivity))) =
-            (&query.filter, &cardinality_and_sel)
-        {
-            if *selectivity < 0.05 && cardinality.exp < 10000 {
-                // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
-                // for a small enough set, their exact scores were computed in phase 1 while
-                // the map lock was held.
-                let filter_ids = precomputed_filter_ids.unwrap_or_default();
-                info!(
-                    "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
-                    selectivity * 100.0,
-                    filter_ids.len()
-                );
+        let (results, post_filter, fetched) =
+            if let (Some(_), Some((ref cardinality, selectivity))) =
+                (&query.filter, &cardinality_and_sel)
+            {
+                if *selectivity < 0.05 && cardinality.exp < 10000 {
+                    // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
+                    // for a small enough set, their exact scores were computed in phase 1 while
+                    // the map lock was held.
+                    let filter_ids = precomputed_filter_ids.unwrap_or_default();
+                    info!(
+                        "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
+                        selectivity * 100.0,
+                        filter_ids.len()
+                    );
 
-                // When filter_ids is very small, kNN approximation is unreliable:
-                // fetching top-K from the full index may miss all filter candidates.
-                // Instead, exact distances over just the matching IDs (O(|filter_ids|)).
-                let r = match exact_scored {
-                    Some(scored) => scored,
-                    None => {
-                        active_index
-                            .search_with_filter(&query.vector, result_limit, ef_hint, &filter_ids)
-                            .await?
-                    }
-                };
-                (r, false)
-            } else if *selectivity < 0.3 {
-                // PRE-FILTERING: still fetch amplified and post-filter.
-                //
-                // The safety factor is what decides whether a request comes back short.
-                // Fetching `limit/selectivity` yields `limit` survivors *on average*, so half
-                // the time fewer. At 2.0 and 5% selectivity a top-10 fetches 400, expects 20
-                // survivors, and falls under 10 roughly once in a hundred requests; at 3.0 that
-                // is about four in a million.
-                let safety = 3.0;
-                let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
-                    .min(total_records)
-                    .max(result_limit * 2);
-                info!(
-                    "PRE-FILTERING: selectivity={:.2}%, fetch={}",
-                    selectivity * 100.0,
-                    fetch
-                );
-                let r = active_index
-                    .search_with_ef_hint(&query.vector, fetch, ef_hint)
-                    .await?;
-                (r, true)
+                    // When filter_ids is very small, kNN approximation is unreliable:
+                    // fetching top-K from the full index may miss all filter candidates.
+                    // Instead, exact distances over just the matching IDs (O(|filter_ids|)).
+                    let r = match exact_scored {
+                        Some(scored) => scored,
+                        None => {
+                            active_index
+                                .search_with_filter(
+                                    &query.vector,
+                                    result_limit,
+                                    ef_hint,
+                                    &filter_ids,
+                                )
+                                .await?
+                        }
+                    };
+                    (r, false, result_limit)
+                } else if *selectivity < 0.3 {
+                    // PRE-FILTERING: still fetch amplified and post-filter.
+                    //
+                    // The safety factor is what decides whether a request comes back short.
+                    // Fetching `limit/selectivity` yields `limit` survivors *on average*, so half
+                    // the time fewer. At 2.0 and 5% selectivity a top-10 fetches 400, expects 20
+                    // survivors, and falls under 10 roughly once in a hundred requests; at 3.0 that
+                    // is about four in a million.
+                    let safety = 3.0;
+                    let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
+                        .min(total_records)
+                        .max(result_limit * 2);
+                    info!(
+                        "PRE-FILTERING: selectivity={:.2}%, fetch={}",
+                        selectivity * 100.0,
+                        fetch
+                    );
+                    let r = active_index
+                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                        .await?;
+                    (r, true, fetch)
+                } else {
+                    // POST-FILTERING: selectivity >= 30%, fetch extra and filter.
+                    //
+                    // Scaled by selectivity, as the pre-filtering branch above already does. A flat
+                    // `result_limit * 3` ignores how many of the fetched rows the filter will throw
+                    // away: at 50% selectivity it fetches 30 for a top-10, and the number that
+                    // survive is a coin toss repeated 30 times — under ten about 2% of the time, so
+                    // roughly one request in fifty silently returned short. That is what made
+                    // `test_filter_with_in_operation` fail intermittently; the test was reporting a
+                    // real defect, not being flaky.
+                    //
+                    // Still not a guarantee — see the retry below, which is.
+                    let safety = 3.0;
+                    let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
+                        .min(total_records)
+                        .max(result_limit * 3);
+                    info!(
+                        "POST-FILTERING: selectivity={:.2}%, fetch={}",
+                        selectivity * 100.0,
+                        fetch
+                    );
+                    let r = active_index
+                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                        .await?;
+                    (r, true, fetch)
+                }
             } else {
-                // POST-FILTERING: selectivity >= 30%, fetch extra and filter.
-                //
-                // Scaled by selectivity, as the pre-filtering branch above already does. A flat
-                // `result_limit * 3` ignores how many of the fetched rows the filter will throw
-                // away: at 50% selectivity it fetches 30 for a top-10, and the number that
-                // survive is a coin toss repeated 30 times — under ten about 2% of the time, so
-                // roughly one request in fifty silently returned short. That is what made
-                // `test_filter_with_in_operation` fail intermittently; the test was reporting a
-                // real defect, not being flaky.
-                //
-                // Still not a guarantee — see the retry below, which is.
-                let safety = 3.0;
-                let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
-                    .min(total_records)
-                    .max(result_limit * 3);
-                info!(
-                    "POST-FILTERING: selectivity={:.2}%, fetch={}",
-                    selectivity * 100.0,
-                    fetch
-                );
+                // No filter
                 let r = active_index
-                    .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                    .search_with_ef_hint(&query.vector, result_limit, ef_hint)
                     .await?;
-                (r, true)
-            }
-        } else {
-            // No filter
-            let r = active_index
-                .search_with_ef_hint(&query.vector, result_limit, ef_hint)
-                .await?;
-            (r, false)
-        };
+                (r, false, result_limit)
+            };
 
-        // Phase 3: assemble. Back under the map lock, but only for hash lookups this time — the
-        // expensive part is already done. The table can have been dropped while the search ran,
-        // and a returned id can have been deleted; both are handled below rather than pretended
-        // away, because that window is the price of not holding the lock across the search.
+        // Phase 3: assemble, and if post-filtering left the caller short, fetch more.
+        //
+        // The amplified fetch above is sized from an *estimated* selectivity, and some estimates
+        // are not estimates at all: `Contains` is hardcoded to 0.25 and `EndsWith` to 0.15
+        // regardless of the data. A `Contains` whose true selectivity is 1% therefore fetched
+        // 240 rows for a top-20 and returned 3. Amplification cannot fix that — no constant can,
+        // because the error is in the input. Refetching when the answer comes back short can,
+        // and it is bounded: each attempt multiplies the fetch, and the last one asks for every
+        // record in the table, after which nothing more exists to find.
+        let mut fetched = fetched;
+        let mut results = results;
+        let mut hits = self
+            .assemble_hits(
+                tablename,
+                &query,
+                results,
+                post_filter,
+                metric,
+                result_limit,
+            )
+            .await?;
+        let mut attempts = 0;
+        while post_filter
+            && hits.len() < result_limit
+            && fetched < total_records
+            && attempts < Self::POST_FILTER_REFETCH_ATTEMPTS
+        {
+            attempts += 1;
+            fetched = if attempts == Self::POST_FILTER_REFETCH_ATTEMPTS {
+                total_records
+            } else {
+                fetched.saturating_mul(8).min(total_records)
+            };
+            debug!(
+                "POST-FILTER short ({} < {}), refetching {} of {} records (attempt {})",
+                hits.len(),
+                result_limit,
+                fetched,
+                total_records,
+                attempts
+            );
+            results = active_index
+                .search_with_ef_hint(&query.vector, fetched, ef_hint.max(fetched))
+                .await?;
+            hits = self
+                .assemble_hits(
+                    tablename,
+                    &query,
+                    results,
+                    post_filter,
+                    metric,
+                    result_limit,
+                )
+                .await?;
+        }
+
+        let tables = self.read_tables("search").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        let query_time = start_time.elapsed();
+        let latency_ms = query_time.as_secs_f64() * 1000.0;
+
+        // 在读锁持有期间通过 Mutex 并发更新查询统计
+        if let Ok(mut stats) = table_data.performance_stats.lock() {
+            stats.total_queries += 1;
+            // 指数移动平均：90% 历史 + 10% 新值
+            stats.avg_query_latency_ms = (stats.avg_query_latency_ms * 0.9) + (latency_ms * 0.1);
+        }
+
+        let total = hits.len();
+        Ok(SearchResult {
+            hits,
+            total,
+            tookms: latency_ms as u64,
+        })
+    }
+
+    /// Number of escalating refetches a short post-filtered search is allowed.
+    ///
+    /// The last attempt asks for every record, so three is not a heuristic budget: it is one
+    /// geometric step, one more, then the exhaustive answer.
+    const POST_FILTER_REFETCH_ATTEMPTS: usize = 3;
+
+    /// Turn raw `(id, distance)` index output into hits, applying the payload filter when the
+    /// search did not already do it in-graph.
+    ///
+    /// Separate from `search` because a short post-filtered result has to be reassembled after
+    /// a larger fetch, and the map lock must not be held across that fetch.
+    #[allow(clippy::too_many_arguments)]
+    async fn assemble_hits(
+        &self,
+        tablename: &str,
+        query: &SearchQuery,
+        results: Vec<(RecordId, f32)>,
+        post_filter: bool,
+        metric: DistanceMetric,
+        result_limit: usize,
+    ) -> crate::Result<Vec<SearchHit>> {
+        // Back under the map lock, but only for hash lookups — the expensive part is done. The
+        // table can have been dropped while the search ran, and a returned id can have been
+        // deleted; both are handled below rather than pretended away, because that window is the
+        // price of not holding the lock across the search.
         let tables = self.read_tables("search").await;
         let table_data = tables
             .get(tablename)
@@ -2589,25 +3035,7 @@ impl IntelligentIndexedStorage {
                     (None, None)
                 };
 
-                // Convert distance to similarity score based on distance metric
-                // Index returns distance (lower is better), but API should return similarity (higher is better)
-                let similarity_score = match metric {
-                    DistanceMetric::Cosine => {
-                        // Cosine distance = 1.0 - cosine_similarity
-                        // Convert back: similarity = 1.0 - distance
-                        1.0 - score.clamp(0.0, 1.0)
-                    }
-                    DistanceMetric::Dot => {
-                        // Dot product distance = -dot_product
-                        // Convert back: similarity = -distance
-                        -score
-                    }
-                    DistanceMetric::Euclidean | DistanceMetric::Manhattan => {
-                        // For distance metrics, smaller is better
-                        // Convert to similarity: 1 / (1 + distance)
-                        1.0 / (1.0 + score)
-                    }
-                };
+                let similarity_score = Self::similarity_from_distance(metric, score);
 
                 Some(SearchHit {
                     id,
@@ -2619,22 +3047,7 @@ impl IntelligentIndexedStorage {
             .take(result_limit) // 过滤后只保留指定数量的结果
             .collect();
 
-        let query_time = start_time.elapsed();
-        let latency_ms = query_time.as_secs_f64() * 1000.0;
-
-        // 在读锁持有期间通过 Mutex 并发更新查询统计
-        if let Ok(mut stats) = table_data.performance_stats.lock() {
-            stats.total_queries += 1;
-            // 指数移动平均：90% 历史 + 10% 新值
-            stats.avg_query_latency_ms = (stats.avg_query_latency_ms * 0.9) + (latency_ms * 0.1);
-        }
-
-        let total = hits.len();
-        Ok(SearchResult {
-            hits,
-            total,
-            tookms: latency_ms as u64,
-        })
+        Ok(hits)
     }
 
     /// 全文搜索
@@ -2757,6 +3170,24 @@ impl IntelligentIndexedStorage {
     /// then rescaled to [0,1]. Normalised scores are summed. This removes unit
     /// mismatch between cosine/distance scores, sparse MIPS scores, and BM25 scores
     /// without requiring alpha tuning.
+    /// Turn the distance an index returns into the similarity the API returns.
+    ///
+    /// Every `VectorIndex::search` yields a distance — lower is better. Everything above this
+    /// layer, including the fusion in `hybrid_search`, ranks by score with higher better. The
+    /// conversion is therefore not cosmetic: feeding a raw distance into a "higher is better"
+    /// ranker returns the results in exactly the wrong order.
+    fn similarity_from_distance(metric: DistanceMetric, distance: f32) -> f32 {
+        match metric {
+            // Cosine distance = 1 - similarity.
+            DistanceMetric::Cosine => 1.0 - distance.clamp(0.0, 1.0),
+            // Dot-product distance = -dot.
+            DistanceMetric::Dot => -distance,
+            // Unbounded metrics: any decreasing function will do, and this one keeps the
+            // result in (0, 1] so it can be fused with the bounded ones.
+            DistanceMetric::Euclidean | DistanceMetric::Manhattan => 1.0 / (1.0 + distance),
+        }
+    }
+
     fn fuse_dbsf(
         vector: Vec<(RecordId, f32)>,
         sparse: Vec<(RecordId, f32)>,
@@ -2934,7 +3365,7 @@ impl IntelligentIndexedStorage {
         // taking a copy would cost more than the search does. It is a WAND-pruned walk over
         // posting lists, far cheaper than the dense side, which is what actually needed moving.
         #[allow(unused_mut)]
-        let (index, mut sparse_results, text_engine, text_enabled) = {
+        let (index, metric, mut sparse_results, text_engine, text_enabled) = {
             let tables = self.read_tables("hybrid_search").await;
             let table_data = tables
                 .get(tablename)
@@ -2963,6 +3394,7 @@ impl IntelligentIndexedStorage {
 
             (
                 table_data.index.clone(),
+                table_data.table.distance_metric,
                 sparse_results,
                 engine,
                 table_data.table.enable_full_text_search,
@@ -2970,13 +3402,26 @@ impl IntelligentIndexedStorage {
         };
 
         // 1. Dense vector search — no map lock held.
+        //
+        // The index answers in distances, and the sparse and text lists that this is about to be
+        // fused with are similarities. Convert here, the way `search` does: `fuse_dbsf`
+        // normalises "higher is better" per list, so handing it distances ranked the dense
+        // component backwards — the nearest vector came out last.
         let mut vector_results: Vec<(RecordId, f32)> = Vec::new();
         if let Some(ref vector) = request.vector {
-            vector_results = index.search(vector, fetch_limit).await?;
+            vector_results = index
+                .search(vector, fetch_limit)
+                .await?
+                .into_iter()
+                .map(|(id, distance)| (id, Self::similarity_from_distance(metric, distance)))
+                .collect();
         }
 
         // 3. Full-text search
+        #[cfg(feature = "text-bm25")]
         let mut text_results: Vec<(RecordId, f32)> = Vec::new();
+        #[cfg(not(feature = "text-bm25"))]
+        let text_results: Vec<(RecordId, f32)> = Vec::new();
         #[cfg(feature = "text-bm25")]
         if let Some(ref text_query) = request.text {
             if text_enabled {
@@ -3165,8 +3610,33 @@ impl IntelligentIndexedStorage {
         Ok(out)
     }
 
+    /// 修改表元数据，并把变更写入 WAL。
+    pub async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
+        self.ensure_writable()?;
+        self.ensure_resident(name).await?;
+
+        let updated = {
+            let mut tables = self.write_tables("alter_table").await;
+            let data = tables
+                .get_mut(name)
+                .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            let updated = data.table.apply_alter(&req);
+            data.table = updated.clone();
+            updated
+        };
+
+        self.wal_append(vec![WalEntry::AlterTable {
+            table: name.to_string(),
+            request: req,
+        }])
+        .await?;
+
+        Ok(updated)
+    }
+
     /// 删除表
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
+        self.ensure_writable()?;
         let table_id = {
             let mut tables = self.write_tables("delete_table").await;
             let data = tables
@@ -3186,10 +3656,10 @@ impl IntelligentIndexedStorage {
         //
         // The caveat is real and the same one every database has with DROP: a backup taken
         // before this point can no longer restore that table's index, because its segments are
-        // gone. chroma keeps a version graph precisely so files shared across versions are not
-        // deleted while some live version still points at them; our segments belong to exactly
-        // one table, so the graph is unnecessary — but the "do not delete what something still
-        // references" rule is why this waits until the removal is durable in the WAL.
+        // gone. A segment here belongs to exactly one table, so no cross-version reference
+        // graph is needed to decide what is safe to remove — but the "do not delete what
+        // something still references" rule is why this waits until the removal is durable in
+        // the WAL.
         if self.object_storage_enabled {
             self.delete_partition_segments(&table_id).await;
         }
@@ -3386,9 +3856,8 @@ impl IntelligentIndexedStorage {
         // those are fewer each time. Only the final delta is applied under the write lock.
         //
         // Doing the whole catch-up under that lock, as this did, stalls every table: it is the
-        // global table map's lock, not this table's. qdrant avoids the same stall with a proxy
-        // segment that absorbs writes during an optimisation; converging outside the lock gets
-        // the same property with far less machinery.
+        // global table map's lock, not this table's. Converging outside the lock avoids that
+        // stall without needing a separate segment to absorb writes during the rebuild.
         let t_catchup = std::time::Instant::now();
         let mut indexed = indexed;
         let mut caught_up = 0usize;
@@ -3602,9 +4071,9 @@ impl IntelligentIndexedStorage {
             "name": data.table.name,
             // Whether this table was in memory before the call. A query against an evicted
             // table rehydrates it transparently, which is convenient and hides a latency cliff:
-            // the caller has no way to know the next query will pay for a fetch. weaviate makes
-            // the same state explicit and goes further — an OFFLOADED tenant is simply not
-            // queryable until reactivated. Exposing it is the least we can do.
+            // the caller has no way to know the next query will pay for a fetch. Exposing the
+            // state is the least we can do; refusing the query until reactivation would be the
+            // stricter alternative.
             "resident": was_resident,
             "record_count": record_count,
             "dimension": dimension,
@@ -3634,6 +4103,34 @@ impl IntelligentIndexedStorage {
     }
 
     /// 选择内存优化索引（memory_optimization=true 时使用）
+    /// Default `ef_search` for adaptively selected indexes.
+    ///
+    /// Measured with `tests/storage_ann_benchmark_test.rs` (exact cosine ground truth,
+    /// recall@10, 10K x 768 random unit vectors — the hardest synthetic case, since uniform
+    /// points on a high-dimensional sphere have almost no distance contrast):
+    ///
+    /// | ef_search |  100  |  128  |  200  |  256  |  400  |
+    /// |-----------|-------|-------|-------|-------|-------|
+    /// | recall@10 | 0.891 | 0.900 | 0.912 | 0.927 | 0.966 |
+    /// | p50       | 1.6ms | 1.9ms | 2.2ms | 3.0ms | 3.6ms |
+    ///
+    /// Returns diminish well before the latency does, so this is a default rather than a
+    /// maximum. A caller who needs the top of that curve
+    /// asks for `SearchMode::Accurate` (4x) per query; one who needs the latency asks for
+    /// `SearchMode::Fast`. Neither requires a rebuild — `ef_search` is a traversal budget.
+    const DEFAULT_EF_SEARCH: usize = 128;
+
+    /// Candidate-set size below which a filtered search scores the candidates directly instead
+    /// of walking the graph.
+    ///
+    /// Measured on 20K x 32 with `bucket` filters (200 queries each, release build): at 5%
+    /// selectivity the graph walk was 1.6 ms p50, at 2% it was 24.3 ms and at 1% 27.6 ms —
+    /// traversal cost rises as the filter gets more selective, because the walk spends its
+    /// budget on nodes it must discard. Scoring the candidates is O(|candidates| x dim) and
+    /// exact. 2048 keeps the direct path bounded at roughly the number of nodes a walk with
+    /// `ef = 128` and `m = 16` would touch regardless.
+    const EXACT_FILTER_SCAN_MAX: usize = 2048;
+
     async fn select_memory_optimized_index(
         &self,
         config: &IndexConfig,
@@ -3643,6 +4140,12 @@ impl IntelligentIndexedStorage {
             config.dataset_size
         );
 
+        // NOTE: the recall/latency/QPS figures attached to each branch below are estimates
+        // written alongside the thresholds, not measurements. Measured recall@10 for the first
+        // two branches on 10K x 768 random unit vectors is 0.900, and 0.886 at 50K x 128 — see
+        // `DEFAULT_EF_SEARCH` and ROADMAP §7 W9. Random hyperspherical data is the hardest
+        // synthetic case and real embeddings score higher, but do not read these constants as
+        // anything the engine has been shown to deliver.
         // 根据数据集大小选择内存优化索引
         let (selected_algorithm, recall, latency_p95_ms, throughput_qps, memory_usage_mb) =
             if config.dataset_size < 10_000 {
@@ -3652,7 +4155,7 @@ impl IntelligentIndexedStorage {
                     IndexAlgorithm::HNSW {
                         m: 16,
                         ef_construction: 200,
-                        ef_search: 50,
+                        ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.98,   // 98% recall
                     5.0,    // 5ms latency
@@ -3669,7 +4172,7 @@ impl IntelligentIndexedStorage {
                         // HierarchicalClustering not yet available; using HNSW
                         m: 16,
                         ef_construction: 200,
-                        ef_search: 50,
+                        ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.95,   // 95% recall
                     2.0,    // 2ms latency
@@ -3684,7 +4187,7 @@ impl IntelligentIndexedStorage {
                         // HybridRaBitQClustering not yet available; using HnswPQ
                         m: 16,
                         ef_construction: 200,
-                        ef_search: 50,
+                        ef_search: Self::DEFAULT_EF_SEARCH,
                         num_subvectors: config.dimension / 8,
                         num_centroids: 256,
                         enable_reranking: true,
@@ -3929,7 +4432,7 @@ impl IntelligentIndexedStorage {
     /// 检查两个算法是否相同
     #[allow(dead_code)]
     fn algorithms_equal(a: &IndexAlgorithm, b: &IndexAlgorithm) -> bool {
-        std::mem::discriminant(a) == std::mem::discriminant(b)
+        !a.requires_rebuild_to_reach(b)
     }
 
     /// 检测硬件能力
@@ -4049,47 +4552,91 @@ impl IntelligentIndexedStorage {
         record_id: &RecordId,
         request: CreateRecordRequest,
     ) -> crate::Result<Record> {
-        let mut tables = self.write_tables("update_record").await;
-        let table_data = tables
-            .get_mut(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        self.ensure_writable()?;
+        self.ensure_resident(tablename).await?;
 
-        // Validate vector dimension
-        let expected_dim = table_data.table.dimension;
-        if !request.vector.is_empty() && request.vector.len() != expected_dim {
-            return Err(crate::Error::DimensionMismatch {
-                expected: expected_dim,
-                actual: request.vector.len(),
-            });
-        }
+        let artifacts = {
+            let mut tables = self.write_tables("update_record").await;
+            let table_data = tables
+                .get_mut(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        // Get existing record's created_at, version, and payload if it exists (preserves created_at on update)
-        let (created_at, version, old_payload) = table_data
-            .records
-            .get(record_id)
-            .map(|r| (r.created_at, r.version + 1, Some(r.payload.clone())))
-            .unwrap_or_else(|| (chrono::Utc::now(), 1, None));
+            let expected_dim = table_data.table.dimension;
+            if !request.vector.is_empty() && request.vector.len() != expected_dim {
+                return Err(crate::Error::DimensionMismatch {
+                    expected: expected_dim,
+                    actual: request.vector.len(),
+                });
+            }
 
-        let record = Record {
-            id: record_id.clone(),
-            vector: request.vector.clone(),
-            sparse_vector: request.sparse_vector,
-            named_vectors: request.named_vectors.clone(),
-            payload: request
-                .payload
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({})),
-            created_at,
-            updated_at: chrono::Utc::now(),
-            version,
-            status: crate::types::RecordStatus::Active,
+            let (created_at, version, old_payload) = table_data
+                .records
+                .get(record_id)
+                .map(|r| (r.created_at, r.version + 1, Some(r.payload.clone())))
+                .unwrap_or_else(|| (chrono::Utc::now(), 1, None));
+
+            let record = Record {
+                id: record_id.clone(),
+                vector: request.vector.clone(),
+                sparse_vector: request.sparse_vector,
+                named_vectors: request.named_vectors.clone(),
+                payload: request
+                    .payload
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+                created_at,
+                updated_at: chrono::Utc::now(),
+                version,
+                status: crate::types::RecordStatus::Active,
+            };
+
+            table_data.records.insert(record_id.clone(), record.clone());
+
+            if let Some(old_payload_val) = old_payload.as_ref() {
+                table_data
+                    .payload_index
+                    .update_record(record_id, old_payload_val, &record.payload);
+            } else {
+                table_data
+                    .payload_index
+                    .insert_record(record_id, &record.payload);
+            }
+
+            // Always remove the old sparse posting first. If the new record has no sparse
+            // vector, leaving the old postings behind makes hybrid search return stale ids.
+            let _ = table_data.sparse_index.delete(record_id);
+            if let Some(sv) = &record.sparse_vector {
+                if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
+                    warn!(
+                        "Failed to update sparse index for record {}: {}",
+                        record_id, e
+                    );
+                }
+            }
+
+            table_data.table.record_count = table_data.records.len() as u64;
+            table_data.table.updated_at = chrono::Utc::now();
+
+            UpdateArtifacts {
+                index: table_data.index.clone(),
+                named_indexes: table_data.named_indexes.clone(),
+                #[cfg(feature = "text-bm25")]
+                table: table_data.table.clone(),
+                record,
+                #[cfg(feature = "text-bm25")]
+                full_text_engine: table_data.full_text_engine.clone(),
+            }
         };
 
-        // Update vector index: remove old entry then re-insert with new vector
-        let _ = table_data.index.remove(record_id).await;
-        if let Err(e) = table_data
+        // Dense and named-vector index work can block, so it runs after the global table-map
+        // lock is released. Search may briefly miss this record while the index catches up, the
+        // same visibility model inserts already have.
+        if let Err(e) = artifacts.index.remove(record_id).await {
+            warn!("Failed to remove old vector for {}: {}", record_id, e);
+        }
+        if let Err(e) = artifacts
             .index
-            .insert(record_id.clone(), record.vector.clone())
+            .insert(record_id.clone(), artifacts.record.vector.clone())
             .await
         {
             warn!(
@@ -4098,23 +4645,38 @@ impl IntelligentIndexedStorage {
             );
         }
 
-        // Update sparse index if present
-        if let Some(sv) = &record.sparse_vector {
-            let _ = table_data.sparse_index.delete(record_id);
-            if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
-                warn!(
-                    "Failed to update sparse index for record {}: {}",
-                    record_id, e
-                );
+        if let Some(collection) = &artifacts.named_indexes {
+            for name in collection.list_index_names().await {
+                if let Some(index) = collection.get_index(&name).await {
+                    if let Err(e) = index.remove(record_id).await {
+                        warn!(
+                            "Failed to remove old named vector '{}' for {}: {}",
+                            name, record_id, e
+                        );
+                    }
+                }
+            }
+            if let Some(named_vectors) = &artifacts.record.named_vectors {
+                for (name, vector) in named_vectors {
+                    if let Some(index) = collection.get_index(name).await {
+                        if let Err(e) = index.insert(record_id.clone(), vector.clone()).await {
+                            warn!(
+                                "Failed to update named vector '{}' for {}: {}",
+                                name, record_id, e
+                            );
+                        }
+                    }
+                }
             }
         }
 
-        // Update full-text index (if enabled)
         #[cfg(feature = "text-bm25")]
-        if let Some(engine) = &table_data.full_text_engine {
-            if let Some(text_content) = extract_text_from_record(&table_data.table, &record) {
+        if let Some(engine) = &artifacts.full_text_engine {
+            if let Some(text_content) =
+                extract_text_from_record(&artifacts.table, &artifacts.record)
+            {
                 let doc = FullTextDocument {
-                    id: record.id.clone(),
+                    id: artifacts.record.id.clone(),
                     title: text_content.get("title").cloned(),
                     content: text_content.get("content").cloned().unwrap_or_default(),
                     description: text_content.get("description").cloned(),
@@ -4122,44 +4684,29 @@ impl IntelligentIndexedStorage {
                         .get("tags")
                         .map(|s| vec![s.clone()])
                         .unwrap_or_default(),
-                    payload: Some(record.payload.clone()),
+                    payload: Some(artifacts.record.payload.clone()),
                     timestamp: chrono::Utc::now().timestamp(),
                 };
 
-                // Update document in full-text engine
                 if let Err(e) = engine.update_document(doc).await {
                     warn!(
                         "Failed to update text index for record {}: {}",
-                        record.id, e
+                        artifacts.record.id, e
                     );
                 }
             }
-        }
-
-        // Commit full-text index changes
-        #[cfg(feature = "text-bm25")]
-        if let Some(engine) = &table_data.full_text_engine {
             if let Err(e) = engine.commit().await {
                 warn!("Failed to commit full-text index: {}", e);
             }
         }
 
-        table_data.records.insert(record_id.clone(), record.clone());
+        self.wal_append(vec![WalEntry::UpsertRecordV2 {
+            table: tablename.to_string(),
+            record: artifacts.record.clone(),
+        }])
+        .await?;
 
-        // Update PayloadIndex
-        if let Some(old_payload_val) = old_payload.as_ref() {
-            // Update existing record
-            table_data
-                .payload_index
-                .update_record(record_id, old_payload_val, &record.payload);
-        } else {
-            // Insert new record (upsert case)
-            table_data
-                .payload_index
-                .insert_record(record_id, &record.payload);
-        }
-
-        Ok(record)
+        Ok(artifacts.record)
     }
 
     /// Delete multiple records
@@ -4168,60 +4715,63 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         record_ids: Vec<RecordId>,
     ) -> crate::Result<()> {
-        let mut tables = self.write_tables("delete_records").await;
-        let table_data = tables
-            .get_mut(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        self.ensure_writable()?;
+        self.ensure_resident(tablename).await?;
 
-        for id in &record_ids {
-            // Remove from full-text index (if enabled)
-            #[cfg(feature = "text-bm25")]
-            if let Some(engine) = &table_data.full_text_engine {
-                if let Err(e) = engine.delete_document(id).await {
-                    warn!("Failed to remove record {} from text index: {}", id, e);
+        let artifacts = {
+            let mut tables = self.write_tables("delete_records").await;
+            let table_data = tables
+                .get_mut(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+            for id in &record_ids {
+                let old_payload = table_data.records.get(id).map(|r| r.payload.clone());
+
+                table_data.records.remove(id);
+
+                if let Some(payload) = old_payload {
+                    table_data.payload_index.remove_record(id, &payload);
+                }
+
+                if let Err(e) = table_data.sparse_index.delete(id) {
+                    warn!("Failed to remove record {} from sparse index: {}", id, e);
                 }
             }
 
-            // Get payload before removing (for payload_index update)
-            let old_payload = table_data.records.get(id).map(|r| r.payload.clone());
+            table_data.table.record_count = table_data.records.len() as u64;
+            table_data.table.updated_at = chrono::Utc::now();
 
-            // Remove from records map
-            table_data.records.remove(id);
-
-            // Remove from PayloadIndex
-            if let Some(payload) = old_payload {
-                table_data.payload_index.remove_record(id, &payload);
+            DeleteArtifacts {
+                index: table_data.index.clone(),
+                record_ids: record_ids.clone(),
+                #[cfg(feature = "text-bm25")]
+                full_text_engine: table_data.full_text_engine.clone(),
             }
+        };
 
-            // Remove from dense vector index
-            if let Err(e) = table_data.index.remove(id).await {
+        for id in &artifacts.record_ids {
+            if let Err(e) = artifacts.index.remove(id).await {
                 warn!("Failed to remove record {} from vector index: {}", id, e);
             } else {
                 debug!("Successfully removed record {} from vector index", id);
             }
-
-            // Remove from sparse index
-            if let Err(e) = table_data.sparse_index.delete(id) {
-                warn!("Failed to remove record {} from sparse index: {}", id, e);
-            }
         }
 
-        // Commit full-text index changes
         #[cfg(feature = "text-bm25")]
-        if let Some(engine) = &table_data.full_text_engine {
+        if let Some(engine) = &artifacts.full_text_engine {
+            for id in &artifacts.record_ids {
+                if let Err(e) = engine.delete_document(id).await {
+                    warn!("Failed to remove record {} from text index: {}", id, e);
+                }
+            }
             if let Err(e) = engine.commit().await {
                 warn!("Failed to commit full-text index: {}", e);
             }
         }
 
-        // Sync record_count from actual HashMap size (handles concurrent deletes correctly)
-        table_data.table.record_count = table_data.records.len() as u64;
-        table_data.table.updated_at = chrono::Utc::now();
-
-        drop(tables);
-
         self.wal_append(
-            record_ids
+            artifacts
+                .record_ids
                 .into_iter()
                 .map(|id| WalEntry::Delete {
                     table: tablename.to_string(),
@@ -4247,6 +4797,107 @@ impl IntelligentIndexedStorage {
         );
 
         stats
+    }
+
+    /// Return a point-in-time view used by liveness/readiness and operator diagnostics.
+    ///
+    /// An empty database is healthy, so table count is intentionally not used as a proxy for
+    /// storage health. The only hard readiness failures are an unavailable local WAL directory
+    /// or a durability error that put this process into read-only mode.
+    pub async fn health_snapshot(&self) -> StorageHealthSnapshot {
+        let (resident_names, total_records): (std::collections::HashSet<String>, usize) = {
+            let tables = self.read_tables("health_snapshot").await;
+            (
+                tables.keys().cloned().collect(),
+                tables.values().map(|table| table.records.len()).sum(),
+            )
+        };
+        let resident_table_count = resident_names.len();
+        // Deliberately not `list_tables()`: that reads the snapshot manifest plus one `.meta`
+        // per evicted table, and this runs on every health and readiness probe. The cached
+        // snapshot names give the same total without touching the disk.
+        let table_count = self
+            .snapshot_table_names
+            .lock()
+            .map(|names| {
+                resident_table_count
+                    + names
+                        .iter()
+                        .filter(|name| !resident_names.contains(*name))
+                        .count()
+            })
+            .unwrap_or(resident_table_count);
+
+        let wal_enabled = self.wal.is_some();
+        // `try_lock`, not `lock`: the WAL mutex is held across `write_all` + `sync_data`, so a
+        // blocking probe queues behind an fsync and reports a timeout as a dead server. A
+        // sequence number that is momentarily unavailable is reported as unavailable.
+        let wal_next_sequence = self
+            .wal
+            .as_ref()
+            .and_then(|wal| wal.try_lock().ok().map(|guard| guard.next_sequence()));
+
+        // The cached sequence comes from the manifest this process loaded at startup or wrote
+        // itself. Re-reading and deserializing the manifest here would put disk I/O on every
+        // health check, and orchestrators poll these endpoints continuously.
+        let snapshot_wal_next_sequence = self
+            .snapshot_sequence
+            .lock()
+            .ok()
+            .and_then(|sequence| *sequence);
+
+        let (wal_directory_accessible, snapshot_present, snapshot_manifest_valid) =
+            if let Some(dir) = &self.wal_dir {
+                let directory_accessible = std::fs::metadata(dir)
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false)
+                    && std::fs::metadata(dir.join("wal.log"))
+                        .map(|metadata| metadata.is_file())
+                        .unwrap_or(false);
+                let present = Self::snapshot_dir(dir).join("manifest").exists();
+                (
+                    directory_accessible,
+                    present,
+                    present && snapshot_wal_next_sequence.is_some(),
+                )
+            } else {
+                (true, false, false)
+            };
+
+        let durability_error = self
+            .durability_error
+            .lock()
+            .ok()
+            .and_then(|state| state.clone());
+        let durability_degraded = durability_error.is_some();
+        let ready = (!wal_enabled || wal_directory_accessible) && !durability_degraded;
+
+        let last_wal_sync_at = self.last_wal_sync_at.lock().ok().and_then(|at| at.clone());
+        let last_snapshot_at = self.last_snapshot_at.lock().ok().and_then(|at| at.clone());
+        let last_snapshot_error = self
+            .last_snapshot_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone());
+
+        StorageHealthSnapshot {
+            ready,
+            wal_enabled,
+            wal_directory_accessible,
+            wal_next_sequence,
+            snapshot_present,
+            snapshot_manifest_valid,
+            snapshot_wal_next_sequence,
+            durability_degraded,
+            durability_error,
+            resident_table_count,
+            table_count,
+            total_records,
+            last_wal_sync_at,
+            last_snapshot_at,
+            snapshot_failures: self.snapshot_failures.load(Ordering::Relaxed),
+            last_snapshot_error,
+        }
     }
 
     // Lock-free insert (stub)
@@ -4375,12 +5026,7 @@ impl IntelligentIndexedStorage {
                     }
                 }
 
-                // Convert distance to similarity score
-                let similarity_score = match metric {
-                    DistanceMetric::Cosine => 1.0 - score.clamp(0.0, 1.0),
-                    DistanceMetric::Dot => -score,
-                    DistanceMetric::Euclidean | DistanceMetric::Manhattan => 1.0 / (1.0 + score),
-                };
+                let similarity_score = Self::similarity_from_distance(metric, score);
 
                 records_with_scores.push((record.clone(), similarity_score));
 
@@ -4512,38 +5158,23 @@ impl IntelligentIndexedStorage {
 #[async_trait::async_trait]
 impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
-        self.create_table(config).await
+        IntelligentIndexedStorage::create_table(self, config).await
     }
 
     async fn get_table(&self, name: &str) -> crate::Result<Table> {
-        let tables = self.read_tables("get_table").await;
-        tables
-            .get(name)
-            .map(|data| data.table.clone())
-            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))
+        IntelligentIndexedStorage::get_table(self, name).await
     }
 
     async fn list_tables(&self) -> crate::Result<Vec<Table>> {
-        let tables = self.read_tables("list_tables").await;
-        Ok(tables.values().map(|data| data.table.clone()).collect())
+        IntelligentIndexedStorage::list_tables(self).await
     }
 
     async fn delete_table(&self, name: &str) -> crate::Result<()> {
-        let mut tables = self.write_tables("delete_table").await;
-        tables
-            .remove(name)
-            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
-        Ok(())
+        IntelligentIndexedStorage::delete_table(self, name).await
     }
 
     async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
-        let mut tables = self.write_tables("alter_table").await;
-        let data = tables
-            .get_mut(name)
-            .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
-        let updated = data.table.apply_alter(&req);
-        data.table = updated.clone();
-        Ok(updated)
+        IntelligentIndexedStorage::alter_table(self, name, req).await
     }
 
     async fn insert_record(
@@ -4571,16 +5202,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
-        let tables = self.read_tables("get_record").await;
-        let table = tables
-            .get(tablename)
-            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-
-        table
-            .records
-            .get(record_id)
-            .cloned()
-            .ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
+        IntelligentIndexedStorage::get_record(self, tablename, record_id).await
     }
 
     async fn update_record(
@@ -4614,7 +5236,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     }
 
     async fn list_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
-        self.list_all_record_ids(tablename).await
+        IntelligentIndexedStorage::list_all_record_ids(self, tablename).await
     }
 
     async fn backup(&self, table_name: &str, backup_path: &str) -> crate::Result<()> {

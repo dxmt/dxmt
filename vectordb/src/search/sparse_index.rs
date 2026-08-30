@@ -8,8 +8,7 @@
 //! max values for the query's non-zero dimensions) cannot beat the current
 //! top-k threshold, dramatically reducing the number of candidates scored.
 //!
-//! Reference: Qdrant sparse vector implementation; Bruch et al. "WAND with
-//! Filter" (2023).
+//! Reference: Bruch et al., "WAND with Filter" (2023).
 
 use crate::types::sparse_vector::SparseVector;
 use crate::types::RecordId;

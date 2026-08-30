@@ -39,7 +39,7 @@ export type Vector = number[];
 /**
  * Metadata - flexible key-value pairs.
  */
-export type Metadata = Record<string, any>;
+export type Metadata = globalThis.Record<string, any>;
 
 /**
  * Filter operation types.
@@ -89,6 +89,10 @@ export interface Record {
   id: string;
   vector: Vector;
   metadata?: Metadata;
+  /** Raw server payload (DXMT's wire name for metadata). */
+  payload?: Metadata;
+  /** Present on GET responses serialized by the Rust storage layer. */
+  payload_json?: string;
   score?: number;
 }
 
@@ -187,6 +191,18 @@ export interface DeleteParams {
   filter?: Filter;
 }
 
+/** Parameters for updating a single record. */
+export interface UpdateRecordParams {
+  table_name: string;
+  record_id: string;
+  vector?: Vector;
+  metadata?: Metadata;
+  /** Replace the payload (default) or merge keys into the existing payload. */
+  merge_mode?: 'replace' | 'merge';
+  /** Create the record when it does not already exist. */
+  upsert?: boolean;
+}
+
 /**
  * Batch operation result.
  */
@@ -195,6 +211,9 @@ export interface BatchOperationResult {
   inserted?: number;
   updated?: number;
   deleted?: number;
+  inserted_ids?: string[];
+  deleted_ids?: string[];
+  count?: number;
   errors?: string[];
 }
 
@@ -206,7 +225,7 @@ export interface ClientConfig {
   port?: number;
   ssl?: boolean;
   timeout?: number;
-  headers?: Record<string, string>;
+  headers?: globalThis.Record<string, string>;
   apiKey?: string;
 }
 
@@ -236,7 +255,13 @@ export interface TableStats {
  * Health check response.
  */
 export interface HealthCheckResponse {
-  status: 'healthy' | 'unhealthy';
-  version: string;
-  uptime_seconds: number;
+  status: string;
+  service?: string;
+  ready?: boolean;
+  storage_healthy?: boolean;
+  timestamp?: string;
+  description?: string;
+  retry_after_seconds?: number;
+  metrics?: globalThis.Record<string, any>;
+  storage?: globalThis.Record<string, any>;
 }

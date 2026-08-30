@@ -3,12 +3,15 @@ use std::net::SocketAddr;
 use tracing::info;
 
 use dxmt_vectordb::{
-    api::{create_app_with_cluster, create_app_with_storage, simple_core::create_simple_app},
+    api::{create_app_with_storage, simple_core::create_simple_app},
     config::AppConfig,
     mcp::server::McpServer,
     storage::IntelligentIndexedStorage,
     Result,
 };
+
+#[cfg(feature = "cluster")]
+use dxmt_vectordb::api::create_app_with_cluster;
 
 /// Unified VectorDB CLI
 #[derive(Parser)]
@@ -29,7 +32,7 @@ enum Commands {
         /// Port to bind
         #[arg(long, default_value = "9999")]
         port: u16,
-        /// Enable simple mode (zero-config, Chroma-like API)
+        /// Enable simple mode (zero-config collection API)
         #[arg(
             long,
             help = "Run in simple mode with zero configuration and auto-tuned performance"
@@ -146,9 +149,20 @@ async fn main() -> Result<()> {
                 info!("Starting DXMT VectorDB on {}...", bind_addr);
 
                 let config = AppConfig::load()?;
-                let (app, storage) = if config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false)
-                {
-                    (create_app_with_cluster(&config).await?, None)
+                let cluster_enabled = config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false);
+                let (app, storage) = if cluster_enabled {
+                    #[cfg(feature = "cluster")]
+                    {
+                        (create_app_with_cluster(&config).await?, None)
+                    }
+                    #[cfg(not(feature = "cluster"))]
+                    {
+                        return Err(dxmt_vectordb::Error::InvalidConfig(
+                            "Cluster mode is configured, but this binary was built without the \
+                             `cluster` feature"
+                                .to_string(),
+                        ));
+                    }
                 } else {
                     // These are off unless asked for: each one widens the exposed
                     // surface, and `create_app()` has always passed false for all three.

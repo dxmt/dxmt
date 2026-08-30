@@ -10,7 +10,8 @@
 ARG RUST_VERSION=latest
 FROM rust:${RUST_VERSION} AS base-builder
 
-# 安装所有构建依赖
+# Install only dependencies needed by the default single-node build. Optional LMDB/RocksDB,
+# CUDA and ONNX integrations are built in dedicated images/jobs rather than silently ignored.
 RUN apt-get update && apt-get install -y \
     # 基础构建工具
     build-essential \
@@ -30,19 +31,18 @@ RUN apt-get update && apt-get install -y \
     libzstd-dev \
     zstd \
     liblz4-dev \
-    # 数据库库
-    liblmdb-dev \
-    librocksdb-dev || true \
-    # 其他依赖
+    # Other build tools
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # 设置环境变量解决编译问题
-ENV BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/12/include -I/usr/include" \
-    CC=clang \
+ENV CC=clang \
     CXX=clang++ \
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    CARGO_BUILD_JOBS=1 \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_DEBUG=0 \
     RUST_BACKTRACE=1
 
 # -----------------------------------------------------------------------------
@@ -99,7 +99,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     libzstd1 \
-    liblmdb0 \
     liblz4-1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -124,18 +123,22 @@ WORKDIR /data
 ENV VECTORDB_DATA_DIR=/data \
     VECTORDB_CONFIG_DIR=/config \
     VECTORDB_LOG_DIR=/logs \
+    DB_WAL_DIR=/data/wal \
     RUST_LOG=info \
     PORT=9999
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+    CMD curl -fsS http://localhost:${PORT}/ready || exit 1
 
 # 暴露端口
 EXPOSE 9999
 
 # 数据卷
 VOLUME ["/data", "/config", "/logs"]
+
+# Give the process a chance to flush its WAL/snapshot before the container is killed.
+STOPSIGNAL SIGTERM
 
 # 启动命令
 ENTRYPOINT ["/usr/local/bin/vectordb"]

@@ -1,6 +1,6 @@
 use tracing::info;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IndexAlgorithm {
     HNSW {
         m: usize,
@@ -47,6 +47,72 @@ pub enum IndexAlgorithm {
         num_leaves: usize,
         num_leaves_to_search: usize,
     },
+}
+
+impl IndexAlgorithm {
+    /// The `ef_search` this algorithm was configured with, for graph indexes that have one.
+    ///
+    /// The search path needs this to honour the selector's choice. Without it the parameter is
+    /// inert: it reaches `HnswConfig` at build time, but every query used a hardcoded default
+    /// instead, so tuning it in the selector changed nothing measurable.
+    pub fn configured_ef_search(&self) -> Option<usize> {
+        match self {
+            IndexAlgorithm::HNSW { ef_search, .. } | IndexAlgorithm::HnswPQ { ef_search, .. } => {
+                Some(*ef_search)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether moving from `self` to `want` needs the index thrown away and rebuilt.
+    ///
+    /// A rebuild is O(n) and, on the `reevaluate_indexes` sweep, happens while the table is
+    /// serving. Full equality is the wrong test: the selector derives several parameters from
+    /// the current row count, so an equality check makes every sweep after any write rebuild a
+    /// table whose algorithm never changed. `PartitionedIvf`'s `nlist` is `sqrt(rows)` — sixty
+    /// new rows move it, and the partitioned index has `maintain()` for exactly that drift.
+    ///
+    /// The parameters that do force a rebuild are the ones baked into the graph as it is
+    /// built. `ef_search` is not one of them: it is read per query.
+    pub fn requires_rebuild_to_reach(&self, want: &IndexAlgorithm) -> bool {
+        match (self, want) {
+            (
+                IndexAlgorithm::HNSW {
+                    m, ef_construction, ..
+                },
+                IndexAlgorithm::HNSW {
+                    m: want_m,
+                    ef_construction: want_ef_construction,
+                    ..
+                },
+            ) => m != want_m || ef_construction != want_ef_construction,
+            (
+                IndexAlgorithm::HnswPQ {
+                    m,
+                    ef_construction,
+                    num_subvectors,
+                    num_centroids,
+                    ..
+                },
+                IndexAlgorithm::HnswPQ {
+                    m: want_m,
+                    ef_construction: want_ef_construction,
+                    num_subvectors: want_num_subvectors,
+                    num_centroids: want_num_centroids,
+                    ..
+                },
+            ) => {
+                m != want_m
+                    || ef_construction != want_ef_construction
+                    || num_subvectors != want_num_subvectors
+                    || num_centroids != want_num_centroids
+            }
+            // Same algorithm, upkeep-only differences: partition counts drift with every write
+            // and are converged by `maintain()`; brute force and the DiskANN family have no
+            // build-time parameter the selector varies with size.
+            _ => std::mem::discriminant(self) != std::mem::discriminant(want),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -138,9 +204,18 @@ impl IntelligentIndexSelector {
             });
         }
 
-        let m = 8;
-        let ef_construction = 50;
-        let ef_search = 50;
+        // Graph shape does not depend on row count the way it was written to. Measured on the
+        // storage ANN benchmark at 10K×384 (exact cosine ground truth, recall@10): m=8 with
+        // ef_construction=100 returned 0.831, while m=16 with ef_construction=200 — what the
+        // memory-optimized path has always used — returned 0.945 on the same corpus. A 10K
+        // table is not "small enough" to need a sparser graph; what makes a query hard is
+        // dimensionality, which this branch never looked at.
+        //
+        // These now match `select_memory_optimized_index` so the two selection paths do not
+        // silently answer with different recall for the same table.
+        let m = 16;
+        let ef_construction = 200;
+        let ef_search = 128;
 
         let vector_memory_mb = (config.dimension * config.dataset_size * 4) / 1024 / 1024;
         let graph_memory_mb = (config.dataset_size * m * 2 * 8) / 1024 / 1024;
@@ -158,7 +233,7 @@ impl IntelligentIndexSelector {
         let estimated_latency_ms = (config.dataset_size as f32).log2() * 0.5;
         let estimated_qps = 1000.0 / estimated_latency_ms.max(1.0);
 
-        if config.dataset_size >= 1_000_000 || hnswpq_total_memory_mb > config.memory_budget_mb {
+        if config.dataset_size >= 1_000_000 && hnsw_total_memory_mb > config.memory_budget_mb {
             info!(
                 "Selecting Enhanced DiskANN: dataset_size={}, HNSW-PQ memory={}MB, budget={}MB",
                 config.dataset_size, hnswpq_total_memory_mb, config.memory_budget_mb
@@ -183,7 +258,7 @@ impl IntelligentIndexSelector {
             });
         }
 
-        if config.dataset_size >= 100_000 || hnsw_total_memory_mb > config.memory_budget_mb {
+        if hnsw_total_memory_mb > config.memory_budget_mb {
             info!(
                 "Selecting HNSW-PQ: dataset_size={}, HNSW memory={}MB, HNSW-PQ memory={}MB, budget={}MB",
                 config.dataset_size, hnsw_total_memory_mb, hnswpq_total_memory_mb, config.memory_budget_mb

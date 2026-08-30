@@ -1,3 +1,5 @@
+#![cfg(feature = "adaptive-index")]
+
 //! Phase 3 Integration Test - Hierarchical Clustering
 //!
 //! This test validates all Phase 3 components working together:

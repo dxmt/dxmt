@@ -26,6 +26,12 @@ pub struct Dataset {
 
 impl Dataset {
     /// Create a small synthetic dataset for tests and demos.
+    ///
+    /// The vectors and their ground truth are deterministic.  Ground truth is
+    /// computed from the generated vectors (cosine distance on the normalized
+    /// vectors), rather than sampled independently.  An independently sampled
+    /// neighbor list is not a valid ANN benchmark: it makes a perfect index
+    /// appear to have poor recall and can contain duplicate neighbors.
     pub fn synthetic(
         name: &str,
         dimension: usize,
@@ -36,7 +42,17 @@ impl Dataset {
         use rand::rngs::SmallRng;
         use rand::{Rng, SeedableRng};
 
-        let mut rng = SmallRng::from_entropy();
+        // A fixed seed keeps benchmark results reproducible across runs and
+        // makes failures debuggable.  The dataset name and shape are mixed in
+        // so two named datasets do not accidentally share the same vectors.
+        let mut seed = 0x4458_4D54_u64; // "DXMT"
+        for byte in name.as_bytes() {
+            seed = seed.rotate_left(5) ^ u64::from(*byte);
+        }
+        seed ^= (dimension as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        seed ^= (train_size as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        seed ^= (test_size as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let mut rng = SmallRng::seed_from_u64(seed);
 
         let mut train_vectors = Vec::with_capacity(train_size);
         for _ in 0..train_size {
@@ -69,13 +85,31 @@ impl Dataset {
             test_queries.push(v);
         }
 
-        // Simple synthetic ground truth: random neighbors
+        // Exact ground truth for cosine similarity.  All generated vectors are
+        // normalized, so maximizing the dot product is equivalent to
+        // minimizing cosine distance.  Tie-break by index for deterministic
+        // ordering.
         let mut ground_truth = Vec::with_capacity(test_size);
-        for _ in 0..test_size {
-            let mut neighbors = Vec::with_capacity(k);
-            for _ in 0..k {
-                neighbors.push(rng.gen_range(0..train_size));
-            }
+        for query in &test_queries {
+            let mut scores: Vec<(usize, f32)> = train_vectors
+                .iter()
+                .enumerate()
+                .map(|(index, vector)| {
+                    let similarity = query.iter().zip(vector).map(|(a, b)| a * b).sum::<f32>();
+                    (index, similarity)
+                })
+                .collect();
+            scores.sort_by(|(index_a, score_a), (index_b, score_b)| {
+                score_b
+                    .partial_cmp(score_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| index_a.cmp(index_b))
+            });
+            let neighbors = scores
+                .into_iter()
+                .take(k.min(train_size))
+                .map(|(index, _)| index)
+                .collect();
             ground_truth.push(neighbors);
         }
 

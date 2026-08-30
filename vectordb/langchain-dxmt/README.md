@@ -325,7 +325,6 @@ Complete working examples are available in the [`examples/`](./examples/) direct
 
 - **[Architecture Overview](./ARCHITECTURE.md)** - Package architecture and design decisions
 - **[API Reference](./docs/API_REFERENCE.md)** - Complete API documentation
-- **[Migration Guide](./docs/MIGRATION_GUIDE.md)** - Migrating from other vector databases
 - **[Testing Guide](./tests/README.md)** - Running and writing tests
 - **[Contributing Guide](./CONTRIBUTING.md)** - How to contribute
 - **[Changelog](./CHANGELOG.md)** - Version history

@@ -4,7 +4,10 @@
  * These tests validate the client API without requiring a live server.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
+vi.mock('cross-fetch', () => ({ default: fetchMock }));
 import { DXMTClient } from '../src/client';
 import {
   DXMTValidationError,
@@ -12,6 +15,9 @@ import {
 } from '../src/errors';
 
 describe('DXMTClient', () => {
+  afterEach(() => {
+    fetchMock.mockReset();
+  });
   describe('Constructor', () => {
     it('should create client with default config', () => {
       const client = new DXMTClient();
@@ -172,6 +178,37 @@ describe('DXMTClient', () => {
 
       // Headers are private, but method should not throw
       expect(() => client.setHeaders({ 'X-Custom': 'value' })).not.toThrow();
+    });
+  });
+
+  describe('Wire contract', () => {
+    it('unwraps envelopes and maps payload on get/update/metrics', async () => {
+      fetchMock
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          success: true,
+          data: { id: 'r1', vector: [1, 0], payload_json: '{"x":1}' },
+        }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          success: true,
+          data: { message: 'ok', record: { id: 'r1', version: 2 } },
+        }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          success: true,
+          data: { status: 'Healthy', storage: { ready: true } },
+        }), { status: 200 }));
+      const client = new DXMTClient();
+      const record = await client.getRecord('docs', 'r1');
+      expect(record.metadata).toEqual({ x: 1 });
+      await client.updateRecord({
+        table_name: 'docs',
+        record_id: 'r1',
+        metadata: { x: 2 },
+        merge_mode: 'merge',
+      });
+      const updateBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(updateBody).toMatchObject({ payload: { x: 2 }, merge_mode: 'merge' });
+      const metrics = await client.healthMetrics();
+      expect(metrics.storage?.ready).toBe(true);
     });
   });
 });

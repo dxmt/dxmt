@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 use super::errors::ObjectStorageError;
 use super::filesystem::FilesystemStorage;
+#[cfg(feature = "s3-storage")]
 use super::s3::S3Storage;
 use super::traits::{ObjectStorage, ObjectStorageResult, StorageStats};
 use super::types::{ListObjectsOptions, ListObjectsResult, ObjectMetadata, PartInfo};
@@ -197,7 +198,18 @@ impl TieredStorage {
                         ssd_cache_dir, // Use ssd_cache_dir as base path for filesystem
                         &object_storage_config.bucket,
                     )?),
-                    "s3" => Box::new(S3Storage::new(object_storage_config.clone().into()).await?),
+                    "s3" => {
+                        #[cfg(feature = "s3-storage")]
+                        {
+                            Box::new(S3Storage::new(object_storage_config.clone().into()).await?)
+                        }
+                        #[cfg(not(feature = "s3-storage"))]
+                        {
+                            return Err(ObjectStorageError::ConfigurationError {
+                                message: "S3 storage requires the `s3-storage` feature".to_string(),
+                            });
+                        }
+                    }
                     _ => {
                         return Err(ObjectStorageError::ConfigurationError {
                             message: format!(

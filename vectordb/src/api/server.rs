@@ -9,7 +9,6 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
     api::{
-        graphql,
         // batch_handlers::batch_search_vectors,  // Removed
         // bulk_handlers::bulk_insert_records,  // Removed
         handlers::{
@@ -17,19 +16,28 @@ use crate::{
             delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
             get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
             hybrid_search_combined, insert_records, insert_records_optimized, list_records,
-            list_tables, rebuild_index, search_vectors, update_record, AppState,
+            list_tables, liveness, readiness, rebuild_index, search_vectors, update_record,
+            AppState,
         },
-        multimodal::{
-            create_multimodal_record, cross_modal_search, generate_embedding,
-            validate_multimodal_content, MultimodalAppState,
-        },
-        swagger,
-        websocket,
     },
     config::AppConfig,
-    embeddings::EmbeddingManager,
     error::Result,
     storage::IntelligentIndexedStorage,
+};
+
+#[cfg(feature = "api-graphql")]
+use crate::api::graphql;
+#[cfg(feature = "api-swagger")]
+use crate::api::swagger;
+#[cfg(feature = "api-ws")]
+use crate::api::websocket;
+#[cfg(feature = "multimodal")]
+use crate::{
+    api::multimodal::{
+        create_multimodal_record, cross_modal_search, generate_embedding,
+        validate_multimodal_content, MultimodalAppState,
+    },
+    embeddings::EmbeddingManager,
 };
 
 /// WAL 目录：`DB_WAL_DIR` 覆盖，默认 `./data/wal`，显式设为空串关闭持久化。
@@ -230,6 +238,25 @@ pub async fn create_app_with_storage(
     enable_graphql: bool,
     enable_websocket: bool,
 ) -> Result<(Router, Arc<IntelligentIndexedStorage>)> {
+    #[cfg(not(feature = "api-swagger"))]
+    if enable_swagger {
+        return Err(crate::Error::InvalidConfig(
+            "Swagger was requested, but this binary was built without `api-swagger`".to_string(),
+        ));
+    }
+    #[cfg(not(feature = "api-graphql"))]
+    if enable_graphql {
+        return Err(crate::Error::InvalidConfig(
+            "GraphQL was requested, but this binary was built without `api-graphql`".to_string(),
+        ));
+    }
+    #[cfg(not(feature = "api-ws"))]
+    if enable_websocket {
+        return Err(crate::Error::InvalidConfig(
+            "WebSocket was requested, but this binary was built without `api-ws`".to_string(),
+        ));
+    }
+
     // 加载配置
     let config = AppConfig::load()?;
 
@@ -238,9 +265,6 @@ pub async fn create_app_with_storage(
     let storage = Arc::new(
         IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?,
     );
-
-    // 创建嵌入管理器
-    let embedding_manager = Arc::new(EmbeddingManager::new());
 
     // 应用状态
     // Initialize server health monitor
@@ -251,10 +275,10 @@ pub async fn create_app_with_storage(
         server_health,
     };
 
-    // 多模态应用状态
+    #[cfg(feature = "multimodal")]
     let multimodal_state = MultimodalAppState {
         basestate: base_state.clone(),
-        embeddingmanager: embedding_manager,
+        embeddingmanager: Arc::new(EmbeddingManager::new()),
     };
 
     // 创建API v1路由
@@ -304,16 +328,25 @@ pub async fn create_app_with_storage(
         )
         // 备份：写一份自洽的备份目录。恢复是离线操作，见 docs/operations/backup-restore.md
         .route("/backup", post(create_backup))
+        // Keep system probes available under the SDK base URL as well as at the root.
+        .route("/health", get(health_check))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
+        .route("/health/metrics", get(health_metrics))
         .with_state(base_state.clone());
 
     // 创建系统路由（在根路径）
     let system_routes = Router::new()
         .route("/status", get(get_status))
         .route("/health", get(health_check))
+        .route("/live", get(liveness))
+        .route("/ready", get(readiness))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
         .route("/health/metrics", get(health_metrics))
         .with_state(base_state.clone());
 
-    // 创建多模态路由（使用多模态状态）
+    #[cfg(feature = "multimodal")]
     let multimodal_routes = Router::new()
         // .route("/embeddings/functions", get(list_embedding_functions))
         // .route("/embeddings/functions/:name", post(load_embedding_function))
@@ -330,18 +363,25 @@ pub async fn create_app_with_storage(
         .with_state(multimodal_state);
 
     // 合并路由
+    #[allow(unused_mut)]
     let mut app = Router::new()
         .merge(system_routes)
-        .nest("/api/v1", api_v1_routes)
-        .nest("/api/v1", multimodal_routes);
+        .nest("/api/v1", api_v1_routes);
+
+    #[cfg(feature = "multimodal")]
+    {
+        app = app.nest("/api/v1", multimodal_routes);
+    }
 
     // 条件性添加 GraphQL 路由
+    #[cfg(feature = "api-graphql")]
     if enable_graphql {
         let graphql_routes = graphql::create_graphql_router();
         app = app.merge(graphql_routes);
     }
 
     // 条件性添加 WebSocket 路由
+    #[cfg(feature = "api-ws")]
     if enable_websocket {
         let websocket_routes = websocket::create_websocket_router();
         app = app.merge(websocket_routes);
@@ -377,12 +417,14 @@ pub async fn create_app_with_storage(
         )
         .layer(TraceLayer::new_for_http());
 
-    // 条件性添加 Swagger UI 路由
+    #[cfg(feature = "api-swagger")]
     let app = if enable_swagger {
         app.merge(swagger::create_swagger_ui())
     } else {
         app
     };
+    #[cfg(not(feature = "api-swagger"))]
+    let app = app;
 
     let app = app.with_state(base_state);
 

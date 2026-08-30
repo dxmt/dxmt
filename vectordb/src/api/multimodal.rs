@@ -22,7 +22,8 @@ pub struct MultimodalAppState {
     pub embeddingmanager: Arc<EmbeddingManager>,
 }
 
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::IntoParams))]
 pub struct ListEmbeddingFunctionsQuery {
     pub modality: Option<String>,
 }
@@ -30,7 +31,7 @@ pub struct ListEmbeddingFunctionsQuery {
 // ============ 嵌入函数管理API ============
 
 /// 列出所有可用的嵌入函数
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/embeddings/functions",
     params(ListEmbeddingFunctionsQuery),
@@ -38,7 +39,7 @@ pub struct ListEmbeddingFunctionsQuery {
         (status = 200, description = "获取嵌入函数列表成功", body = ApiResponse),
     ),
     tag = "embeddings"
-)]
+))]
 pub async fn list_embedding_functions(
     State(state): State<MultimodalAppState>,
     Query(query): Query<ListEmbeddingFunctionsQuery>,
@@ -59,7 +60,7 @@ pub async fn list_embedding_functions(
 }
 
 /// 加载嵌入函数
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/embeddings/functions/{name}",
     request_body = EmbeddingConfig,
@@ -68,7 +69,7 @@ pub async fn list_embedding_functions(
         (status = 400, description = "配置错误", body = ApiResponse),
     ),
     tag = "embeddings"
-)]
+))]
 pub async fn load_embedding_function(
     State(state): State<MultimodalAppState>,
     Path(name): Path<String>,
@@ -90,7 +91,7 @@ pub async fn load_embedding_function(
 }
 
 /// 卸载嵌入函数
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     delete,
     path = "/api/v1/embeddings/functions/{name}",
     responses(
@@ -98,7 +99,7 @@ pub async fn load_embedding_function(
         (status = 404, description = "嵌入函数不存在", body = ApiResponse),
     ),
     tag = "embeddings"
-)]
+))]
 pub async fn unload_embedding_function(
     State(state): State<MultimodalAppState>,
     Path(name): Path<String>,
@@ -115,14 +116,14 @@ pub async fn unload_embedding_function(
 }
 
 /// 列出已加载的嵌入函数
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/embeddings/functions/active",
     responses(
         (status = 200, description = "获取活跃嵌入函数列表成功", body = ApiResponse),
     ),
     tag = "embeddings"
-)]
+))]
 pub async fn list_active_embedding_functions(
     State(state): State<MultimodalAppState>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
@@ -133,7 +134,7 @@ pub async fn list_active_embedding_functions(
 // ============ 嵌入生成API ============
 
 /// 生成嵌入向量
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/embeddings/embed",
     request_body = EmbeddingRequest,
@@ -143,7 +144,7 @@ pub async fn list_active_embedding_functions(
         (status = 404, description = "嵌入函数不存在", body = ApiResponse),
     ),
     tag = "embeddings"
-)]
+))]
 pub async fn generate_embedding(
     State(state): State<MultimodalAppState>,
     Json(request): Json<EmbeddingRequest>,
@@ -176,7 +177,7 @@ pub async fn generate_embedding(
 // ============ 多向量记录API ============
 
 /// 创建多向量记录
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/records/multimodal",
     request_body = CreateMultiVectorRequest,
@@ -186,7 +187,7 @@ pub async fn generate_embedding(
         (status = 404, description = "表不存在", body = ApiResponse),
     ),
     tag = "multimodal"
-)]
+))]
 pub async fn create_multimodal_record(
     State(state): State<MultimodalAppState>,
     Path(table_name): Path<String>,
@@ -248,7 +249,7 @@ pub async fn create_multimodal_record(
 }
 
 /// 跨模态搜索
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search/cross-modal",
     request_body = CrossModalSearchQuery,
@@ -258,7 +259,7 @@ pub async fn create_multimodal_record(
         (status = 404, description = "表不存在", body = ApiResponse),
     ),
     tag = "multimodal"
-)]
+))]
 pub async fn cross_modal_search(
     State(state): State<MultimodalAppState>,
     Path(table_name): Path<String>,
@@ -285,7 +286,7 @@ pub async fn cross_modal_search(
 // ============ 工具API ============
 
 /// 验证多模态内容
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/multimodal/validate",
     request_body = Vec<crate::types::MultimodalContent>,
@@ -294,7 +295,7 @@ pub async fn cross_modal_search(
         (status = 400, description = "内容验证失败", body = ApiResponse),
     ),
     tag = "multimodal"
-)]
+))]
 pub async fn validate_multimodal_content(
     Json(contents): Json<Vec<crate::types::MultimodalContent>>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
@@ -334,7 +335,7 @@ pub async fn validate_multimodal_content(
 }
 
 /// 获取多模态内容信息
-#[utoipa::path(
+#[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/multimodal/info",
     request_body = crate::types::MultimodalContent,
@@ -342,7 +343,7 @@ pub async fn validate_multimodal_content(
         (status = 200, description = "获取内容信息成功", body = ApiResponse),
     ),
     tag = "multimodal"
-)]
+))]
 pub async fn get_multimodal_info(
     Json(content): Json<crate::types::MultimodalContent>,
 ) -> std::result::Result<ApiResponse, StatusCode> {

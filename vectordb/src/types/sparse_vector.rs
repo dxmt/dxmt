@@ -13,7 +13,10 @@ pub struct SparseVector {
 }
 
 impl SparseVector {
-    /// Maximum number of non-zero elements (10M limit from Qdrant)
+    /// Maximum number of non-zero elements in a flattened multivector.
+    ///
+    /// A cap is needed because the length is caller-supplied and allocation follows it; 10M
+    /// is far above any legitimate sparse vector and still bounds a hostile request.
     pub const MAX_MULTIVECTOR_FLATTENED_LEN: usize = 10_000_000;
 
     /// Create a new sparse vector with validation
@@ -36,7 +39,8 @@ impl SparseVector {
         }
     }
 
-    /// Comprehensive validation following Qdrant and Chroma patterns
+    /// Full structural validation: matching lengths, sorted unique indices, finite values,
+    /// and indices inside the declared dimension.
     pub fn validate(&self) -> crate::Result<()> {
         // 1. Length matching (indices.len == values.len)
         if self.indices.len() != self.values.len() {

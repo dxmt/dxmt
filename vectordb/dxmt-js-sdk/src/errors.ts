@@ -101,9 +101,12 @@ export function parseErrorResponse(
   status: number,
   data: any
 ): DXMTError {
-  const message = data?.message || data?.error || 'Unknown error';
-  const code = data?.code;
-  const details = data?.details;
+  // Standard Rust responses use { success: false, error: { code, message, details } };
+  // compatibility handlers may still return a flat { error, details } object.
+  const nested = data?.error && typeof data.error === 'object' ? data.error : data;
+  const message = nested?.message || (typeof data?.error === 'string' ? data.error : undefined) || 'Unknown error';
+  const code = nested?.code || data?.code;
+  const details = nested?.details || data?.details;
 
   switch (status) {
     case 400:
@@ -115,6 +118,10 @@ export function parseErrorResponse(
       return new DXMTTableError(`Not found: ${message}`, 'NOT_FOUND', details);
     case 408:
       return new DXMTTimeoutError(message, details);
+    case 429:
+      return new DXMTError(message, code || 'TOO_MANY_REQUESTS', details);
+    case 501:
+      return new DXMTError(message, code || 'NOT_IMPLEMENTED', details);
     case 409:
       return new DXMTRecordError(
         `Conflict: ${message}`,

@@ -396,8 +396,8 @@ async fn many_deletes_stay_linear() {
 
     // Tombstones are consulted for every candidate a query scans, and checked again on every
     // delete. Holding them in a Vec makes deleting n records O(n^2) and every query
-    // O(candidates x tombstones) — weaviate keeps them in a hash set and has since gone further,
-    // caching a snapshot for the query path.
+    // O(candidates x tombstones). A hash set makes both O(1); caching a snapshot of the set
+    // for the query path would take it further still.
     let started = Instant::now();
     for (id, _) in data.iter().take(10_000) {
         index.delete(id).await.unwrap();

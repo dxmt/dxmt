@@ -1,5 +1,4 @@
 // 标量量化实现
-// 参考 Qdrant 的 EncodedVectorsU8
 
 use super::{
     QuantizationMetadata, QuantizationParams, QuantizationStats, QuantizedData, QuantizedIndex,

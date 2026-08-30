@@ -62,6 +62,10 @@ struct OperationMetrics {
     index_building: AtomicBool,
     /// Number of recent errors
     recent_errors: AtomicUsize,
+    /// Start of the current error burst. Error pressure decays after the configured cooldown;
+    /// otherwise ten unrelated startup/client errors could permanently mark a healthy server as
+    /// critical until restart.
+    last_error_at: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Default for OperationMetrics {
@@ -75,6 +79,7 @@ impl Default for OperationMetrics {
             last_index_build: RwLock::new(None),
             index_building: AtomicBool::new(false),
             recent_errors: AtomicUsize::new(0),
+            last_error_at: std::sync::Mutex::new(None),
         }
     }
 }
@@ -126,6 +131,7 @@ impl ServerHealth {
 
     /// Get current health state
     pub async fn current_state(&self) -> HealthState {
+        self.reset_stale_errors();
         let ongoing_inserts = self.metrics.ongoing_inserts.load(Ordering::Relaxed);
         let total_ongoing = self.total_ongoing_operations();
         let recent_errors = self.metrics.recent_errors.load(Ordering::Relaxed);
@@ -162,10 +168,9 @@ impl ServerHealth {
         let state = self.current_state().await;
         let accept = match state {
             HealthState::Healthy | HealthState::Degraded => true,
-            HealthState::Overloaded => {
-                // Accept with 30% probability during overload
-                rand::random::<f32>() < 0.3
-            }
+            // Backpressure must be deterministic. Random admission made retries impossible to
+            // reason about and could overload the same queue that triggered this state.
+            HealthState::Overloaded => false,
             HealthState::Critical => false,
         };
         (accept, state)
@@ -175,11 +180,11 @@ impl ServerHealth {
     pub async fn should_accept_search(&self) -> (bool, HealthState) {
         let state = self.current_state().await;
         let accept = match state {
-            HealthState::Healthy | HealthState::Degraded | HealthState::Overloaded => true,
-            HealthState::Critical => {
-                // Even in critical state, accept read operations with reduced rate
-                rand::random::<f32>() < 0.5
-            }
+            // Reads remain available while writes are being drained or durability is repaired.
+            HealthState::Healthy
+            | HealthState::Degraded
+            | HealthState::Overloaded
+            | HealthState::Critical => true,
         };
         (accept, state)
     }
@@ -226,12 +231,30 @@ impl ServerHealth {
 
     /// Record an error
     pub fn record_error(&self) {
+        let now = Instant::now();
+        if let Ok(mut last_error_at) = self.metrics.last_error_at.lock() {
+            let expired = (*last_error_at)
+                .map(|started| {
+                    now.duration_since(started)
+                        >= Duration::from_millis(self.config.cooldown_period_ms)
+                })
+                .unwrap_or(false);
+            if expired {
+                self.metrics.recent_errors.store(0, Ordering::Relaxed);
+            }
+            if expired || last_error_at.is_none() {
+                *last_error_at = Some(now);
+            }
+        }
         self.metrics.recent_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Reset error counter (called periodically)
     pub fn reset_errors(&self) {
         self.metrics.recent_errors.store(0, Ordering::Relaxed);
+        if let Ok(mut last_error_at) = self.metrics.last_error_at.lock() {
+            *last_error_at = None;
+        }
     }
 
     /// Mark index build started
@@ -255,6 +278,7 @@ impl ServerHealth {
 
     /// Get metrics for monitoring
     pub fn get_metrics(&self) -> HealthMetrics {
+        self.reset_stale_errors();
         HealthMetrics {
             ongoing_inserts: self.metrics.ongoing_inserts.load(Ordering::Relaxed),
             ongoing_searches: self.metrics.ongoing_searches.load(Ordering::Relaxed),
@@ -263,6 +287,25 @@ impl ServerHealth {
             total_operations: self.metrics.total_operations.load(Ordering::Relaxed),
             recent_errors: self.metrics.recent_errors.load(Ordering::Relaxed),
             index_building: self.metrics.index_building.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset_stale_errors(&self) {
+        let stale = self
+            .metrics
+            .last_error_at
+            .lock()
+            .ok()
+            .and_then(|last| *last)
+            .map(|started| {
+                started.elapsed() >= Duration::from_millis(self.config.cooldown_period_ms)
+            })
+            .unwrap_or(false);
+        if stale {
+            self.metrics.recent_errors.store(0, Ordering::Relaxed);
+            if let Ok(mut last_error_at) = self.metrics.last_error_at.lock() {
+                *last_error_at = None;
+            }
         }
     }
 }

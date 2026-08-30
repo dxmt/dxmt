@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+pytest.importorskip("langgraph", reason="optional LangGraph integration dependency is not installed")
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

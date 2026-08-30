@@ -1,9 +1,7 @@
-"""Multimodal content store — DXMT port of Chroma multimodal-video-search pattern.
+"""Multimodal content store — video/image search over embeddings.
 
 Demonstrates storing text transcripts and image embeddings in the same DXMT table,
 then querying each modality independently via payload filters.
-
-Reference: reference/examples/chroma-cookbooks/multimodal-video-search/chroma_store.py
 
 Pattern:
     - One table per "session" (video / document set)
@@ -190,7 +188,7 @@ def display(results: list[dict], title: str) -> None:
 
 def main() -> None:
     print("=" * 70)
-    print("  DXMT Multimodal Store (Chroma multimodal-video-search pattern)")
+    print("  DXMT Multimodal Store")
     print("=" * 70)
 
     client = Client(host="localhost", port=9999)

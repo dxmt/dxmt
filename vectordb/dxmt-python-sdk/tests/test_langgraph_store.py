@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch, MagicMock
 import sys
 from pathlib import Path
 
+pytest.importorskip("langgraph", reason="optional LangGraph integration dependency is not installed")
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

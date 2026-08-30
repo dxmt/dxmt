@@ -69,10 +69,9 @@ impl HnswConfig {
 ///
 /// Instead: one buffer per thread holding a generation number per node. A node counts as visited
 /// when its stamp equals the current generation, so starting a traversal costs an increment
-/// rather than a clear, and a test is an array read. Borrowed from qdrant's `VisitedListPool`,
-/// which does the same thing with a `Vec<u8>` and an explicit pool; a thread-local needs no pool
-/// and cannot be contended, which suits us because `search_layer` takes `&self` and would
-/// otherwise have to lock something to get a scratch buffer.
+/// rather than a clear, and a test is an array read. A thread-local is used instead of a shared
+/// pool because it needs no pool and cannot be contended, which suits us: `search_layer` takes
+/// `&self` and would otherwise have to lock something to get a scratch buffer.
 mod visited {
     use std::cell::RefCell;
 
@@ -233,9 +232,8 @@ impl HnswIndex {
     /// For cosine that means unit length. Cosine similarity is `dot(a,b) / (‖a‖·‖b‖)`, and
     /// computing it that way costs three passes over both vectors and two square roots on *every*
     /// distance evaluation — which is the inner loop of both search and construction. Normalising
-    /// once on the way in leaves a plain dot product, one pass and no roots. qdrant does exactly
-    /// this: its `CosineMetric::similarity` *is* `DotProductMetric::similarity`, with the
-    /// normalisation moved into a `preprocess` step.
+    /// once on the way in leaves a plain dot product, one pass and no roots — the normalisation
+    /// moves out of the inner loop and into a one-time preprocessing step.
     ///
     /// This only touches the copy the index keeps. Records are stored separately by the storage
     /// layer, so what the API hands back is still what the caller sent.
@@ -305,8 +303,6 @@ impl HnswIndex {
     /// to fix — and measuring on them alone said it bought nothing. Worth remembering before
     /// benchmarking an ANN change on uniform data again.
     ///
-    /// qdrant selects the same way, calls it "not closer than base", and has it on by default.
-    ///
     /// `candidates` must be sorted nearest-first, which is what `search_layer` returns.
     fn select_neighbors_heuristic(&self, candidates: &[(usize, f32)], m: usize) -> Vec<usize> {
         let mut selected: Vec<usize> = Vec::with_capacity(m);
@@ -327,8 +323,8 @@ impl HnswIndex {
 
     /// Draw a node's top layer from the exponential distribution HNSW is built on.
     ///
-    /// `-ln(u) * ml` for uniform `u`, which is what the paper specifies and what qdrant's
-    /// `get_random_layer` computes. `ml` is a *scale factor*, `1/ln(m)`, not a probability.
+    /// `-ln(u) * ml` for uniform `u`, which is what the paper specifies. `ml` is a *scale
+    /// factor*, `1/ln(m)`, not a probability.
     ///
     /// This used to be a coin-flip loop, `while rng.gen::<f64>() < ml`, comparing a uniform in
     /// [0,1) against a factor of about 1.44 — a condition that is simply always true. Every node
@@ -363,14 +359,17 @@ impl HnswIndex {
             if idx >= self.nodes.len() || self.nodes[idx].deleted {
                 continue; // Skip deleted nodes
             }
-            // Entry points that don't match the filter still serve as graph entry,
-            // but we skip adding them to the result set w.
+            // An entry point that fails the filter is still the way into the graph: it goes on
+            // the exploration queue, and only the *result* set is gated on the filter. Gating
+            // both is how a filtered search returns nothing — with the queue empty the loop
+            // below never runs, so a selective filter came back empty for every query whose
+            // entry point happened not to match. At 2% selectivity that was 98% of queries.
+            let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+            candidates.push(Candidate {
+                idx,
+                distance: dist,
+            });
             if filter_idxs.is_none_or(|f| f.contains(&idx)) {
-                let dist = self.calculate_distance(query, &self.nodes[idx].vector);
-                candidates.push(Candidate {
-                    idx,
-                    distance: dist,
-                });
                 w.push(Result {
                     idx,
                     distance: dist,
@@ -461,12 +460,13 @@ impl HnswIndex {
             if idx >= self.nodes.len() || self.nodes[idx].deleted {
                 continue;
             }
+            // Same rule as `search_layer`: the queue is unfiltered, the result set is not.
+            let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+            candidates.push(Candidate {
+                idx,
+                distance: dist,
+            });
             if filter_idxs.is_none_or(|f| f.contains(&idx)) {
-                let dist = self.calculate_distance(query, &self.nodes[idx].vector);
-                candidates.push(Candidate {
-                    idx,
-                    distance: dist,
-                });
                 w.push(Result {
                     idx,
                     distance: dist,
@@ -671,13 +671,14 @@ impl HnswIndex {
             curr_nearest = self.search_layer_closest(query, curr_nearest, lc);
         }
 
-        // Automatic parallel search for large datasets (>1000 nodes)
+        // Rayon has a non-trivial scheduling cost for the small neighbor lists
+        // in a normal HNSW graph (M=16 => at most 32 neighbors at layer 0).
+        // The old `>1000 nodes` switch therefore made every 10K query slower
+        // than the scalar traversal.  Keep the parallel path for filtered
+        // searches, where it can avoid scoring rejected candidates, but use
+        // the cache-friendly sequential loop for the common unfiltered case.
         let ef = ef_override.max(k);
-        let candidates = if self.nodes.len() > 1000 {
-            self.search_layer_parallel(query, curr_nearest, ef, 0, None)
-        } else {
-            self.search_layer(query, curr_nearest, ef, 0, None)
-        };
+        let candidates = self.search_layer(query, curr_nearest, ef, 0, None);
 
         // Return top k
         Ok(candidates
@@ -766,11 +767,7 @@ impl HnswIndex {
 
         // Search layer 0 with precomputed optimization
         let ef = self.config.ef_search.max(k);
-        let candidates = if self.nodes.len() > 1000 {
-            self.search_layer_parallel(&precomputed.vector, curr_nearest, ef, 0, None)
-        } else {
-            self.search_layer(&precomputed.vector, curr_nearest, ef, 0, None)
-        };
+        let candidates = self.search_layer(&precomputed.vector, curr_nearest, ef, 0, None);
 
         Ok(candidates
             .into_iter()

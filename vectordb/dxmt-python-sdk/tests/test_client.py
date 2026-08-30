@@ -213,6 +213,46 @@ def test_get_records_success(mock_client_class: Mock) -> None:
 
 
 @patch("dxmt.client.httpx.Client")
+def test_search_sends_top_k_and_normalizes_payload_json(mock_client_class: Mock) -> None:
+    """The Rust API uses top_k and serializes GET records as payload_json."""
+    mock_instance = Mock()
+    mock_client_class.return_value = mock_instance
+    response = Mock(spec=Response)
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.json.return_value = {
+        "success": True,
+        "data": {
+            "hits": [{"id": "1", "score": 1.0, "payload": {"kind": "x"}}]
+        },
+    }
+    mock_instance.post.return_value = response
+
+    client = Client()
+    assert client.search("test", [1.0, 0.0], k=1)[0]["metadata"] == {"kind": "x"}
+    body = mock_instance.post.call_args.kwargs["json"]
+    assert body["top_k"] == 1
+
+
+@patch("dxmt.client.httpx.Client")
+def test_get_records_parses_payload_json(mock_client_class: Mock) -> None:
+    mock_instance = Mock()
+    mock_client_class.return_value = mock_instance
+    response = Mock(spec=Response)
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.json.return_value = {
+        "success": True,
+        "data": {"id": "1", "vector": [1.0], "payload_json": '{"x": 2}'},
+    }
+    mock_instance.get.return_value = response
+
+    record = Client().get_records("test", ["1"])[0]
+    assert record["payload"] == {"x": 2}
+    assert record["metadata"] == {"x": 2}
+
+
+@patch("dxmt.client.httpx.Client")
 def test_delete_records_success(mock_client_class: Mock) -> None:
     """Test successful record deletion."""
     mock_instance = Mock()
@@ -284,6 +324,26 @@ async def test_async_search() -> None:
 
         assert len(results) == 1
         assert results[0]["id"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_async_update_preserves_update_options() -> None:
+    with patch("dxmt.client.httpx.AsyncClient") as mock_async_client_class:
+        mock_instance = AsyncMock()
+        mock_async_client_class.return_value = mock_instance
+        mock_response = Mock(spec=Response)
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={"success": True, "data": {}})
+        mock_instance.put = AsyncMock(return_value=mock_response)
+
+        client = Client()
+        await client.aupdate_record(
+            "test", "r1", payload={"x": 1}, merge_mode="merge", upsert=True
+        )
+        body = mock_instance.put.call_args.kwargs["json"]
+        assert body["merge_mode"] == "merge"
+        assert body["upsert"] is True
 
 
 @patch("dxmt.client.httpx.Client")

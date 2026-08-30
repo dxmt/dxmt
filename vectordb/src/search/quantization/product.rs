@@ -1,5 +1,4 @@
 // 乘积量化实现
-// 参考 Qdrant 的 EncodedVectorsPQ
 
 use super::{
     CompressionRatio, ProductQuantizationConfig, QuantizationMetadata, QuantizationParams,

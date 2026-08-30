@@ -8,8 +8,8 @@
 //!
 //! Why IVF rather than a partially-resident HNSW: graph traversal jumps to arbitrary neighbours,
 //! so serving it from object storage means a network round trip per hop. A centroid layout
-//! decides which partitions matter *before* reading any vectors, which is why Turbopuffer and
-//! DiskANN-style systems are built this way.
+//! decides which partitions matter *before* reading any vectors, which is why disk- and
+//! object-store-resident indexes are built this way.
 //!
 //! Writes land in an in-memory overflow buffer that every search also scans, so a partitioned
 //! table stays writable. [`PartitionedIvfIndex::rebuild`] folds the buffer back into partitions.
@@ -50,9 +50,9 @@ impl Default for PartitionedIvfConfig {
             // nlist on purpose: if every partition can be resident there is no tiering.
             max_resident_partitions: 16,
             max_iterations: 20,
-            // SPANN's defaults, as shipped in chroma: a posting list splits at 100 and merges
-            // below 50. The gap matters — split and merge thresholds that meet would make a
-            // partition oscillate between the two on every maintenance pass.
+            // A posting list splits at 100 and merges below 50. The gap matters — split and
+            // merge thresholds that meet would make a partition oscillate between the two on
+            // every maintenance pass.
             split_threshold: 100,
             merge_threshold: 50,
         }
@@ -108,8 +108,8 @@ struct PartitionedIvfState {
     ///
     /// A set, not a list: this is consulted once per candidate on every query, so a linear
     /// membership test makes each query O(candidates x tombstones). Measured at 10,000
-    /// tombstones, ten queries took 19.7s. weaviate keeps its tombstones in a hash map for the
-    /// same reason and has since gone further, caching a snapshot for the read path.
+    /// tombstones, ten queries took 19.7s. A hash map makes the test O(1); caching a snapshot
+    /// of the set for the read path would take it further still.
     deleted: std::collections::HashSet<RecordId>,
     /// Next partition id to hand out.
     next_partition_id: u64,
@@ -275,8 +275,8 @@ impl PartitionedIvfIndex {
     /// 重跑一遍是不可行的。这里只碰被写入影响到的那几个分区，代价与**新增量**成正比，
     /// 而不是与总量成正比。
     ///
-    /// 阈值取自 SPANN（chroma 的实现用 split=100 / merge=50）：一个列表长过 `split_threshold`
-    /// 就一分为二，短于 `merge_threshold` 就并进最近的邻居。
+    /// 阈值 split=100 / merge=50：一个列表长过 `split_threshold` 就一分为二，短于
+    /// `merge_threshold` 就并进最近的邻居。两个阈值之间留出间隔，避免分区来回振荡。
     pub async fn maintain(&mut self) -> crate::Result<MaintenanceReport> {
         let mut report = MaintenanceReport::default();
 
@@ -445,8 +445,7 @@ impl PartitionedIvfIndex {
         // original loses everything in it. The segment becomes garbage only once a snapshot
         // exists that does not reference it, which is when the storage layer collects it.
         //
-        // chroma's garbage collector states the same rule: nothing a live version references
-        // gets deleted.
+        // The rule is simply: nothing a live version references gets deleted.
     }
 
     /// 写一个分区，并把它放进常驻缓存。

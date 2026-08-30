@@ -114,6 +114,34 @@ cargo test --all-features
 
 **Example**: `wal_performance_test.rs` - WAL write/recovery performance
 
+The ANN validation suite also includes an exact-ground-truth storage benchmark:
+
+```bash
+# Correctness/quality checks
+cargo test --features benchmarks --test search_quality_test -- --nocapture
+cargo test --features benchmarks --test dataset_test -- --nocapture
+
+# 10K-vector storage ANN recall + latency (optimized, unwind-compatible)
+cargo test --profile release-unwind --features benchmarks \
+  --test storage_ann_benchmark_test -- --ignored --nocapture
+
+# Same, at a realistic embedding dimension and against the other selector path.
+# DXMT_ANN_N / DXMT_ANN_DIM / DXMT_ANN_NUM_QUERIES size the corpus;
+# DXMT_ANN_MEMORY_OPT picks which index-selection path is measured (unset = the
+# server default); DXMT_ANN_SEARCH_MODE is fast | normal | accurate.
+DXMT_ANN_DIM=768 DXMT_ANN_MEMORY_OPT=true \
+  cargo test --profile release-unwind --features benchmarks \
+  --test storage_ann_benchmark_test -- --ignored --nocapture
+
+# Criterion filter-selectivity benchmark
+cargo bench --bench filter_performance_bench --no-default-features \
+  --features text-bm25
+```
+
+Synthetic corpora use fixed seeds and compute exact cosine top-k ground truth;
+the SIFT-shaped fixture is explicitly synthetic and is not a substitute for
+the public SIFT/GIST/DEEP datasets.
+
 ### Property-Based Tests (`tests/property/`)
 
 **Purpose**: Verify properties hold across random inputs using `proptest`.

@@ -1,4 +1,4 @@
-// Simple mode API — Chroma-compatible Collections API
+// Simple mode API — zero-config Collections API
 //
 // Embedding strategy (no external model required):
 //   Dense vector:  bag-of-words projection — each term hashes to a bucket in [0, dim),
@@ -256,6 +256,10 @@ pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
         .route("/collections/:name/query", post(query))
         .route("/search/:collection", post(query)) // compat alias
         .route("/health", get(health))
+        .route("/live", get(liveness))
+        .route("/ready", get(readiness))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
         .route("/status", get(status))
         .with_state(state))
 }
@@ -269,6 +273,35 @@ async fn health() -> impl IntoResponse {
         "backend": "intelligent_indexed_storage + bm25_sparse_encoding",
         "version": "1.0.0"
     }))
+}
+
+async fn liveness() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "alive",
+        "mode": "simple",
+        "service": "vectordb",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn readiness(State(state): State<Arc<SimpleModeState>>) -> impl IntoResponse {
+    let storage = state.app.storage.health_snapshot().await;
+    let status = if storage.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if storage.ready { "ready" } else { "not_ready" },
+            "mode": "simple",
+            "service": "vectordb",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": storage.durability_error.clone(),
+            "storage": storage,
+        })),
+    )
 }
 
 async fn status(State(state): State<Arc<SimpleModeState>>) -> impl IntoResponse {
@@ -590,6 +623,11 @@ async fn query(
                 .to_string();
             QueryResult {
                 id: hit.id,
+                // NOTE: this field is a similarity, not a distance — higher is better, and the
+                // list is ordered by it descending, where a field named `distance` invites the
+                // opposite reading. The
+                // name is kept because it is already published; a caller that sorts by it
+                // ascending, as the name invites, gets the worst match first.
                 distance: hit.score,
                 document: text,
                 metadata: hit.payload,

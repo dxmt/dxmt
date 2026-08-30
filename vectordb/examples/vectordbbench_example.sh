@@ -209,7 +209,7 @@ echo ""
 
 echo -e "${YELLOW}Next steps:${NC}"
 echo "1. Run larger datasets (10M, 100M vectors)"
-echo "2. Compare with other databases (Milvus, Qdrant, etc.)"
+echo "2. Compare results across configurations"
 echo "3. Submit results to VectorDBBench leaderboard"
 echo ""
 
