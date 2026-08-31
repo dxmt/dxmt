@@ -14,7 +14,8 @@ echo ""
 echo "1. 检查 vectordbbench 命令..."
 if ! command -v vectordbbench &> /dev/null; then
     echo "❌ vectordbbench 命令未找到"
-    echo "请安装: cd reference/VectorDBBench && pip install -e ."
+    echo "The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout."
+    echo "安装: pip install -e \"$DXMT_VECTORDBBENCH\""
     exit 1
 fi
 echo "✅ vectordbbench 命令可用"

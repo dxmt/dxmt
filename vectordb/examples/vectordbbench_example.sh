@@ -31,7 +31,7 @@ fi
 # Check if vectordbbench is installed
 if ! command -v vectordbbench &> /dev/null; then
     echo -e "${YELLOW}⚠ vectordbbench not found. Please install it with:${NC}"
-    echo -e "  cd reference/VectorDBBench && pip install -e .\n"
+    echo -e "  pip install -e \$DXMT_VECTORDBBENCH   # the DXMT client lives in a VectorDBBench fork, not in this repository\n"
     exit 1
 fi
 

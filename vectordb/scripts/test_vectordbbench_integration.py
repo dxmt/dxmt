@@ -12,13 +12,16 @@ Usage:
     python scripts/test_vectordbbench_integration.py
 """
 
+import os
 import sys
 import time
-from pathlib import Path
 
-# Add VectorDBBench to path
-vectordbbench_path = Path(__file__).parent.parent / "reference" / "VectorDBBench"
-sys.path.insert(0, str(vectordbbench_path))
+# The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout.
+# This used to hardcode reference/VectorDBBench, a directory this repository excludes on
+# purpose, so a clone could never run this script and never said why.
+VECTORDBBENCH = os.environ.get("DXMT_VECTORDBBENCH")
+if VECTORDBBENCH:
+    sys.path.insert(0, VECTORDBBENCH)
 
 try:
     from vectordb_bench.backend.clients import DB
@@ -34,6 +37,8 @@ try:
     print("✓ Successfully imported DXMT client and configs")
 except ImportError as e:
     print(f"✗ Import failed: {e}")
+    if not VECTORDBBENCH:
+        print("  DXMT_VECTORDBBENCH is unset. " + 'The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout.')
     sys.exit(1)
 
 
@@ -248,7 +253,7 @@ def main():
         print("\n✓ All tests passed!")
         print("\nNext steps:")
         print("1. Start DXMT server: cargo run --release -- serve")
-        print("2. Install VectorDBBench: pip install -e reference/VectorDBBench")
+        print("2. Install the fork: pip install -e $DXMT_VECTORDBBENCH")
         print("3. Run benchmark: vectordbbench dxmtauto --case-type Performance768D1M")
     else:
         print("\n✗ Some tests failed. Please check the output above.")

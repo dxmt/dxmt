@@ -8,7 +8,7 @@ CARGO_INCREMENTAL ?= 0
 CARGO_PROFILE_DEV_DEBUG ?= 0
 export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
 
-.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci
+.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall
 
 # Default target - show help
 help:
@@ -25,7 +25,8 @@ help:
 	@echo "  test       - Run all tests"
 	@echo "  test-unit  - Run unit tests only"
 	@echo "  test-integ - Run integration tests"
-	@echo "  bench      - Run benchmarks"
+	@echo "  bench      - Run the criterion benchmarks"
+	@echo "  bench-recall - Measure ANN recall against exact ground truth"
 	@echo "  coverage   - Generate test coverage report"
 	@echo ""
 	@echo "Code Quality:"
@@ -37,11 +38,6 @@ help:
 	@echo "Documentation:"
 	@echo "  docs       - Build documentation"
 	@echo "  docs-open  - Build and open documentation"
-	@echo ""
-	@echo "Cluster Operations:"
-	@echo "  cluster-start  - Start a local cluster"
-	@echo "  cluster-stop   - Stop the local cluster"
-	@echo "  cluster-test   - Test cluster functionality"
 	@echo ""
 	@echo "Docker:"
 	@echo "  docker-build   - Build Docker image"
@@ -57,7 +53,6 @@ setup:
 	@echo "Setting up development environment..."
 	@rustup component add rustfmt clippy
 	@cargo install cargo-audit cargo-tarpaulin
-	@pip3 install -r scripts/requirements.txt || true
 	@echo "Setup complete!"
 
 # Build targets
@@ -99,9 +94,19 @@ test-contract:
 	@echo "Running server/API contract tests..."
 	@cargo test --test api_contract_test
 
+# `filter_performance_bench` declares `required-features = ["text-bm25"]`, and text-bm25
+# left the default set. Without naming it here, cargo silently skips the only bench target
+# and this recipe exits 0 having measured nothing.
 bench:
 	@echo "Running benchmarks..."
-	@cargo bench
+	@cargo bench --features text-bm25
+
+# Recall against an exact brute-force reference, over the production storage path. The test
+# is feature-gated AND #[ignore]d, so nothing reaches it by accident; release-unwind because
+# it asserts, and the numbers mean nothing at opt-level 0.
+bench-recall:
+	@echo "Measuring ANN recall..."
+	@cargo test --profile release-unwind --features benchmarks --test storage_ann_benchmark_test -- --ignored --nocapture
 
 coverage:
 	@echo "Generating test coverage..."
@@ -142,19 +147,6 @@ docs:
 docs-open:
 	@echo "Building and opening documentation..."
 	@cargo doc --no-deps --open
-
-# Cluster operations
-cluster-start:
-	@echo "Starting local cluster..."
-	@scripts/cluster/start_cluster.sh || true
-
-cluster-stop:
-	@echo "Stopping local cluster..."
-	@scripts/cluster/stop_cluster.sh || true
-
-cluster-test:
-	@echo "Testing cluster functionality..."
-	@python3 scripts/test/test_cluster_resilience.py || true
 
 # Docker operations
 docker-build:
@@ -214,24 +206,6 @@ quick-test: fmt lint test-unit
 
 dev: fmt
 	@cargo watch -x run
-
-# Performance testing
-perf-test:
-	@echo "Running performance tests..."
-	@python3 scripts/benchmark/performance-test.py
-
-perf-compare:
-	@echo "Comparing performance with baseline..."
-	@python3 scripts/benchmark/compare-versions.sh || true
-
-# API testing shortcuts
-api-test:
-	@echo "Testing API endpoints..."
-	@./scripts/test/simple_test.sh || true
-
-api-test-detailed:
-	@echo "Running detailed API tests..."
-	@./scripts/test/detailed_test.sh || true
 
 # Default target
 .DEFAULT_GOAL := help
