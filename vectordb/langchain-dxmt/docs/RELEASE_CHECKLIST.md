@@ -361,7 +361,7 @@ Following [Semantic Versioning](https://semver.org/):
 ## Contact
 
 For release questions:
-- GitHub Issues: https://github.com/dxmt/vectordb/issues
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
 - Maintainer: [Contact info]
 
 ---

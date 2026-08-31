@@ -357,7 +357,7 @@ Key features:
 
 ## Contributing
 
-Contributions are welcome! Please see the [main repository](https://github.com/dxmt/vectordb) for contribution guidelines.
+Contributions are welcome! Please see the [main repository](https://github.com/dxmt/dxmt) for contribution guidelines.
 
 ## License
 
@@ -365,11 +365,11 @@ Apache License 2.0 - see [LICENSE](./LICENSE) file for details.
 
 ## Links
 
-- [DXMT VectorDB](https://github.com/dxmt/vectordb)
+- [DXMT VectorDB](https://github.com/dxmt/dxmt)
 - [LlamaIndex](https://github.com/run-llama/llama_index)
-- [Documentation](https://github.com/dxmt/vectordb/tree/main/docs)
+- [Documentation](https://github.com/dxmt/dxmt/tree/main/vectordb/docs)
 
 ## Support
 
-- GitHub Issues: https://github.com/dxmt/vectordb/issues
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
 - Email: support@dxmt.io

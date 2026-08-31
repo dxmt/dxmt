@@ -9,8 +9,8 @@ description = "DXMT VectorDB vector store integration for LlamaIndex"
 authors = ["DXMT Team <support@dxmt.io>"]
 license = "Apache-2.0"
 readme = "README.md"
-homepage = "https://github.com/dxmt/vectordb"
-repository = "https://github.com/dxmt/vectordb"
+homepage = "https://github.com/dxmt/dxmt"
+repository = "https://github.com/dxmt/dxmt"
 keywords = ["llama-index", "vector-store", "dxmt", "vector-database", "embeddings", "rag"]
 classifiers = [
     "Development Status :: 4 - Beta",

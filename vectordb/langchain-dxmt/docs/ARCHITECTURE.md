@@ -280,5 +280,5 @@ As the ecosystem grows:
 ## References
 
 - [LangChain Architecture Blog](https://blog.langchain.com/the-new-langchain-architecture-langchain-core-v0-1-langchain-community-and-a-path-to-langchain-v0-1/)
-- [dxmt-python-sdk Repository](https://github.com/dxmt/vectordb/tree/main/dxmt-python-sdk)
+- [dxmt-python-sdk Repository](https://github.com/dxmt/dxmt/tree/main/vectordb/dxmt-python-sdk)
 - [LangChain VectorStore Interface](https://python.langchain.com/docs/modules/data_connection/vectorstores/)

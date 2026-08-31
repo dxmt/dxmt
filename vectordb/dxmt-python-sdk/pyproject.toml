@@ -49,10 +49,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dxmt/vectordb"
+Homepage = "https://github.com/dxmt/dxmt"
 Documentation = "https://docs.dxmt.io"
-Repository = "https://github.com/dxmt/vectordb"
-Issues = "https://github.com/dxmt/vectordb/issues"
+Repository = "https://github.com/dxmt/dxmt"
+Issues = "https://github.com/dxmt/dxmt/issues"
 
 [tool.setuptools.packages.find]
 include = ["dxmt*"]

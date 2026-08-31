@@ -353,7 +353,7 @@ pip list | grep -E "ragas|langchain|llama-index|openai"
 2. 验证所有依赖都已安装
 3. 检查 OpenAI API 密钥是否有效
 4. 查看 [RAGAS GitHub Issues](https://github.com/explodinggradients/ragas/issues)
-5. 查看 [DXMT GitHub Issues](https://github.com/dxmt/vectordb/issues)
+5. 查看 [DXMT GitHub Issues](https://github.com/dxmt/dxmt/issues)
 
 ---
 

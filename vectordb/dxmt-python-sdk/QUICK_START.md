@@ -150,4 +150,4 @@ asyncio.run(main())
 - 文档: `README.md`
 - 验证报告: `SDK_VERIFICATION_REPORT.md`
 - 示例: `examples/`
-- GitHub Issues: https://github.com/dxmt/vectordb/issues
+- GitHub Issues: https://github.com/dxmt/dxmt/issues

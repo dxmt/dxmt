@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["DXMT Team"]
 description = "A lightweight, horizontally scalable vector database with storage native architecture"
 license = "Apache-2.0"
-repository = "https://github.com/dxmt/vectordb"
+repository = "https://github.com/dxmt/dxmt"
 
 [lib]
 name = "dxmt_vectordb"

@@ -20,8 +20,8 @@ Welcome to DXMT VectorDB! This tutorial will guide you through your first steps 
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/dxmt-vectordb.git
-cd dxmt-vectordb
+git clone https://github.com/dxmt/dxmt.git
+cd dxmt/vectordb
 
 # Build the project
 cargo build --release
@@ -417,13 +417,13 @@ Now that you understand the basics:
 ## Resources
 
 - [Community Discord](https://discord.gg/dxmt)
-- [GitHub Issues](https://github.com/your-org/dxmt-vectordb/issues)
+- [GitHub Issues](https://github.com/dxmt/dxmt/issues)
 
 ## Getting Help
 
 If you run into issues:
-1. Search [existing issues](https://github.com/your-org/dxmt-vectordb/issues)
+1. Search [existing issues](https://github.com/dxmt/dxmt/issues)
 2. Join our [Discord community](https://discord.gg/dxmt)
-3. Create a [new issue](https://github.com/your-org/dxmt-vectordb/issues/new)
+3. Create a [new issue](https://github.com/dxmt/dxmt/issues/new)
 
 Happy vector searching! 🚀

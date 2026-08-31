@@ -883,7 +883,7 @@ vector_store = DXMTVectorDB(
 - [README.md](../README.md) - Quick start guide
 - [Examples](../examples/) - Code examples
 - [Integration Tests](../tests/integration_tests/) - Integration test examples
-- [DXMT Documentation](https://github.com/dxmt/vectordb) - DXMT VectorDB docs
+- [DXMT Documentation](https://github.com/dxmt/dxmt) - DXMT VectorDB docs
 - [LangChain Documentation](https://python.langchain.com/) - LangChain docs
 
 ---

@@ -106,9 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Links
 
-- [Repository](https://github.com/dxmt/vectordb)
+- [Repository](https://github.com/dxmt/dxmt)
 - [PyPI Package](https://pypi.org/project/langchain-dxmt/) (coming soon)
-- [Documentation](https://github.com/dxmt/vectordb/tree/main/langchain-dxmt)
+- [Documentation](https://github.com/dxmt/dxmt/tree/main/vectordb/langchain-dxmt)
 - [LangChain Integration Guide](https://python.langchain.com/docs/integrations/vectorstores/dxmt)
 
 ---

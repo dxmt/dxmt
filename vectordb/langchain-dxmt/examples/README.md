@@ -682,8 +682,8 @@ result = qa_chain.invoke({"query": "Your question"})
 1. 📖 **Read the main README**: `../README.md`
 2. 🧪 **Run the tests**: `pytest tests/`
 3. 📚 **Check the API docs**: https://docs.dxmt.io
-4. 💬 **Join the community**: https://github.com/dxmt/vectordb/discussions
-5. 🐛 **Report issues**: https://github.com/dxmt/vectordb/issues
+4. 💬 **Join the community**: https://github.com/dxmt/dxmt/discussions
+5. 🐛 **Report issues**: https://github.com/dxmt/dxmt/issues
 
 ---
 
@@ -700,7 +700,7 @@ result = qa_chain.invoke({"query": "Your question"})
 
 ### Community
 - [LangChain Discord](https://discord.gg/langchain)
-- [DXMT GitHub Discussions](https://github.com/dxmt/vectordb/discussions)
+- [DXMT GitHub Discussions](https://github.com/dxmt/dxmt/discussions)
 
 ---
 
@@ -708,8 +708,8 @@ result = qa_chain.invoke({"query": "Your question"})
 
 Found a bug in an example? Have an idea for a new example?
 
-1. Open an issue: https://github.com/dxmt/vectordb/issues
-2. Submit a PR: https://github.com/dxmt/vectordb/pulls
+1. Open an issue: https://github.com/dxmt/dxmt/issues
+2. Submit a PR: https://github.com/dxmt/dxmt/pulls
 
 We especially welcome examples for:
 - Domain-specific applications (healthcare, legal, finance)

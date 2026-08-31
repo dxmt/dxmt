@@ -503,5 +503,5 @@ config = HttpDXMTVectorMemoryConfig(
 ---
 
 **需要帮助?**
-- GitHub Issues: https://github.com/your-org/dxmt-vectordb/issues
+- GitHub Issues: https://github.com/dxmt/dxmt/issues
 - 文档: `DXMT_AUTOGEN_INTEGRATION_DESIGN.md`

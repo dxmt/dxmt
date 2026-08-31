@@ -567,8 +567,8 @@ results = client.search(
 
 ```bash
 # Clone repository
-git clone https://github.com/dxmt/vectordb.git
-cd vectordb/dxmt-python-sdk
+git clone https://github.com/dxmt/dxmt.git
+cd dxmt/vectordb/dxmt-python-sdk
 
 # Create virtual environment
 python3 -m venv venv
@@ -615,9 +615,9 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ## Links
 
-- **Homepage**: https://github.com/dxmt/vectordb
+- **Homepage**: https://github.com/dxmt/dxmt
 - **Documentation**: https://docs.dxmt.io
-- **Issues**: https://github.com/dxmt/vectordb/issues
+- **Issues**: https://github.com/dxmt/dxmt/issues
 - **PyPI**: https://pypi.org/project/dxmt-python-sdk/
 
 ## Contributing
