@@ -1,0 +1,62 @@
+name: Nightly benchmarks
+
+# Recall and latency are the two numbers a vector database is judged on, and neither reaches
+# the per-PR gate. The ANN benchmark is behind `--features benchmarks` *and* `#[ignore]`, and
+# the only criterion bench needs `text-bm25`, which left the default feature set — so a
+# regression in index parameters stays invisible until someone remembers to measure by hand.
+# That is how `ef_search` sat inert at a hardcoded 100 while the selector's value went nowhere.
+# This job measures every night and keeps the output, so the next regression shows up as a diff.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    # Not the default `bash -e {0}`: without pipefail, `cargo ... | tee` reports tee's exit
+    # status and a failing benchmark would be reported as a green night.
+    shell: bash
+    working-directory: vectordb
+
+jobs:
+  recall:
+    name: ANN recall and latency
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+
+      # `--ignored` because the benchmark opts out of the normal suite on purpose, and
+      # release-unwind because it asserts — the plain release profile aborts on panic, which
+      # turns a failed recall assertion into a crash with no message.
+      - name: Recall against exact ground truth
+        run: |
+          cargo test --profile release-unwind --features benchmarks \
+            --test storage_ann_benchmark_test -- --ignored --nocapture \
+            | tee recall.txt
+
+      - name: Filter selectivity benchmark
+        run: cargo bench --features text-bm25 | tee filter-bench.txt
+
+      # Kept for 90 days so a regression can be bisected against the last good night rather
+      # than re-measured from scratch.
+      - name: Keep the measurements
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results-${{ github.run_number }}
+          path: |
+            vectordb/recall.txt
+            vectordb/filter-bench.txt
+            vectordb/target/criterion
+          retention-days: 90
+          if-no-files-found: warn
