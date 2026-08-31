@@ -245,6 +245,15 @@ These are real gaps, not roadmap aspirations:
   removed.
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
+- **Bulk loading is slow, and gets slower as the table grows.** Measured here at 768
+  dimensions over the REST API: about 1,270 rows/s into a 20,000-row table and about 240
+  rows/s into a 1,000,000-row one. Loading the million-row Cohere set took roughly 68 minutes,
+  followed by roughly 58 minutes of index building. The two knobs that look like they should
+  help do not: request size makes almost no difference (50 to 5,000 records per request spans
+  1,050-1,270 rows/s), and writer concurrency peaks at two (1,270 -> 1,860 rows/s, then
+  declines). The time goes into building the HNSW graph, not into the wire or the request
+  overhead, so a denser insert format would not change it either. Building the graph in
+  parallel is what would, and is not done.
 
 ## License
 
