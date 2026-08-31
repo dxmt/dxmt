@@ -2361,3 +2361,101 @@ async fn a_search_does_not_hold_the_table_lock_while_it_searches() {
         searching
     );
 }
+
+#[tokio::test]
+async fn a_dropped_table_does_not_come_back_from_the_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let storage = open(&wal_dir).await;
+
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+
+    // The snapshot is the whole precondition. It puts the table in the manifest, and both
+    // `list_tables` and rehydration read non-resident tables from there — correct for an
+    // evicted table, wrong for a deleted one. Delete without snapshotting first and nothing
+    // is wrong to begin with.
+    storage.snapshot().await.unwrap();
+    storage.delete_table("t").await.unwrap();
+
+    let listed: Vec<String> = storage
+        .list_tables()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(
+        !listed.contains(&"t".to_string()),
+        "a dropped table is still listed: {:?}",
+        listed
+    );
+    assert!(
+        storage.get_table("t").await.is_err(),
+        "a dropped table is still readable"
+    );
+
+    // The name has to be reusable, at a different dimension too: a client that drops a
+    // collection and recreates it with a new shape is the case that found this, and it failed
+    // with "Dimension mismatch: expected 1536, got 768" against the resurrected table.
+    storage
+        .create_table(table("t", 8, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("b", vec![0.0; 8])])
+        .await
+        .unwrap();
+    let fresh = storage.get_table("t").await.unwrap();
+    assert_eq!(fresh.dimension, 8, "the old table shadowed the new one");
+}
+
+#[tokio::test]
+async fn a_dropped_table_stays_dropped_across_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+        storage.delete_table("t").await.unwrap();
+
+        // This second snapshot is what made the drop unrecoverable rather than merely
+        // visible: it copied the table forward into the new manifest and advanced
+        // `wal_next_sequence` past the `DeleteTable` entry, so replay no longer covered the
+        // deletion and the table came back with its rows on the next start.
+        storage.snapshot().await.unwrap();
+    }
+
+    let storage = open(&wal_dir).await;
+    let listed: Vec<String> = storage
+        .list_tables()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(
+        !listed.contains(&"t".to_string()),
+        "a dropped table came back after a restart: {:?}",
+        listed
+    );
+    assert!(
+        storage.get_table("t").await.is_err(),
+        "a dropped table is readable after a restart"
+    );
+}
