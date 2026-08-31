@@ -74,6 +74,37 @@ impl IndexAlgorithm {
     ///
     /// The parameters that do force a rebuild are the ones baked into the graph as it is
     /// built. `ef_search` is not one of them: it is read per query.
+    /// Take the parameters that are read per query rather than baked into the graph.
+    ///
+    /// The counterpart to `requires_rebuild_to_reach`. That method leaves `ef_search` out
+    /// of the rebuild triggers because the search path reads it per query — but nothing
+    /// wrote a new value back, so a table kept whatever it was built or restored with and
+    /// a changed default reached it only through a full rebuild. Returns whether anything
+    /// moved, so the caller can say so.
+    pub fn adopt_query_time_params(&mut self, want: &IndexAlgorithm) -> bool {
+        let (current_ef, wanted_ef) = match (self, want) {
+            (
+                IndexAlgorithm::HNSW { ef_search, .. },
+                IndexAlgorithm::HNSW {
+                    ef_search: wanted, ..
+                },
+            )
+            | (
+                IndexAlgorithm::HnswPQ { ef_search, .. },
+                IndexAlgorithm::HnswPQ {
+                    ef_search: wanted, ..
+                },
+            ) => (ef_search, *wanted),
+            // Different families: whatever happens next is a rebuild, not an adoption.
+            _ => return false,
+        };
+        if *current_ef == wanted_ef {
+            return false;
+        }
+        *current_ef = wanted_ef;
+        true
+    }
+
     pub fn requires_rebuild_to_reach(&self, want: &IndexAlgorithm) -> bool {
         match (self, want) {
             (
@@ -215,7 +246,23 @@ impl IntelligentIndexSelector {
         // silently answer with different recall for the same table.
         let m = 16;
         let ef_construction = 200;
-        let ef_search = 128;
+        // Measured, not assumed. Cohere 1M x 768 (the VectorDBBench Performance768D1M
+        // corpus), recall@100 against its ground truth, on the production storage path:
+        //
+        //     ef_search    128     192     256     384     512
+        //     recall@100   0.9135  0.9456  0.9604  0.9751  0.9823
+        //
+        // 128 left the default configuration below the 0.95 that this class of engine is
+        // read against, on the corpus size people benchmark. 256 clears it at roughly twice
+        // the traversal, and p99 stayed under 9 ms; 384 buys 0.015 more recall for another
+        // half again of work. Callers who want the rest of the curve have
+        // `SearchMode::Accurate`, which is 4x this and measured 0.9923.
+        //
+        // One number for every table is a simplification: what makes a query hard is
+        // dimensionality, and this does not look at it. 10K x 64 already returns 1.000 at
+        // 128, so the extra effort is wasted there — cheap in absolute terms, but the
+        // honest fix is to scale with dimension. Tracked in the roadmap.
+        let ef_search = 256;
 
         let vector_memory_mb = (config.dimension * config.dataset_size * 4) / 1024 / 1024;
         let graph_memory_mb = (config.dataset_size * m * 2 * 8) / 1024 / 1024;
@@ -300,5 +347,62 @@ impl IntelligentIndexSelector {
                 memory_usage_mb: hnsw_total_memory_mb,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+
+    fn hnsw(m: usize, ef_construction: usize, ef_search: usize) -> IndexAlgorithm {
+        IndexAlgorithm::HNSW {
+            m,
+            ef_construction,
+            ef_search,
+        }
+    }
+
+    #[test]
+    fn adopting_moves_ef_search_and_nothing_else() {
+        let mut current = hnsw(16, 200, 128);
+        assert!(current.adopt_query_time_params(&hnsw(16, 200, 256)));
+        match current {
+            IndexAlgorithm::HNSW {
+                m,
+                ef_construction,
+                ef_search,
+            } => {
+                assert_eq!(ef_search, 256, "ef_search was not adopted");
+                // The graph parameters are what a rebuild is for. Adopting must not pretend to
+                // change them, or the stored algorithm would stop describing the built graph.
+                assert_eq!(m, 16);
+                assert_eq!(ef_construction, 200);
+            }
+            other => panic!("variant changed: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn adopting_an_unchanged_value_reports_no_move() {
+        let mut current = hnsw(16, 200, 256);
+        assert!(!current.adopt_query_time_params(&hnsw(16, 200, 256)));
+    }
+
+    #[test]
+    fn adopting_across_index_families_does_nothing() {
+        let mut current = hnsw(16, 200, 128);
+        let want = IndexAlgorithm::HnswPQ {
+            m: 16,
+            ef_construction: 200,
+            ef_search: 512,
+            num_subvectors: 96,
+            num_centroids: 256,
+            enable_reranking: false,
+        };
+        assert!(
+            !current.adopt_query_time_params(&want),
+            "a family change is a rebuild, not an adoption"
+        );
+        assert_eq!(current.configured_ef_search(), Some(128));
     }
 }
