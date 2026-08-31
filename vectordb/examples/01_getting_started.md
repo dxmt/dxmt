@@ -412,24 +412,18 @@ retry(ExponentialBackoff::default(), || {
 Now that you understand the basics:
 
 1. **[Tutorial 2: Working with Embeddings](./02_embeddings.md)** - Learn about different embedding models
-2. **[Tutorial 3: Advanced Search](./03_advanced_search.md)** - Master filtering and hybrid search
-3. **[Tutorial 4: Production Deployment](./04_production.md)** - Scale to production
-4. **[Tutorial 5: Performance Tuning](./05_performance.md)** - Optimize for your workload
+2. **[Filtering](./filter_example.md)** - Metadata filters and the operators behind them
 
 ## Resources
 
-- [API Documentation](/docs/api)
-- [Example Applications](/examples)
-- [Performance Benchmarks](/benchmarks)
 - [Community Discord](https://discord.gg/dxmt)
 - [GitHub Issues](https://github.com/your-org/dxmt-vectordb/issues)
 
 ## Getting Help
 
 If you run into issues:
-1. Check the [FAQ](/docs/faq.md)
-2. Search [existing issues](https://github.com/your-org/dxmt-vectordb/issues)
-3. Join our [Discord community](https://discord.gg/dxmt)
-4. Create a [new issue](https://github.com/your-org/dxmt-vectordb/issues/new)
+1. Search [existing issues](https://github.com/your-org/dxmt-vectordb/issues)
+2. Join our [Discord community](https://discord.gg/dxmt)
+3. Create a [new issue](https://github.com/your-org/dxmt-vectordb/issues/new)
 
 Happy vector searching! 🚀

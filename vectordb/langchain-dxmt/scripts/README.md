@@ -405,7 +405,7 @@ When adding new scripts:
 
 For issues with scripts:
 - [GitHub Issues](https://github.com/dxmt/vectordb/issues)
-- [Contributing Guide](../CONTRIBUTING.md)
+- [Contributing Guide](../docs/CONTRIBUTING.md)
 
 ---
 

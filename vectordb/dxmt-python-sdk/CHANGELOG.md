@@ -64,8 +64,6 @@ The full-text search engine (Tantivy) expects specific field names to map to its
 
 For complete details, see:
 - [Field Naming Conventions](README.md#field-naming-conventions)
-- [FIELD_NAMING_STANDARD.md](../FIELD_NAMING_STANDARD.md)
-- [HYBRID_SEARCH_FIX_COMPLETE.md](../HYBRID_SEARCH_FIX_COMPLETE.md)
 
 ### Fixed
 

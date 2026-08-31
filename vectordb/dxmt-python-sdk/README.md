@@ -341,8 +341,6 @@ After updating field names, you need to:
 1. Re-create tables with full-text search
 2. Re-insert all records with corrected field names
 
-For more details, see [FIELD_NAMING_STANDARD.md](../FIELD_NAMING_STANDARD.md).
-
 ## Advanced Features
 
 ### Distance Metrics
@@ -451,8 +449,6 @@ for mem in results:
 - Efficient filtering and semantic search
 - Timestamp tracking (created_at, updated_at)
 - Cost-efficient tiered storage
-
-**Documentation:** See [../docs/mem0_integration.md](../docs/mem0_integration.md) for complete guide
 
 **Examples:** See [../examples/mem0_integration.py](../examples/mem0_integration.py) for comprehensive usage examples
 

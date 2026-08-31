@@ -61,7 +61,7 @@ Official LangChain integration for DXMT VectorDB - a lightweight, horizontally s
 - ✅ **Single Source**: Bug fixes in SDK benefit all integrations
 - ✅ **Reduced Duplication**: ~700 lines of code eliminated
 
-For more details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+For more details, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
 ## Installation
 
@@ -323,11 +323,11 @@ Complete working examples are available in the [`examples/`](./examples/) direct
 
 ## Documentation
 
-- **[Architecture Overview](./ARCHITECTURE.md)** - Package architecture and design decisions
+- **[Architecture Overview](./docs/ARCHITECTURE.md)** - Package architecture and design decisions
 - **[API Reference](./docs/API_REFERENCE.md)** - Complete API documentation
 - **[Testing Guide](./tests/README.md)** - Running and writing tests
-- **[Contributing Guide](./CONTRIBUTING.md)** - How to contribute
-- **[Changelog](./CHANGELOG.md)** - Version history
+- **[Contributing Guide](./docs/CONTRIBUTING.md)** - How to contribute
+- **[Changelog](./docs/CHANGELOG.md)** - Version history
 - **[dxmt-python-sdk Documentation](https://github.com/dxmt/vectordb/tree/main/dxmt-python-sdk)** - Core SDK documentation
 
 ## Development
@@ -358,4 +358,4 @@ Apache License 2.0 - see LICENSE file for details
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Contributions are welcome! Please see [CONTRIBUTING.md](docs/CONTRIBUTING.md) for details.
