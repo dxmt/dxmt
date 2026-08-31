@@ -1769,6 +1769,7 @@ impl IntelligentIndexedStorage {
 
         let mut rebuilt = Vec::new();
         let mut maintained: Vec<String> = Vec::new();
+        let mut retuned: Vec<String> = Vec::new();
 
         for (name, count, current) in candidates {
             // An empty table has nothing to cluster and nothing to gain.
@@ -1791,7 +1792,22 @@ impl IntelligentIndexedStorage {
                 .selected_algorithm;
 
             if !current.requires_rebuild_to_reach(&want) {
-                // The algorithm still fits, but a partitioned index has upkeep to do: writes
+                // The algorithm still fits, but its per-query parameters may have moved.
+                // `ef_search` is read on every search and deliberately does not force a
+                // rebuild — and until this ran, nothing wrote a new one back either, so a
+                // changed default never reached a table that already existed. This is the
+                // cheap half of what a rebuild would have done, and the next snapshot
+                // persists it along with the rest of the algorithm.
+                {
+                    let mut tables = self.write_tables("reevaluate_indexes").await;
+                    if let Some(data) = tables.get_mut(&name) {
+                        if data.selected_algorithm.adopt_query_time_params(&want) {
+                            retuned.push(name.clone());
+                        }
+                    }
+                }
+
+                // A partitioned index also has upkeep to do: writes
                 // since the last pass are sitting in its overflow buffer, and partitions drift
                 // out of their size range as data lands. Doing nothing here would leave the
                 // buffer growing until something forced a full rebuild.
@@ -1835,6 +1851,13 @@ impl IntelligentIndexedStorage {
                 "Maintained {} partitioned index(es): {:?}",
                 maintained.len(),
                 maintained
+            );
+        }
+        if !retuned.is_empty() {
+            info!(
+                "Adopted new query-time parameters for {} table(s) without a rebuild: {:?}",
+                retuned.len(),
+                retuned
             );
         }
         Ok(rebuilt)
@@ -5382,6 +5405,98 @@ mod tests {
     use crate::CreateRecordRequest;
     use crate::RecordId;
     use crate::SearchQuery;
+
+    /// A changed `ef_search` reaches an existing table without rebuilding its graph.
+    ///
+    /// `requires_rebuild_to_reach` leaves `ef_search` out of the rebuild triggers because the
+    /// search path reads it per query, but nothing used to write a new value back: a table
+    /// kept whatever it was built or restored with, so changing the selector's default moved
+    /// nothing until someone paid for a full rebuild. Measured on a 1M-row table: setting the
+    /// default to 256 and restarting left recall at 0.9135, exactly the ef=128 figure.
+    ///
+    /// The expected value is read from a table created now rather than written as a literal,
+    /// so this keeps testing the behaviour and not the current constant.
+    #[tokio::test]
+    async fn a_reevaluation_adopts_a_new_ef_search() -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 1024,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+
+        let table = |name: &str| TableConfig {
+            name: name.to_string(),
+            dimension: 16,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+        };
+        // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
+        // and would make this test vacuous.
+        const ROWS: usize = 6_000;
+        storage.create_table(table("stale")).await?;
+        let records: Vec<CreateRecordRequest> = (0..ROWS)
+            .map(|i| CreateRecordRequest {
+                id: format!("{}", i),
+                vector: (0..16).map(|j| ((i * 16 + j) % 7) as f32).collect(),
+                sparse_vector: None,
+                named_vectors: None,
+                payload: None,
+            })
+            .collect();
+        storage.insert_records("stale", records).await?;
+
+        // Settle the table onto the graph index the selector wants for its size.
+        storage.reevaluate_indexes().await?;
+
+        // What the selector answers today. Asked directly rather than read off a second table
+        // built for the purpose: the assertion is about the selector's answer, and a second
+        // 6,000-row graph build is a minute of the unit suite for nothing.
+        let wanted = storage
+            .decide_algorithm(ROWS, 16, DistanceMetric::Cosine)
+            .await?
+            .selected_algorithm
+            .configured_ef_search()
+            .expect("a graph index with an ef_search");
+
+        // Stand in for a table built or restored under an older default.
+        let stale_ef = wanted / 2 + 1;
+        {
+            let mut tables = storage.write_tables("test").await;
+            let data = tables.get_mut("stale").expect("table present");
+            data.selected_algorithm = IndexAlgorithm::HNSW {
+                m: 16,
+                ef_construction: 200,
+                ef_search: stale_ef,
+            };
+        }
+        assert_ne!(stale_ef, wanted, "the test set up no divergence to close");
+
+        storage.reevaluate_indexes().await?;
+
+        let adopted = storage
+            .describe_index("stale")
+            .await
+            .and_then(|a| a.configured_ef_search())
+            .expect("a graph index with an ef_search");
+        assert_eq!(
+            adopted, wanted,
+            "a re-evaluation left the table on its old ef_search ({} rather than {})",
+            adopted, wanted
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_intelligent_storage_creation() -> Result<(), Box<dyn std::error::Error>> {
