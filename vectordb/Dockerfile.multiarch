@@ -1,0 +1,176 @@
+# =============================================================================
+# DXMT VectorDB - 优化的多架构 Docker 镜像
+# 支持平台: linux/amd64, linux/arm64
+# 针对Docker Hub自动构建优化
+# =============================================================================
+
+ARG RUST_VERSION=latest
+ARG DEBIAN_VERSION=trixie
+
+# -----------------------------------------------------------------------------
+# 第一阶段：构建环境
+# -----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION} AS builder
+
+# 构建参数
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILD_DATE
+ARG VCS_REF
+ARG VERSION
+
+# 显示构建信息
+RUN echo "Building for: $TARGETPLATFORM" && \
+    echo "Building on: $BUILDPLATFORM" && \
+    echo "Target arch: $TARGETARCH"
+
+# 安装构建依赖
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    cmake \
+    git \
+    curl \
+    gcc \
+    g++ \
+    clang \
+    libclang-dev \
+    llvm-dev \
+    libssl-dev \
+    libzstd-dev \
+    zstd \
+    liblz4-dev \
+    liblmdb-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# 根据目标架构设置交叉编译工具
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update && \
+        apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu && \
+        rustup target add aarch64-unknown-linux-gnu && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# 设置Cargo环境
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    RUST_BACKTRACE=1
+
+# 工作目录
+WORKDIR /build
+
+# 复制依赖文件（利用Docker缓存）
+COPY Cargo.toml Cargo.lock ./
+
+# 创建虚拟源文件来预构建依赖（更完整的占位符）
+# 需要为 Cargo.toml 中定义的所有二进制创建占位符
+RUN mkdir -p src/bin && \
+    echo "fn main() { println!(\"placeholder\"); }" > src/main.rs && \
+    echo "pub fn lib() {}" > src/lib.rs && \
+    echo "fn main() {}" > src/bin/vectordb.rs && \
+    echo "fn main() {}" > src/bin/benchmark.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# 复制实际源代码
+COPY src ./src
+COPY tests ./tests
+COPY examples ./examples
+
+# 清理缓存构建并重新编译
+RUN touch src/main.rs src/lib.rs
+
+# 根据架构设置目标和构建
+# 注意：不使用 --bin 标志，让 Cargo 构建所有目标（包括库）
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc && \
+        export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ && \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
+        cargo build --release --target aarch64-unknown-linux-gnu && \
+        strip target/aarch64-unknown-linux-gnu/release/vectordb && \
+        cp target/aarch64-unknown-linux-gnu/release/vectordb /build/vectordb; \
+    else \
+        cargo build --release && \
+        strip target/release/vectordb && \
+        cp target/release/vectordb /build/vectordb; \
+    fi
+
+# 验证二进制文件
+RUN file /build/vectordb && \
+    ls -lh /build/vectordb
+
+# -----------------------------------------------------------------------------
+# 第二阶段：运行时镜像
+# -----------------------------------------------------------------------------
+# 使用与构建阶段相同的 Debian 版本以确保 GLIBC 兼容性
+FROM --platform=$TARGETPLATFORM debian:${DEBIAN_VERSION}-slim AS runtime
+
+# 运行时标签
+ARG BUILD_DATE
+ARG VCS_REF
+ARG VERSION
+
+# 添加OCI标签
+LABEL org.opencontainers.image.title="DXMT VectorDB" \
+      org.opencontainers.image.description="Lightweight, horizontally scalable vector database for AI applications" \
+      org.opencontainers.image.authors="DXMT Team" \
+      org.opencontainers.image.vendor="DXMT" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.url="https://github.com/dxmt/vectordb" \
+      org.opencontainers.image.source="https://github.com/dxmt/vectordb" \
+      org.opencontainers.image.documentation="https://docs.dxmt.io" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}"
+
+# 安装运行时依赖
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libzstd1 \
+    liblz4-1 \
+    liblmdb0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建非root用户
+RUN groupadd -r vectordb && \
+    useradd -r -g vectordb -s /bin/false vectordb && \
+    mkdir -p /data /config /logs && \
+    chown -R vectordb:vectordb /data /config /logs
+
+# 复制二进制文件
+COPY --from=builder --chown=vectordb:vectordb /build/vectordb /usr/local/bin/vectordb
+
+# 复制配置文件
+COPY --chown=vectordb:vectordb config /config
+
+# 切换到非root用户
+USER vectordb
+
+# 暴露端口
+EXPOSE 9999
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:9999/health || exit 1
+
+# 数据卷
+VOLUME ["/data", "/config", "/logs"]
+
+# 工作目录
+WORKDIR /data
+
+# 环境变量
+ENV VECTORDB_DATA_DIR=/data \
+    VECTORDB_CONFIG_DIR=/config \
+    VECTORDB_LOG_DIR=/logs \
+    RUST_LOG=info \
+    PORT=9999
+
+# 启动命令
+ENTRYPOINT ["/usr/local/bin/vectordb"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "9999"]

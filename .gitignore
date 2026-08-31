@@ -19,3 +19,21 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Third-party source read for comparison. Never belongs in this repository —
+# it is someone else's code, and its presence invites commits that describe
+# this project in terms of theirs.
+reference/
+**/reference/
+
+# Internal design notes, release plans and anything else not meant to ship with
+# the source. Keep it here rather than scattering ignore rules by filename —
+# a path says "this is not shared", a `*.md` rule only says "this is markdown".
+design/
+
+# Agent working instructions. They stay at their paths so Claude Code still loads them
+# in this checkout, but they are candid about what is not wired up yet and are not shared.
+CLAUDE.md
+
+# Per-checkout agent settings. Local to whoever is working here, never shared.
+.claude/settings.local.json

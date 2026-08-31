@@ -1,0 +1,253 @@
+# DXMT VectorDB
+
+A vector database written in Rust. HNSW, HNSW-PQ and product quantization with runtime SIMD
+dispatch, hybrid retrieval and a query language behind a REST API, plus a zero-config
+collection mode. Full-text search (Tantivy), GraphQL, WebSocket, Swagger and S3 are opt-in
+build features — see [Feature flags](#feature-flags) — so a default build is the minimal
+supported single-node server and nothing more.
+
+> **Status: Alpha development, not production-ready.** Records are held in memory and made durable by a write-ahead log,
+> replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
+> `./data/wal`; set `DB_WAL_DIR` to move it. When configured, snapshots, WAL chunks and
+> partition segments are mirrored to object storage, but that mirror is still experimental and
+> local WAL remains the readiness boundary. Distributed/cluster code exists but is not
+> production-ready. See [Known Limitations](#known-limitations).
+
+Anything this README does not describe is experimental, even when its module compiles or has
+standalone tests.
+
+## Quick Start
+
+Requires a recent stable Rust toolchain.
+
+```bash
+# Build
+cargo build --release
+
+# Zero-config mode — collection API, auto-tuned
+./target/release/vectordb serve --simple --memory-limit 1024
+
+# Standard mode
+./target/release/vectordb serve --host 0.0.0.0 --port 9999
+```
+
+Verify it's up:
+
+```bash
+curl http://localhost:9999/health
+# Readiness is the deployment probe; it returns 503 after a local WAL durability failure.
+curl -f http://localhost:9999/ready
+```
+
+Swagger, GraphQL and WebSocket are optional integrations and are not compiled into the default
+single-node build. Build them explicitly when needed, then opt in per process:
+
+```bash
+cargo build --release --features api-swagger,api-graphql,api-ws
+./target/release/vectordb serve --swagger --graphql --websocket
+```
+
+| Flag          | Endpoint                                            |
+| ------------- | --------------------------------------------------- |
+| `--swagger`   | `GET /api/docs`, spec at `/api/docs/openapi.json`    |
+| `--graphql`   | `POST /graphql`                                      |
+| `--websocket` | `GET /ws` (upgrade)                                  |
+
+`GET /api/v1/tables/{name}/stats` reports `resident`: whether the table was in memory when
+asked. A query against an evicted table rehydrates it transparently, so without this a caller
+has no way to know the next one will pay for a fetch from object storage.
+
+`GET /health/metrics` (also `/api/v1/health/metrics`) includes the local durability frontier:
+`storage.wal_next_sequence`, `storage.last_wal_sync_at`, `storage.last_snapshot_at`, and
+`storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
+timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
+
+### MCP server
+
+The database also speaks the Model Context Protocol over stdio, backed by the same durable
+storage as the HTTP server:
+
+```bash
+./target/release/vectordb mcp --wal-dir ./data/wal
+```
+
+Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_vector`,
+`create_table`, `list_tables`, `get_table_info`, `delete_vectors`, `hybrid_search`):
+
+```json
+{
+  "mcpServers": {
+    "dxmt-vectordb": {
+      "command": "/path/to/vectordb",
+      "args": ["mcp", "--wal-dir", "/path/to/data/wal"]
+    }
+  }
+}
+```
+
+## Architecture
+
+Both server modes converge on one storage implementation, `IntelligentIndexedStorage`:
+
+```
+serve --simple  →  /collections/*   (zero-config collection API, at the root)
+serve           →  /api/v1/*
+                        ↓
+             IntelligentIndexedStorage
+               ├─ records: in-process HashMap      ← all data lives here
+               ├─ wal:     ./data/wal              ← durability; replayed on startup
+               ├─ snapshot: ./data/wal/snapshot    ← every 300s, on SIGTERM, after a rebuild
+               └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
+```
+
+When object storage is configured, the write-ahead log and snapshots are also mirrored there. A
+table nothing has queried for a while can be dropped from memory entirely — records and index —
+leaving its snapshot segments as the recovery source. The next query rehydrates it
+transparently. Without object storage, the durable source remains the local WAL and snapshot
+directory. This behavior is tuned by `DB_EVICTION_INTERVAL_SECS`.
+
+A table whose vectors exceed `DB_PARTITION_THRESHOLD_MB` (default 512) switches to a partitioned
+IVF index
+— on its next `index/rebuild`, or automatically at the next re-evaluation sweep: centroids stay in memory and each partition is an immutable segment
+in object storage, fetched only when a query probes it. That bounds memory for a single table
+larger than RAM, which table-level eviction cannot do.
+
+This path is still experimental.
+
+Index selection is re-checked on a timer (`DB_REINDEX_INTERVAL_SECS`, default 900) and the
+index is rebuilt when a table's size no longer suits the algorithm it has:
+
+| Dataset size | Algorithm         |
+| ------------ | ----------------- |
+| < 5K         | BruteForce        |
+| 5K–100K      | HNSW              |
+| 100K–1M      | HNSW-PQ           |
+| ≥ 1M         | DiskANN Enhanced  |
+
+One caveat: this table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
+a separate path that yields HNSW below 100K and HNSW-PQ above it.
+
+`CREATE TABLE` still picks from a fixed estimate, because a new table has no rows to size
+against — the periodic re-evaluation is what corrects it. `POST /api/v1/tables/{name}/index/rebuild`
+forces it immediately. A rebuild builds the replacement before swapping it in, so queries keep
+being served by the old index throughout.
+
+Interfaces: REST (`src/api/handlers.rs`), a zero-config simple mode
+(`src/api/simple_core.rs`), GraphQL, and WebSocket. Standard-mode REST routes are served
+under `/api/v1`; system probes are available at the root (`/health`, `/live`, `/ready`) and
+under the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
+
+## Configuration
+
+Configuration is read from the environment. Copy `.env.example` and adjust:
+
+```bash
+DB_HOST=0.0.0.0
+DB_PORT=9999
+DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
+DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables persistence
+DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
+DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
+DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
+DB_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
+DB_MEMORY_CACHE_SIZE=512    # MB
+DB_COMPRESSION=zstd         # zstd | lz4 | none
+```
+
+`DB_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
+`IntelligentIndexedStorage` unconditionally.
+
+Object storage credentials come from the environment only — never commit them. They are read
+into the configuration. Object-storage mirroring is opt-in and best effort:
+
+```bash
+export DB_OBJECT_STORAGE_PROVIDER=s3
+export DB_S3_BUCKET=<your-bucket>
+export DB_S3_ENDPOINT=<your-endpoint>
+export DB_AWS_ACCESS_KEY_ID=<your-access-key>
+export DB_AWS_SECRET_ACCESS_KEY=<your-secret-key>
+```
+
+### Feature Flags
+
+Default: `tokio-runtime`, `basic-storage`.
+
+Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `s3-storage`, `storage-lmdb`,
+`storage-rocksdb`, `gpu` (CUDA), `cluster`, `multimodal`, `embeddings`, `python` (PyO3
+bindings), `metrics`, `hf-datasets`.
+
+## Client SDKs
+
+| Directory                          | Package                                  |
+| ---------------------------------- | ---------------------------------------- |
+| `dxmt-python-sdk/`                 | Python client + framework integrations   |
+| `dxmt-js-sdk/`                     | TypeScript/JavaScript client             |
+| `langchain-dxmt/`                  | LangChain vector store                   |
+| `llama-index-vector-stores-dxmt/`  | LlamaIndex vector store                  |
+
+The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI, MetaGPT,
+and AutoGen. See `dxmt-python-sdk/README.md`.
+
+## Development
+
+```bash
+make build              # Debug build
+make release            # Release build
+make test               # Rust tests
+cargo test --lib        # Unit tests only
+make fmt && make lint   # rustfmt + clippy
+make verify             # the full gate: fmt-check, clippy -D warnings, unit + all integration tests
+make verify-core        # the same without the full integration suite, for iterating
+```
+
+The broader legacy scripts under `scripts/` are not part of the Alpha quality gate.
+
+Note that a default `cargo test` does not run the feature-gated suites — the benchmark,
+dataset, adaptive-index and LMDB tests compile to zero tests without their features. CI's
+`optional-features` job compiles them; run them locally with, for example,
+`cargo test --features benchmarks --test dataset_test`.
+
+The examples in `examples/` that process PDFs do not ship with a corpus. Supply your own:
+
+```bash
+DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
+```
+
+## Known Limitations
+
+These are real gaps, not roadmap aspirations:
+
+- **A snapshot is the only copy of what it covers**, so back it up — see
+  [docs/operations/backup-restore.md](docs/operations/backup-restore.md).
+  Briefly: The WAL is compacted once a snapshot
+  verifies, so the entries below that point exist nowhere else. The snapshot is read back before
+  the log is trimmed, and an unreadable snapshot makes the server refuse to start rather than
+  come up empty — but back up `data/wal/snapshot/` like the data it is.
+- **One fsync per write batch.** Durability is paid for synchronously; there is no group
+  commit yet.
+- **`POST /api/v1/tables/{name}/records` caps a request at 10,000 records** and returns
+  `Validation failed` above that.
+- **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
+  uploaded when configured, and a fresh node can recover from them, but remote upload failures
+  are logged without failing an already durable local write. Multi-process coordination and full
+  failure-injection coverage are not yet part of the Alpha contract.
+- **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It rejects sparse/text fusion
+  with `NOT_IMPLEMENTED` instead of silently discarding query components. For BM25 use
+  `/search/text`; for real vector+text fusion use `/search/hybrid`.
+- **Two implementations behind one name.** `search/quantization/product_quantizer.rs` is a
+  52-line stand-in whose `encode_batch` returns zeroed codes; the working one is
+  `product_quantization.rs`. Only the latter is reachable from the live path.
+- **`DiskANN`, `ScaNN` and `QuantizedIVF`** fall back to brute force in
+  `create_index_instance`.
+- **Multimodal** (`src/multimodal/`) — returns placeholder embeddings, pending a stable
+  `ort` 2.0 release.
+- **No gRPC.** It is not built; `api/grpc.rs` was never declared by `api/mod.rs` and has been
+  removed.
+- **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
+  `embeddings`.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+    Copyright 2026 上海点线面体信息科技有限公司 (Shanghai Dianxianmianti Information Technology Co., Ltd.)
