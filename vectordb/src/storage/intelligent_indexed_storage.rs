@@ -356,6 +356,19 @@ pub struct IntelligentIndexedStorage {
     /// and one `.meta` file per evicted table — off disk on every call.
     snapshot_sequence: Arc<StdMutex<Option<u64>>>,
     snapshot_table_names: Arc<StdMutex<Vec<String>>>,
+    /// Tables dropped since the last snapshot was installed.
+    ///
+    /// `delete_table` takes the table out of `tables` and logs `WalEntry::DeleteTable`, but
+    /// the snapshot on disk still holds it, and the snapshot writer copies every
+    /// *non-resident* table forward on the premise that an evicted table cannot have
+    /// changed. A dropped table is non-resident and has changed. Without this set it is
+    /// carried into every later snapshot: it keeps appearing in `list_tables`, the next
+    /// access rehydrates it, and the drop stops being durable at all — each snapshot
+    /// advances `wal_next_sequence` past the `DeleteTable` entry that recorded it, so a
+    /// restart brings the table back with its rows.
+    ///
+    /// Emptied of the names a snapshot has just written without.
+    dropped_since_snapshot: Arc<StdMutex<std::collections::HashSet<String>>>,
     snapshot_failures: AtomicU64,
     last_snapshot_error: Arc<StdMutex<Option<String>>>,
 
@@ -916,6 +929,7 @@ impl IntelligentIndexedStorage {
             last_snapshot_at: Arc::new(StdMutex::new(None)),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
+            dropped_since_snapshot: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             snapshot_failures: AtomicU64::new(0),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "gpu")]
@@ -1271,6 +1285,10 @@ impl IntelligentIndexedStorage {
         // An evicted table cannot have changed: every write path calls ensure_resident first,
         // so it would be back in memory before anything touched it. Its segments from the
         // previous snapshot are therefore still current and can simply be copied across.
+        // Taken before the carry-forward and cleared after the install, so a drop that
+        // arrives while this snapshot is being written is held over for the next one
+        // rather than forgotten by it.
+        let dropped_at_start = self.dropped_table_names();
         if dir.exists() {
             if let Ok(previous) = crate::search::index_persistence::read_index::<SnapshotManifest>(
                 &dir.join("manifest"),
@@ -1278,7 +1296,9 @@ impl IntelligentIndexedStorage {
             ) {
                 let resident: std::collections::HashSet<String> = names.iter().cloned().collect();
                 for (i, name) in previous.names.iter().enumerate() {
-                    if resident.contains(name) {
+                    // A dropped table is non-resident too. Copying it forward is what made
+                    // DROP non-durable: the deletion never reached the snapshot lineage.
+                    if resident.contains(name) || dropped_at_start.contains(name) {
                         continue;
                     }
                     let from = format!("t{}", i);
@@ -1334,6 +1354,15 @@ impl IntelligentIndexedStorage {
         }
         std::fs::rename(&staging, &dir)?;
         let _ = std::fs::remove_dir_all(&previous);
+
+        // The manifest that is now live does not name them, so the tombstones have done
+        // their job. Remove exactly the ones this snapshot filtered — a drop that landed
+        // mid-write is not in that set and stays for the next snapshot.
+        if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
+            for name in &dropped_at_start {
+                dropped.remove(name);
+            }
+        }
 
         // Push the segments to object storage before trimming the log. If the upload fails the
         // local snapshot is still there and still verified, so compaction stays safe — but the
@@ -1511,6 +1540,11 @@ impl IntelligentIndexedStorage {
             // Resident tables sit in Warm so the policy's demote_to_cold rule applies to them;
             // it only demotes out of Warm.
             self.tier_policy.set_current_tier(table_name, Tier::Warm);
+            return Ok(());
+        }
+        // Not resident because it was dropped, not because it was evicted. The manifest on
+        // disk still names it; loading from there would undo the delete.
+        if self.dropped_table_names().contains(table_name) {
             return Ok(());
         }
         let Some(ref wal_dir) = self.wal_dir else {
@@ -3593,8 +3627,9 @@ impl IntelligentIndexedStorage {
 
         let resident: std::collections::HashSet<String> =
             out.iter().map(|t| t.name.clone()).collect();
+        let dropped = self.dropped_table_names();
         for (i, name) in manifest.names.iter().enumerate() {
-            if resident.contains(name) {
+            if resident.contains(name) || dropped.contains(name) {
                 continue;
             }
             // Read only the metadata; the point of eviction is not to pull the records back in
@@ -3635,6 +3670,15 @@ impl IntelligentIndexedStorage {
     }
 
     /// 删除表
+    /// Names dropped since the last snapshot. The manifest on disk still lists them, so
+    /// every reader of it has to filter them out until a snapshot is written without them.
+    fn dropped_table_names(&self) -> std::collections::HashSet<String> {
+        self.dropped_since_snapshot
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default()
+    }
+
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
         self.ensure_writable()?;
         let table_id = {
@@ -3649,6 +3693,13 @@ impl IntelligentIndexedStorage {
             table: name.to_string(),
         }])
         .await?;
+
+        // The removal is durable in the log now, but the snapshot on disk still carries
+        // this table and the snapshot writer would copy it forward. Record it so the next
+        // snapshot leaves it out, and so nothing lists or rehydrates it in the meantime.
+        if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
+            dropped.insert(name.to_string());
+        }
 
         // A partitioned table leaves its segments in object storage. Delete them here rather
         // than at the next snapshot: the table is out of `tables` and its removal is in the
