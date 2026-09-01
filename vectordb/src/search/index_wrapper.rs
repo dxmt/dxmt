@@ -48,6 +48,26 @@ impl IndexWrapper {
         index.add(id.to_string(), vector).await
     }
 
+    /// Insert several vectors under one write lock.
+    ///
+    /// Calling `insert` in a loop took the lock once per record — a batch of two
+    /// thousand acquired and released it two thousand times — and gave the index no
+    /// chance to do the batch any faster than one at a time.
+    pub async fn insert_batch(&self, items: Vec<(RecordId, DenseVector)>) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut index = self.index.write().await;
+        index
+            .add_batch(
+                items
+                    .into_iter()
+                    .map(|(id, v)| (id.to_string(), v))
+                    .collect(),
+            )
+            .await
+    }
+
     /// Search for nearest neighbors - requires read lock
     pub async fn search(&self, query: &DenseVector, k: usize) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;

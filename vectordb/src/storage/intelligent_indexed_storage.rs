@@ -673,10 +673,29 @@ async fn insertion_processor(
                 }
             }
 
-            for (id, vector, named) in to_insert {
-                index.insert(id.clone(), vector).await?;
+            // One call for the whole batch, not one per record. A graph index spends almost
+            // all of an insert searching the graph, which only reads it, so handed the batch
+            // it can do that half on every core; handed one record at a time it cannot, and
+            // an eight-core machine built the index on one of them. The batch also takes the
+            // index's write lock once rather than once per record.
+            let named_work: Vec<(RecordId, Option<HashMap<String, DenseVector>>)> = to_insert
+                .iter()
+                .map(|(id, _, named)| (id.clone(), named.clone()))
+                .collect();
+            index
+                .insert_batch(
+                    to_insert
+                        .into_iter()
+                        .map(|(id, vector, _)| (id, vector))
+                        .collect(),
+                )
+                .await?;
 
-                if let (Some(ref collection), Some(named_vecs)) = (&named_indexes, named) {
+            // Named vector spaces are a separate index per space; nothing measured points at
+            // them, so they keep the straightforward loop.
+            if let Some(ref collection) = named_indexes {
+                for (id, named) in named_work {
+                    let Some(named_vecs) = named else { continue };
                     for (vec_name, vec_data) in named_vecs {
                         if let Some(named_idx) = collection.get_index(&vec_name).await {
                             if let Err(e) = named_idx.insert(id.clone(), vec_data).await {

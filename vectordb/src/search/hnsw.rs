@@ -199,6 +199,13 @@ impl Ord for Result {
     }
 }
 
+/// Below this many nodes a batch is inserted one record at a time. Early records are
+/// what the rest of the graph hangs off, so letting a batch of them plan without seeing
+/// each other costs real recall; past this size it does not.
+const PARALLEL_PLAN_MIN_NODES: usize = 10_000;
+/// Below this many records the rayon fan-out costs more than the serial loop.
+const PARALLEL_PLAN_MIN_BATCH: usize = 16;
+
 #[derive(Serialize, Deserialize)]
 pub struct HnswIndex {
     #[serde(skip, default = "default_rng")]
@@ -776,6 +783,163 @@ impl HnswIndex {
             .collect())
     }
 
+    /// Insert a batch, planning every record in parallel and writing them in order.
+    ///
+    /// The expensive half of an insert is `ef_construction` layer expansions per record, and
+    /// it only reads the graph; the half that mutates is pointer work. So the whole batch
+    /// plans against the graph as it stood when the batch arrived, on every core, and the
+    /// plans are then applied one at a time. No node-level locking, no change to how the
+    /// graph is stored.
+    ///
+    /// What this gives up: records in the same batch cannot link to each other, because none
+    /// of them is in the graph while the others are planning. Against a graph many times the
+    /// batch's size that is a rounding error. Against a small one it is not — early records
+    /// are what the rest of the graph hangs off — so below `PARALLEL_PLAN_MIN_NODES` this
+    /// inserts one at a time and gives up nothing.
+    pub fn insert_batch(&mut self, items: Vec<(RecordId, DenseVector)>) -> crate::Result<()> {
+        if items.len() < PARALLEL_PLAN_MIN_BATCH
+            || self.nodes.len() < PARALLEL_PLAN_MIN_NODES
+            || self.entry_point.is_none()
+        {
+            for (id, vector) in items {
+                self.insert(id, vector)?;
+            }
+            return Ok(());
+        }
+
+        // Levels come from the RNG, which needs `&mut self`. Draw them here so that planning
+        // needs nothing but `&self`. Duplicate ids are rejected against the graph and against
+        // the rest of the batch — the serial path catches the second one because the first is
+        // already in `id_to_idx`, and nothing in this batch is yet.
+        let mut prepared: Vec<(RecordId, DenseVector, usize)> = Vec::with_capacity(items.len());
+        let mut seen: HashSet<RecordId> = HashSet::with_capacity(items.len());
+        for (id, vector) in items {
+            if self.id_to_idx.contains_key(&id) || !seen.insert(id.clone()) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "ID {} already exists",
+                    id
+                )));
+            }
+            let vector = self.prepare(vector);
+            let level = self.select_level();
+            prepared.push((id, vector, level));
+        }
+
+        // One entry point for the whole batch, for the same reason: it is what everything
+        // plans against, and `apply_planned_insert` uses the same value so a plan and its
+        // application never disagree about which layers were searched.
+        let entry = self.entry_point.unwrap();
+        let entry_level = self.nodes[entry].level;
+
+        let plans: Vec<Vec<Vec<usize>>> = prepared
+            .par_iter()
+            .map(|(_, vector, level)| self.plan_neighbors(vector, *level, entry, entry_level))
+            .collect();
+
+        for ((id, vector, level), neighbors) in prepared.into_iter().zip(plans) {
+            self.apply_planned_insert(id, vector, level, neighbors, entry_level);
+        }
+        Ok(())
+    }
+
+    /// The read-only half of an insert: which neighbours this vector should link to, per layer.
+    ///
+    /// Identical to what `insert` computes; kept separate so it can run with `&self`.
+    fn plan_neighbors(
+        &self,
+        vector: &DenseVector,
+        level: usize,
+        entry: usize,
+        entry_level: usize,
+    ) -> Vec<Vec<usize>> {
+        let mut per_layer = vec![Vec::new(); level + 1];
+        let mut curr_nearest = vec![entry];
+
+        for lc in ((level + 1).min(entry_level + 1)..=entry_level).rev() {
+            curr_nearest = self.search_layer_closest(vector, curr_nearest, lc);
+        }
+
+        for lc in (0..=level.min(entry_level)).rev() {
+            let candidates = self.search_layer(
+                vector,
+                curr_nearest.clone(),
+                self.config.ef_construction,
+                lc,
+                None,
+            );
+            let m = if lc == 0 {
+                self.config.max_m0
+            } else {
+                self.config.m
+            };
+            per_layer[lc] = self.select_neighbors_heuristic(&candidates, m);
+            if lc > 0 {
+                curr_nearest = candidates.into_iter().map(|(idx, _)| idx).collect();
+            }
+        }
+        per_layer
+    }
+
+    /// The writing half: the same node, links and pruning `insert` would have produced.
+    fn apply_planned_insert(
+        &mut self,
+        id: RecordId,
+        vector: DenseVector,
+        level: usize,
+        neighbors_per_layer: Vec<Vec<usize>>,
+        entry_level: usize,
+    ) {
+        let idx = self.nodes.len();
+        let mut node = Node {
+            id: id.clone(),
+            vector,
+            level,
+            neighbors: vec![Vec::new(); level + 1],
+            deleted: false,
+        };
+        for (lc, chosen) in neighbors_per_layer.into_iter().enumerate() {
+            node.neighbors[lc] = chosen;
+        }
+        self.nodes.push(node);
+        self.id_to_idx.insert(id, idx);
+
+        for lc in 0..=level.min(entry_level) {
+            let neighbors = self.nodes[idx].neighbors[lc].clone();
+            for neighbor_idx in neighbors {
+                if lc >= self.nodes[neighbor_idx].neighbors.len() {
+                    continue;
+                }
+                self.nodes[neighbor_idx].neighbors[lc].push(idx);
+
+                let max_neighbors = if lc == 0 {
+                    self.config.max_m0
+                } else {
+                    self.config.m
+                };
+                if self.nodes[neighbor_idx].neighbors[lc].len() > max_neighbors {
+                    // Prune by the same heuristic used to choose links in the first place,
+                    // exactly as the serial path does.
+                    let neighbor_vec = self.nodes[neighbor_idx].vector.clone();
+                    let mut neighbors_with_dist: Vec<_> = self.nodes[neighbor_idx].neighbors[lc]
+                        .iter()
+                        .map(|&n_idx| {
+                            let dist =
+                                self.calculate_distance(&neighbor_vec, &self.nodes[n_idx].vector);
+                            (n_idx, dist)
+                        })
+                        .collect();
+                    neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    self.nodes[neighbor_idx].neighbors[lc] =
+                        self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
+                }
+            }
+        }
+
+        if level > entry_level {
+            self.entry_point = Some(idx);
+        }
+    }
+
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
         let vector = self.prepare(vector);
         if self.id_to_idx.contains_key(&id) {
@@ -903,6 +1067,10 @@ impl std::fmt::Debug for HnswIndex {
 impl crate::search::index_traits::VectorIndex for HnswIndex {
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
+    }
+
+    async fn add_batch(&mut self, items: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        self.insert_batch(items)
     }
 
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
@@ -1095,5 +1263,138 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
             index_size_bytes: vectors_bytes + graph_bytes,
             build_time_ms: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_insert_tests {
+    use super::*;
+
+    fn corpus(n: usize, dim: usize, seed: u64) -> Vec<(RecordId, DenseVector)> {
+        // A clustered distribution, not uniform noise: uniform random unit vectors are the
+        // hardest case for any graph index and the least like real embeddings, so a
+        // regression in graph quality shows up more honestly on something with structure.
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..n)
+            .map(|i| {
+                let centre = (i % 16) as f32;
+                let v: DenseVector = (0..dim)
+                    .map(|d| centre + rng.gen::<f32>() * 0.5 + (d as f32) * 0.01)
+                    .collect();
+                (format!("v{i:06}"), v)
+            })
+            .collect()
+    }
+
+    fn index() -> HnswIndex {
+        HnswIndex::new(DistanceMetric::Cosine, Some(HnswConfig::default()))
+    }
+
+    fn live_count(index: &HnswIndex) -> usize {
+        index.nodes.iter().filter(|n| !n.deleted).count()
+    }
+
+    fn recall_against(
+        index_a: &HnswIndex,
+        index_b: &HnswIndex,
+        queries: &[DenseVector],
+        k: usize,
+    ) -> (f64, f64) {
+        // Both indexes answer the same queries; each is scored against the exact answer taken
+        // from a brute-force pass over the same vectors.
+        let mut hits_a = 0usize;
+        let mut hits_b = 0usize;
+        let mut total = 0usize;
+        for q in queries {
+            let exact: HashSet<String> = {
+                let mut scored: Vec<(String, f32)> = index_a
+                    .nodes
+                    .iter()
+                    .filter(|n| !n.deleted)
+                    .map(|n| (n.id.clone(), index_a.calculate_distance(q, &n.vector)))
+                    .collect();
+                scored.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+                scored.into_iter().take(k).map(|(id, _)| id).collect()
+            };
+            let got_a: HashSet<String> = index_a
+                .search(q, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let got_b: HashSet<String> = index_b
+                .search(q, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            hits_a += got_a.intersection(&exact).count();
+            hits_b += got_b.intersection(&exact).count();
+            total += k;
+        }
+        (hits_a as f64 / total as f64, hits_b as f64 / total as f64)
+    }
+
+    #[test]
+    fn a_batched_build_is_as_good_as_a_serial_one() {
+        let dim = 32;
+        let items = corpus(12_000, dim, 0xB47C);
+
+        let mut serial = index();
+        for (id, v) in items.clone() {
+            serial.insert(id, v).unwrap();
+        }
+
+        let mut batched = index();
+        for chunk in items.chunks(500) {
+            batched.insert_batch(chunk.to_vec()).unwrap();
+        }
+
+        assert_eq!(
+            live_count(&serial),
+            live_count(&batched),
+            "the two paths stored different counts"
+        );
+
+        let queries: Vec<DenseVector> = items.iter().step_by(400).map(|(_, v)| v.clone()).collect();
+        let (serial_recall, batched_recall) = recall_against(&serial, &batched, &queries, 10);
+
+        println!("serial recall@10 {serial_recall:.4}, batched recall@10 {batched_recall:.4}");
+        // Held to the serial path rather than to a fixed number: this is asking whether
+        // batching cost anything, not whether HNSW is good.
+        assert!(
+            batched_recall >= serial_recall - 0.02,
+            "batched build lost recall: serial {serial_recall:.4}, batched {batched_recall:.4}"
+        );
+    }
+
+    #[test]
+    fn a_batch_below_the_threshold_takes_the_serial_path() {
+        // Small graphs fall back on purpose: the first records are what everything else hangs
+        // off, and letting them plan without seeing each other is not a rounding error there.
+        let items = corpus(64, 8, 7);
+        let mut idx = index();
+        idx.insert_batch(items.clone()).unwrap();
+        assert_eq!(live_count(&idx), items.len());
+        // Every record must be findable -- a fallback that silently dropped rows would still
+        // pass a count check on an empty graph, so query for one.
+        let (_, probe) = &items[13];
+        let hits = idx.search(probe, 1).unwrap();
+        assert_eq!(hits[0].0, items[13].0, "the fallback path lost a record");
+    }
+
+    #[test]
+    fn a_duplicate_inside_one_batch_is_rejected() {
+        // The serial path catches a repeat because the first copy is already in `id_to_idx`.
+        // Nothing in a batch is, while the batch is being planned, so the batch has to check
+        // itself.
+        let mut idx = index();
+        let mut items = corpus(11_000, 8, 3);
+        let seeded = items[0].clone();
+        items.push(seeded);
+        assert!(
+            idx.insert_batch(items).is_err(),
+            "a repeated id inside one batch was accepted"
+        );
     }
 }

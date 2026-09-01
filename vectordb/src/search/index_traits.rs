@@ -5,6 +5,18 @@ use std::collections::HashSet;
 #[async_trait]
 pub trait VectorIndex: Send + Sync {
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()>;
+    /// Add several vectors at once.
+    ///
+    /// The default is the loop every caller used to write by hand. Graph indexes
+    /// override it: an insert is mostly a read-only search, so a batch can do that half
+    /// on every core, which is the difference between building an index on one core and
+    /// on all of them.
+    async fn add_batch(&mut self, items: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        for (id, vector) in items {
+            self.add(id, vector).await?;
+        }
+        Ok(())
+    }
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>>;
     /// Search with an explicit ef_search hint (only meaningful for graph-based indexes like HNSW).
     /// Default implementation ignores the hint and calls `search`.
