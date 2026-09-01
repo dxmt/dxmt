@@ -101,7 +101,7 @@ memmap2 = "0.9"
 zerocopy = { version = "0.7", features = ["derive"] }
 
 # Concurrency primitives
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["serde"] }
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
 dashmap = "5.5"

@@ -5866,10 +5866,7 @@ mod tests {
         table: &str,
         ids: &[&str],
         dim: usize,
-    ) -> (
-        InsertRequest,
-        oneshot::Receiver<crate::Result<Vec<Record>>>,
-    ) {
+    ) -> (InsertRequest, oneshot::Receiver<crate::Result<Vec<Record>>>) {
         let (response_tx, response_rx) = oneshot::channel();
         (
             InsertRequest {

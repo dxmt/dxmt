@@ -1,6 +1,7 @@
 use crate::precomputed_query::PrecomputedQuery;
 use crate::search::simd_distance::SimdDistance;
 use crate::types::{DenseVector, DistanceMetric, RecordId};
+use parking_lot::RwLock;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -132,13 +133,43 @@ mod visited {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One vector and its outgoing edges, one edge list per layer.
+///
+/// The edge lists are behind a lock each because pruning a neighbour's list is where insert
+/// spends most of its CPU (about 78% of the profile, all of it distance calculations), and a
+/// single lock over the whole graph is what kept that on one core. Per-node locking is what
+/// Qdrant, Weaviate and hnswlib all do for the same reason.
+///
+/// `RwLock` is not `Clone`, so neither is `Node` — nothing ever cloned a whole one; the
+/// clones in this file are all of a single field. `serde(rename)` keeps the field's name in
+/// self-describing formats, and parking_lot's `serde` impl is transparent, so the bincode
+/// encoding is byte-for-byte what `Vec<Vec<usize>>` wrote. `hnsw_v2_files_still_load` pins
+/// that against a file written before this change.
+#[derive(Debug, Serialize, Deserialize)]
 struct Node {
     id: RecordId,
     vector: DenseVector,
     level: usize,
-    neighbors: Vec<Vec<usize>>,
+    #[serde(rename = "neighbors")]
+    links: Vec<RwLock<Vec<usize>>>,
     deleted: bool, // Tombstone flag for soft deletion
+}
+
+impl Node {
+    /// A fresh node with `level + 1` empty edge lists.
+    fn new(id: RecordId, vector: DenseVector, level: usize) -> Self {
+        Node {
+            id,
+            vector,
+            level,
+            links: (0..=level).map(|_| RwLock::new(Vec::new())).collect(),
+            deleted: false,
+        }
+    }
+
+    fn layers(&self) -> usize {
+        self.links.len()
+    }
 }
 
 // For the candidate priority queue (min-heap, closer is better)
@@ -398,8 +429,12 @@ impl HnswIndex {
 
             // Explore neighbors
             let node = &self.nodes[current.idx];
-            if layer < node.neighbors.len() {
-                for &neighbor_idx in &node.neighbors[layer] {
+            if layer < node.layers() {
+                // The guard is held across the walk, which reads only `vector` and `deleted`
+                // on the neighbours and takes no second lock — so a writer pruning some other
+                // node cannot be waiting on this one.
+                let links = node.links[layer].read();
+                for &neighbor_idx in links.iter() {
                     if neighbor_idx >= self.nodes.len()
                         || visited.contains(neighbor_idx)
                         || self.nodes[neighbor_idx].deleted
@@ -492,20 +527,22 @@ impl HnswIndex {
             }
 
             let node = &self.nodes[current.idx];
-            if layer < node.neighbors.len() {
-                let neighbors = &node.neighbors[layer];
-
-                // Parallel distance calculation for neighbors (layer 0 optimization);
-                // filtered-out neighbours are excluded from distance computation entirely.
-                let candidate_neighbors: Vec<usize> = neighbors
-                    .iter()
-                    .filter(|&&neighbor_idx| {
-                        neighbor_idx < self.nodes.len()
-                            && !visited.contains(neighbor_idx)
-                            && !self.nodes[neighbor_idx].deleted
-                    })
-                    .copied()
-                    .collect();
+            if layer < node.layers() {
+                // Copy the ids out and drop the guard before the `par_iter` below: handing a
+                // lock guard to rayon means holding it for as long as the pool takes to
+                // schedule, and a writer pruning this same node would block behind it.
+                let candidate_neighbors: Vec<usize> = {
+                    let links = node.links[layer].read();
+                    links
+                        .iter()
+                        .filter(|&&neighbor_idx| {
+                            neighbor_idx < self.nodes.len()
+                                && !visited.contains(neighbor_idx)
+                                && !self.nodes[neighbor_idx].deleted
+                        })
+                        .copied()
+                        .collect()
+                };
 
                 // Mark all as visited before computing distances (prevents re-entry)
                 for &idx in &candidate_neighbors {
@@ -622,8 +659,9 @@ impl HnswIndex {
             }
 
             let node = &self.nodes[current.idx];
-            if layer < node.neighbors.len() {
-                for &neighbor_idx in &node.neighbors[layer] {
+            if layer < node.layers() {
+                let links = node.links[layer].read();
+                for &neighbor_idx in links.iter() {
                     if neighbor_idx >= self.nodes.len()
                         || visited.contains(neighbor_idx)
                         || self.nodes[neighbor_idx].deleted
@@ -826,18 +864,44 @@ impl HnswIndex {
         }
 
         // One entry point for the whole batch, for the same reason: it is what everything
-        // plans against, and `apply_planned_insert` uses the same value so a plan and its
-        // application never disagree about which layers were searched.
+        // plans against, and phases B and C use the same value so a plan and its application
+        // never disagree about which layers were searched.
         let entry = self.entry_point.unwrap();
         let entry_level = self.nodes[entry].level;
 
+        // A. Plan. Read-only, `&self`, every core.
         let plans: Vec<Vec<Vec<usize>>> = prepared
             .par_iter()
             .map(|(_, vector, level)| self.plan_neighbors(vector, *level, entry, entry_level))
             .collect();
 
-        for ((id, vector, level), neighbors) in prepared.into_iter().zip(plans) {
-            self.apply_planned_insert(id, vector, level, neighbors, entry_level);
+        // B. Append the nodes and their own forward edges. Serial `&mut self`, but pure
+        // pushes -- for a 380-record group at 768 dimensions this is about a megabyte of
+        // memcpy. The whole batch is appended before phase C starts, so `nodes` does not
+        // grow while C runs and no index into it can be invalidated.
+        let mut applied: Vec<(usize, usize)> = Vec::with_capacity(plans.len());
+        let mut new_entry: Option<usize> = None;
+        for ((id, vector, level), plan) in prepared.into_iter().zip(plans) {
+            let idx = self.push_planned_node(id, vector, level, plan);
+            if level > entry_level {
+                // Last one wins, exactly as the one-at-a-time path did: every plan in this
+                // batch was made against `entry`, so a mid-batch change would make some plans
+                // disagree with the graph they were built for.
+                new_entry = Some(idx);
+            }
+            applied.push((idx, level));
+        }
+
+        // C. Reverse edges and pruning. `&self`, one edge lock at a time, every core. This
+        // is the phase worth parallelising: the pruning inside `link_back` is where the
+        // insert path spent about 78% of its CPU, and it was serial.
+        let graph: &Self = self;
+        applied
+            .par_iter()
+            .for_each(|&(idx, level)| graph.link_back_all(idx, level, entry_level));
+
+        if let Some(idx) = new_entry {
+            self.entry_point = Some(idx);
         }
         Ok(())
     }
@@ -880,64 +944,86 @@ impl HnswIndex {
         per_layer
     }
 
-    /// The writing half: the same node, links and pruning `insert` would have produced.
-    fn apply_planned_insert(
+    /// Append a planned node with its own forward edges, and nothing else.
+    ///
+    /// This is the only part of applying a plan that needs `&mut self`: it pushes onto
+    /// `nodes` and `id_to_idx`. The reverse edges, which is where the work is, go through
+    /// `link_back_all` under `&self`. `apply_planned_insert`, which did both for one node at
+    /// a time, is what that split replaced -- a batch cannot run the second half on every
+    /// core if it is interleaved with the first.
+    fn push_planned_node(
         &mut self,
         id: RecordId,
         vector: DenseVector,
         level: usize,
         neighbors_per_layer: Vec<Vec<usize>>,
-        entry_level: usize,
-    ) {
+    ) -> usize {
         let idx = self.nodes.len();
-        let mut node = Node {
-            id: id.clone(),
-            vector,
-            level,
-            neighbors: vec![Vec::new(); level + 1],
-            deleted: false,
-        };
+        let mut node = Node::new(id.clone(), vector, level);
         for (lc, chosen) in neighbors_per_layer.into_iter().enumerate() {
-            node.neighbors[lc] = chosen;
+            *node.links[lc].get_mut() = chosen;
         }
         self.nodes.push(node);
         self.id_to_idx.insert(id, idx);
+        idx
+    }
 
+    /// Add the reverse edge on every neighbour `idx` chose, pruning any list that overflows.
+    ///
+    /// `&self`, so a batch can run this for many nodes at once.
+    fn link_back_all(&self, idx: usize, level: usize, entry_level: usize) {
         for lc in 0..=level.min(entry_level) {
-            let neighbors = self.nodes[idx].neighbors[lc].clone();
-            for neighbor_idx in neighbors {
-                if lc >= self.nodes[neighbor_idx].neighbors.len() {
-                    continue;
-                }
-                self.nodes[neighbor_idx].neighbors[lc].push(idx);
-
-                let max_neighbors = if lc == 0 {
-                    self.config.max_m0
-                } else {
-                    self.config.m
-                };
-                if self.nodes[neighbor_idx].neighbors[lc].len() > max_neighbors {
-                    // Prune by the same heuristic used to choose links in the first place,
-                    // exactly as the serial path does.
-                    let neighbor_vec = self.nodes[neighbor_idx].vector.clone();
-                    let mut neighbors_with_dist: Vec<_> = self.nodes[neighbor_idx].neighbors[lc]
-                        .iter()
-                        .map(|&n_idx| {
-                            let dist =
-                                self.calculate_distance(&neighbor_vec, &self.nodes[n_idx].vector);
-                            (n_idx, dist)
-                        })
-                        .collect();
-                    neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                    self.nodes[neighbor_idx].neighbors[lc] =
-                        self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
-                }
+            // Copy the plan out and drop the guard before taking any write lock, so that no
+            // thread ever holds two edge locks at once.
+            let chosen = self.nodes[idx].links[lc].read().clone();
+            for neighbor_idx in chosen {
+                self.link_back(neighbor_idx, lc, idx);
             }
         }
+    }
 
-        if level > entry_level {
-            self.entry_point = Some(idx);
+    /// Add the reverse edge `neighbor_idx -> new_idx` on layer `lc`, pruning the neighbour's
+    /// edge list back to its cap if that push overflowed it.
+    ///
+    /// This is the expensive half of an insert. The pruning branch recomputes the distance
+    /// from the neighbour to every one of its links, and that is where about 78% of insert
+    /// CPU went in the profile — the part a single graph-wide write lock kept on one core.
+    ///
+    /// It takes `&self` and exactly one lock, the neighbour's edge list on this one layer.
+    /// `calculate_distance` and `select_neighbors_heuristic` read `nodes[..].vector`, which is
+    /// never behind a lock. **Nothing here holds two locks at once, so the parallel phase
+    /// cannot deadlock** however the batch interleaves.
+    ///
+    /// `insert` and `apply_planned_insert` used to carry a verbatim copy of this each.
+    fn link_back(&self, neighbor_idx: usize, lc: usize, new_idx: usize) {
+        let neighbor = &self.nodes[neighbor_idx];
+        if lc >= neighbor.layers() {
+            return;
         }
+        let max_neighbors = if lc == 0 {
+            self.config.max_m0
+        } else {
+            self.config.m
+        };
+
+        let mut links = neighbor.links[lc].write();
+        links.push(new_idx);
+        if links.len() <= max_neighbors {
+            return;
+        }
+
+        // Prune by the same heuristic used to choose links in the first place. Keeping the
+        // `max_neighbors` closest instead would undo the diversity on exactly the nodes that
+        // matter most -- the ones popular enough to overflow.
+        let mut neighbors_with_dist: Vec<_> = links
+            .iter()
+            .map(|&n_idx| {
+                let dist = self.calculate_distance(&neighbor.vector, &self.nodes[n_idx].vector);
+                (n_idx, dist)
+            })
+            .collect();
+        neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        *links = self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
     }
 
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
@@ -952,13 +1038,7 @@ impl HnswIndex {
         let idx = self.nodes.len();
         let level = self.select_level();
 
-        let mut node = Node {
-            id: id.clone(),
-            vector: vector.clone(),
-            level,
-            neighbors: vec![Vec::new(); level + 1],
-            deleted: false, // New nodes are not deleted
-        };
+        let mut node = Node::new(id.clone(), vector.clone(), level);
 
         if self.nodes.is_empty() || self.entry_point.is_none() {
             self.nodes.push(node);
@@ -992,9 +1072,7 @@ impl HnswIndex {
                 self.config.m
             };
 
-            let neighbors = self.select_neighbors_heuristic(&candidates, m);
-
-            node.neighbors[lc] = neighbors.clone();
+            *node.links[lc].get_mut() = self.select_neighbors_heuristic(&candidates, m);
 
             // Update curr_nearest for next layer
             if lc > 0 {
@@ -1006,42 +1084,9 @@ impl HnswIndex {
         self.nodes.push(node);
         self.id_to_idx.insert(id, idx);
 
-        // Add bidirectional links
-        for lc in 0..=level.min(entry_level) {
-            let neighbors = self.nodes[idx].neighbors[lc].clone();
-            for neighbor_idx in neighbors {
-                if lc < self.nodes[neighbor_idx].neighbors.len() {
-                    self.nodes[neighbor_idx].neighbors[lc].push(idx);
-
-                    // Prune if needed
-                    let max_neighbors = if lc == 0 {
-                        self.config.max_m0
-                    } else {
-                        self.config.m
-                    };
-
-                    if self.nodes[neighbor_idx].neighbors[lc].len() > max_neighbors {
-                        // Prune by the same heuristic used to choose links in the first place.
-                        // Keeping the `max_neighbors` closest instead would undo the diversity on
-                        // exactly the nodes that matter most — the ones popular enough to overflow.
-                        let neighbor_vec = self.nodes[neighbor_idx].vector.clone();
-                        let mut neighbors_with_dist: Vec<_> = self.nodes[neighbor_idx].neighbors
-                            [lc]
-                            .iter()
-                            .map(|&n_idx| {
-                                let dist = self
-                                    .calculate_distance(&neighbor_vec, &self.nodes[n_idx].vector);
-                                (n_idx, dist)
-                            })
-                            .collect();
-
-                        neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                        self.nodes[neighbor_idx].neighbors[lc] =
-                            self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
-                    }
-                }
-            }
-        }
+        // Add bidirectional links -- the same `link_back` the batch path uses, so the two
+        // cannot drift apart again.
+        self.link_back_all(idx, level, entry_level);
 
         // Update entry point if new node has higher layer
         if level > entry_level {
@@ -1140,7 +1185,11 @@ impl HnswIndex {
     fn reconnect_neighbors(&mut self, deleted_idx: usize) -> crate::Result<()> {
         // Clone the data we need before borrowing mutably
         let deleted_level = self.nodes[deleted_idx].level;
-        let deleted_neighbors: Vec<Vec<usize>> = self.nodes[deleted_idx].neighbors.clone();
+        let deleted_neighbors: Vec<Vec<usize>> = self.nodes[deleted_idx]
+            .links
+            .iter()
+            .map(|l| l.read().clone())
+            .collect();
 
         // For each layer where the deleted node had connections
         for (layer, neighbors_in_layer) in
@@ -1152,9 +1201,11 @@ impl HnswIndex {
             for &neighbor_idx in &neighbors_of_deleted {
                 if neighbor_idx < self.nodes.len()
                     && !self.nodes[neighbor_idx].deleted
-                    && layer < self.nodes[neighbor_idx].neighbors.len()
+                    && layer < self.nodes[neighbor_idx].layers()
                 {
-                    self.nodes[neighbor_idx].neighbors[layer].retain(|&n| n != deleted_idx);
+                    self.nodes[neighbor_idx].links[layer]
+                        .write()
+                        .retain(|&n| n != deleted_idx);
                 }
             }
 
@@ -1188,17 +1239,20 @@ impl HnswIndex {
                     // Add connections to maintain connectivity (limit to M/2 to avoid over-connection)
                     let max_new_connections = self.config.m / 2;
                     for (new_neighbor, _) in distances.into_iter().take(max_new_connections) {
-                        if layer < self.nodes[neighbor_a].neighbors.len() {
-                            let neighbors = &mut self.nodes[neighbor_a].neighbors[layer];
-                            if !neighbors.contains(&new_neighbor) {
-                                neighbors.push(new_neighbor);
+                        if layer < self.nodes[neighbor_a].layers() {
+                            let mut links_a = self.nodes[neighbor_a].links[layer].write();
+                            if !links_a.contains(&new_neighbor) {
+                                links_a.push(new_neighbor);
+                                // Released before the reverse edge is taken: one lock at a
+                                // time here too, so this path can never be the odd one out
+                                // that deadlocks against a concurrent insert.
+                                drop(links_a);
 
                                 // Add bidirectional edge
-                                if layer < self.nodes[new_neighbor].neighbors.len() {
-                                    let reverse_neighbors =
-                                        &mut self.nodes[new_neighbor].neighbors[layer];
-                                    if !reverse_neighbors.contains(&neighbor_a) {
-                                        reverse_neighbors.push(neighbor_a);
+                                if layer < self.nodes[new_neighbor].layers() {
+                                    let mut reverse = self.nodes[new_neighbor].links[layer].write();
+                                    if !reverse.contains(&neighbor_a) {
+                                        reverse.push(neighbor_a);
                                     }
                                 }
                             }
@@ -1253,7 +1307,7 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
             .nodes
             .iter()
             .map(|n| {
-                n.neighbors.iter().map(|l| l.len()).sum::<usize>() * std::mem::size_of::<usize>()
+                n.links.iter().map(|l| l.read().len()).sum::<usize>() * std::mem::size_of::<usize>()
             })
             .sum();
 
@@ -1395,6 +1449,77 @@ mod batch_insert_tests {
         assert!(
             idx.insert_batch(items).is_err(),
             "a repeated id inside one batch was accepted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::search::index_traits::SerializableIndex;
+
+    /// An index file written before the edge lists went behind locks, by the code at
+    /// c7e1cbe: 200 clustered 16-d vectors, `HnswConfig::default()`, cosine.
+    const HNSW_V2_GOLDEN: &[u8] = include_bytes!("testdata/hnsw_v2_golden.idx");
+
+    #[test]
+    fn hnsw_v2_files_still_load() {
+        // `Vec<RwLock<Vec<usize>>>` is only safe to swap in for `Vec<Vec<usize>>` if it
+        // encodes the same bytes -- otherwise every index file on every existing deployment
+        // becomes unreadable on upgrade, and the kind would have to go to "hnsw-v3". bincode
+        // is positional and parking_lot's serde impl is transparent, so it should be a
+        // no-op. Should be is not a result: this reads a file written by the old struct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("golden.idx");
+        std::fs::write(&path, HNSW_V2_GOLDEN).unwrap();
+
+        let loaded =
+            HnswIndex::load(&path).expect("an hnsw-v2 file written before the lock change");
+
+        assert_eq!(
+            loaded.nodes.len(),
+            200,
+            "lost nodes across the format change"
+        );
+        assert_eq!(loaded.entry_point, Some(172), "entry point moved");
+        assert_eq!(loaded.id_to_idx.len(), 200);
+
+        // The edges have to survive too, not just the node count -- a graph that read back
+        // with every edge list empty would still pass the assertions above.
+        let edges: usize = loaded
+            .nodes
+            .iter()
+            .map(|n| n.links.iter().map(|l| l.read().len()).sum::<usize>())
+            .sum();
+        assert!(edges > 200, "edges did not survive the load: {edges}");
+
+        // And it has to answer queries: every node must find itself.
+        for probe in [0usize, 57, 199] {
+            let node = &loaded.nodes[probe];
+            let hits = loaded.search(&node.vector, 1).unwrap();
+            assert_eq!(
+                hits[0].0, node.id,
+                "loaded graph could not find node {probe}"
+            );
+        }
+
+        // The nodes region has to come back byte for byte -- that is the part this change
+        // could have altered. The whole file cannot be compared: `id_to_idx` is a `HashMap`,
+        // bincode writes it in iteration order, and that order is randomised per process, so
+        // a golden file diverges from a faithful rewrite at the byte where the map starts
+        // (44,926 of 49,124 here) no matter what the node layout does.
+        //
+        // Offsets: a 23-byte envelope (8 magic + 4 version + 4 kind length + "hnsw-v2"),
+        // then the struct's fields in declaration order with `rng` skipped.
+        let prefix = bincode::serialize(&loaded.config).unwrap().len()
+            + bincode::serialize(&loaded.distance_metric).unwrap().len();
+        let start = 23 + prefix;
+        let nodes_bytes = bincode::serialize(&loaded.nodes).unwrap();
+        assert_eq!(
+            &HNSW_V2_GOLDEN[start..start + nodes_bytes.len()],
+            &nodes_bytes[..],
+            "`Vec<RwLock<Vec<usize>>>` does not encode like the `Vec<Vec<usize>>` that wrote \
+             this file -- the index kind must go to \"hnsw-v3\""
         );
     }
 }
