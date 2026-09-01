@@ -525,6 +525,14 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
     }
 }
 
+/// How many queued requests one pass may merge, and how many records that merge may cover.
+///
+/// Both caps bound the added latency of the request at the head of the queue, not throughput.
+/// Coalescing only ever consumes requests that are *already* waiting: under a single writer
+/// `try_recv` finds nothing, a group is one request, and the behaviour is what it was before.
+const MAX_COALESCED_REQUESTS: usize = 32;
+const MAX_COALESCED_RECORDS: usize = 50_000;
+
 /// 后台插入处理器 - 单线程处理所有插入，消除锁竞争
 async fn insertion_processor(
     mut rx: mpsc::UnboundedReceiver<InsertRequest>,
@@ -532,46 +540,137 @@ async fn insertion_processor(
 ) {
     info!("Insertion processor started");
 
-    while let Some(req) = rx.recv().await {
-        let start_time = std::time::Instant::now();
+    // Requests taken off the channel but not yet placed in a group. A group is a run of
+    // requests naming one table and sharing no record id; the first request that breaks either
+    // condition stays here and heads the next group. Per-table arrival order is therefore
+    // preserved, and nothing starves — every pass consumes at least the request at the front.
+    let mut pending: std::collections::VecDeque<InsertRequest> = std::collections::VecDeque::new();
 
-        // Two phases, and the split is the point. Phase one holds the tables write lock just
-        // long enough to update the record map and the payload/sparse indexes — cheap, bounded
-        // work. Phase two does the expensive part, inserting into the vector index, with the
-        // lock released.
-        //
-        // Holding the lock across the whole batch is what this replaces: a 5,000-record request
-        // blocked every reader, `GET /tables` included, until the last vector was in the graph.
-        // Requests are still serialised against each other — this task processes one at a time —
-        // so nothing about ordering or visibility changes. Records only become searchable once
-        // the index insert lands, exactly as before, because search goes through the index.
-        let result = async {
-            let (index, named_indexes, table_meta, to_remove, to_insert, records) = {
-                let mut tables = TimedWrite {
-                    guard: tables.write().await,
-                    who: "insertion_processor",
-                    since: std::time::Instant::now(),
-                };
+    loop {
+        if pending.is_empty() {
+            match rx.recv().await {
+                Some(req) => pending.push_back(req),
+                None => break,
+            }
+        }
+        // Whatever else has piled up meanwhile. `try_recv` does not wait, so an idle queue
+        // costs one failed poll per pass.
+        while pending.len() < MAX_COALESCED_REQUESTS {
+            match rx.try_recv() {
+                Ok(req) => pending.push_back(req),
+                Err(_) => break,
+            }
+        }
 
-                let table_data = tables
-                    .get_mut(&req.table_name)
-                    .ok_or_else(|| crate::Error::TableNotFound(req.table_name.clone()))?;
+        let group = take_group(&mut pending);
+        process_insert_group(group, &tables).await;
+    }
 
-                let expected_dim = table_data.table.dimension;
-                let mut records = Vec::new();
-                let mut to_remove: Vec<RecordId> = Vec::new();
-                let mut to_insert: Vec<PendingIndexInsert> = Vec::new();
-                let mut new_records_count = 0;
+    info!("Insertion processor stopped");
+}
 
-                for request in req.records {
-                    let record_id = request.id.clone();
+/// Take off the front of `pending` the longest run one pass can handle as a single batch.
+///
+/// Two requests may share a group only if they name the same table and touch no id in common.
+/// The table condition is what makes one merged index insert possible at all. The id condition
+/// is what keeps upsert honest: were the same id written twice inside one group, the merged
+/// batch would carry it twice, and the index would be asked to drop a vector it had not yet
+/// been given. Splitting on the overlap costs one small group and needs no de-duplication.
+fn take_group(pending: &mut std::collections::VecDeque<InsertRequest>) -> Vec<InsertRequest> {
+    let first = pending
+        .pop_front()
+        .expect("insertion_processor only calls this with a non-empty queue");
+    let table = first.table_name.clone();
+    let mut ids: std::collections::HashSet<RecordId> =
+        first.records.iter().map(|r| r.id.clone()).collect();
+    let mut staged = first.records.len();
+    let mut group = vec![first];
 
-                    if !request.vector.is_empty() && request.vector.len() != expected_dim {
-                        return Err(crate::Error::DimensionMismatch {
+    while group.len() < MAX_COALESCED_REQUESTS && staged < MAX_COALESCED_RECORDS {
+        let Some(next) = pending.front() else { break };
+        if next.table_name != table || next.records.iter().any(|r| ids.contains(&r.id)) {
+            break;
+        }
+        let next = pending
+            .pop_front()
+            .expect("front() just returned a request");
+        ids.extend(next.records.iter().map(|r| r.id.clone()));
+        staged += next.records.len();
+        group.push(next);
+    }
+    group
+}
+
+/// Apply one group of requests and answer each of them.
+///
+/// Two phases, and the split is the point. Phase one holds the tables write lock just long
+/// enough to update the record map and the payload/sparse indexes — cheap, bounded work. Phase
+/// two does the expensive part, inserting into the vector index, with the lock released.
+///
+/// Holding the lock across the whole batch is what this replaces: a 5,000-record request
+/// blocked every reader, `GET /tables` included, until the last vector was in the graph.
+/// Records still become searchable only once the index insert lands, because search goes
+/// through the index; what a group changes is that requests merged into it land together
+/// rather than one after another.
+async fn process_insert_group(
+    group: Vec<InsertRequest>,
+    tables: &Arc<RwLock<HashMap<String, IntelligentTableData>>>,
+) {
+    let start_time = std::time::Instant::now();
+    let table_name = group[0].table_name.clone();
+
+    // Each request keeps its own responder, so one bad request can be answered and dropped
+    // without failing the requests it happened to be merged with.
+    let mut senders: Vec<Option<oneshot::Sender<crate::Result<Vec<Record>>>>> =
+        Vec::with_capacity(group.len());
+    let mut batches: Vec<Vec<CreateRecordRequest>> = Vec::with_capacity(group.len());
+    for req in group {
+        senders.push(Some(req.response_tx));
+        batches.push(req.records);
+    }
+
+    let result: crate::Result<Vec<(usize, Vec<Record>)>> = async {
+        let (index, named_indexes, table_meta, to_remove, to_insert, owners) = {
+            let mut tables = TimedWrite {
+                guard: tables.write().await,
+                who: "insertion_processor",
+                since: std::time::Instant::now(),
+            };
+
+            let table_data = tables
+                .get_mut(&table_name)
+                .ok_or_else(|| crate::Error::TableNotFound(table_name.clone()))?;
+
+            let expected_dim = table_data.table.dimension;
+            let mut to_remove: Vec<RecordId> = Vec::new();
+            let mut to_insert: Vec<PendingIndexInsert> = Vec::new();
+            // Which slice of the work belongs to which responder.
+            let mut owners: Vec<(usize, Vec<Record>)> = Vec::new();
+            let mut new_records_count = 0;
+            let mut staged = 0usize;
+
+            for (slot, batch) in batches.into_iter().enumerate() {
+                // Dimensions are checked across the whole request before any of it is applied.
+                // Checking as it went, as the single-request version did, left the records
+                // ahead of the mismatch in the table map but out of the index; a merged group
+                // would additionally have to decide what that meant for the requests alongside.
+                // One pass first answers both: a bad request changes nothing and fails alone.
+                if let Some(bad) = batch
+                    .iter()
+                    .find(|r| !r.vector.is_empty() && r.vector.len() != expected_dim)
+                {
+                    if let Some(tx) = senders[slot].take() {
+                        let _ = tx.send(Err(crate::Error::DimensionMismatch {
                             expected: expected_dim,
-                            actual: request.vector.len(),
-                        });
+                            actual: bad.vector.len(),
+                        }));
                     }
+                    continue;
+                }
+
+                let mut records = Vec::with_capacity(batch.len());
+                for request in batch {
+                    let record_id = request.id.clone();
 
                     // UPSERT: an existing id keeps its created_at and bumps its version, and its
                     // old vector has to leave the index before the new one arrives.
@@ -634,134 +733,167 @@ async fn insertion_processor(
                     records.push(record);
                 }
 
-                table_data.table.record_count += new_records_count;
-                table_data.table.updated_at = chrono::Utc::now();
+                staged += records.len();
+                owners.push((slot, records));
+            }
 
-                let insert_time = start_time.elapsed();
-                let throughput = records.len() as f64 / insert_time.as_secs_f64();
-                if let Ok(mut stats) = table_data.performance_stats.lock() {
-                    stats.insert_throughput = (stats.insert_throughput * 0.9) + (throughput * 0.1);
-                }
+            table_data.table.record_count += new_records_count;
+            table_data.table.updated_at = chrono::Utc::now();
 
-                (
-                    table_data.index.clone(),
-                    table_data.named_indexes.clone(),
-                    table_data.table.clone(),
-                    to_remove,
-                    to_insert,
-                    records,
-                )
-            };
+            let insert_time = start_time.elapsed();
+            let throughput = staged as f64 / insert_time.as_secs_f64();
+            if let Ok(mut stats) = table_data.performance_stats.lock() {
+                stats.insert_throughput = (stats.insert_throughput * 0.9) + (throughput * 0.1);
+            }
 
-            // ── lock released ──
+            (
+                table_data.index.clone(),
+                table_data.named_indexes.clone(),
+                table_data.table.clone(),
+                to_remove,
+                to_insert,
+                owners,
+            )
+        };
 
-            for id in &to_remove {
-                if let Err(e) = index.remove(id).await {
-                    warn!("Failed to remove old vector for {}: {}", id, e);
-                }
-                if let Some(collection) = &named_indexes {
-                    for name in collection.list_index_names().await {
-                        if let Some(named_index) = collection.get_index(&name).await {
-                            if let Err(e) = named_index.remove(id).await {
-                                warn!(
-                                    "Failed to remove old named vector '{}' for {}: {}",
-                                    name, id, e
-                                );
-                            }
+        // ── lock released ──
+
+        for id in &to_remove {
+            if let Err(e) = index.remove(id).await {
+                warn!("Failed to remove old vector for {}: {}", id, e);
+            }
+            if let Some(collection) = &named_indexes {
+                for name in collection.list_index_names().await {
+                    if let Some(named_index) = collection.get_index(&name).await {
+                        if let Err(e) = named_index.remove(id).await {
+                            warn!(
+                                "Failed to remove old named vector '{}' for {}: {}",
+                                name, id, e
+                            );
                         }
                     }
                 }
             }
-
-            // One call for the whole batch, not one per record. A graph index spends almost
-            // all of an insert searching the graph, which only reads it, so handed the batch
-            // it can do that half on every core; handed one record at a time it cannot, and
-            // an eight-core machine built the index on one of them. The batch also takes the
-            // index's write lock once rather than once per record.
-            let named_work: Vec<(RecordId, Option<HashMap<String, DenseVector>>)> = to_insert
-                .iter()
-                .map(|(id, _, named)| (id.clone(), named.clone()))
-                .collect();
-            index
-                .insert_batch(
-                    to_insert
-                        .into_iter()
-                        .map(|(id, vector, _)| (id, vector))
-                        .collect(),
-                )
-                .await?;
-
-            // Named vector spaces are a separate index per space; nothing measured points at
-            // them, so they keep the straightforward loop.
-            if let Some(ref collection) = named_indexes {
-                for (id, named) in named_work {
-                    let Some(named_vecs) = named else { continue };
-                    for (vec_name, vec_data) in named_vecs {
-                        if let Some(named_idx) = collection.get_index(&vec_name).await {
-                            if let Err(e) = named_idx.insert(id.clone(), vec_data).await {
-                                warn!(
-                                    "Failed to insert into named index '{}' for {}: {}",
-                                    vec_name, id, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            #[cfg(feature = "text-bm25")]
-            {
-                let engine = {
-                    let tables = tables.read().await;
-                    tables
-                        .get(&req.table_name)
-                        .and_then(|d| d.full_text_engine.clone())
-                };
-                if let Some(engine) = engine {
-                    for id in &to_remove {
-                        if let Err(e) = engine.delete_document(id).await {
-                            warn!("Failed to remove old full-text document for {}: {}", id, e);
-                        }
-                    }
-                    for record in &records {
-                        if let Some(text_content) = extract_text_from_record(&table_meta, record) {
-                            let doc = FullTextDocument {
-                                id: record.id.clone(),
-                                title: text_content.get("title").cloned(),
-                                content: text_content.get("content").cloned().unwrap_or_default(),
-                                description: text_content.get("description").cloned(),
-                                tags: text_content
-                                    .get("tags")
-                                    .map(|s| vec![s.clone()])
-                                    .unwrap_or_default(),
-                                payload: Some(record.payload.clone()),
-                                timestamp: chrono::Utc::now().timestamp(),
-                            };
-                            // Text indexing must not fail an insert that already landed.
-                            if let Err(e) = engine.add_document(doc).await {
-                                warn!("Failed to index text for record {}: {}", record.id, e);
-                            }
-                        }
-                    }
-                    if let Err(e) = engine.commit().await {
-                        warn!("Failed to commit full-text index: {}", e);
-                    }
-                }
-            }
-            #[cfg(not(feature = "text-bm25"))]
-            let _ = &table_meta;
-
-            Ok(records)
         }
-        .await;
 
-        // 发送响应
-        if req.response_tx.send(result).is_err() {
-            error!("Failed to send insert response: insertion result was dropped");
+        // One call for the whole group, not one per record and not one per request. A graph
+        // index spends almost all of an insert searching the graph, which only reads it, so
+        // handed a batch it can do that half on every core; handed one record at a time it
+        // cannot, and an eight-core machine built the index on one of them. Merging the queued
+        // requests is what makes the batch big enough for that to pay. The batch also takes the
+        // index's write lock once rather than once per record.
+        let named_work: Vec<(RecordId, Option<HashMap<String, DenseVector>>)> = to_insert
+            .iter()
+            .map(|(id, _, named)| (id.clone(), named.clone()))
+            .collect();
+        index
+            .insert_batch(
+                to_insert
+                    .into_iter()
+                    .map(|(id, vector, _)| (id, vector))
+                    .collect(),
+            )
+            .await?;
+
+        // Named vector spaces are a separate index per space; nothing measured points at
+        // them, so they keep the straightforward loop.
+        if let Some(ref collection) = named_indexes {
+            for (id, named) in named_work {
+                let Some(named_vecs) = named else { continue };
+                for (vec_name, vec_data) in named_vecs {
+                    if let Some(named_idx) = collection.get_index(&vec_name).await {
+                        if let Err(e) = named_idx.insert(id.clone(), vec_data).await {
+                            warn!(
+                                "Failed to insert into named index '{}' for {}: {}",
+                                vec_name, id, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "text-bm25")]
+        {
+            let engine = {
+                let tables = tables.read().await;
+                tables
+                    .get(&table_name)
+                    .and_then(|d| d.full_text_engine.clone())
+            };
+            if let Some(engine) = engine {
+                for id in &to_remove {
+                    if let Err(e) = engine.delete_document(id).await {
+                        warn!("Failed to remove old full-text document for {}: {}", id, e);
+                    }
+                }
+                for record in owners.iter().flat_map(|(_, records)| records) {
+                    if let Some(text_content) = extract_text_from_record(&table_meta, record) {
+                        let doc = FullTextDocument {
+                            id: record.id.clone(),
+                            title: text_content.get("title").cloned(),
+                            content: text_content.get("content").cloned().unwrap_or_default(),
+                            description: text_content.get("description").cloned(),
+                            tags: text_content
+                                .get("tags")
+                                .map(|s| vec![s.clone()])
+                                .unwrap_or_default(),
+                            payload: Some(record.payload.clone()),
+                            timestamp: chrono::Utc::now().timestamp(),
+                        };
+                        // Text indexing must not fail an insert that already landed.
+                        if let Err(e) = engine.add_document(doc).await {
+                            warn!("Failed to index text for record {}: {}", record.id, e);
+                        }
+                    }
+                }
+                if let Err(e) = engine.commit().await {
+                    warn!("Failed to commit full-text index: {}", e);
+                }
+            }
+        }
+        #[cfg(not(feature = "text-bm25"))]
+        let _ = &table_meta;
+
+        Ok(owners)
+    }
+    .await;
+
+    // 发送响应
+    match result {
+        Ok(owners) => {
+            for (slot, records) in owners {
+                if let Some(tx) = senders[slot].take() {
+                    if tx.send(Ok(records)).is_err() {
+                        error!("Failed to send insert response: insertion result was dropped");
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // Whatever went wrong here — the table disappeared, or the index refused the merged
+            // batch — applies to every request still waiting. `crate::Error` is not `Clone`, so
+            // the first of them carries the original and the rest carry its message; an insert
+            // that failed for an internal reason is what `Internal` is for.
+            let detail = e.to_string();
+            let mut original = Some(e);
+            for slot in senders.iter_mut() {
+                let Some(tx) = slot.take() else { continue };
+                let err = original
+                    .take()
+                    .unwrap_or_else(|| crate::Error::Internal(detail.clone()));
+                let _ = tx.send(Err(err));
+            }
         }
     }
 
-    info!("Insertion processor stopped");
+    // Every responder should be spoken for by now; one left holding the line would block its
+    // caller until the channel dropped, and is a bug worth seeing rather than a quiet hang.
+    for slot in senders.iter_mut() {
+        if slot.take().is_some() {
+            error!("An insert request in a coalesced group went unanswered");
+        }
+    }
 }
 
 /// Map the algorithm the selector chose onto the type the table advertises.
@@ -4247,7 +4379,7 @@ impl IntelligentIndexedStorage {
                 (
                     IndexAlgorithm::HNSW {
                         m: 16,
-                        ef_construction: 200,
+                        ef_construction: 64,
                         ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.98,   // 98% recall
@@ -4264,7 +4396,7 @@ impl IntelligentIndexedStorage {
                     IndexAlgorithm::HNSW {
                         // HierarchicalClustering not yet available; using HNSW
                         m: 16,
-                        ef_construction: 200,
+                        ef_construction: 64,
                         ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.95,   // 95% recall
@@ -4279,7 +4411,7 @@ impl IntelligentIndexedStorage {
                     IndexAlgorithm::HnswPQ {
                         // HybridRaBitQClustering not yet available; using HnswPQ
                         m: 16,
-                        ef_construction: 200,
+                        ef_construction: 64,
                         ef_search: Self::DEFAULT_EF_SEARCH,
                         num_subvectors: config.dimension / 8,
                         num_centroids: 256,
@@ -5496,7 +5628,7 @@ mod tests {
             let data = tables.get_mut("stale").expect("table present");
             data.selected_algorithm = IndexAlgorithm::HNSW {
                 m: 16,
-                ef_construction: 200,
+                ef_construction: 64,
                 ef_search: stale_ef,
             };
         }
@@ -5726,6 +5858,217 @@ mod tests {
             5,
             "all records should be reachable after rebuild"
         );
+        Ok(())
+    }
+
+    /// One request, the way `insert_records` builds it, with the responder handed back.
+    fn queued(
+        table: &str,
+        ids: &[&str],
+        dim: usize,
+    ) -> (
+        InsertRequest,
+        oneshot::Receiver<crate::Result<Vec<Record>>>,
+    ) {
+        let (response_tx, response_rx) = oneshot::channel();
+        (
+            InsertRequest {
+                table_name: table.to_string(),
+                records: ids
+                    .iter()
+                    .map(|id| CreateRecordRequest {
+                        id: id.to_string(),
+                        vector: vec![0.5; dim],
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload: None,
+                    })
+                    .collect(),
+                response_tx,
+            },
+            response_rx,
+        )
+    }
+
+    /// A group stops at the first request for a different table.
+    ///
+    /// Merging exists so one index insert can cover several requests, and an index belongs to
+    /// one table; a group spanning two would have nothing to insert into.
+    #[test]
+    fn a_group_covers_one_table() {
+        let mut pending = std::collections::VecDeque::new();
+        let mut keep = Vec::new();
+        for (table, ids) in [("a", ["1"]), ("a", ["2"]), ("b", ["3"]), ("a", ["4"])] {
+            let (req, rx) = queued(table, &ids, 2);
+            pending.push_back(req);
+            keep.push(rx);
+        }
+
+        let group = take_group(&mut pending);
+        assert_eq!(group.len(), 2, "the run for table a, and no further");
+        assert!(group.iter().all(|r| r.table_name == "a"));
+        assert_eq!(pending.len(), 2, "table b heads the next group");
+        assert_eq!(pending[0].table_name, "b");
+    }
+
+    /// A group stops rather than carry the same id twice.
+    ///
+    /// The second write of an id is an upsert: it wants the first one's vector out of the graph
+    /// before its own goes in. Inside one merged batch there is no "before" — the batch would
+    /// hold the id twice and the removal would target a vector the index had never been given.
+    /// Splitting the group is what keeps that ordering real.
+    #[test]
+    fn a_group_stops_at_a_repeated_id() {
+        let mut pending = std::collections::VecDeque::new();
+        let mut keep = Vec::new();
+        for ids in [["x", "y"], ["p", "q"], ["y", "z"]] {
+            let (req, rx) = queued("t", &ids, 2);
+            pending.push_back(req);
+            keep.push(rx);
+        }
+
+        let group = take_group(&mut pending);
+        assert_eq!(group.len(), 2, "stopped before the request that repeats y");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].records[0].id, "y");
+
+        // And the one left behind heads a group of its own, so it is not stranded.
+        let next = take_group(&mut pending);
+        assert_eq!(next.len(), 1);
+        assert!(pending.is_empty());
+    }
+
+    /// A single request larger than the record cap still goes through.
+    ///
+    /// The cap bounds how much merging adds, not how much a caller may send. Reading it as a
+    /// limit on the group would leave an oversized request in the queue forever.
+    #[test]
+    fn the_record_cap_never_strands_a_request() {
+        let ids: Vec<String> = (0..MAX_COALESCED_RECORDS + 10)
+            .map(|i| i.to_string())
+            .collect();
+        let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let (big, _rx) = queued("t", &refs, 2);
+        let (after, _rx2) = queued("t", &["late"], 2);
+        let mut pending = std::collections::VecDeque::from(vec![big, after]);
+
+        let group = take_group(&mut pending);
+        assert_eq!(group.len(), 1, "the oversized request travels alone");
+        assert_eq!(group[0].records.len(), MAX_COALESCED_RECORDS + 10);
+        assert_eq!(pending.len(), 1, "and does not swallow the one behind it");
+    }
+
+    /// A request that fails validation does not take down the requests merged with it.
+    ///
+    /// Before merging, a bad request could only fail itself. Now several requests share one
+    /// pass and one index insert, so the failure has to be contained by hand — and the records
+    /// belonging to the bad request must leave no trace, because the check that rejects it now
+    /// runs before anything is written rather than partway through.
+    #[tokio::test]
+    async fn a_bad_request_fails_alone_inside_a_group() -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+        storage
+            .create_table(TableConfig {
+                name: "mixed".to_string(),
+                dimension: 4,
+                distance_metric: DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+            })
+            .await?;
+
+        let (first, first_rx) = queued("mixed", &["a", "b"], 4);
+        // Wrong width, and not in first position: the records staged ahead of it inside the
+        // group are the ones a partial failure would corrupt.
+        let (bad, bad_rx) = queued("mixed", &["c"], 3);
+        let (last, last_rx) = queued("mixed", &["d"], 4);
+
+        process_insert_group(vec![first, bad, last], &storage.tables).await;
+
+        assert_eq!(first_rx.await?.expect("first request succeeded").len(), 2);
+        assert_eq!(last_rx.await?.expect("last request succeeded").len(), 1);
+        assert!(
+            matches!(
+                bad_rx.await?,
+                Err(crate::Error::DimensionMismatch {
+                    expected: 4,
+                    actual: 3
+                })
+            ),
+            "the mismatched request reports its own error"
+        );
+
+        for id in ["a", "b", "d"] {
+            storage
+                .get_record("mixed", &id.to_string())
+                .await
+                .unwrap_or_else(|e| panic!("{id} should have landed: {e}"));
+        }
+        assert!(
+            storage.get_record("mixed", &"c".to_string()).await.is_err(),
+            "the rejected request left nothing behind"
+        );
+        Ok(())
+    }
+
+    /// Merged requests each get back their own records, in their own order.
+    ///
+    /// One index insert now covers several callers; each still has to be answered with exactly
+    /// the rows it sent, or a client would see someone else's ids come back from its own write.
+    #[tokio::test]
+    async fn a_group_answers_each_request_with_its_own_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+        storage
+            .create_table(TableConfig {
+                name: "split".to_string(),
+                dimension: 4,
+                distance_metric: DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+            })
+            .await?;
+
+        let (one, one_rx) = queued("split", &["a", "b"], 4);
+        let (two, two_rx) = queued("split", &["c"], 4);
+        let (three, three_rx) = queued("split", &["d", "e", "f"], 4);
+
+        process_insert_group(vec![one, two, three], &storage.tables).await;
+
+        let ids = |rows: Vec<Record>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(one_rx.await??), vec!["a", "b"]);
+        assert_eq!(ids(two_rx.await??), vec!["c"]);
+        assert_eq!(ids(three_rx.await??), vec!["d", "e", "f"]);
         Ok(())
     }
 }
