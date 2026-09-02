@@ -39,6 +39,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Serialising an insert body is almost entirely floats, and the standard library does it
+# in Python while holding the GIL -- concurrent writers then encode one at a time. The SDK
+# works without this; it just encodes bodies faster with it.
+fast = [
+    "orjson>=3.9.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
