@@ -236,6 +236,20 @@ impl Ord for Result {
 const PARALLEL_PLAN_MIN_NODES: usize = 10_000;
 /// Below this many records the rayon fan-out costs more than the serial loop.
 const PARALLEL_PLAN_MIN_BATCH: usize = 16;
+/// How many records a bulk build hands to `insert_batch` at a time.
+///
+/// Sized for parallelism alone: rayon can only use as many cores as there are, so a chunk past
+/// a few hundred adds nothing, while every chunk boundary is one write-lock acquisition and one
+/// serial append phase.
+///
+/// It would be natural to also cap this to protect recall -- records inside one chunk plan
+/// against the graph as it stood before the chunk, so they cannot link to each other. Measured
+/// at 1M x 768 that effect is not there to protect against: coalescing on (batches of ~380)
+/// gave recall 0.9592, coalescing off (~100) 0.9584, and disabling batch planning altogether
+/// so every record saw every predecessor gave 0.9572 -- a spread inside the noise band, and
+/// pointing the wrong way. If a measurement ever shows `optimize` still behind, raising this
+/// is safe on the evidence there is.
+const BULK_BUILD_CHUNK: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
 pub struct HnswIndex {
@@ -1118,6 +1132,29 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
         self.insert_batch(items)
     }
 
+    /// Build the whole index from a vector set, on every core.
+    ///
+    /// Without this override HnswIndex took the trait's default, which inserts one record at a
+    /// time. A 1M-vector `rebuild_index` was therefore a million serial single-threaded
+    /// `insert` calls that never touched `insert_batch` -- the path made parallel in e85fc6f.
+    /// Measured against Qdrant on the same machine with the same graph parameters, that was
+    /// `optimize` 3,504 s against its 806 s, while DXMT's own insert had already caught up.
+    ///
+    /// Chunked rather than handed over whole: see `BULK_BUILD_CHUNK` for why bigger is not
+    /// better.
+    async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        let mut rest = vectors.into_iter();
+        loop {
+            // `by_ref().take(n)` consumes rather than clones -- these are 768-float vectors
+            // and there are a million of them.
+            let chunk: Vec<(String, Vec<f32>)> = rest.by_ref().take(BULK_BUILD_CHUNK).collect();
+            if chunk.is_empty() {
+                return Ok(());
+            }
+            self.insert_batch(chunk)?;
+        }
+    }
+
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
         self.search(&query.to_vec(), k)
     }
@@ -1435,6 +1472,39 @@ mod batch_insert_tests {
         let (_, probe) = &items[13];
         let hits = idx.search(probe, 1).unwrap();
         assert_eq!(hits[0].0, items[13].0, "the fallback path lost a record");
+    }
+
+    #[tokio::test]
+    async fn a_bulk_build_matches_a_serial_one() {
+        // `bulk_build` is what `rebuild_index` calls, and it used to fall through to the
+        // trait's default -- one `insert` at a time, on one core, for the whole table. The
+        // override sends it through `insert_batch` instead, so this asks the question that
+        // change raises: does building in chunks cost anything a search can see?
+        use crate::search::index_traits::VectorIndex;
+        let dim = 32;
+        let items = corpus(12_000, dim, 0x8B1C);
+
+        let mut serial = index();
+        for (id, v) in items.clone() {
+            serial.insert(id, v).unwrap();
+        }
+
+        let mut bulk = index();
+        bulk.bulk_build(items.clone()).await.unwrap();
+
+        assert_eq!(
+            live_count(&serial),
+            live_count(&bulk),
+            "bulk_build stored a different number of records"
+        );
+
+        let queries: Vec<DenseVector> = items.iter().step_by(400).map(|(_, v)| v.clone()).collect();
+        let (serial_recall, bulk_recall) = recall_against(&serial, &bulk, &queries, 10);
+        println!("serial recall@10 {serial_recall:.4}, bulk recall@10 {bulk_recall:.4}");
+        assert!(
+            bulk_recall >= serial_recall - 0.02,
+            "bulk build lost recall: serial {serial_recall:.4}, bulk {bulk_recall:.4}"
+        );
     }
 
     #[test]
