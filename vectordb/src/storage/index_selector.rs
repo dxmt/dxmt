@@ -242,8 +242,14 @@ impl IntelligentIndexSelector {
         // table is not "small enough" to need a sparser graph; what makes a query hard is
         // dimensionality, which this branch never looked at.
         //
-        // These now match `select_memory_optimized_index` so the two selection paths do not
+        // These match `select_memory_optimized_index`, so the two selection paths do not
         // silently answer with different recall for the same table.
+        //
+        // That sentence used to be here while it was false: this path used ef_construction
+        // 200 and that one used 64, and because the assertion read like a check nobody
+        // re-checked it. The divergence was worth 8.5 points of recall@100 on Cohere 1M --
+        // 0.874 from the graph a table gets on creation, 0.9591 after a rebuild through this
+        // path. If you change either number, change both, and measure rather than asserting.
         let m = 16;
         let ef_construction = 200;
         // Measured, not assumed. Cohere 1M x 768 (the VectorDBBench Performance768D1M
