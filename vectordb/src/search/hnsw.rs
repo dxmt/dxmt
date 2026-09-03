@@ -230,6 +230,21 @@ impl Ord for Result {
     }
 }
 
+/// Cumulative time in each phase of `insert_batch`, logged at info every `PHASE_LOG_EVERY`
+/// batches. Three `Instant::now()` per batch, so it stays on.
+///
+/// Measured on Cohere 1M x 768, 16 cores: 87% of insert time is in `link_back`'s pruning,
+/// 12% in planning, under 1% in the serial append. That breakdown is what to watch when the
+/// next insert-path change lands -- a throughput number without it is how a phantom 31%
+/// regression from chunked vector storage took seven refuted hypotheses to see through.
+static PHASE_NS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static PHASE_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const PHASE_LOG_EVERY: u64 = 250;
+
 /// Below this many nodes a batch is inserted one record at a time. Early records are
 /// what the rest of the graph hangs off, so letting a batch of them plan without seeing
 /// each other costs real recall; past this size it does not.
@@ -884,11 +899,13 @@ impl HnswIndex {
         let entry_level = self.nodes[entry].level;
 
         // A. Plan. Read-only, `&self`, every core.
+        let t_a = std::time::Instant::now();
         let plans: Vec<Vec<Vec<usize>>> = prepared
             .par_iter()
             .map(|(_, vector, level)| self.plan_neighbors(vector, *level, entry, entry_level))
             .collect();
 
+        let t_b = std::time::Instant::now();
         // B. Append the nodes and their own forward edges. Serial `&mut self`, but pure
         // pushes -- for a 380-record group at 768 dimensions this is about a megabyte of
         // memcpy. The whole batch is appended before phase C starts, so `nodes` does not
@@ -906,6 +923,7 @@ impl HnswIndex {
             applied.push((idx, level));
         }
 
+        let t_c = std::time::Instant::now();
         // C. Reverse edges and pruning. `&self`, one edge lock at a time, every core. This
         // is the phase worth parallelising: the pruning inside `link_back` is where the
         // insert path spent about 78% of its CPU, and it was serial.
@@ -913,6 +931,27 @@ impl HnswIndex {
         applied
             .par_iter()
             .for_each(|&(idx, level)| graph.link_back_all(idx, level, entry_level));
+
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let now = std::time::Instant::now();
+            PHASE_NS[0].fetch_add((t_b - t_a).as_nanos() as u64, Relaxed);
+            PHASE_NS[1].fetch_add((t_c - t_b).as_nanos() as u64, Relaxed);
+            PHASE_NS[2].fetch_add((now - t_c).as_nanos() as u64, Relaxed);
+            let n = PHASE_BATCHES.fetch_add(1, Relaxed) + 1;
+            if n.is_multiple_of(PHASE_LOG_EVERY) {
+                let ms = |i: usize| PHASE_NS[i].load(Relaxed) as f64 / 1e6;
+                tracing::info!(
+                    "insert_batch phases after {} batches: plan {:.0} ms, append {:.0} ms, \
+                     link_back {:.0} ms (nodes now {})",
+                    n,
+                    ms(0),
+                    ms(1),
+                    ms(2),
+                    self.nodes.len()
+                );
+            }
+        }
 
         if let Some(idx) = new_entry {
             self.entry_point = Some(idx);
