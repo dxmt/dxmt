@@ -15,6 +15,26 @@ log = logging.getLogger(__name__)
 # trusting the caller to stay under the limit.
 MAX_RECORDS_PER_REQUEST = 2000
 
+try:  # pragma: no cover - depends on which extras are installed
+    import orjson as _orjson  # noqa: F401
+
+    _SDK_ENCODES_NUMPY = True
+except ImportError:  # pragma: no cover
+    _SDK_ENCODES_NUMPY = False
+
+
+def _as_json_vector(vec):
+    """Hand a row to the SDK in the cheapest form it can encode.
+
+    With orjson present the SDK serialises numpy arrays directly in C, so the array goes
+    through untouched. Without it the SDK uses json.dumps, which raises on numpy types, so
+    the row has to be converted -- `tolist()` rather than `list()`, because `list()` builds
+    a Python float per element while `tolist()` does the whole row in C.
+    """
+    if _SDK_ENCODES_NUMPY:
+        return vec
+    return vec.tolist() if hasattr(vec, "tolist") else list(vec)
+
 
 class DXMT(VectorDB):
     def __init__(
@@ -106,8 +126,20 @@ class DXMT(VectorDB):
                 chunk_vecs = embeddings[start : start + MAX_RECORDS_PER_REQUEST]
                 chunk_ids = metadata[start : start + MAX_RECORDS_PER_REQUEST]
                 # VectorDBBench keys rows by int; DXMT record ids are strings.
+                #
+                # `vec` is handed straight through rather than passed through `list()`.
+                # VectorDBBench yields numpy rows, and `list(vec)` materialises 768 Python
+                # floats per row -- 76,800 objects per 100-record request, built in Python
+                # holding the GIL. Measured on a 16-core box: the server absorbs 6,985
+                # rows/s from a loader that does not do this, while this client fed it
+                # 1,713. The benchmark was measuring the conversion, not the database.
+                #
+                # The SDK encodes with orjson under OPT_SERIALIZE_NUMPY, which serialises a
+                # numpy array in C. Without orjson installed the SDK falls back to
+                # json.dumps, which cannot encode numpy -- so keep the tolist() path for
+                # that case rather than failing at run time.
                 records = [
-                    {"id": str(pk), "vector": list(vec)}
+                    {"id": str(pk), "vector": _as_json_vector(vec)}
                     for pk, vec in zip(chunk_ids, chunk_vecs)
                 ]
                 self.client.insert_records(self.table_name, records)
