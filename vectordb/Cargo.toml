@@ -102,6 +102,16 @@ zerocopy = { version = "0.7", features = ["derive"] }
 
 # Concurrency primitives
 parking_lot = { version = "0.12", features = ["serde"] }
+# Optional global allocator, behind the `jemalloc` feature.
+#
+# glibc gives each thread an arena and creates up to one per core; a 3 KB vector freed in
+# one cannot satisfy a request in another. The insert path churns four 3 KB vectors per
+# record and keeps two, so on 16 cores those per-arena free lists held 4.7 KB per record of
+# the 16.2 KB measured -- and RSS was 34% worse on 16 cores than on 8 for that reason alone.
+# glibc's own knob trades it back the wrong way: MALLOC_ARENA_MAX=2 cut RSS 29% and
+# throughput 31%, because sixteen threads then contend on two arenas. jemalloc's per-thread
+# caches and background page return address both sides at once.
+tikv-jemallocator = { version = "0.6", optional = true }
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
 dashmap = "5.5"
@@ -309,7 +319,9 @@ api-ws = []
 embeddings = ["reqwest", "backoff"]
 gpu = ["embeddings", "cudarc"]
 simd = ["embeddings"]
-jemalloc = []
+# Was an empty feature: `--features jemalloc` compiled and changed nothing. Now it swaps
+# the global allocator, which is the point.
+jemalloc = ["tikv-jemallocator"]
 metrics = ["prometheus"]
 cluster = ["consul", "tonic", "prost", "hash_ring", "consensus"]
 consensus = []

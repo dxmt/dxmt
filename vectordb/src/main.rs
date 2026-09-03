@@ -2,6 +2,16 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use tracing::info;
 
+/// Swap the system allocator for jemalloc when the `jemalloc` feature is on.
+///
+/// Measured on Cohere 1M x 768, 16 cores, snapshots disabled: glibc held 16,171 bytes of RSS
+/// per record while the structs account for about 6.8 KB, and constraining it with
+/// MALLOC_ARENA_MAX=2 brought that to 11,450 at the cost of 31% of insert throughput. The
+/// gap is per-arena free lists that never get reused, not anything the database is storing.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use dxmt_vectordb::{
     api::{create_app_with_storage, simple_core::create_simple_app},
     config::AppConfig,
