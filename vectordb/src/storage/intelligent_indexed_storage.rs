@@ -2821,6 +2821,12 @@ impl IntelligentIndexedStorage {
         // 先落内存再记日志，最后才返回给调用方。中间崩掉的话这次写入还没被确认，丢了也符合语义；
         // 反过来先记日志的话，处理器若因维度不符等原因失败，日志里就留下了一条永远重放不成功的
         // 幽灵记录。
+        // Each entry clones the record, vector included -- a third 3 KB allocation per record
+        // on this path, freed as soon as the entry is serialised. It cannot simply be moved:
+        // `inserted` is this function's return value and has 157 call sites. Removing it
+        // means serialising the WAL entry from a borrow (a `WalEntryRef` with the same serde
+        // shape, so replay keeps decoding) -- see design/INSERT_PERFORMANCE.md §23.17 for
+        // what that clone costs and what it would take.
         self.wal_append(
             inserted
                 .iter()
