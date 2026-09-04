@@ -20,8 +20,11 @@ pub fn detect_system_memory() -> SystemMemoryInfo {
     let mut sys = System::new_all();
     sys.refresh_all();
 
-    let total_memory = sys.total_memory() * 1024; // Convert KB to bytes
-    let available_memory = sys.available_memory() * 1024;
+    // sysinfo reports bytes. It reported kibibytes up to 0.29, and this multiplied by 1024
+    // to convert; on 0.30 that overstated a 33.6 GB machine as 34.4 TB, which then picked the
+    // largest branch of every threshold below.
+    let total_memory = sys.total_memory();
+    let available_memory = sys.available_memory();
     let cpu_count = sys.cpus().len();
 
     info!(
@@ -120,6 +123,33 @@ pub fn apply_memory_config_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `sysinfo` reports has to agree with the kernel.
+    ///
+    /// sysinfo returned kibibytes up to 0.29 and bytes from 0.30. This crate is on 0.30, so
+    /// a `* 1024` here overstates memory 1024-fold, and everything downstream sizes itself
+    /// from that number.
+    #[test]
+    fn detected_memory_matches_the_kernel() {
+        let proc_total: u64 = std::fs::read_to_string("/proc/meminfo")
+            .expect("Linux")
+            .lines()
+            .find(|l| l.starts_with("MemTotal:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .expect("MemTotal is there")
+            * 1024;
+
+        let detected = detect_system_memory();
+        let ratio = detected.totalmemorybytes as f64 / proc_total as f64;
+        assert!(
+            (0.95..=1.05).contains(&ratio),
+            "detect_system_memory says {} bytes, /proc/meminfo says {} -- off by {:.0}x",
+            detected.totalmemorybytes,
+            proc_total,
+            ratio
+        );
+    }
 
     #[test]
     fn test_memory_calculation_small_system() {
