@@ -69,6 +69,16 @@ impl Default for HnswPqConfig {
 }
 
 impl HnswPqIndex {
+    /// Fewest training vectors per centroid. k-means over 256 centroids fitted to 300
+    /// points describes those points, not the distribution; at 16 apiece the default
+    /// 256-centroid codebook wants 4,096 vectors, and a smaller codebook scales down with it
+    /// rather than being held to a number chosen for a bigger one.
+    const MIN_VECTORS_PER_CENTROID: usize = 16;
+
+    /// Most vectors to train on. Training is k-means over every subspace and its cost is
+    /// linear in this; past a few tens of thousands the codebooks stop moving.
+    const MAX_TRAINING_VECTORS: usize = 65_536;
+
     /// Create a new HNSW-PQ index
     pub fn new(
         dimension: usize,
@@ -317,6 +327,50 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         self.insert(id, vector)
     }
 
+    /// Train the codebooks on the data, then insert it.
+    ///
+    /// Without this override the trait's default `bulk_build` calls `add` in a loop and
+    /// nothing ever calls `train`: `HnswPqIndex::train` had no caller outside its own tests.
+    /// An untrained quantizer has zero-filled codebooks, so every vector encodes to the same
+    /// code; `search` notices and falls back to the graph's own ordering, which is why this
+    /// returned correct results while the compression it was chosen for did not happen. The
+    /// index is selected when a table's HNSW graph would exceed its memory budget, so the
+    /// saving is the entire reason it is there.
+    ///
+    /// Training needs enough vectors to place `num_centroids` centroids per subspace; below
+    /// that, k-means would fit codebooks to noise, and a fallback that is merely slower beats
+    /// a codebook that is wrong. The sample is a fixed stride rather than a random draw so
+    /// two builds of the same data produce the same codebooks.
+    async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
+        let wanted = self
+            .config
+            .num_centroids
+            .saturating_mul(Self::MIN_VECTORS_PER_CENTROID);
+        if vectors.len() >= wanted {
+            let stride = (vectors.len() / Self::MAX_TRAINING_VECTORS).max(1);
+            let sample: Vec<DenseVector> = vectors
+                .iter()
+                .step_by(stride)
+                .take(Self::MAX_TRAINING_VECTORS)
+                .map(|(_, v)| v.clone())
+                .collect();
+            self.train(&sample)?;
+        } else {
+            tracing::info!(
+                "HNSW-PQ: {} vectors is below the {} needed to train {} centroids per \
+                 subspace; leaving the quantizer untrained (search falls back to the graph \
+                 ordering, and the memory saving does not happen)",
+                vectors.len(),
+                wanted,
+                self.config.num_centroids
+            );
+        }
+        for (id, vector) in vectors {
+            self.insert(id, vector)?;
+        }
+        Ok(())
+    }
+
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
         self.search(&query.to_vec(), k)
     }
@@ -385,6 +439,94 @@ impl crate::search::index_traits::SerializableIndex for HnswPqIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic corpus where every vector is distinct.
+    ///
+    /// An earlier version of this gave each vector one of 16 centres, which made the nearest
+    /// neighbour a tie among hundreds of near-identical rows and the top-1 assertion a coin
+    /// flip. Distinct vectors are the point: a quantizer that collapses them is exactly what
+    /// these tests are looking for.
+    fn corpus(n: usize, dim: usize) -> Vec<(String, Vec<f32>)> {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0
+        };
+        (0..n)
+            .map(|i| (format!("v{i}"), (0..dim).map(|_| next()).collect()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn bulk_build_trains_the_quantizer() {
+        use crate::search::index_traits::VectorIndex;
+        let config = HnswPqConfig {
+            num_subvectors: 8,
+            num_centroids: 16,
+            ..HnswPqConfig::default()
+        };
+        let mut index = HnswPqIndex::new(16, DistanceMetric::Euclidean, Some(config)).unwrap();
+        assert!(
+            !index.pq.is_trained(),
+            "a fresh quantizer starts with zero-filled codebooks"
+        );
+
+        // 16 centroids x MIN_VECTORS_PER_CENTROID is 256, so this trains.
+        let data = corpus(600, 16);
+        index.bulk_build(data.clone()).await.unwrap();
+
+        assert!(
+            index.pq.is_trained(),
+            "bulk_build must train the codebooks; an untrained quantizer encodes every \
+             vector to the same code and the memory saving this index exists for does not \
+             happen"
+        );
+        assert_eq!(index.len(), 600);
+
+        // Distinct vectors must not all collapse onto one code -- which is exactly what an
+        // untrained codebook does.
+        let first = index
+            .compressed_vectors
+            .values()
+            .next()
+            .expect("codes were stored")
+            .clone();
+        assert!(
+            index
+                .compressed_vectors
+                .values()
+                .any(|c| c.codes != first.codes),
+            "every vector encoded to the same PQ code"
+        );
+
+        let hits = VectorIndex::search(&index, &data[0].1, 5).await.unwrap();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(hits[0].0, "v0", "the query's own vector should rank first");
+    }
+
+    #[tokio::test]
+    async fn bulk_build_leaves_a_small_corpus_untrained_and_still_answers() {
+        use crate::search::index_traits::VectorIndex;
+        let config = HnswPqConfig {
+            num_subvectors: 8,
+            num_centroids: 16,
+            ..HnswPqConfig::default()
+        };
+        let mut index = HnswPqIndex::new(16, DistanceMetric::Euclidean, Some(config)).unwrap();
+
+        // Under the 256 that 16 centroids want: fitting them here would describe the sample
+        // rather than the distribution, so the quantizer stays untrained and search falls
+        // back to the graph ordering -- slower than PQ, but correct.
+        let data = corpus(200, 16);
+        index.bulk_build(data.clone()).await.unwrap();
+
+        assert!(!index.pq.is_trained());
+        assert_eq!(index.len(), 200);
+        let hits = VectorIndex::search(&index, &data[7].1, 3).await.unwrap();
+        assert_eq!(hits[0].0, "v7");
+    }
 
     #[test]
     fn test_hnsw_pq_creation() {
