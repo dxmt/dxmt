@@ -2026,27 +2026,34 @@ impl IntelligentIndexedStorage {
             return Ok(Vec::new());
         }
 
-        let covered: Vec<String> = {
+        // Decide before snapshotting. This used to snapshot every table on every sweep and
+        // only then ask which were cold: on a 1M-row table that is a 38 s serialisation under
+        // the index read lock every 600 s, whether or not anything was going to be evicted,
+        // and a load it landed in ran at half speed (design doc section 24.4). A table is only
+        // dropped from memory once it is on disk, so the snapshot stays -- for the sweeps that
+        // will drop something.
+        //
+        // `should_demote_to_cold` is the right predicate here, not `get_recommended_tier`: the
+        // latter calls anything below the *warm* threshold Cold, and a table written to seconds
+        // ago scores about 0.31 -- the frequency term is normalised against 100 accesses, so a
+        // handful of touches barely registers and recency contributes at most 0.3. Demotion
+        // instead compares against demote_to_cold_threshold (0.2), which a Warm table only
+        // falls below after roughly a third of the window with nothing touching it.
+        let cold: Vec<String> = {
             let tables = self.read_tables("evict_cold_tables").await;
-            tables.keys().cloned().collect()
+            tables
+                .keys()
+                .filter(|name| self.tier_policy.should_demote_to_cold(name))
+                .cloned()
+                .collect()
         };
-        if covered.is_empty() {
+        if cold.is_empty() {
             return Ok(Vec::new());
         }
         self.snapshot().await?;
 
         let mut evicted = Vec::new();
-        for name in covered {
-            // `should_demote_to_cold` is the right predicate here, not
-            // `get_recommended_tier`: the latter calls anything below the *warm* threshold
-            // Cold, and a table written to seconds ago scores about 0.31 — the frequency term
-            // is normalised against 100 accesses, so a handful of touches barely registers and
-            // recency contributes at most 0.3. Demotion instead compares against
-            // demote_to_cold_threshold (0.2), which a Warm table only falls below after roughly
-            // a third of the window with nothing touching it.
-            if !self.tier_policy.should_demote_to_cold(&name) {
-                continue;
-            }
+        for name in cold {
             let mut tables = self.write_tables("evict_cold_tables").await;
             if tables.remove(&name).is_some() {
                 evicted.push(name.clone());

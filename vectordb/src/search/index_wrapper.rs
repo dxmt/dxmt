@@ -161,7 +161,20 @@ impl IndexWrapper {
     /// Write the index to `path`; false means this index type has no on-disk form.
     pub async fn snapshot_to(&self, path: &std::path::Path) -> Result<bool> {
         let index = self.index.read().await;
-        index.snapshot_to(path)
+        // Serialising a 1M-node graph takes tens of seconds of CPU. Done inline it parks the
+        // worker thread this future is on, and the runtime's other tasks with it: a 1 s timer
+        // measured 53.6 s late during one snapshot (design doc section 24.3.3).
+        // `block_in_place` hands the thread over and lets the runtime start a replacement; it
+        // only exists on the multi-thread runtime, so the current-thread runtime that
+        // `#[tokio::test]` builds keeps the inline call.
+        let multi_thread = tokio::runtime::Handle::try_current()
+            .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            .unwrap_or(false);
+        if multi_thread {
+            tokio::task::block_in_place(|| index.snapshot_to(path))
+        } else {
+            index.snapshot_to(path)
+        }
     }
 
     /// Replace the wrapped index in place, keeping the same `Arc` so existing clones of this
