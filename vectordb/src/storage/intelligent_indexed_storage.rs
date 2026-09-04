@@ -4414,6 +4414,18 @@ impl IntelligentIndexedStorage {
     /// built at less than a third of the effort the rest of the codebase had settled on.
     const DEFAULT_EF_CONSTRUCTION: usize = 200;
 
+    /// `DB_HNSW_EF_CONSTRUCTION` overrides the build effort for tables created from here on.
+    /// It exists to measure the trade: on Cohere 1M the neighbour search at 200 is 88% of the
+    /// insert time (design doc section 24.4.3), and the only way to know what 100 costs in
+    /// recall is to build at 100. Rebuilds do not read it; skip the rebuild when comparing.
+    fn default_ef_construction() -> usize {
+        std::env::var("DB_HNSW_EF_CONSTRUCTION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(Self::DEFAULT_EF_CONSTRUCTION)
+    }
+
     /// Candidate-set size below which a filtered search scores the candidates directly instead
     /// of walking the graph.
     ///
@@ -4448,7 +4460,7 @@ impl IntelligentIndexedStorage {
                 (
                     IndexAlgorithm::HNSW {
                         m: 16,
-                        ef_construction: Self::DEFAULT_EF_CONSTRUCTION,
+                        ef_construction: Self::default_ef_construction(),
                         ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.98,   // 98% recall
@@ -4465,7 +4477,7 @@ impl IntelligentIndexedStorage {
                     IndexAlgorithm::HNSW {
                         // HierarchicalClustering not yet available; using HNSW
                         m: 16,
-                        ef_construction: Self::DEFAULT_EF_CONSTRUCTION,
+                        ef_construction: Self::default_ef_construction(),
                         ef_search: Self::DEFAULT_EF_SEARCH,
                     },
                     0.95,   // 95% recall
@@ -4480,7 +4492,7 @@ impl IntelligentIndexedStorage {
                     IndexAlgorithm::HnswPQ {
                         // HybridRaBitQClustering not yet available; using HnswPQ
                         m: 16,
-                        ef_construction: Self::DEFAULT_EF_CONSTRUCTION,
+                        ef_construction: Self::default_ef_construction(),
                         ef_search: Self::DEFAULT_EF_SEARCH,
                         num_subvectors: config.dimension / 8,
                         num_centroids: 256,
