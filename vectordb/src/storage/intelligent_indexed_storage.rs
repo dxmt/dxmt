@@ -4060,9 +4060,9 @@ impl IntelligentIndexedStorage {
             // was paying for that divergence forever instead of fixing it.
             //
             // The test is `requires_rebuild_to_reach`, not equality. Equality never holds:
-            // the two selection paths still hand out different `ef_search` (128 against 256),
-            // and `ef_search` is a per-query traversal budget rather than anything baked into
-            // the graph -- which is precisely why that method leaves it out and
+            // the two selection paths used to hand out different `ef_search` (128 against 256,
+            // both 256 now), and `ef_search` is a per-query traversal budget rather than
+            // anything baked into the graph -- which is precisely why that method leaves it out and
             // `adopt_query_time_params` exists to write it in place. An equality check here
             // compiles, passes a small test, and then never fires on a real table.
             //
@@ -4381,23 +4381,20 @@ impl IntelligentIndexedStorage {
         Ok(stats.clone())
     }
 
-    /// 选择内存优化索引（memory_optimization=true 时使用）
-    /// Default `ef_search` for adaptively selected indexes.
+    /// Default traversal budget for a table created here. It matches `index_selector`, which
+    /// hands out 256 on a rebuild; until it did, a table that had never been through
+    /// `optimize()` searched at 128 and one that had searched at 256, and recall depended on
+    /// whether the caller happened to have called that endpoint. Measured on Cohere 1M x 768,
+    /// ef_construction 200, same graph (design doc section 24.6.1):
     ///
-    /// Measured with `tests/storage_ann_benchmark_test.rs` (exact cosine ground truth,
-    /// recall@10, 10K x 768 random unit vectors — the hardest synthetic case, since uniform
-    /// points on a high-dimensional sphere have almost no distance contrast):
+    /// | ef_search | 128            | 256            | 512            | 1024           |
+    /// |-----------|----------------|----------------|----------------|----------------|
+    /// | recall@10 | 0.911 @ 3,637  | 0.958 @ 2,200  | 0.991 @ 1,301  | 0.991 @ 800    |
     ///
-    /// | ef_search |  100  |  128  |  200  |  256  |  400  |
-    /// |-----------|-------|-------|-------|-------|-------|
-    /// | recall@10 | 0.891 | 0.900 | 0.912 | 0.927 | 0.966 |
-    /// | p50       | 1.6ms | 1.9ms | 2.2ms | 3.0ms | 3.6ms |
-    ///
-    /// Returns diminish well before the latency does, so this is a default rather than a
-    /// maximum. A caller who needs the top of that curve
-    /// asks for `SearchMode::Accurate` (4x) per query; one who needs the latency asks for
-    /// `SearchMode::Fast`. Neither requires a rebuild — `ef_search` is a traversal budget.
-    const DEFAULT_EF_SEARCH: usize = 128;
+    /// 256 is where the benchmark's recall clears 0.95; past 512 the extra work buys nothing.
+    /// `SearchMode::Accurate` is 4x this per query and `SearchMode::Fast` 1x; neither needs a
+    /// rebuild -- `ef_search` is a per-query budget, not part of the graph.
+    const DEFAULT_EF_SEARCH: usize = 256;
 
     /// Graph build effort for the index a table gets when it is created.
     ///
