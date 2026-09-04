@@ -2971,7 +2971,7 @@ impl IntelligentIndexedStorage {
             if let (Some(filter), Some((cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                if *selectivity < 0.05 && cardinality.exp < 10000 {
+                if *selectivity < 0.05 && cardinality.exp <= Self::in_graph_filter_max_ids() {
                     let filter_ids = table_data.payload_index.get_matching_ids(filter);
                     // Exact scoring over the candidate set, when the set is small enough that
                     // doing so beats walking the graph. `result_limit * 4` alone made that
@@ -3039,7 +3039,7 @@ impl IntelligentIndexedStorage {
             if let (Some(_), Some((ref cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                if *selectivity < 0.05 && cardinality.exp < 10000 {
+                if *selectivity < 0.05 && cardinality.exp <= Self::in_graph_filter_max_ids() {
                     // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
                     // for a small enough set, their exact scores were computed in phase 1 while
                     // the map lock was held.
@@ -3053,6 +3053,18 @@ impl IntelligentIndexedStorage {
                     // When filter_ids is very small, kNN approximation is unreliable:
                     // fetching top-K from the full index may miss all filter candidates.
                     // Instead, exact distances over just the matching IDs (O(|filter_ids|)).
+                    // Filtering inside the traversal needs a bigger budget than an
+                    // unfiltered one, because most of what the walk visits gets discarded:
+                    // at 4% selectivity, ef 256 finds 20 matches with recall 0.65 against a
+                    // brute-force scan of the matching rows. `ef_search_adaptive` scales the
+                    // budget by selectivity but only for `SearchMode::Auto`, and the default
+                    // mode is not Auto, so nothing was scaling it here. This is arithmetic
+                    // rather than a preference -- a caller does not opt into needing a large
+                    // enough budget -- so the branch applies it whatever the mode, and
+                    // `Accurate`'s own multiplier still wins when it asks for more.
+                    let filtered_ef = ((result_limit as f64 * 8.0 / selectivity.max(0.001)).ceil()
+                        as usize)
+                        .clamp(ef_hint, Self::MAX_FILTERED_EF);
                     let r = match exact_scored {
                         Some(scored) => scored,
                         None => {
@@ -3060,7 +3072,7 @@ impl IntelligentIndexedStorage {
                                 .search_with_filter(
                                     &query.vector,
                                     result_limit,
-                                    ef_hint,
+                                    filtered_ef,
                                     &filter_ids,
                                 )
                                 .await?
@@ -4455,6 +4467,36 @@ impl IntelligentIndexedStorage {
     /// exact. 2048 keeps the direct path bounded at roughly the number of nodes a walk with
     /// `ef = 128` and `m = 16` would touch regardless.
     const EXACT_FILTER_SCAN_MAX: usize = 2048;
+
+    /// Largest matching set the in-graph filter will materialise ids for.
+    ///
+    /// Above it a filtered query falls back to an unfiltered search with an amplified fetch
+    /// and a post-filter, and that fallback is expensive in a way the branch's name
+    /// ("PRE-FILTERING") hides: `fetch = limit / selectivity * 3` becomes the `k`, and so the
+    /// `ef`, of an *unfiltered* walk -- a top-100 at 1% selectivity explores 30,000 candidates
+    /// where an unfiltered query explores 256. Measured on Performance768D1M99P, where 1% of
+    /// the rows pass and there are exactly 10,000 of them, which missed the old cap of
+    /// `< 10000` by one: 47.9 QPS at a 207.7 ms p99, against 2,307 QPS and 5.0 ms unfiltered.
+    ///
+    /// Materialising the ids costs one hash-set build per query, linear in the matching set.
+    /// At 100,000 that is a few milliseconds against tens of milliseconds of extra traversal,
+    /// which is why the cap sits here rather than at the size of the graph.
+    /// `DB_IN_GRAPH_FILTER_MAX_IDS` overrides it.
+    const IN_GRAPH_FILTER_MAX_IDS: usize = 100_000;
+
+    /// Ceiling on the budget a filtered traversal may ask for.
+    ///
+    /// `top_k * 8 / selectivity` grows without bound as the filter gets more selective, and
+    /// past a point a walk that visits most of the graph is worse than the exact scan the
+    /// small-set branch already does. 8,192 is roughly where scanning starts to win.
+    const MAX_FILTERED_EF: usize = 8_192;
+
+    fn in_graph_filter_max_ids() -> usize {
+        std::env::var("DB_IN_GRAPH_FILTER_MAX_IDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(Self::IN_GRAPH_FILTER_MAX_IDS)
+    }
 
     async fn select_memory_optimized_index(
         &self,
