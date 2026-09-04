@@ -344,6 +344,8 @@ pub struct IntelligentIndexedStorage {
     /// would make the durability boundary unknowable, so the process becomes read-only until a
     /// restart. The mutation that returned the error is not acknowledged and may or may not be
     /// present after recovery, depending on how far the filesystem write got.
+    /// Refuses writes before the machine runs out of memory; see `memory_guard`.
+    memory_guard: crate::storage::memory_guard::MemoryGuard,
     durability_error: Arc<StdMutex<Option<String>>>,
 
     /// Operational durability telemetry. These fields are intentionally process-local: a
@@ -1082,6 +1084,7 @@ impl IntelligentIndexedStorage {
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
             dropped_since_snapshot: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             snapshot_failures: AtomicU64::new(0),
+            memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "gpu")]
             gpu_calculator,
@@ -1098,6 +1101,17 @@ impl IntelligentIndexedStorage {
             return Err(crate::Error::ServiceUnavailable { message });
         }
         Ok(())
+    }
+
+    /// Refuse data that would grow the process when memory is nearly gone.
+    ///
+    /// Deliberately not part of `ensure_writable`, which eight paths share. Two of those are
+    /// `delete_records` and `delete_table`: refusing a delete because memory is low blocks
+    /// the one thing that would fix it. Two more are `wal_append` and `snapshot_inner`, and
+    /// a server that cannot replay its log or write its snapshot after a memory event cannot
+    /// come back from one. Only the paths that take new data from a caller consult this.
+    fn ensure_memory_headroom(&self) -> crate::Result<()> {
+        self.memory_guard.check()
     }
 
     fn mark_durability_failed(&self, error: &crate::Error) {
@@ -2805,6 +2819,7 @@ impl IntelligentIndexedStorage {
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
         self.ensure_writable()?;
+        self.ensure_memory_headroom()?;
         // Writing to an evicted table has to bring it back first, or the insert lands in a
         // fresh empty table and the snapshot's records vanish on the next snapshot.
         self.ensure_resident(tablename).await?;
@@ -4863,6 +4878,7 @@ impl IntelligentIndexedStorage {
         request: CreateRecordRequest,
     ) -> crate::Result<Record> {
         self.ensure_writable()?;
+        self.ensure_memory_headroom()?;
         self.ensure_resident(tablename).await?;
 
         let artifacts = {

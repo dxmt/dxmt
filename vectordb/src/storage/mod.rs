@@ -15,6 +15,7 @@ pub mod intelligent_indexed_storage;
 #[cfg(feature = "storage-lmdb")]
 pub mod lmdb;
 pub mod memory;
+pub(crate) mod memory_guard;
 pub mod mmap_index;
 pub mod object;
 pub mod payload_index;
