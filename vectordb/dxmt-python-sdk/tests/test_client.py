@@ -1,5 +1,6 @@
 """Unit tests for DXMT Client."""
 
+import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -230,7 +231,13 @@ def test_search_sends_top_k_and_normalizes_payload_json(mock_client_class: Mock)
 
     client = Client()
     assert client.search("test", [1.0, 0.0], k=1)[0]["metadata"] == {"kind": "x"}
-    body = mock_instance.post.call_args.kwargs["json"]
+    # Search encodes its own body rather than handing httpx a dict, so read what actually
+    # goes on the wire. The header has to come with it: `content=` sends bytes and httpx
+    # sets no Content-Type of its own, so dropping it would post JSON the server does not
+    # parse as JSON.
+    kwargs = mock_instance.post.call_args.kwargs
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+    body = json.loads(kwargs["content"])
     assert body["top_k"] == 1
 
 
