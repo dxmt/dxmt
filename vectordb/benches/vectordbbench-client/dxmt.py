@@ -1,11 +1,13 @@
 """VectorDBBench client for DXMT VectorDB, over the dxmt-python-sdk REST client."""
 
 import logging
+import os
 from contextlib import contextmanager
 
 import httpx
 
 from ..api import VectorDB
+from ...filter import Filter, FilterOp
 from .config import DXMTIndexConfig
 
 log = logging.getLogger(__name__)
@@ -14,6 +16,12 @@ log = logging.getLogger(__name__)
 # 5,000 at a time by default, but a case is free to change that, so chunk here rather than
 # trusting the caller to stay under the limit.
 MAX_RECORDS_PER_REQUEST = 2000
+
+# The integer the filtered cases select on. It is not the record id: ids are strings here,
+# and the filter needs a number to compare, so the load writes the same value into the
+# payload under this name.
+FILTER_FIELD = "id_num"
+WRITE_FILTER_PAYLOAD = os.environ.get("DXMT_BENCH_FILTER_PAYLOAD") == "1"
 
 try:  # pragma: no cover - depends on which extras are installed
     import orjson as _orjson  # noqa: F401
@@ -37,6 +45,11 @@ def _as_json_vector(vec):
 
 
 class DXMT(VectorDB):
+    # Without this the harness treats every filtered case as unsupported and never runs it,
+    # which is why only Performance768D1M had ever been measured. NumGE covers the 1P/99P
+    # cases (`id >= n`); StrEqual needs a label column this client does not write yet.
+    supported_filter_types: list[FilterOp] = [FilterOp.NonFilter, FilterOp.NumGE]
+
     def __init__(
         self,
         dim: int,
@@ -138,10 +151,20 @@ class DXMT(VectorDB):
                 # numpy array in C. Without orjson installed the SDK falls back to
                 # json.dumps, which cannot encode numpy -- so keep the tolist() path for
                 # that case rather than failing at run time.
-                records = [
-                    {"id": str(pk), "vector": _as_json_vector(vec)}
-                    for pk, vec in zip(chunk_ids, chunk_vecs)
-                ]
+                if WRITE_FILTER_PAYLOAD:
+                    records = [
+                        {
+                            "id": str(pk),
+                            "vector": _as_json_vector(vec),
+                            "payload": {FILTER_FIELD: int(pk)},
+                        }
+                        for pk, vec in zip(chunk_ids, chunk_vecs)
+                    ]
+                else:
+                    records = [
+                        {"id": str(pk), "vector": _as_json_vector(vec)}
+                        for pk, vec in zip(chunk_ids, chunk_vecs)
+                    ]
                 self.client.insert_records(self.table_name, records)
                 inserted += len(records)
         except Exception as e:
@@ -149,9 +172,30 @@ class DXMT(VectorDB):
             return inserted, e
         return inserted, None
 
+    def prepare_filter(self, filters: Filter):
+        """Translate the harness's filter into the one the SDK sends.
+
+        The filtered cases select on an integer that has to exist in the payload, and the
+        unfiltered path writes no payload at all -- so a filtered run needs
+        DXMT_BENCH_FILTER_PAYLOAD=1 during its load as well. Kept behind an environment
+        variable rather than written always: the payload adds bytes to every insert, and
+        the unfiltered numbers already on record were measured without it.
+        """
+        if filters.type == FilterOp.NonFilter:
+            self.query_filter = None
+        elif filters.type == FilterOp.NumGE:
+            self.query_filter = {FILTER_FIELD: {"$gte": filters.int_value}}
+        else:
+            msg = f"DXMT bench client does not serve {filters.type}"
+            raise RuntimeError(msg)
+
     def search_embedding(self, query: list[float], k: int = 100, **kwargs) -> list[int]:
         hits = self.client.search(
-            self.table_name, vector=list(query), k=k, search_mode=self.search_mode
+            self.table_name,
+            vector=list(query),
+            k=k,
+            search_mode=self.search_mode,
+            filter=getattr(self, "query_filter", None),
         )
         return [int(h["id"]) for h in hits]
 
