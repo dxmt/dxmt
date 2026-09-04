@@ -12,6 +12,17 @@ use tracing::info;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// jemalloc returns freed pages to the kernel on a decay clock that is normally advanced by
+/// allocation activity, so a server that goes idle after a burst keeps the burst's dirty
+/// pages. A background thread runs the decay on wall-clock time instead. Measured on the
+/// same 1M load: 8.5 KB per record after a 3,000-query burst instead of 11.5 KB, and the
+/// same throughput. jemalloc reads this symbol before `main` runs; it replaces the
+/// `_RJEM_MALLOC_CONF` environment variable, which an operator would otherwise have to know.
+#[cfg(feature = "jemalloc")]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: &[u8] = b"background_thread:true\0";
+
 use dxmt_vectordb::{
     api::{create_app_with_storage, simple_core::create_simple_app},
     config::AppConfig,

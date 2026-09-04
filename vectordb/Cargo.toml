@@ -285,7 +285,7 @@ incremental = true
 # The default build is the supported single-node Alpha surface. Heavy or experimental
 # integrations must be opted into explicitly so a normal build does not require AWS, LMDB,
 # GraphQL, ONNX, or GPU toolchains.
-default = ["tokio-runtime", "basic-storage"]
+default = ["tokio-runtime", "basic-storage", "jemalloc"]
 experimental = [
     "benchmarks",
     "worker-pool",
