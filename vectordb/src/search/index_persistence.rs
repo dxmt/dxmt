@@ -25,26 +25,36 @@ const FORMAT_VERSION: u32 = 1;
 /// the previous index intact rather than a truncated file that loads as an empty index and
 /// quietly loses every vector.
 pub fn write_index<T: Serialize>(path: &Path, kind: &str, value: &T) -> crate::Result<()> {
-    let payload =
-        bincode::serialize(value).map_err(|e| crate::Error::Serialization(e.to_string()))?;
-
-    let kind_bytes = kind.as_bytes();
-    let mut buf = Vec::with_capacity(payload.len() + kind_bytes.len() + 16);
-    buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    buf.extend_from_slice(&(kind_bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(kind_bytes);
-    buf.extend_from_slice(&payload);
-
+    // Serialised straight into the file rather than into memory first.
+    //
+    // This used to build the whole thing twice: `bincode::serialize` returned the payload as
+    // a `Vec<u8>`, and it was copied again into a buffer carrying the header. For a snapshot
+    // of a million 768-dimension records that is about 3.2 GB each time, charged against a
+    // process that already holds the records themselves. Measured: one snapshot took the peak
+    // from 8.3 GB to 17.6 GB, and at 10M the same doubling was fatal (design doc section 34).
+    //
+    // The bytes are unchanged -- the same header fields in the same order, then whatever
+    // `bincode` would have produced. `hnsw::persistence_tests::hnsw_v2_files_still_load` says so:
+    // it writes an index through here and compares the node region against
+    // `testdata/hnsw_v2_golden.idx`, a file produced before any of this.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
+    let kind_bytes = kind.as_bytes();
     let tmp = path.with_extension("tmp");
     {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&buf)?;
-        file.sync_data()?;
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+        writer.write_all(MAGIC)?;
+        writer.write_all(&FORMAT_VERSION.to_le_bytes())?;
+        writer.write_all(&(kind_bytes.len() as u32).to_le_bytes())?;
+        writer.write_all(kind_bytes)?;
+        bincode::serialize_into(&mut writer, value)
+            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        writer
+            .into_inner()
+            .map_err(|e| crate::Error::Serialization(e.to_string()))?
+            .sync_data()?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
