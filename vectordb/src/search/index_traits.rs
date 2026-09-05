@@ -48,6 +48,21 @@ pub trait VectorIndex: Send + Sync {
             .collect();
         Ok(filtered)
     }
+    /// The HNSW graph behind this index, when it is one.
+    ///
+    /// `IndexWrapper` uses these to hold its write lock for only the part of a batch insert
+    /// that needs exclusive access. Searches take the same lock for reading, so holding it
+    /// for a whole batch parks every reader for the length of the batch -- 32 ms at a million
+    /// nodes, of which 0.25 ms is the appending that actually needs `&mut` (design doc
+    /// section 33.1). `None` means the caller falls back to `add_batch`.
+    fn as_hnsw(&self) -> Option<&crate::search::hnsw::HnswIndex> {
+        None
+    }
+
+    fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {
+        None
+    }
+
     async fn delete(&mut self, id: &str) -> crate::Result<()>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;

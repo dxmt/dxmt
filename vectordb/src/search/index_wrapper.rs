@@ -21,6 +21,14 @@ use async_trait::async_trait;
 pub struct IndexWrapper {
     /// The actual index, wrapped in RwLock for interior mutability
     index: Arc<RwLock<Box<dyn VectorIndex>>>,
+    /// Held across a phased insert, and by anything that swaps the index out.
+    ///
+    /// A phased insert releases the `RwLock` between its phases so searches can run, which
+    /// opens a window `replace` could step into: the plans were computed against one graph
+    /// and would be applied to another, and the node indices in them would mean something
+    /// else. Nothing else contends for this -- inserts are already serialised by the storage
+    /// layer's single insert task, and a rebuild is rare.
+    structural: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl IndexWrapper {
@@ -28,12 +36,8 @@ impl IndexWrapper {
     pub fn new(index: Box<dyn VectorIndex>) -> Self {
         Self {
             index: Arc::new(RwLock::new(index)),
+            structural: Arc::new(tokio::sync::Mutex::new(())),
         }
-    }
-
-    /// Create a new index wrapper from an Arc<RwLock<>>
-    pub fn from_arc(index: Arc<RwLock<Box<dyn VectorIndex>>>) -> Self {
-        Self { index }
     }
 
     /// Clone the underlying Arc for sharing between async tasks
@@ -57,15 +61,68 @@ impl IndexWrapper {
         if items.is_empty() {
             return Ok(());
         }
-        let mut index = self.index.write().await;
-        index
-            .add_batch(
-                items
-                    .into_iter()
-                    .map(|(id, v)| (id.to_string(), v))
-                    .collect(),
-            )
-            .await
+        let items: Vec<(String, Vec<f32>)> = items
+            .into_iter()
+            .map(|(id, v)| (id.to_string(), v))
+            .collect();
+
+        // The write lock is taken for the appending and nothing else.
+        //
+        // Searches take this lock for reading, so holding it for a whole batch parks every
+        // reader for as long as the batch takes: at a million nodes, 4 ms of planning plus
+        // 0.25 ms of appending plus 28 ms of reverse-edge pruning. Only the appending needs
+        // exclusive access. Measured before this change, on Cohere 1M at 2,000 rows/s with
+        // concurrent search: p95 4.6 ms, p99 91 ms, against a p99 of 4.7 ms once the writes
+        // stopped (design doc section 33).
+        //
+        // Chunking the batch was tried first and made it worse -- p99 down by a third, p95 up
+        // five to nine times -- because tokio's `RwLock` is write-preferring, so acquiring it
+        // more often blocks readers more often rather than less (section 33.1). Holding it
+        // less is the fix; holding it more briefly is not.
+        let _structural = self.structural.lock().await;
+
+        let prepared = {
+            let mut index = self.index.write().await;
+            if index.as_hnsw().is_none() {
+                return index.add_batch(items).await;
+            }
+            index
+                .as_hnsw_mut()
+                .expect("checked on the line above, under the same lock")
+                .prepare_batch(items)?
+        };
+        // `None` means the batch was small enough that the serial path took it already.
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+
+        // A. Planning: shared, and every core.
+        let plans = {
+            let index = self.index.read().await;
+            index
+                .as_hnsw()
+                .expect("the structural lock holds the index type still")
+                .plan_batch(&prepared)
+        };
+
+        // B. Appending: exclusive, and the only phase that has to be.
+        let applied = {
+            let mut index = self.index.write().await;
+            index
+                .as_hnsw_mut()
+                .expect("the structural lock holds the index type still")
+                .apply_batch(prepared, plans)
+        };
+
+        // C. Reverse edges and pruning: shared, and the longest of the three.
+        {
+            let index = self.index.read().await;
+            index
+                .as_hnsw()
+                .expect("the structural lock holds the index type still")
+                .link_batch(&applied);
+        }
+        Ok(())
     }
 
     /// Search for nearest neighbors - requires read lock
@@ -180,6 +237,10 @@ impl IndexWrapper {
     /// Replace the wrapped index in place, keeping the same `Arc` so existing clones of this
     /// wrapper — the table holds one, and searches hold more — observe the new index.
     pub async fn replace(&self, new_index: Box<dyn VectorIndex>) {
+        // Ahead of the write lock: a phased insert releases that lock between its phases, and
+        // swapping the index out in one of those gaps would apply plans built against the old
+        // graph to a new one.
+        let _structural = self.structural.lock().await;
         let mut index = self.index.write().await;
         *index = new_index;
     }
@@ -210,6 +271,7 @@ impl Clone for IndexWrapper {
     fn clone(&self) -> Self {
         Self {
             index: Arc::clone(&self.index),
+            structural: Arc::clone(&self.structural),
         }
     }
 }
@@ -268,6 +330,79 @@ impl Default for IndexCollection {
 
 #[cfg(test)]
 mod tests {
+
+    /// A phased insert must build the same graph the one-shot path did.
+    ///
+    /// `insert_batch` now releases the index lock between planning, appending and linking so
+    /// searches can run in the gaps (design doc section 33.1). The phases were already there
+    /// inside `HnswIndex`; what is new is that a lock is dropped between them, and what that
+    /// must not change is the result. The graph has to be over `PARALLEL_PLAN_MIN_NODES` for
+    /// the phased path to be taken at all, which is why this builds ten thousand nodes first.
+    #[tokio::test]
+    async fn a_phased_batch_insert_finds_what_a_serial_one_finds() {
+        use crate::search::hnsw::HnswIndex;
+        use crate::types::vector::DistanceMetric;
+
+        const SEED_NODES: usize = 10_200;
+        const BATCH: usize = 400;
+        const DIM: usize = 16;
+
+        // Deterministic and all distinct: vectors from `i % n` would make the nearest
+        // neighbour a tie among identical rows and the comparison meaningless.
+        let mut state = 0x1234_5678_9ABC_DEF0_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let vectors: Vec<Vec<f32>> = (0..SEED_NODES + BATCH)
+            .map(|_| (0..DIM).map(|_| next()).collect())
+            .collect();
+
+        let build = |phased: bool| {
+            let vectors = vectors.clone();
+            async move {
+                let mut index = HnswIndex::new(DistanceMetric::Cosine, None);
+                for (i, v) in vectors.iter().take(SEED_NODES).enumerate() {
+                    index.insert(i.to_string(), v.clone()).unwrap();
+                }
+                let wrapper = IndexWrapper::new(Box::new(index));
+                let batch: Vec<(RecordId, DenseVector)> = (SEED_NODES..SEED_NODES + BATCH)
+                    .map(|i| (RecordId::from(i.to_string()), vectors[i].clone()))
+                    .collect();
+                if phased {
+                    wrapper.insert_batch(batch).await.unwrap();
+                } else {
+                    for (id, v) in batch {
+                        wrapper.insert(id, v).await.unwrap();
+                    }
+                }
+                wrapper
+            }
+        };
+
+        let phased = build(true).await;
+        let serial = build(false).await;
+        assert_eq!(phased.len().await, serial.len().await);
+
+        // The freshly inserted vectors must be found, and found in the same place.
+        let mut agreed = 0;
+        for (i, v) in vectors.iter().enumerate().skip(SEED_NODES).take(20) {
+            let want = i.to_string();
+            let hits = phased.search(v, 5).await.unwrap();
+            assert_eq!(
+                hits.first().map(|(id, _)| id.as_str()),
+                Some(want.as_str()),
+                "a vector inserted through the phased path is not its own nearest neighbour"
+            );
+            let other = serial.search(v, 5).await.unwrap();
+            if hits.first().map(|h| &h.0) == other.first().map(|h| &h.0) {
+                agreed += 1;
+            }
+        }
+        assert_eq!(agreed, 20, "phased and serial disagreed on a top hit");
+    }
     use super::*;
 
     // Mock VectorIndex for testing

@@ -245,6 +245,35 @@ static PHASE_NS: [std::sync::atomic::AtomicU64; 3] = [
 static PHASE_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const PHASE_LOG_EVERY: u64 = 250;
 
+/// Add one phase's elapsed time to the running totals.
+///
+/// Recorded inside each phase rather than around the batch, because the phases are called
+/// separately by anything that wants to hold a lock for only part of an insert -- timing them
+/// from the outside would stop working the moment that happened, and these numbers are what
+/// found the p99 tail in the first place.
+fn record_phase(phase: usize, started: std::time::Instant) {
+    use std::sync::atomic::Ordering::Relaxed;
+    PHASE_NS[phase].fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+}
+
+/// One line per `PHASE_LOG_EVERY` batches, with the cumulative time in each phase.
+fn report_phases(nodes: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = PHASE_BATCHES.fetch_add(1, Relaxed) + 1;
+    if n.is_multiple_of(PHASE_LOG_EVERY) {
+        let ms = |i: usize| PHASE_NS[i].load(Relaxed) as f64 / 1e6;
+        tracing::info!(
+            "insert_batch phases after {} batches: plan {:.0} ms, append {:.0} ms, \
+             link_back {:.0} ms (nodes now {})",
+            n,
+            ms(0),
+            ms(1),
+            ms(2),
+            nodes
+        );
+    }
+}
+
 /// Below this many nodes a batch is inserted one record at a time. Early records are
 /// what the rest of the graph hangs off, so letting a batch of them plan without seeing
 /// each other costs real recall; past this size it does not.
@@ -265,6 +294,20 @@ const PARALLEL_PLAN_MIN_BATCH: usize = 16;
 /// pointing the wrong way. If a measurement ever shows `optimize` still behind, raising this
 /// is safe on the evidence there is.
 const BULK_BUILD_CHUNK: usize = 1024;
+
+/// What [`HnswIndex::prepare_batch`] hands to the planning and appending phases.
+pub struct PreparedBatch {
+    items: Vec<(RecordId, DenseVector, usize)>,
+    entry: usize,
+    entry_level: usize,
+}
+
+/// What [`HnswIndex::apply_batch`] hands to the linking phase: the new nodes and the entry
+/// level everything in the batch was planned against.
+pub struct AppliedBatch {
+    nodes: Vec<(usize, usize)>,
+    entry_level: usize,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct HnswIndex {
@@ -863,7 +906,36 @@ impl HnswIndex {
     /// batch's size that is a rounding error. Against a small one it is not — early records
     /// are what the rest of the graph hangs off — so below `PARALLEL_PLAN_MIN_NODES` this
     /// inserts one at a time and gives up nothing.
+    /// A batch insert, split so a caller can hold exclusive access only where it is needed.
+    ///
+    /// Searches contend with inserts on whichever lock guards the index, and holding it for a
+    /// whole batch parks every reader for the length of the batch: at a million nodes that
+    /// measured 4 ms of planning, 0.25 ms of appending and 28 ms of pruning, and a streaming
+    /// workload saw a p99 of 90-120 ms against 4.7 ms when idle (design doc section 33).
+    /// Only the appending needs `&mut self`.
+    ///
+    /// `prepare_batch` and `apply_batch` take `&mut self`; `plan_batch` and `link_batch` take
+    /// `&self`. Callers that do not care run [`Self::insert_batch`], which is the four in
+    /// order. Only one batch may be in flight at a time -- the storage layer's insert
+    /// processor is a single task, which is what makes releasing the lock between phases safe.
     pub fn insert_batch(&mut self, items: Vec<(RecordId, DenseVector)>) -> crate::Result<()> {
+        let Some(prepared) = self.prepare_batch(items)? else {
+            return Ok(());
+        };
+        let plans = self.plan_batch(&prepared);
+        let applied = self.apply_batch(prepared, plans);
+        self.link_batch(&applied);
+        Ok(())
+    }
+
+    /// Draw the levels and reject duplicates. `&mut self` for the RNG; no distance work.
+    ///
+    /// `Ok(None)` means the batch was small enough, or the graph young enough, that the
+    /// serial path already inserted it -- there is nothing left to plan.
+    pub fn prepare_batch(
+        &mut self,
+        items: Vec<(RecordId, DenseVector)>,
+    ) -> crate::Result<Option<PreparedBatch>> {
         if items.len() < PARALLEL_PLAN_MIN_BATCH
             || self.nodes.len() < PARALLEL_PLAN_MIN_NODES
             || self.entry_point.is_none()
@@ -871,12 +943,11 @@ impl HnswIndex {
             for (id, vector) in items {
                 self.insert(id, vector)?;
             }
-            return Ok(());
+            return Ok(None);
         }
-
         // Levels come from the RNG, which needs `&mut self`. Draw them here so that planning
         // needs nothing but `&self`. Duplicate ids are rejected against the graph and against
-        // the rest of the batch — the serial path catches the second one because the first is
+        // the rest of the batch -- the serial path catches the second one because the first is
         // already in `id_to_idx`, and nothing in this batch is yet.
         let mut prepared: Vec<(RecordId, DenseVector, usize)> = Vec::with_capacity(items.len());
         let mut seen: HashSet<RecordId> = HashSet::with_capacity(items.len());
@@ -891,72 +962,77 @@ impl HnswIndex {
             let level = self.select_level();
             prepared.push((id, vector, level));
         }
-
         // One entry point for the whole batch, for the same reason: it is what everything
-        // plans against, and phases B and C use the same value so a plan and its application
+        // plans against, and the later phases use the same value so a plan and its application
         // never disagree about which layers were searched.
         let entry = self.entry_point.unwrap();
         let entry_level = self.nodes[entry].level;
+        Ok(Some(PreparedBatch {
+            items: prepared,
+            entry,
+            entry_level,
+        }))
+    }
 
-        // A. Plan. Read-only, `&self`, every core.
-        let t_a = std::time::Instant::now();
-        let plans: Vec<Vec<Vec<usize>>> = prepared
+    /// A. Plan. Read-only, `&self`, every core.
+    pub fn plan_batch(&self, prepared: &PreparedBatch) -> Vec<Vec<Vec<usize>>> {
+        let started = std::time::Instant::now();
+        let plans = prepared
+            .items
             .par_iter()
-            .map(|(_, vector, level)| self.plan_neighbors(vector, *level, entry, entry_level))
+            .map(|(_, vector, level)| {
+                self.plan_neighbors(vector, *level, prepared.entry, prepared.entry_level)
+            })
             .collect();
+        record_phase(0, started);
+        plans
+    }
 
-        let t_b = std::time::Instant::now();
-        // B. Append the nodes and their own forward edges. Serial `&mut self`, but pure
-        // pushes -- for a 380-record group at 768 dimensions this is about a megabyte of
-        // memcpy. The whole batch is appended before phase C starts, so `nodes` does not
-        // grow while C runs and no index into it can be invalidated.
+    /// B. Append the nodes and their own forward edges. Serial `&mut self`, but pure pushes --
+    /// for a 380-record group at 768 dimensions this is about a megabyte of memcpy. The whole
+    /// batch is appended before the linking starts, so `nodes` does not grow while that runs
+    /// and no index into it can be invalidated.
+    pub fn apply_batch(
+        &mut self,
+        prepared: PreparedBatch,
+        plans: Vec<Vec<Vec<usize>>>,
+    ) -> AppliedBatch {
+        let started = std::time::Instant::now();
+        let entry_level = prepared.entry_level;
         let mut applied: Vec<(usize, usize)> = Vec::with_capacity(plans.len());
         let mut new_entry: Option<usize> = None;
-        for ((id, vector, level), plan) in prepared.into_iter().zip(plans) {
+        for ((id, vector, level), plan) in prepared.items.into_iter().zip(plans) {
             let idx = self.push_planned_node(id, vector, level, plan);
             if level > entry_level {
-                // Last one wins, exactly as the one-at-a-time path did: every plan in this
-                // batch was made against `entry`, so a mid-batch change would make some plans
-                // disagree with the graph they were built for.
                 new_entry = Some(idx);
             }
             applied.push((idx, level));
         }
-
-        let t_c = std::time::Instant::now();
-        // C. Reverse edges and pruning. `&self`, one edge lock at a time, every core. This
-        // is the phase worth parallelising: the pruning inside `link_back` is where the
-        // insert path spent about 78% of its CPU, and it was serial.
-        let graph: &Self = self;
-        applied
-            .par_iter()
-            .for_each(|&(idx, level)| graph.link_back_all(idx, level, entry_level));
-
-        {
-            use std::sync::atomic::Ordering::Relaxed;
-            let now = std::time::Instant::now();
-            PHASE_NS[0].fetch_add((t_b - t_a).as_nanos() as u64, Relaxed);
-            PHASE_NS[1].fetch_add((t_c - t_b).as_nanos() as u64, Relaxed);
-            PHASE_NS[2].fetch_add((now - t_c).as_nanos() as u64, Relaxed);
-            let n = PHASE_BATCHES.fetch_add(1, Relaxed) + 1;
-            if n.is_multiple_of(PHASE_LOG_EVERY) {
-                let ms = |i: usize| PHASE_NS[i].load(Relaxed) as f64 / 1e6;
-                tracing::info!(
-                    "insert_batch phases after {} batches: plan {:.0} ms, append {:.0} ms, \
-                     link_back {:.0} ms (nodes now {})",
-                    n,
-                    ms(0),
-                    ms(1),
-                    ms(2),
-                    self.nodes.len()
-                );
-            }
-        }
-
         if let Some(idx) = new_entry {
             self.entry_point = Some(idx);
         }
-        Ok(())
+        record_phase(1, started);
+        AppliedBatch {
+            nodes: applied,
+            entry_level,
+        }
+    }
+
+    /// C. Reverse edges and pruning. `&self`, one edge lock at a time, every core. This is the
+    /// phase worth parallelising: the pruning inside `link_back` is where the insert path spent
+    /// about 78% of its CPU, and it was serial.
+    pub fn link_batch(&self, applied: &AppliedBatch) {
+        let started = std::time::Instant::now();
+        let graph: &Self = self;
+        let entry_level = applied.entry_level;
+        applied
+            .nodes
+            .par_iter()
+            .for_each(|&(idx, level)| graph.link_back_all(idx, level, entry_level));
+        record_phase(2, started);
+        // The batch counter advances with the last phase, so one line covers one batch
+        // however the caller split it.
+        report_phases(graph.nodes.len());
     }
 
     /// The read-only half of an insert: which neighbours this vector should link to, per layer.
@@ -1165,6 +1241,14 @@ impl std::fmt::Debug for HnswIndex {
 impl crate::search::index_traits::VectorIndex for HnswIndex {
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
+    }
+
+    fn as_hnsw(&self) -> Option<&HnswIndex> {
+        Some(self)
+    }
+
+    fn as_hnsw_mut(&mut self) -> Option<&mut HnswIndex> {
+        Some(self)
     }
 
     async fn add_batch(&mut self, items: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
