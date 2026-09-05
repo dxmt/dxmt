@@ -141,3 +141,41 @@ async fn an_hnsw_file_is_refused_as_hnsw_pq() {
         err
     );
 }
+
+/// A snapshot written before the record map became `Arc`-shared must still be readable.
+///
+/// The map holds `Arc<Record>` so a snapshot can copy handles instead of records -- 10M of
+/// them were 90 GB of copy on top of 90 GB resident, and the process was OOM-killed for it
+/// (design doc section 34.3). That is only safe if the bytes are unchanged. `Record` has a
+/// hand-written `Serialize` that puts the payload through a JSON string, and serde's `rc`
+/// feature serialises an `Arc<T>` by delegating to that same impl -- so they should agree.
+/// Asserted rather than assumed, because the alternative is a snapshot nobody can restore.
+#[test]
+fn an_arc_serialises_to_the_same_bytes_as_the_record_inside_it() {
+    use dxmt_vectordb::types::record::{Record, RecordStatus};
+    use std::sync::Arc;
+
+    let record = Record {
+        id: "r1".to_string(),
+        vector: vec![0.5, -0.25, 0.125, 0.0],
+        sparse_vector: None,
+        named_vectors: None,
+        payload: serde_json::json!({"bucket": 3, "name": "x"}),
+        created_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .into(),
+        updated_at: chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .into(),
+        version: 7,
+        status: RecordStatus::Active,
+    };
+
+    let plain = bincode::serialize(&vec![record.clone()]).expect("Vec<Record>");
+    let shared = bincode::serialize(&vec![Arc::new(record)]).expect("Vec<Arc<Record>>");
+    assert_eq!(
+        plain, shared,
+        "Arc<Record> must serialise to the same bytes as Record, or every snapshot written \
+         before this change becomes unreadable"
+    );
+}

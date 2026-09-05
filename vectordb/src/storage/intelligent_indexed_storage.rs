@@ -191,7 +191,12 @@ pub struct StorageHealthSnapshot {
 struct TableSnapshot {
     table: Table,
     algorithm: IndexAlgorithm,
-    records: Vec<Record>,
+    /// Shared with the live map, not copied out of it.
+    ///
+    /// serde's `rc` feature serialises an `Arc<T>` as a plain `T`, so the file on disk is
+    /// unchanged; what changes is that writing a snapshot of 10M records no longer needs a
+    /// second 90 GB of them in memory first (design doc section 34.3).
+    records: Vec<Arc<Record>>,
     has_index: bool,
 }
 
@@ -202,7 +207,8 @@ struct TableSnapshot {
 struct TableTemplate {
     table: Table,
     algorithm: IndexAlgorithm,
-    records: Vec<Record>,
+    /// Shared with the live map rather than copied out of it; see `records` there.
+    records: Vec<Arc<Record>>,
 }
 
 /// 一条待写入索引的记录：id、稠密向量，以及可选的命名向量。
@@ -385,7 +391,12 @@ struct IntelligentTableData {
     table: Table,
 
     /// 记录存储
-    records: HashMap<RecordId, Record>,
+    ///
+    /// `Arc` 是为了快照:它要的是某个时刻的一致视图,于是在读锁里把每条记录拷出来,
+    /// 而 10M 条 × 9.5 KB 就是 90 GB 的临时拷贝叠在 90 GB 常驻之上 —— 实测在 125 GB 的机器上
+    /// 被内核杀掉(design doc §34.3)。记录从不原地修改、只整体替换,所以引用计数就够,
+    /// 一次快照的拷贝从每条 9.5 KB 降到 8 字节。
+    records: HashMap<RecordId, Arc<Record>>,
 
     /// 选择的索引算法
     selected_algorithm: IndexAlgorithm,
@@ -729,7 +740,9 @@ async fn process_insert_group(
                             .payload_index
                             .insert_record(&record_id, &record.payload);
                     }
-                    table_data.records.insert(record_id.clone(), record.clone());
+                    table_data
+                        .records
+                        .insert(record_id.clone(), Arc::new(record.clone()));
 
                     to_insert.push((record_id, request.vector, request.named_vectors));
                     records.push(record);
@@ -1277,7 +1290,8 @@ impl IntelligentIndexedStorage {
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        data.records.insert(record.id.clone(), record.clone());
+        data.records
+            .insert(record.id.clone(), Arc::new(record.clone()));
         data.table.record_count = data.records.len() as u64;
         if record.updated_at > data.table.updated_at {
             data.table.updated_at = record.updated_at;
@@ -2296,7 +2310,8 @@ impl IntelligentIndexedStorage {
         data.selected_algorithm = meta.algorithm.clone();
 
         for record in &meta.records {
-            data.records.insert(record.id.clone(), record.clone());
+            // Already an `Arc` from the file; cloning the handle is the point.
+            data.records.insert(record.id.clone(), Arc::clone(record));
         }
         data.table.record_count = data.records.len() as u64;
 
@@ -4909,7 +4924,7 @@ impl IntelligentIndexedStorage {
         table
             .records
             .get(record_id)
-            .cloned()
+            .map(|r| (**r).clone())
             .ok_or_else(|| crate::Error::RecordNotFound(record_id.clone()))
     }
 
@@ -4959,7 +4974,9 @@ impl IntelligentIndexedStorage {
                 status: crate::types::RecordStatus::Active,
             };
 
-            table_data.records.insert(record_id.clone(), record.clone());
+            table_data
+                .records
+                .insert(record_id.clone(), Arc::new(record.clone()));
 
             if let Some(old_payload_val) = old_payload.as_ref() {
                 table_data
@@ -5397,7 +5414,7 @@ impl IntelligentIndexedStorage {
 
                 let similarity_score = Self::similarity_from_distance(metric, score);
 
-                records_with_scores.push((record.clone(), similarity_score));
+                records_with_scores.push(((**record).clone(), similarity_score));
 
                 // 只保留limit个结果
                 if records_with_scores.len() >= limit {
@@ -5440,10 +5457,10 @@ impl IntelligentIndexedStorage {
             let matching_ids = table_data.payload_index.get_matching_ids(filter);
             matching_ids
                 .iter()
-                .filter_map(|id| table_data.records.get(id).cloned())
+                .filter_map(|id| table_data.records.get(id).map(|r| (**r).clone()))
                 .collect()
         } else {
-            table_data.records.values().cloned().collect()
+            table_data.records.values().map(|r| (**r).clone()).collect()
         };
 
         // Sort by created_at (newest first)
@@ -5624,7 +5641,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
             Snapshot {
                 table: data.table.clone(),
-                records: data.records.values().cloned().collect(),
+                records: data.records.values().map(|r| (**r).clone()).collect(),
             }
         };
         let json =
