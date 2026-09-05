@@ -48,22 +48,47 @@ struct SerializableRecord {
     status: RecordStatus,
 }
 
+/// The same shape as [`SerializableRecord`], borrowing instead of owning.
+///
+/// `Record::serialize` used to build a `SerializableRecord`, which meant cloning every field
+/// -- the 3 KB vector included -- for each record on its way to disk. A snapshot of a million
+/// records spent about 3 GB of allocation on copies that existed only to be written and
+/// dropped, and that showed up as resident memory for as long as the allocator held the
+/// pages: with the record map already shared and the writer already streaming, a snapshot
+/// still took the peak from 8.1 GB to 13.5 GB (design doc section 34).
+///
+/// Field order and types match `SerializableRecord` exactly, because bincode writes fields in
+/// order and a `&T` writes as a `T` -- the file is the same file. `payload_json` is still
+/// built: the payload is stored as a JSON string, and that is the format, not a copy.
+#[derive(Serialize)]
+struct SerializableRecordRef<'a> {
+    id: &'a RecordId,
+    vector: &'a DenseVector,
+    sparse_vector: &'a Option<SparseVector>,
+    named_vectors: &'a Option<std::collections::HashMap<String, DenseVector>>,
+    payload_json: String,
+    created_at: &'a DateTime<Utc>,
+    updated_at: &'a DateTime<Utc>,
+    version: u64,
+    status: &'a RecordStatus,
+}
+
 impl Serialize for Record {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let serializable = SerializableRecord {
-            id: self.id.clone(),
-            vector: self.vector.clone(),
-            sparse_vector: self.sparse_vector.clone(),
-            named_vectors: self.named_vectors.clone(),
+        let serializable = SerializableRecordRef {
+            id: &self.id,
+            vector: &self.vector,
+            sparse_vector: &self.sparse_vector,
+            named_vectors: &self.named_vectors,
             payload_json: serde_json::to_string(&self.payload)
                 .map_err(serde::ser::Error::custom)?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
             version: self.version,
-            status: self.status.clone(),
+            status: &self.status,
         };
         serializable.serialize(serializer)
     }
@@ -892,5 +917,80 @@ mod tests {
     fn test_search_query_default_search_mode() {
         let q = SearchQuery::default();
         assert_eq!(q.search_mode, SearchMode::Normal);
+    }
+}
+
+#[cfg(test)]
+mod serialize_borrow_tests {
+    use super::*;
+
+    /// Borrowing on the way to disk must not change what lands there.
+    ///
+    /// `Record::serialize` builds a `SerializableRecordRef` rather than cloning every field
+    /// into a `SerializableRecord` -- for a snapshot of a million records that was about 3 GB
+    /// of copies made only to be written and dropped. It is only safe because bincode writes
+    /// a struct's fields in order and writes a `&T` exactly as a `T`, so the two shapes
+    /// produce the same bytes. That is the sort of thing that is true until someone reorders
+    /// a field, which is what this test is for: every snapshot and WAL entry already on disk
+    /// depends on it.
+    #[test]
+    fn the_borrowing_shape_writes_the_same_bytes_as_the_owning_one() {
+        let record = Record {
+            id: "rec-42".to_string(),
+            vector: vec![0.5, -0.25, 0.125, 0.0, 1.5],
+            sparse_vector: None,
+            named_vectors: None,
+            payload: serde_json::json!({"bucket": 3, "name": "x", "flag": true}),
+            created_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .into(),
+            updated_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05.678Z")
+                .unwrap()
+                .into(),
+            version: 9,
+            status: RecordStatus::Active,
+        };
+        let payload_json = serde_json::to_string(&record.payload).unwrap();
+
+        let owning = SerializableRecord {
+            id: record.id.clone(),
+            vector: record.vector.clone(),
+            sparse_vector: record.sparse_vector.clone(),
+            named_vectors: record.named_vectors.clone(),
+            payload_json: payload_json.clone(),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            version: record.version,
+            status: record.status.clone(),
+        };
+        let borrowing = SerializableRecordRef {
+            id: &record.id,
+            vector: &record.vector,
+            sparse_vector: &record.sparse_vector,
+            named_vectors: &record.named_vectors,
+            payload_json,
+            created_at: &record.created_at,
+            updated_at: &record.updated_at,
+            version: record.version,
+            status: &record.status,
+        };
+
+        assert_eq!(
+            bincode::serialize(&owning).unwrap(),
+            bincode::serialize(&borrowing).unwrap(),
+            "the borrowing shape must write the bytes the owning one did"
+        );
+        // And the record itself, which now goes through the borrowing shape, agrees with both.
+        assert_eq!(
+            bincode::serialize(&record).unwrap(),
+            bincode::serialize(&owning).unwrap(),
+            "a Record must still write what a SerializableRecord writes"
+        );
+        // Round trip, so the reader side is covered too.
+        let back: Record = bincode::deserialize(&bincode::serialize(&record).unwrap()).unwrap();
+        assert_eq!(back.id, record.id);
+        assert_eq!(back.vector, record.vector);
+        assert_eq!(back.payload, record.payload);
+        assert_eq!(back.version, record.version);
     }
 }
