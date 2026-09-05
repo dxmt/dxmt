@@ -200,6 +200,56 @@ struct TableSnapshot {
     has_index: bool,
 }
 
+/// [`TableSnapshot`] as the verification reads it: every record decoded, none kept.
+///
+/// Verification exists because compacting the WAL makes the snapshot the only copy, so
+/// "written" is not enough -- it has to be readable. It did that by deserialising the whole
+/// `TableSnapshot`, which materialises every record in order to look at one boolean at the
+/// end. On a million records that was 6.2 GB, and it landed on top of the 8 GB already held:
+/// measured as the entire remaining cost of a snapshot, once the record copying and the
+/// serialisation buffers were gone (design doc section 34).
+///
+/// Same fields in the same order, so bincode reads the same bytes; `records` decodes each
+/// element and drops it, which is what keeps the guarantee -- a record that will not decode
+/// still fails the verification -- at constant memory.
+#[derive(serde::Deserialize)]
+struct VerifiedSnapshot {
+    #[allow(dead_code)]
+    table: Table,
+    #[allow(dead_code)]
+    algorithm: IndexAlgorithm,
+    /// Never read, and that is the point: the work happens in its `Deserialize`, which
+    /// decodes each record and drops it. Reading it would defeat the purpose.
+    #[allow(dead_code)]
+    records: DecodedAndDropped,
+    has_index: bool,
+}
+
+/// A `Vec<Record>` decoded for its errors and not for its contents.
+struct DecodedAndDropped;
+
+impl<'de> serde::Deserialize<'de> for DecodedAndDropped {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = DecodedAndDropped;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a sequence of records")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                // Each element is decoded, checked by that decoding, and dropped before the
+                // next one is read.
+                while seq.next_element::<Record>()?.is_some() {}
+                Ok(DecodedAndDropped)
+            }
+        }
+        d.deserialize_seq(Visitor)
+    }
+}
+
 /// Everything a snapshot has to copy out of a table while the map lock is held.
 ///
 /// It is `TableSnapshot` minus `has_index`, because that field is the *result* of writing the
@@ -2115,7 +2165,7 @@ impl IntelligentIndexedStorage {
 
         for i in 0..tables {
             let stem = format!("t{}", i);
-            let meta: TableSnapshot = crate::search::index_persistence::read_index(
+            let meta: VerifiedSnapshot = crate::search::index_persistence::read_index(
                 &dir.join(format!("{}.meta", stem)),
                 "table-snapshot",
             )?;

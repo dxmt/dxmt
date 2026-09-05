@@ -101,9 +101,12 @@ pub fn read_index<T: DeserializeOwned>(path: &Path, kind: &str) -> crate::Result
         )));
     }
 
-    let mut payload = Vec::new();
-    file.read_to_end(&mut payload)?;
-    bincode::deserialize(&payload).map_err(|e| crate::Error::Serialization(e.to_string()))
+    // Deserialised from the file rather than from a copy of it. Reading the whole payload
+    // into a `Vec<u8>` first costs the size of the file on top of whatever the value itself
+    // needs -- about 3.2 GB for a snapshot of a million records, and the snapshot's own
+    // verification reads that file back immediately after writing it.
+    bincode::deserialize_from(std::io::BufReader::with_capacity(1 << 20, file))
+        .map_err(|e| crate::Error::Serialization(e.to_string()))
 }
 
 #[cfg(test)]

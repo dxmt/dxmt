@@ -179,3 +179,50 @@ fn an_arc_serialises_to_the_same_bytes_as_the_record_inside_it() {
          before this change becomes unreadable"
     );
 }
+
+/// Verification has to keep failing on a snapshot it cannot decode.
+///
+/// `verify_snapshot` decodes every record and drops it as it goes, because materialising them
+/// to read one boolean cost 6.2 GB on a million records. Dropping them is only acceptable if
+/// a record that will not decode still fails: compacting the WAL makes the snapshot the only
+/// copy, so "written" is not enough, it has to be readable.
+#[test]
+fn a_truncated_record_still_fails_to_decode() {
+    use dxmt_vectordb::types::record::{Record, RecordStatus};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("t0.meta");
+    let record = Record {
+        id: "r1".to_string(),
+        vector: vec![1.0; 32],
+        sparse_vector: None,
+        named_vectors: None,
+        payload: serde_json::json!({}),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        version: 1,
+        status: RecordStatus::Active,
+    };
+    dxmt_vectordb::search::index_persistence::write_index(
+        &path,
+        "records",
+        &vec![record.clone(), record],
+    )
+    .expect("write");
+
+    // Whole file: decodes.
+    let ok: Vec<Record> =
+        dxmt_vectordb::search::index_persistence::read_index(&path, "records").expect("read back");
+    assert_eq!(ok.len(), 2);
+
+    // Cut the tail off and it must not: a streaming reader that stopped early and reported
+    // success would let a half-written snapshot through the check that guards the WAL.
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &bytes[..bytes.len() - 40]).unwrap();
+    let truncated: Result<Vec<Record>, _> =
+        dxmt_vectordb::search::index_persistence::read_index(&path, "records");
+    assert!(
+        truncated.is_err(),
+        "a truncated file decoded without error; the snapshot check would pass a broken file"
+    );
+}

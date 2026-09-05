@@ -379,7 +379,26 @@ impl WalManager {
         }
         let before = std::fs::metadata(&wal_file_path).map_err(Error::Io)?.len();
 
-        let kept = self.replay_from(keep_from)?;
+        // When the snapshot covers everything written, nothing survives the compaction and
+        // the file can go without being read.
+        //
+        // `replay_from` deserialises every frame, including the ones below `keep_from` -- it
+        // does that on purpose, so a corrupt frame in the middle cannot be silently skipped
+        // and leave the recovery frontier unknowable. That reasoning does not apply to a log
+        // that is about to be deleted in full: by definition there is no entry at or after
+        // `keep_from` to lose. Measured on a 1M-row table, the scan it replaces read 3.97 GB
+        // and spent 15 s doing it, and the transient allocations took resident memory from
+        // 8.0 GB to 14.2 GB -- the whole of what a snapshot appeared to cost, once the record
+        // copying was gone (design doc section 34).
+        //
+        // `sequence_number` is the next sequence to be handed out, so the highest written is
+        // one below it.
+        let nothing_survives = keep_from >= self.sequence_number;
+        let kept = if nothing_survives {
+            Vec::new()
+        } else {
+            self.replay_from(keep_from)?
+        };
 
         let tmp_path = self.wal_path.join("wal.log.compacting");
         {
@@ -564,6 +583,44 @@ mod tests {
         let kept = wal.replay_from(0).unwrap();
         assert_eq!(kept.len(), 3, "expected entries 7,8,9 to survive");
         assert_eq!(kept.first().unwrap().0, 7);
+    }
+
+    #[test]
+    fn the_shortcut_and_the_scan_agree_at_the_boundary() {
+        // `truncate_before` skips reading the log when `keep_from` is at or past the next
+        // sequence, because nothing can survive. That is the case a snapshot produces -- it
+        // covers everything written, and reading 4 GB to find nothing cost 15 s and took
+        // resident memory from 8.0 to 14.2 GB. The boundary is worth pinning from both sides:
+        // one below it the scan still runs and still keeps the entry it should.
+        for (offset, expected_kept) in [(0u64, 0usize), (1, 1)] {
+            let dir = TempDir::new().unwrap();
+            let mut wal = WalManager::new(dir.path()).unwrap();
+            for i in 0..5 {
+                wal.write_entry(WalEntry::Delete {
+                    table: "t".to_string(),
+                    record_id: format!("r{}", i),
+                })
+                .unwrap();
+            }
+            wal.force_flush().unwrap();
+
+            let keep_from = wal.next_sequence() - offset;
+            wal.truncate_before(keep_from).unwrap();
+            let left = wal.replay_from(0).unwrap();
+            assert_eq!(
+                left.len(),
+                expected_kept,
+                "keep_from = next_sequence - {offset} should leave {expected_kept} entries, \
+                 left {}",
+                left.len()
+            );
+            if expected_kept > 0 {
+                assert!(
+                    left.iter().all(|(seq, _)| *seq >= keep_from),
+                    "an entry below the cutoff survived"
+                );
+            }
+        }
     }
 
     #[test]
