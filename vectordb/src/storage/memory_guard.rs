@@ -22,14 +22,19 @@ use std::time::Instant;
 /// checks, which is why the floor is measured in hundreds of megabytes rather than tens.
 const CACHE_MILLIS: u64 = 500;
 
-/// Default floor, overridable with `DB_MIN_FREE_MEMORY_MB`; 0 disables the check.
-const DEFAULT_FLOOR_MB: u64 = 1024;
+/// Default floor as a fraction of total memory, overridable with `DB_MIN_FREE_MEMORY_MB`.
+///
+/// It was a flat 1 GB, and 1 GB is not a floor on a large machine: a single batch insert into
+/// a 10M-node graph allocates a `Visited` buffer of one `u32` per node per rayon thread --
+/// 40 MB each, 1.3 GB across 32 threads -- so an operation can step over a 1 GB gap between
+/// two samples. It did: a 10M load with a payload was OOM-killed at 122.6 GB resident on a
+/// 125 GB box without the guard ever refusing a write. A twentieth of total is 6 GB there and
+/// 25 MB on a 512 MB container, which is the right shape for a number meant to leave room for
+/// one operation's burst.
+const DEFAULT_FLOOR_FRACTION: u64 = 20;
 
-/// The *default* floor is capped at this fraction of total memory so a small container does
-/// not refuse every write: on a 512 MB cgroup the default becomes 64 MB, not 1 GB. A floor
-/// set explicitly is used as given -- an operator who names a number knows their machine,
-/// and a cap that silently overrode them would also make the setting untestable.
-const MAX_DEFAULT_FLOOR_FRACTION: u64 = 8;
+/// Floor when total memory cannot be read at all.
+const FALLBACK_FLOOR_MB: u64 = 1024;
 
 pub(crate) struct MemoryGuard {
     floor_bytes: u64,
@@ -44,14 +49,12 @@ impl MemoryGuard {
             .ok()
             .and_then(|v| v.parse::<u64>().ok());
         let floor_bytes = match configured {
+            // An operator who names a number knows their machine; it is used as given.
             Some(mb) => mb * 1024 * 1024,
-            None => {
-                let default = DEFAULT_FLOOR_MB * 1024 * 1024;
-                match total_bytes() {
-                    Some(total) => default.min(total / MAX_DEFAULT_FLOOR_FRACTION),
-                    None => default,
-                }
-            }
+            None => match total_bytes() {
+                Some(total) => total / DEFAULT_FLOOR_FRACTION,
+                None => FALLBACK_FLOOR_MB * 1024 * 1024,
+            },
         };
         if floor_bytes == 0 {
             tracing::info!("Write-side memory floor disabled");
@@ -209,14 +212,19 @@ mod tests {
     }
 
     #[test]
-    fn the_default_floor_is_capped_so_a_small_container_still_accepts_writes() {
-        // The cap is applied in `from_env`; this pins the arithmetic it uses.
-        let total: u64 = 512 * 1024 * 1024;
-        let default: u64 = DEFAULT_FLOOR_MB * 1024 * 1024;
+    fn the_default_floor_scales_with_the_machine() {
+        // A fraction rather than a constant, in both directions: big enough on a large box to
+        // survive one operation's allocation burst, small enough on a container not to refuse
+        // every write.
         assert_eq!(
-            default.min(total / MAX_DEFAULT_FLOOR_FRACTION),
-            64 * 1024 * 1024,
-            "a 512 MB container gets a 64 MB floor, not a 1 GB one that refuses everything"
+            (125 * 1024 * 1024 * 1024_u64) / DEFAULT_FLOOR_FRACTION,
+            6_710_886_400,
+            "a 125 GB box gets a 6.25 GB floor, not the 1 GB it was OOM-killed under"
+        );
+        assert_eq!(
+            (512 * 1024 * 1024_u64) / DEFAULT_FLOOR_FRACTION,
+            26_843_545,
+            "a 512 MB container gets 25 MB, not a floor that refuses everything"
         );
     }
 
