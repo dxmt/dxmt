@@ -6,10 +6,14 @@
 //! unfiltered query uses 256. Measured: 47.9 QPS at a 207.7 ms p99, against 2,307 QPS and
 //! 5.0 ms with no filter at all.
 //!
-//! Widening the gate moves such queries onto `search_with_filter`, which gates the result set
-//! during traversal. That path has no top-up if it comes back short -- the retry in phase 3
-//! only covers post-filtering -- so what this file pins is that it does not: both paths must
-//! return a full k, and the in-graph one must not be the less accurate of the two.
+//! Widening the gate to admit it was tried and taken back out: measured on that case, the
+//! in-graph walk ran at 26.7 QPS against the over-fetching path's 76.9, because it visits
+//! about `ef / selectivity` nodes and materialises the whole matching id set on every query.
+//! The cap stays at 10,000 and `IN_GRAPH_FILTER_MAX_IDS` carries the numbers.
+//!
+//! What this file pins is that the two paths agree. The in-graph one has no top-up if it
+//! comes back short -- the retry in phase 3 only covers post-filtering -- so both must return
+//! a full k, both must return only rows that pass, and neither may be the less accurate.
 //!
 //! `DB_IN_GRAPH_FILTER_MAX_IDS` is process-global, so this is the only test in this binary.
 
@@ -158,7 +162,9 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
         .search("t", selective_query(query.clone()))
         .await
         .unwrap();
-    // The default admits this matching set, so the filter is applied during traversal.
+    // Raised so this matching set is admitted and the filter is applied during traversal.
+    // The shipped default is 10,000, which this table's 2,400 matching rows sit under anyway;
+    // setting it explicitly keeps the test honest about which path it is exercising.
     std::env::set_var("DB_IN_GRAPH_FILTER_MAX_IDS", "100000");
     let in_graph = storage
         .search("t", selective_query(query.clone()))
