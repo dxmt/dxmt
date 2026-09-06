@@ -1970,7 +1970,39 @@ impl IntelligentIndexedStorage {
             };
         }
 
+        if let Some(forced) = Self::forced_algorithm(dimension) {
+            decision.selected_algorithm = forced;
+        }
+
         Ok(decision)
+    }
+
+    /// `DB_INDEX_ALGORITHM=hnsw|hnsw-pq` pins the index family for every table, at creation
+    /// and at re-evaluation alike, so the periodic re-check does not rebuild it back.
+    ///
+    /// For measuring one index against another on the same data without touching the
+    /// selector's size thresholds -- the HNSW-PQ acceptance runs in DISK_INDEX.md section 4
+    /// are made this way. Unset, the selector decides as before.
+    fn forced_algorithm(dimension: usize) -> Option<IndexAlgorithm> {
+        match std::env::var("DB_INDEX_ALGORITHM").ok()?.as_str() {
+            "hnsw" => Some(IndexAlgorithm::HNSW {
+                m: 16,
+                ef_construction: Self::default_ef_construction(),
+                ef_search: Self::DEFAULT_EF_SEARCH,
+            }),
+            "hnsw-pq" => Some(IndexAlgorithm::HnswPQ {
+                m: 16,
+                ef_construction: Self::default_ef_construction(),
+                ef_search: Self::DEFAULT_EF_SEARCH,
+                num_subvectors: dimension / 4,
+                num_centroids: 256,
+                enable_reranking: true,
+            }),
+            other => {
+                warn!("DB_INDEX_ALGORITHM={other} is not hnsw or hnsw-pq; ignoring it");
+                None
+            }
+        }
     }
 
     /// 检查每张表当前的索引算法是否仍与其规模相称，不相称的重建。
@@ -2776,7 +2808,7 @@ impl IntelligentIndexedStorage {
         };
 
         // 根据 memory_optimization 配置选择索引算法
-        let index_decision = if memory_optimization {
+        let mut index_decision = if memory_optimization {
             // 内存优化模式：优先选择压缩和聚类索引
             self.select_memory_optimized_index(&index_config).await?
         } else {
@@ -2785,6 +2817,9 @@ impl IntelligentIndexedStorage {
                 .select_optimal_index(&index_config)
                 .await?
         };
+        if let Some(forced) = Self::forced_algorithm(config.dimension) {
+            index_decision.selected_algorithm = forced;
+        }
 
         info!(
             "Selected {} algorithm for table {} with confidence {:.2}",
@@ -3133,14 +3168,16 @@ impl IntelligentIndexedStorage {
                     let r = match exact_scored {
                         Some(scored) => scored,
                         None => {
-                            active_index
-                                .search_with_filter(
-                                    &query.vector,
-                                    result_limit,
-                                    filtered_ef,
-                                    &filter_ids,
-                                )
-                                .await?
+                            self.search_reranked(
+                                tablename,
+                                active_index,
+                                metric,
+                                &query.vector,
+                                result_limit,
+                                filtered_ef,
+                                Some(&filter_ids),
+                            )
+                            .await?
                         }
                     };
                     (r, false, result_limit)
@@ -3161,8 +3198,16 @@ impl IntelligentIndexedStorage {
                         selectivity * 100.0,
                         fetch
                     );
-                    let r = active_index
-                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                    let r = self
+                        .search_reranked(
+                            tablename,
+                            active_index,
+                            metric,
+                            &query.vector,
+                            fetch,
+                            ef_hint,
+                            None,
+                        )
                         .await?;
                     (r, true, fetch)
                 } else {
@@ -3186,15 +3231,31 @@ impl IntelligentIndexedStorage {
                         selectivity * 100.0,
                         fetch
                     );
-                    let r = active_index
-                        .search_with_ef_hint(&query.vector, fetch, ef_hint)
+                    let r = self
+                        .search_reranked(
+                            tablename,
+                            active_index,
+                            metric,
+                            &query.vector,
+                            fetch,
+                            ef_hint,
+                            None,
+                        )
                         .await?;
                     (r, true, fetch)
                 }
             } else {
                 // No filter
-                let r = active_index
-                    .search_with_ef_hint(&query.vector, result_limit, ef_hint)
+                let r = self
+                    .search_reranked(
+                        tablename,
+                        active_index,
+                        metric,
+                        &query.vector,
+                        result_limit,
+                        ef_hint,
+                        None,
+                    )
                     .await?;
                 (r, false, result_limit)
             };
@@ -3240,8 +3301,16 @@ impl IntelligentIndexedStorage {
                 total_records,
                 attempts
             );
-            results = active_index
-                .search_with_ef_hint(&query.vector, fetched, ef_hint.max(fetched))
+            results = self
+                .search_reranked(
+                    tablename,
+                    active_index,
+                    metric,
+                    &query.vector,
+                    fetched,
+                    ef_hint.max(fetched),
+                    None,
+                )
                 .await?;
             hits = self
                 .assemble_hits(
@@ -3287,6 +3356,60 @@ impl IntelligentIndexedStorage {
     /// Turn raw `(id, distance)` index output into hits, applying the payload filter when the
     /// search did not already do it in-graph.
     ///
+    /// An index search, reranked against the stored vectors when the index asks for it.
+    ///
+    /// A quantized graph (`HnswPqIndex`) walks on codes and returns candidates ordered by an
+    /// approximate distance; it says how many to fetch through `rerank_candidates`, and the
+    /// exact distance from the record's own vector decides the final order and the score the
+    /// caller sees. An exact index passes straight through. With a filter, the fetch goes
+    /// through the in-graph filtered walk with the same enlarged `k`.
+    #[allow(clippy::too_many_arguments)]
+    async fn search_reranked(
+        &self,
+        tablename: &str,
+        index: &crate::search::index_wrapper::IndexWrapper,
+        metric: DistanceMetric,
+        query: &DenseVector,
+        k: usize,
+        ef: usize,
+        filter_ids: Option<&std::collections::HashSet<String>>,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
+        let Some(candidates) = index.rerank_candidates(k).await else {
+            return match filter_ids {
+                Some(ids) => index.search_with_filter(query, k, ef, ids).await,
+                None => index.search_with_ef_hint(query, k, ef).await,
+            };
+        };
+        let fetch = candidates.max(k);
+        let approximate = match filter_ids {
+            Some(ids) => {
+                index
+                    .search_with_filter(query, fetch, ef.max(fetch), ids)
+                    .await?
+            }
+            None => {
+                index
+                    .search_with_ef_hint(query, fetch, ef.max(fetch))
+                    .await?
+            }
+        };
+        let tables = self.read_tables("rerank").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let mut exact: Vec<(RecordId, f32)> = approximate
+            .into_iter()
+            .filter_map(|(id, _)| {
+                let record = table_data.records.get(&id)?;
+                let dist = metric.calculate(query, &record.vector).ok()?;
+                Some((id, dist))
+            })
+            .collect();
+        exact.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        exact.truncate(k);
+        Ok(exact)
+    }
+
     /// Separate from `search` because a short post-filtered result has to be reassembled after
     /// a larger fetch, and the map lock must not be held across that fetch.
     #[allow(clippy::too_many_arguments)]
@@ -4621,7 +4744,9 @@ impl IntelligentIndexedStorage {
                         m: 16,
                         ef_construction: Self::default_ef_construction(),
                         ef_search: Self::DEFAULT_EF_SEARCH,
-                        num_subvectors: config.dimension / 8,
+                        // 4 dimensions per subspace (192 bytes at 768): the code size that
+                        // kept recall@100 at 1M and 10M (design/DISK_INDEX.md section 2.7).
+                        num_subvectors: config.dimension / 4,
                         num_centroids: 256,
                         enable_reranking: true,
                     },
@@ -4719,8 +4844,9 @@ impl IntelligentIndexedStorage {
                     },
                     num_subvectors: *num_subvectors,
                     num_centroids: *num_centroids,
-                    enable_reranking: *enable_reranking,
-                    rerank_factor: 3,
+                    // Reranking is not optional any more: the graph holds codes, not
+                    // vectors, so the storage layer always reranks (`search_reranked`).
+                    ..HnswPqConfig::default()
                 };
 
                 Ok(Box::new(HnswPqIndex::new(

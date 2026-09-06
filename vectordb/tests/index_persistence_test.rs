@@ -88,7 +88,6 @@ async fn hnsw_pq_carries_its_codebooks() {
     let config = HnswPqConfig {
         num_subvectors: 4,
         num_centroids: 16,
-        enable_reranking: false,
         ..Default::default()
     };
     let mut index = HnswPqIndex::new(dim, DistanceMetric::Euclidean, Some(config)).unwrap();

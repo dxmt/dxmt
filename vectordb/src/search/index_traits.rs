@@ -59,6 +59,14 @@ pub trait VectorIndex: Send + Sync {
         None
     }
 
+    /// How many candidates a top-`k` should fetch for the storage layer to rerank against
+    /// the stored vectors, or `None` when the index's own scores are exact. An index that
+    /// traverses on compressed vectors returns `Some`; its scores rank well enough to find
+    /// the neighbourhood and not well enough to order it.
+    fn rerank_candidates(&self, _k: usize) -> Option<usize> {
+        None
+    }
+
     fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {
         None
     }

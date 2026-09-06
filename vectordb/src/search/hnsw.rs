@@ -514,6 +514,14 @@ impl HnswIndex {
         }
     }
 
+    /// Restore what serialisation skips (the centroid table); `load` does this itself, a
+    /// wrapper that deserialises this graph inside its own struct has to call it.
+    pub fn after_load(&mut self) {
+        if let Some(store) = &mut self.quantized {
+            store.rebuild_symmetric();
+        }
+    }
+
     /// Whether the graph traverses on PQ codes.
     pub fn is_quantized(&self) -> bool {
         self.quantized.is_some()
