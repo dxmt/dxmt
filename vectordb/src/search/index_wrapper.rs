@@ -173,6 +173,11 @@ impl IndexWrapper {
         self.index.read().await.rerank_candidates(k)
     }
 
+    /// See `VectorIndex::wants_rebuild`.
+    pub async fn wants_rebuild(&self) -> bool {
+        self.index.read().await.wants_rebuild()
+    }
+
     /// Remove a vector - requires write lock
     pub async fn remove(&self, id: &RecordId) -> Result<bool> {
         let mut index = self.index.write().await;

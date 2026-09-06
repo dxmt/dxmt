@@ -40,6 +40,15 @@ pub struct HnswPqConfig {
     /// 1M and 10M (sections 2.8-2.10).
     pub rerank_factor: usize,
     pub rerank_min: usize,
+    /// Rows at which a streaming build trains and quantizes on its own, without waiting for
+    /// a rebuild. High enough that the codebooks see a representative sample -- the first
+    /// batches of a load are often one cluster -- and the one-off training cost (about two
+    /// minutes for 192 subspaces on 32 cores) lands once.
+    pub quantize_at_rows: usize,
+}
+
+impl HnswPqConfig {
+    pub const DEFAULT_QUANTIZE_AT_ROWS: usize = 65_536;
 }
 
 impl Default for HnswPqConfig {
@@ -50,6 +59,7 @@ impl Default for HnswPqConfig {
             num_centroids: 256,
             rerank_factor: 5,
             rerank_min: 100,
+            quantize_at_rows: Self::DEFAULT_QUANTIZE_AT_ROWS,
         }
     }
 }
@@ -84,6 +94,29 @@ impl HnswPqIndex {
             distance_metric,
             dimension,
         })
+    }
+
+    fn training_minimum(&self) -> usize {
+        self.config
+            .num_centroids
+            .saturating_mul(Self::MIN_VECTORS_PER_CENTROID)
+    }
+
+    /// Quantize from the vectors the exact graph still holds, once there are enough of them.
+    fn quantize_from_graph(&mut self) -> crate::Result<()> {
+        let n = crate::search::index_traits::VectorIndex::len(&self.hnsw);
+        if self.hnsw.is_quantized() || n < self.training_minimum() {
+            return Ok(());
+        }
+        let sample = self.hnsw.sample_vectors(Self::MAX_TRAINING_VECTORS);
+        tracing::info!(
+            "HNSW-PQ: quantizing a {}-row graph from a {}-vector sample",
+            n,
+            sample.len()
+        );
+        // Graph vectors are already metric-prepared; `train` prepares again, which is
+        // idempotent for unit vectors.
+        self.train(&sample)
     }
 
     /// Train the codebooks on `training_data` and switch the graph to codes.
@@ -123,7 +156,20 @@ impl HnswPqIndex {
     }
 
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
-        self.hnsw.insert(id, vector)
+        self.hnsw.insert(id, vector)?;
+        self.maybe_quantize()
+    }
+
+    /// A streaming build quantizes itself at `quantize_at_rows`; below that it waits for a
+    /// rebuild (`wants_rebuild`) or stays exact.
+    fn maybe_quantize(&mut self) -> crate::Result<()> {
+        if !self.hnsw.is_quantized()
+            && crate::search::index_traits::VectorIndex::len(&self.hnsw)
+                >= self.config.quantize_at_rows
+        {
+            self.quantize_from_graph()?;
+        }
+        Ok(())
     }
 
     /// The walk's best `k` by ADC (exact distances while untrained). Approximate once
@@ -191,7 +237,8 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
     }
 
     async fn add_batch(&mut self, items: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
-        self.hnsw.insert_batch(items)
+        self.hnsw.insert_batch(items)?;
+        self.maybe_quantize()
     }
 
     /// Train on a sample, quantize, then build on every core.
@@ -201,10 +248,7 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
     /// rerank need. The sample is a fixed stride rather than a random draw so two builds of
     /// the same data produce the same codebooks.
     async fn bulk_build(&mut self, vectors: Vec<(String, Vec<f32>)>) -> crate::Result<()> {
-        let wanted = self
-            .config
-            .num_centroids
-            .saturating_mul(Self::MIN_VECTORS_PER_CENTROID);
+        let wanted = self.training_minimum();
         if !self.hnsw.is_quantized() && vectors.len() >= wanted {
             let stride = (vectors.len() / Self::MAX_TRAINING_VECTORS).max(1);
             let sample: Vec<DenseVector> = vectors
@@ -252,6 +296,11 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
 
     fn rerank_candidates(&self, k: usize) -> Option<usize> {
         HnswPqIndex::rerank_candidates(self, k)
+    }
+
+    fn wants_rebuild(&self) -> bool {
+        !self.hnsw.is_quantized()
+            && crate::search::index_traits::VectorIndex::len(&self.hnsw) >= self.training_minimum()
     }
 
     fn as_hnsw(&self) -> Option<&HnswIndex> {
@@ -399,6 +448,42 @@ mod tests {
             found >= 98,
             "{found}/100 queries found their own vector after rerank"
         );
+    }
+
+    #[tokio::test]
+    async fn a_streaming_build_quantizes_itself_at_the_threshold() {
+        let config = HnswPqConfig {
+            quantize_at_rows: 2000,
+            ..small_config()
+        };
+        let mut index = HnswPqIndex::new(64, DistanceMetric::Cosine, Some(config)).unwrap();
+        let data = corpus(3000, 64, 0x9E3779B97F4A7C15);
+        index.add_batch(data[..1000].to_vec()).await.unwrap();
+        assert!(!index.is_quantized());
+        assert!(
+            index.wants_rebuild(),
+            "past the training minimum but under the threshold: a rebuild would quantize"
+        );
+        index.add_batch(data[1000..2500].to_vec()).await.unwrap();
+        assert!(
+            index.is_quantized(),
+            "2,500 rows crossed the 2,000-row threshold"
+        );
+        assert!(!index.wants_rebuild());
+        index.add_batch(data[2500..].to_vec()).await.unwrap();
+        assert_eq!(index.len(), 3000);
+        assert_eq!(index.memory_stats().vectors_bytes, 0);
+        // Rows inserted after quantizing were planned with ADC against the codes; nearly
+        // all of them are reachable within the rerank window (a single miss is what a
+        // 16 x 32-centroid code on this data allows, not a defect).
+        let mut found = 0;
+        for (id, v) in &data[2500..2600] {
+            let cands = index.search_with_ef_hint(v, 100, 128).await.unwrap();
+            if cands.iter().any(|(c, _)| c == id) {
+                found += 1;
+            }
+        }
+        assert!(found >= 90, "{found}/100 late inserts reachable");
     }
 
     #[tokio::test]

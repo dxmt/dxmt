@@ -4291,10 +4291,15 @@ impl IntelligentIndexedStorage {
             // The row-count check catches an index that has fallen behind its record map,
             // from a restore that rebuilt from rows or a build that died partway. That is the
             // case a rebuild repairs, and it must still run.
+            // An HNSW-PQ index that streamed in below its quantization threshold holds every
+            // record as an exact graph; the rebuild is what trains and quantizes it, so it is
+            // not skipped as "equivalent". The first 1M acceptance run was skipped this way and
+            // measured the exact graph -- 8,295 MB resident, the same as plain HNSW.
             let up_to_date = !table_data
                 .selected_algorithm
                 .requires_rebuild_to_reach(&algorithm)
-                && table_data.index.len().await == record_count;
+                && table_data.index.len().await == record_count
+                && !table_data.index.wants_rebuild().await;
             if up_to_date {
                 drop(tables);
                 let mut tables = self.write_tables("rebuild_index").await;

@@ -522,6 +522,22 @@ impl HnswIndex {
         }
     }
 
+    /// Up to `want` of the stored vectors at a fixed stride, for training a quantizer on a
+    /// graph that still holds them. Empty once quantized.
+    pub fn sample_vectors(&self, want: usize) -> Vec<DenseVector> {
+        if self.quantized.is_some() || self.nodes.is_empty() {
+            return Vec::new();
+        }
+        let stride = (self.nodes.len() / want.max(1)).max(1);
+        self.nodes
+            .iter()
+            .step_by(stride)
+            .filter(|n| !n.deleted)
+            .take(want)
+            .map(|n| n.vector.clone())
+            .collect()
+    }
+
     /// Whether the graph traverses on PQ codes.
     pub fn is_quantized(&self) -> bool {
         self.quantized.is_some()

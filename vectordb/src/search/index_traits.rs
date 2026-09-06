@@ -67,6 +67,13 @@ pub trait VectorIndex: Send + Sync {
         None
     }
 
+    /// Whether a rebuild would produce a materially different index even though this one
+    /// already holds every record -- an HNSW-PQ graph that has not quantized yet, say. The
+    /// storage layer's rebuild skips "equivalent" indexes unless this says otherwise.
+    fn wants_rebuild(&self) -> bool {
+        false
+    }
+
     fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {
         None
     }
