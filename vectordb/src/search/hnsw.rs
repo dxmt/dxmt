@@ -146,31 +146,353 @@ mod visited {
 /// self-describing formats, and parking_lot's `serde` impl is transparent, so the bincode
 /// encoding is byte-for-byte what `Vec<Vec<usize>>` wrote. `hnsw_v2_files_still_load` pins
 /// that against a file written before this change.
+/// The node as "hnsw-v2" and "hnsw-v3" files store it. Read-only: `load` converts it into
+/// [`Nodes`]. It cost 616-785 bytes per node beyond the vector (a `String`, a `Vec` header, a
+/// `Vec` of locked `Vec<usize>` edge lists), measured on 1M and 10M Cohere 768-d.
 #[derive(Debug, Serialize, Deserialize)]
-struct Node {
+struct LegacyNode {
     id: RecordId,
     vector: DenseVector,
     level: usize,
     #[serde(rename = "neighbors")]
     links: Vec<RwLock<Vec<usize>>>,
-    deleted: bool, // Tombstone flag for soft deletion
+    deleted: bool,
 }
 
-impl Node {
-    /// A fresh node with `level + 1` empty edge lists.
-    fn new(id: RecordId, vector: DenseVector, level: usize) -> Self {
-        Node {
-            id,
-            vector,
-            level,
-            links: (0..=level).map(|_| RwLock::new(Vec::new())).collect(),
-            deleted: false,
+/// Layer-0 edge slots per node. Fixed so a node's layer-0 list is one 132-byte value behind
+/// one 8-byte lock, with no heap allocation, no `Vec` header and no capacity slack; serde
+/// derives arrays up to this size, which is why it is exactly 32.
+pub const MAX_M0_SLOTS: usize = 32;
+
+/// A node's layer-0 edges: `slots[..len]` are the neighbours.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct Links0 {
+    len: u8,
+    slots: [u32; MAX_M0_SLOTS],
+}
+
+impl Links0 {
+    const EMPTY: Self = Self {
+        len: 0,
+        slots: [0; MAX_M0_SLOTS],
+    };
+
+    fn as_slice(&self) -> &[u32] {
+        &self.slots[..self.len as usize]
+    }
+
+    fn set(&mut self, links: &[u32]) {
+        let n = links.len().min(MAX_M0_SLOTS);
+        self.slots[..n].copy_from_slice(&links[..n]);
+        self.len = n as u8;
+    }
+}
+
+/// One node's edge list at one layer, borrowed mutably under its lock.
+enum LinkSlot<'a> {
+    L0(&'a mut Links0),
+    Upper(&'a mut Vec<u32>),
+}
+
+impl LinkSlot<'_> {
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            LinkSlot::L0(l) => l.as_slice(),
+            LinkSlot::Upper(v) => v,
         }
     }
 
-    fn layers(&self) -> usize {
-        self.links.len()
+    fn len(&self) -> usize {
+        self.as_slice().len()
     }
+
+    fn contains(&self, x: u32) -> bool {
+        self.as_slice().contains(&x)
+    }
+
+    /// Append if there is room; layer 0 is bounded by its slots, upper layers by nothing.
+    fn push(&mut self, x: u32) -> bool {
+        match self {
+            LinkSlot::L0(l) => {
+                if (l.len as usize) < MAX_M0_SLOTS {
+                    l.slots[l.len as usize] = x;
+                    l.len += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            LinkSlot::Upper(v) => {
+                v.push(x);
+                true
+            }
+        }
+    }
+
+    fn set(&mut self, links: &[u32]) {
+        match self {
+            LinkSlot::L0(l) => l.set(links),
+            LinkSlot::Upper(v) => {
+                v.clear();
+                v.extend_from_slice(links);
+            }
+        }
+    }
+
+    fn retain(&mut self, keep: impl Fn(u32) -> bool) {
+        match self {
+            LinkSlot::L0(l) => {
+                let kept: Vec<u32> = l.as_slice().iter().copied().filter(|&x| keep(x)).collect();
+                l.set(&kept);
+            }
+            LinkSlot::Upper(v) => v.retain(|&x| keep(x)),
+        }
+    }
+}
+
+/// A node's edge lists at layers `1..=level`, one locked list per layer.
+type UpperLayers = Box<[RwLock<Vec<u32>>]>;
+
+/// Every node of the graph, as columns rather than as a `Vec` of node structs.
+///
+/// Per node this is about 140 bytes at layer 0 (an 8-byte lock over 132 bytes of slots), a
+/// 16-byte `Option<Box<..>>` that is `None` for the fifteen in sixteen nodes with no upper
+/// layer, one byte each of level and tombstone, a 4-byte id offset into a shared byte arena,
+/// and the vector itself -- contiguous, so an exact-mode scan walks memory in order, and
+/// absent once quantized. The `Vec` header the old node kept for its (by then empty) vector
+/// is gone with it.
+#[derive(Serialize, Deserialize)]
+struct Nodes {
+    dim: usize,
+    /// `n * dim` floats while the graph is exact; empty once quantized.
+    vectors: Vec<f32>,
+    level: Vec<u8>,
+    deleted: Vec<bool>,
+    l0: Vec<RwLock<Links0>>,
+    /// Layers `1..=level`, only for nodes with `level >= 1`.
+    upper: Vec<Option<UpperLayers>>,
+    id_bytes: Vec<u8>,
+    /// `len() + 1` entries: node `i`'s id is `id_bytes[id_offsets[i]..id_offsets[i + 1]]`.
+    id_offsets: Vec<u32>,
+}
+
+impl Nodes {
+    fn new() -> Self {
+        Self {
+            dim: 0,
+            vectors: Vec::new(),
+            level: Vec::new(),
+            deleted: Vec::new(),
+            l0: Vec::new(),
+            upper: Vec::new(),
+            id_bytes: Vec::new(),
+            id_offsets: vec![0],
+        }
+    }
+
+    /// Slots including tombstoned ones; node indices run to this.
+    fn len(&self) -> usize {
+        self.level.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.level.is_empty()
+    }
+
+    fn live_count(&self) -> usize {
+        self.deleted.iter().filter(|d| !**d).count()
+    }
+
+    /// Append a node. `vector` is `None` once the graph is quantized (the code went to the
+    /// quantized store instead); `links[l]` is the edge list at layer `l`.
+    fn push(
+        &mut self,
+        id: &str,
+        vector: Option<&[f32]>,
+        level: usize,
+        links: &[Vec<u32>],
+    ) -> usize {
+        let idx = self.len();
+        if let Some(v) = vector {
+            if self.dim == 0 {
+                self.dim = v.len();
+            }
+            self.vectors.extend_from_slice(v);
+        }
+        self.level.push(level as u8);
+        self.deleted.push(false);
+        let mut l0 = Links0::EMPTY;
+        if let Some(first) = links.first() {
+            l0.set(first);
+        }
+        self.l0.push(RwLock::new(l0));
+        self.upper.push(if level == 0 {
+            None
+        } else {
+            Some(
+                (1..=level)
+                    .map(|l| RwLock::new(links.get(l).cloned().unwrap_or_default()))
+                    .collect(),
+            )
+        });
+        self.id_bytes.extend_from_slice(id.as_bytes());
+        self.id_offsets.push(self.id_bytes.len() as u32);
+        idx
+    }
+
+    fn id(&self, idx: usize) -> &str {
+        let (a, b) = (
+            self.id_offsets[idx] as usize,
+            self.id_offsets[idx + 1] as usize,
+        );
+        // Only ever filled from `&str`, so this is valid UTF-8.
+        std::str::from_utf8(&self.id_bytes[a..b]).unwrap_or("")
+    }
+
+    fn vector(&self, idx: usize) -> &[f32] {
+        &self.vectors[idx * self.dim..(idx + 1) * self.dim]
+    }
+
+    #[cfg(test)]
+    fn vectors_dropped(&self) -> bool {
+        self.vectors.is_empty() && !self.is_empty()
+    }
+
+    fn drop_vectors(&mut self) {
+        self.vectors = Vec::new();
+    }
+
+    fn level(&self, idx: usize) -> usize {
+        self.level[idx] as usize
+    }
+
+    fn layers(&self, idx: usize) -> usize {
+        self.level[idx] as usize + 1
+    }
+
+    fn is_deleted(&self, idx: usize) -> bool {
+        self.deleted[idx]
+    }
+
+    fn mark_deleted(&mut self, idx: usize) {
+        self.deleted[idx] = true;
+    }
+
+    /// Copy node `idx`'s edges at `layer` into `out` (cleared first). A copy of at most 32
+    /// `u32`s per hop, taken under the read lock and released before any distance is
+    /// computed, so a search never holds a lock while it scores.
+    fn copy_links(&self, idx: usize, layer: usize, out: &mut Vec<u32>) {
+        out.clear();
+        if layer == 0 {
+            out.extend_from_slice(self.l0[idx].read().as_slice());
+        } else if let Some(upper) = &self.upper[idx] {
+            if let Some(list) = upper.get(layer - 1) {
+                out.extend_from_slice(&list.read());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn edge_count(&self, idx: usize, layer: usize) -> usize {
+        if layer == 0 {
+            self.l0[idx].read().len as usize
+        } else {
+            self.upper[idx]
+                .as_ref()
+                .and_then(|u| u.get(layer - 1))
+                .map(|l| l.read().len())
+                .unwrap_or(0)
+        }
+    }
+
+    /// Edit node `idx`'s edges at `layer` under its write lock. Nothing else is locked while
+    /// `f` runs, and `f` must not lock another node: that is the whole deadlock argument.
+    fn with_links_mut<R>(
+        &self,
+        idx: usize,
+        layer: usize,
+        f: impl FnOnce(&mut LinkSlot<'_>) -> R,
+    ) -> Option<R> {
+        if layer == 0 {
+            let mut guard = self.l0[idx].write();
+            Some(f(&mut LinkSlot::L0(&mut guard)))
+        } else {
+            let upper = self.upper[idx].as_ref()?;
+            let list = upper.get(layer - 1)?;
+            let mut guard = list.write();
+            Some(f(&mut LinkSlot::Upper(&mut guard)))
+        }
+    }
+
+    /// All edges over all layers, for tests.
+    #[cfg(test)]
+    fn total_edges(&self) -> usize {
+        (0..self.len())
+            .map(|i| {
+                (0..self.layers(i))
+                    .map(|l| self.edge_count(i, l))
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Bytes this layout holds per node besides the vectors: the columns above plus the id
+    /// arena, counted from the containers rather than estimated.
+    fn resident_bytes_without_vectors(&self) -> usize {
+        use std::mem::size_of;
+        self.level.len()
+            * (size_of::<u8>()
+                + size_of::<bool>()
+                + size_of::<RwLock<Links0>>()
+                + size_of::<Option<UpperLayers>>())
+            + self
+                .upper
+                .iter()
+                .flatten()
+                .map(|u| {
+                    u.len() * size_of::<RwLock<Vec<u32>>>()
+                        + u.iter().map(|l| l.read().capacity() * 4).sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.id_bytes.len()
+            + self.id_offsets.len() * 4
+    }
+
+    fn from_legacy(nodes: Vec<LegacyNode>) -> Self {
+        let mut out = Self::new();
+        for node in nodes {
+            let links: Vec<Vec<u32>> = node
+                .links
+                .into_iter()
+                .map(|l| l.into_inner().into_iter().map(|x| x as u32).collect())
+                .collect();
+            let idx = out.push(
+                &node.id,
+                if node.vector.is_empty() {
+                    None
+                } else {
+                    Some(&node.vector)
+                },
+                node.level,
+                &links,
+            );
+            if node.deleted {
+                out.mark_deleted(idx);
+            }
+        }
+        out
+    }
+}
+
+/// Stable 64-bit hash of an id for `id_to_idx`. FNV-1a, spelled out, because the map is
+/// persisted with these keys and `std`'s hasher makes no promise across versions.
+fn id_hash(id: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 // For the candidate priority queue (min-heap, closer is better)
@@ -316,8 +638,14 @@ pub struct HnswIndex {
     rng: StdRng,
     config: HnswConfig,
     distance_metric: DistanceMetric,
-    nodes: Vec<Node>,
-    id_to_idx: HashMap<RecordId, usize>,
+    nodes: Nodes,
+    /// Hash of the id to node index. A hash rather than the string: the string lives once,
+    /// in the arena inside `nodes`, and this table costs about 24 bytes a node instead of
+    /// a second copy of every id plus a `String` header.
+    id_to_idx: HashMap<u64, u32>,
+    /// Ids whose hash collided with a different id's. Consulted after `id_to_idx` disagrees
+    /// with the arena; in practice empty.
+    id_overflow: HashMap<String, u32>,
     entry_point: Option<usize>,
     /// Present once the graph traverses on PQ codes instead of full vectors; see
     /// [`QuantizedStore`]. Files written without it stay readable as "hnsw-v2".
@@ -384,8 +712,8 @@ impl QuantizedStore {
         &self.codes[idx * self.m..(idx + 1) * self.m]
     }
 
-    fn push(&mut self, vector: &DenseVector) -> crate::Result<()> {
-        let code = self.pq.encode(vector)?;
+    fn push(&mut self, vector: &[f32]) -> crate::Result<()> {
+        let code = self.pq.encode(&vector.to_vec())?;
         self.codes.extend_from_slice(&code.codes);
         Ok(())
     }
@@ -430,25 +758,27 @@ pub enum QueryScorer<'a> {
     Adc(Vec<f32>),
 }
 
-/// The "hnsw-v2" layout: [`HnswIndex`] without `quantized`. `save` writes through the borrowed
-/// form and `load` reads the owned one, so files from before quantization existed round-trip
-/// unchanged (`persistence_tests::hnsw_v2_files_still_load` pins the bytes).
-#[derive(Serialize)]
-struct PlainIndexRef<'a> {
-    config: &'a HnswConfig,
-    distance_metric: &'a DistanceMetric,
-    nodes: &'a [Node],
-    id_to_idx: &'a HashMap<RecordId, usize>,
-    entry_point: &'a Option<usize>,
-}
-
+/// The "hnsw-v2" file layout, read-only.
 #[derive(Deserialize)]
-struct PlainIndex {
+struct LegacyV2 {
     config: HnswConfig,
     distance_metric: DistanceMetric,
-    nodes: Vec<Node>,
+    nodes: Vec<LegacyNode>,
+    #[allow(dead_code)]
     id_to_idx: HashMap<RecordId, usize>,
     entry_point: Option<usize>,
+}
+
+/// The "hnsw-v3" file layout (v2 plus the quantized store), read-only.
+#[derive(Deserialize)]
+struct LegacyV3 {
+    config: HnswConfig,
+    distance_metric: DistanceMetric,
+    nodes: Vec<LegacyNode>,
+    #[allow(dead_code)]
+    id_to_idx: HashMap<RecordId, usize>,
+    entry_point: Option<usize>,
+    quantized: Option<QuantizedStore>,
 }
 
 fn default_rng() -> StdRng {
@@ -457,16 +787,90 @@ fn default_rng() -> StdRng {
 
 impl HnswIndex {
     pub fn new(distance_metric: DistanceMetric, config: Option<HnswConfig>) -> Self {
-        let config = config.unwrap_or_default();
+        let mut config = config.unwrap_or_default();
+        if config.max_m0 > MAX_M0_SLOTS {
+            tracing::warn!(
+                "HNSW max_m0 {} exceeds the {} layer-0 slots per node; clamping",
+                config.max_m0,
+                MAX_M0_SLOTS
+            );
+            config.max_m0 = MAX_M0_SLOTS;
+        }
         Self {
             rng: StdRng::seed_from_u64(config.seed),
             config,
             distance_metric,
-            nodes: Vec::new(),
+            nodes: Nodes::new(),
             id_to_idx: HashMap::new(),
+            id_overflow: HashMap::new(),
             entry_point: None,
             quantized: None,
         }
+    }
+
+    /// Node index of `id`, if present and live.
+    fn idx_of(&self, id: &str) -> Option<usize> {
+        if let Some(&idx) = self.id_to_idx.get(&id_hash(id)) {
+            if self.nodes.id(idx as usize) == id {
+                return Some(idx as usize);
+            }
+        }
+        self.id_overflow.get(id).map(|&i| i as usize)
+    }
+
+    fn register_id(&mut self, id: &str, idx: usize) {
+        match self.id_to_idx.entry(id_hash(id)) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(idx as u32);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.id_overflow.insert(id.to_string(), idx as u32);
+            }
+        }
+    }
+
+    fn unregister_id(&mut self, id: &str) {
+        let h = id_hash(id);
+        if self
+            .id_to_idx
+            .get(&h)
+            .is_some_and(|&i| self.nodes.id(i as usize) == id)
+        {
+            self.id_to_idx.remove(&h);
+        } else {
+            self.id_overflow.remove(id);
+        }
+    }
+
+    /// Given a legacy node list and an entry point, the rest of the index.
+    fn from_legacy(
+        config: HnswConfig,
+        distance_metric: DistanceMetric,
+        nodes: Vec<LegacyNode>,
+        entry_point: Option<usize>,
+        quantized: Option<QuantizedStore>,
+    ) -> Self {
+        let nodes = Nodes::from_legacy(nodes);
+        let mut index = HnswIndex {
+            rng: default_rng(),
+            config,
+            distance_metric,
+            nodes,
+            id_to_idx: HashMap::new(),
+            id_overflow: HashMap::new(),
+            entry_point,
+            quantized,
+        };
+        for idx in 0..index.nodes.len() {
+            if !index.nodes.is_deleted(idx) {
+                let id = index.nodes.id(idx).to_string();
+                index.register_id(&id, idx);
+            }
+        }
+        if let Some(store) = &mut index.quantized {
+            store.rebuild_symmetric();
+        }
+        index
     }
 
     /// Build the scorer for one (already `prepare`d) query.
@@ -496,7 +900,7 @@ impl HnswIndex {
     #[inline]
     fn score(&self, scorer: &QueryScorer<'_>, idx: usize) -> f32 {
         match scorer {
-            QueryScorer::Exact(q) => self.calculate_distance(q, &self.nodes[idx].vector),
+            QueryScorer::Exact(q) => self.calculate_distance(q, self.nodes.vector(idx)),
             QueryScorer::Adc(table) => self
                 .quantized
                 .as_ref()
@@ -509,7 +913,7 @@ impl HnswIndex {
     #[inline]
     fn node_distance(&self, a: usize, b: usize) -> f32 {
         match &self.quantized {
-            None => self.calculate_distance(&self.nodes[a].vector, &self.nodes[b].vector),
+            None => self.calculate_distance(self.nodes.vector(a), self.nodes.vector(b)),
             Some(q) => q.node_distance(a, b),
         }
     }
@@ -529,12 +933,11 @@ impl HnswIndex {
             return Vec::new();
         }
         let stride = (self.nodes.len() / want.max(1)).max(1);
-        self.nodes
-            .iter()
+        (0..self.nodes.len())
             .step_by(stride)
-            .filter(|n| !n.deleted)
+            .filter(|&i| !self.nodes.is_deleted(i))
             .take(want)
-            .map(|n| n.vector.clone())
+            .map(|i| self.nodes.vector(i).to_vec())
             .collect()
     }
 
@@ -557,26 +960,18 @@ impl HnswIndex {
         }
         let mut store = QuantizedStore::from_quantizer(pq);
         store.codes.reserve(self.nodes.len() * store.m);
-        for node in &self.nodes {
-            store.push(&node.vector)?;
+        for idx in 0..self.nodes.len() {
+            store.push(self.nodes.vector(idx))?;
         }
-        for node in &mut self.nodes {
-            node.vector = Vec::new();
-        }
+        self.nodes.drop_vectors();
         self.quantized = Some(store);
         Ok(())
     }
 
     /// Bytes the graph holds beyond its vectors: links, plus codes and tables once quantized.
     pub fn resident_bytes_without_vectors(&self) -> usize {
-        let links: usize = self
-            .nodes
-            .iter()
-            .map(|n| {
-                n.links.iter().map(|l| l.read().len()).sum::<usize>() * std::mem::size_of::<usize>()
-            })
-            .sum();
-        links
+        self.nodes.resident_bytes_without_vectors()
+            + self.id_to_idx.capacity() * (std::mem::size_of::<u64>() + std::mem::size_of::<u32>())
             + self
                 .quantized
                 .as_ref()
@@ -611,7 +1006,7 @@ impl HnswIndex {
         v
     }
 
-    fn calculate_distance(&self, a: &DenseVector, b: &DenseVector) -> f32 {
+    fn calculate_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         // Cosine inputs are unit length by construction (see `prepare`), so the similarity is the
         // dot product and the distance is one minus it.
         if matches!(self.distance_metric, DistanceMetric::Cosine) {
@@ -732,10 +1127,11 @@ impl HnswIndex {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new(); // Min-heap for exploration
         let mut w = BinaryHeap::new(); // Max-heap for results
+        let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
 
         // Initialize with entry points
         for idx in entry_points {
-            if idx >= self.nodes.len() || self.nodes[idx].deleted {
+            if idx >= self.nodes.len() || self.nodes.is_deleted(idx) {
                 continue; // Skip deleted nodes
             }
             // An entry point that fails the filter is still the way into the graph: it goes on
@@ -769,16 +1165,16 @@ impl HnswIndex {
             }
 
             // Explore neighbors
-            let node = &self.nodes[current.idx];
-            if layer < node.layers() {
-                // The guard is held across the walk, which reads only `vector` and `deleted`
-                // on the neighbours and takes no second lock — so a writer pruning some other
-                // node cannot be waiting on this one.
-                let links = node.links[layer].read();
+            if layer < self.nodes.layers(current.idx) {
+                // The edge list is copied out under its read lock and the lock released
+                // before any neighbour is scored, so a search never holds a lock while it
+                // computes, and a writer pruning some node never waits on a reader's walk.
+                self.nodes.copy_links(current.idx, layer, &mut links);
                 for &neighbor_idx in links.iter() {
+                    let neighbor_idx = neighbor_idx as usize;
                     if neighbor_idx >= self.nodes.len()
                         || visited.contains(neighbor_idx)
-                        || self.nodes[neighbor_idx].deleted
+                        || self.nodes.is_deleted(neighbor_idx)
                     {
                         continue;
                     }
@@ -817,7 +1213,7 @@ impl HnswIndex {
         // Convert to sorted vector, filtering out deleted nodes
         let mut results: Vec<_> = w
             .into_iter()
-            .filter(|r| !self.nodes[r.idx].deleted)
+            .filter(|r| !self.nodes.is_deleted(r.idx))
             .map(|r| (r.idx, r.distance))
             .collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -837,10 +1233,11 @@ impl HnswIndex {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new();
         let mut w = BinaryHeap::new();
+        let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
 
         // Initialize with entry points
         for idx in entry_points {
-            if idx >= self.nodes.len() || self.nodes[idx].deleted {
+            if idx >= self.nodes.len() || self.nodes.is_deleted(idx) {
                 continue;
             }
             // Same rule as `search_layer`: the queue is unfiltered, the result set is not.
@@ -867,23 +1264,17 @@ impl HnswIndex {
                 }
             }
 
-            let node = &self.nodes[current.idx];
-            if layer < node.layers() {
-                // Copy the ids out and drop the guard before the `par_iter` below: handing a
-                // lock guard to rayon means holding it for as long as the pool takes to
-                // schedule, and a writer pruning this same node would block behind it.
-                let candidate_neighbors: Vec<usize> = {
-                    let links = node.links[layer].read();
-                    links
-                        .iter()
-                        .filter(|&&neighbor_idx| {
-                            neighbor_idx < self.nodes.len()
-                                && !visited.contains(neighbor_idx)
-                                && !self.nodes[neighbor_idx].deleted
-                        })
-                        .copied()
-                        .collect()
-                };
+            if layer < self.nodes.layers(current.idx) {
+                self.nodes.copy_links(current.idx, layer, &mut links);
+                let candidate_neighbors: Vec<usize> = links
+                    .iter()
+                    .map(|&n| n as usize)
+                    .filter(|&neighbor_idx| {
+                        neighbor_idx < self.nodes.len()
+                            && !visited.contains(neighbor_idx)
+                            && !self.nodes.is_deleted(neighbor_idx)
+                    })
+                    .collect();
 
                 // Mark all as visited before computing distances (prevents re-entry)
                 for &idx in &candidate_neighbors {
@@ -953,7 +1344,7 @@ impl HnswIndex {
 
         let mut results: Vec<_> = w
             .into_iter()
-            .filter(|r| !self.nodes[r.idx].deleted)
+            .filter(|r| !self.nodes.is_deleted(r.idx))
             .map(|r| (r.idx, r.distance))
             .collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -980,10 +1371,11 @@ impl HnswIndex {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new();
         let mut w = BinaryHeap::new();
+        let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
 
         // Initialize
         for idx in entry_points {
-            if idx >= self.nodes.len() || self.nodes[idx].deleted {
+            if idx >= self.nodes.len() || self.nodes.is_deleted(idx) {
                 continue; // Skip deleted nodes
             }
             let dist = score(idx);
@@ -1007,13 +1399,13 @@ impl HnswIndex {
                 }
             }
 
-            let node = &self.nodes[current.idx];
-            if layer < node.layers() {
-                let links = node.links[layer].read();
+            if layer < self.nodes.layers(current.idx) {
+                self.nodes.copy_links(current.idx, layer, &mut links);
                 for &neighbor_idx in links.iter() {
+                    let neighbor_idx = neighbor_idx as usize;
                     if neighbor_idx >= self.nodes.len()
                         || visited.contains(neighbor_idx)
-                        || self.nodes[neighbor_idx].deleted
+                        || self.nodes.is_deleted(neighbor_idx)
                     {
                         continue; // Skip deleted nodes
                     }
@@ -1058,7 +1450,7 @@ impl HnswIndex {
         let scorer = self.scorer(query);
 
         let entry = self.entry_point.unwrap();
-        let entry_level = self.nodes[entry].level;
+        let entry_level = self.nodes.level(entry);
         let mut curr_nearest = vec![entry];
 
         // Search from top layer to layer 1 (greedy search for closest point)
@@ -1079,7 +1471,7 @@ impl HnswIndex {
         Ok(candidates
             .into_iter()
             .take(k)
-            .map(|(idx, dist)| (self.nodes[idx].id.clone(), dist))
+            .map(|(idx, dist)| (self.nodes.id(idx).to_string(), dist))
             .collect())
     }
 
@@ -1102,10 +1494,8 @@ impl HnswIndex {
         }
 
         // Convert string record IDs to node indices for O(1) filter checks
-        let filter_idxs: HashSet<usize> = filter_ids
-            .iter()
-            .filter_map(|id| self.id_to_idx.get(id).copied())
-            .collect();
+        let filter_idxs: HashSet<usize> =
+            filter_ids.iter().filter_map(|id| self.idx_of(id)).collect();
 
         if filter_idxs.is_empty() {
             return Ok(Vec::new());
@@ -1114,7 +1504,7 @@ impl HnswIndex {
         let scorer = self.scorer(query);
 
         let entry = self.entry_point.unwrap();
-        let entry_level = self.nodes[entry].level;
+        let entry_level = self.nodes.level(entry);
         let mut curr_nearest = vec![entry];
 
         // Upper layers: greedy traversal without filter (find good entry to layer 0)
@@ -1133,7 +1523,7 @@ impl HnswIndex {
         Ok(candidates
             .into_iter()
             .take(k)
-            .map(|(idx, dist)| (self.nodes[idx].id.clone(), dist))
+            .map(|(idx, dist)| (self.nodes.id(idx).to_string(), dist))
             .collect())
     }
 
@@ -1147,15 +1537,15 @@ impl HnswIndex {
             return Vec::new();
         };
         let mut curr_nearest = vec![entry];
-        for lc in (1..=self.nodes[entry].level).rev() {
+        for lc in (1..=self.nodes.level(entry)).rev() {
             curr_nearest = self.search_layer_closest_by(&score, curr_nearest, lc);
         }
         self.search_layer_by(&score, curr_nearest, ef, 0, None)
     }
 
     /// The record stored at a node index, as returned by [`Self::search_by_score`].
-    pub fn node_id(&self, idx: usize) -> &RecordId {
-        &self.nodes[idx].id
+    pub fn node_id(&self, idx: usize) -> &str {
+        self.nodes.id(idx)
     }
 
     /// Search with precomputed query (for cosine similarity optimization)
@@ -1174,7 +1564,7 @@ impl HnswIndex {
         }
 
         let entry = self.entry_point.unwrap();
-        let entry_level = self.nodes[entry].level;
+        let entry_level = self.nodes.level(entry);
         let mut curr_nearest = vec![entry];
 
         let scorer = self.scorer(&precomputed.vector);
@@ -1190,7 +1580,7 @@ impl HnswIndex {
         Ok(candidates
             .into_iter()
             .take(k)
-            .map(|(idx, dist)| (self.nodes[idx].id.clone(), dist))
+            .map(|(idx, dist)| (self.nodes.id(idx).to_string(), dist))
             .collect())
     }
 
@@ -1253,7 +1643,7 @@ impl HnswIndex {
         let mut prepared: Vec<(RecordId, DenseVector, usize)> = Vec::with_capacity(items.len());
         let mut seen: HashSet<RecordId> = HashSet::with_capacity(items.len());
         for (id, vector) in items {
-            if self.id_to_idx.contains_key(&id) || !seen.insert(id.clone()) {
+            if self.idx_of(&id).is_some() || !seen.insert(id.clone()) {
                 return Err(crate::Error::InvalidInput(format!(
                     "ID {} already exists",
                     id
@@ -1267,7 +1657,7 @@ impl HnswIndex {
         // plans against, and the later phases use the same value so a plan and its application
         // never disagree about which layers were searched.
         let entry = self.entry_point.unwrap();
-        let entry_level = self.nodes[entry].level;
+        let entry_level = self.nodes.level(entry);
         Ok(Some(PreparedBatch {
             items: prepared,
             entry,
@@ -1389,42 +1779,47 @@ impl HnswIndex {
         level: usize,
         neighbors_per_layer: Vec<Vec<usize>>,
     ) -> usize {
-        let idx = self.nodes.len();
-        let vector = self.take_or_encode(vector);
-        let mut node = Node::new(id.clone(), vector, level);
-        for (lc, chosen) in neighbors_per_layer.into_iter().enumerate() {
-            *node.links[lc].get_mut() = chosen;
-        }
-        self.nodes.push(node);
-        self.id_to_idx.insert(id, idx);
-        idx
+        let links: Vec<Vec<u32>> = neighbors_per_layer
+            .into_iter()
+            .map(|l| l.into_iter().map(|n| n as u32).collect())
+            .collect();
+        self.push_node(&id, vector, level, &links)
     }
 
-    /// What a new node stores: the vector itself, or -- once quantized -- nothing, with its
-    /// code appended to the store instead. Called exactly once per node pushed, which is what
+    /// Append a node: its vector goes on the node while the graph is exact, or into the
+    /// quantized store as a code once it is not. Called exactly once per node, which is what
     /// keeps `codes` aligned with `nodes`.
-    fn take_or_encode(&mut self, vector: DenseVector) -> DenseVector {
-        match &mut self.quantized {
-            None => vector,
+    fn push_node(
+        &mut self,
+        id: &str,
+        vector: DenseVector,
+        level: usize,
+        links: &[Vec<u32>],
+    ) -> usize {
+        let idx = match &mut self.quantized {
+            None => self.nodes.push(id, Some(&vector), level, links),
             Some(store) => {
                 store
                     .push(&vector)
                     .expect("vector was dimension-checked before reaching the graph");
-                Vec::new()
+                self.nodes.push(id, None, level, links)
             }
-        }
+        };
+        self.register_id(id, idx);
+        idx
     }
 
     /// Add the reverse edge on every neighbour `idx` chose, pruning any list that overflows.
     ///
     /// `&self`, so a batch can run this for many nodes at once.
     fn link_back_all(&self, idx: usize, level: usize, entry_level: usize) {
+        // Copy the plan out and drop the guard before taking any write lock, so that no
+        // thread ever holds two edge locks at once.
+        let mut chosen: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
         for lc in 0..=level.min(entry_level) {
-            // Copy the plan out and drop the guard before taking any write lock, so that no
-            // thread ever holds two edge locks at once.
-            let chosen = self.nodes[idx].links[lc].read().clone();
-            for neighbor_idx in chosen {
-                self.link_back(neighbor_idx, lc, idx);
+            self.nodes.copy_links(idx, lc, &mut chosen);
+            for &neighbor_idx in &chosen {
+                self.link_back(neighbor_idx as usize, lc, idx);
             }
         }
     }
@@ -1443,8 +1838,7 @@ impl HnswIndex {
     ///
     /// `insert` and `apply_planned_insert` used to carry a verbatim copy of this each.
     fn link_back(&self, neighbor_idx: usize, lc: usize, new_idx: usize) {
-        let neighbor = &self.nodes[neighbor_idx];
-        if lc >= neighbor.layers() {
+        if lc >= self.nodes.layers(neighbor_idx) {
             return;
         }
         let max_neighbors = if lc == 0 {
@@ -1453,47 +1847,51 @@ impl HnswIndex {
             self.config.m
         };
 
-        let mut links = neighbor.links[lc].write();
-        links.push(new_idx);
-        if links.len() <= max_neighbors {
-            return;
-        }
-
-        // Prune by the same heuristic used to choose links in the first place. Keeping the
-        // `max_neighbors` closest instead would undo the diversity on exactly the nodes that
-        // matter most -- the ones popular enough to overflow.
-        let mut neighbors_with_dist: Vec<_> = links
-            .iter()
-            .map(|&n_idx| (n_idx, self.node_distance(neighbor_idx, n_idx)))
-            .collect();
-        neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        *links = self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
+        self.nodes.with_links_mut(neighbor_idx, lc, |links| {
+            if links.len() < max_neighbors && links.push(new_idx as u32) {
+                return;
+            }
+            // Prune by the same heuristic used to choose links in the first place. Keeping
+            // the `max_neighbors` closest instead would undo the diversity on exactly the
+            // nodes that matter most -- the ones popular enough to overflow. The new edge
+            // takes part in the selection like any other.
+            let mut neighbors_with_dist: Vec<(usize, f32)> = links
+                .as_slice()
+                .iter()
+                .map(|&n| n as usize)
+                .chain(std::iter::once(new_idx))
+                .map(|n_idx| (n_idx, self.node_distance(neighbor_idx, n_idx)))
+                .collect();
+            neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let kept: Vec<u32> = self
+                .select_neighbors_heuristic(&neighbors_with_dist, max_neighbors)
+                .into_iter()
+                .map(|n| n as u32)
+                .collect();
+            links.set(&kept);
+        });
     }
 
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
         let vector = self.prepare(vector);
-        if self.id_to_idx.contains_key(&id) {
+        if self.idx_of(&id).is_some() {
             return Err(crate::Error::InvalidInput(format!(
                 "ID {} already exists",
                 id
             )));
         }
 
-        let idx = self.nodes.len();
         let level = self.select_level();
 
-        let stored = self.take_or_encode(vector.clone());
-        let mut node = Node::new(id.clone(), stored, level);
-
         if self.nodes.is_empty() || self.entry_point.is_none() {
-            self.nodes.push(node);
-            self.id_to_idx.insert(id, idx);
+            let idx = self.push_node(&id, vector, level, &[]);
             self.entry_point = Some(idx);
             return Ok(());
         }
+        let mut planned: Vec<Vec<u32>> = vec![Vec::new(); level + 1];
 
         let entry = self.entry_point.unwrap();
-        let entry_level = self.nodes[entry].level;
+        let entry_level = self.nodes.level(entry);
         let mut curr_nearest = vec![entry];
         let scorer = self.scorer(&vector);
 
@@ -1518,7 +1916,11 @@ impl HnswIndex {
                 self.config.m
             };
 
-            *node.links[lc].get_mut() = self.select_neighbors_heuristic(&candidates, m);
+            planned[lc] = self
+                .select_neighbors_heuristic(&candidates, m)
+                .into_iter()
+                .map(|n| n as u32)
+                .collect();
 
             // Update curr_nearest for next layer
             if lc > 0 {
@@ -1527,8 +1929,7 @@ impl HnswIndex {
         }
 
         // Add node
-        self.nodes.push(node);
-        self.id_to_idx.insert(id, idx);
+        let idx = self.push_node(&id, vector, level, &planned);
 
         // Add bidirectional links -- the same `link_back` the batch path uses, so the two
         // cannot drift apart again.
@@ -1620,16 +2021,13 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
 
     async fn delete(&mut self, id: &str) -> crate::Result<()> {
         // Find node index
-        let idx = *self
-            .id_to_idx
-            .get(id)
+        let idx = self
+            .idx_of(id)
             .ok_or_else(|| crate::Error::NotFound(format!("ID {} not found", id)))?;
 
-        // Mark node as deleted (tombstone)
-        self.nodes[idx].deleted = true;
+        self.nodes.mark_deleted(idx);
 
-        // Remove from id mapping
-        self.id_to_idx.remove(id);
+        self.unregister_id(id);
 
         // Reconnect neighbors to maintain graph connectivity
         self.reconnect_neighbors(idx)?;
@@ -1643,7 +2041,7 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
     }
 
     fn len(&self) -> usize {
-        self.id_to_idx.len()
+        self.id_to_idx.len() + self.id_overflow.len()
     }
 
     fn snapshot_to(&self, path: &std::path::Path) -> crate::Result<bool> {
@@ -1652,7 +2050,7 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
     }
 
     fn is_empty(&self) -> bool {
-        self.id_to_idx.is_empty()
+        self.id_to_idx.is_empty() && self.id_overflow.is_empty()
     }
 }
 
@@ -1661,11 +2059,13 @@ impl HnswIndex {
     /// Reconnect neighbors when a node is deleted
     fn reconnect_neighbors(&mut self, deleted_idx: usize) -> crate::Result<()> {
         // Clone the data we need before borrowing mutably
-        let deleted_level = self.nodes[deleted_idx].level;
-        let deleted_neighbors: Vec<Vec<usize>> = self.nodes[deleted_idx]
-            .links
-            .iter()
-            .map(|l| l.read().clone())
+        let deleted_level = self.nodes.level(deleted_idx);
+        let deleted_neighbors: Vec<Vec<usize>> = (0..self.nodes.layers(deleted_idx))
+            .map(|layer| {
+                let mut buf = Vec::new();
+                self.nodes.copy_links(deleted_idx, layer, &mut buf);
+                buf.into_iter().map(|n| n as usize).collect()
+            })
             .collect();
 
         // For each layer where the deleted node had connections
@@ -1677,12 +2077,12 @@ impl HnswIndex {
             // Remove deleted node from all its neighbors' neighbor lists
             for &neighbor_idx in &neighbors_of_deleted {
                 if neighbor_idx < self.nodes.len()
-                    && !self.nodes[neighbor_idx].deleted
-                    && layer < self.nodes[neighbor_idx].layers()
+                    && !self.nodes.is_deleted(neighbor_idx)
+                    && layer < self.nodes.layers(neighbor_idx)
                 {
-                    self.nodes[neighbor_idx].links[layer]
-                        .write()
-                        .retain(|&n| n != deleted_idx);
+                    self.nodes.with_links_mut(neighbor_idx, layer, |links| {
+                        links.retain(|n| n as usize != deleted_idx)
+                    });
                 }
             }
 
@@ -1692,7 +2092,7 @@ impl HnswIndex {
                 // Connect neighbors to each other to maintain graph density
                 for i in 0..neighbors_of_deleted.len() {
                     let neighbor_a = neighbors_of_deleted[i];
-                    if neighbor_a >= self.nodes.len() || self.nodes[neighbor_a].deleted {
+                    if neighbor_a >= self.nodes.len() || self.nodes.is_deleted(neighbor_a) {
                         continue;
                     }
 
@@ -1700,7 +2100,7 @@ impl HnswIndex {
                     let mut distances: Vec<(usize, f32)> = neighbors_of_deleted
                         .iter()
                         .filter(|&&n| {
-                            n != neighbor_a && n < self.nodes.len() && !self.nodes[n].deleted
+                            n != neighbor_a && n < self.nodes.len() && !self.nodes.is_deleted(n)
                         })
                         .map(|&n| (n, self.node_distance(neighbor_a, n)))
                         .collect();
@@ -1710,22 +2110,23 @@ impl HnswIndex {
                     // Add connections to maintain connectivity (limit to M/2 to avoid over-connection)
                     let max_new_connections = self.config.m / 2;
                     for (new_neighbor, _) in distances.into_iter().take(max_new_connections) {
-                        if layer < self.nodes[neighbor_a].layers() {
-                            let mut links_a = self.nodes[neighbor_a].links[layer].write();
-                            if !links_a.contains(&new_neighbor) {
-                                links_a.push(new_neighbor);
-                                // Released before the reverse edge is taken: one lock at a
-                                // time here too, so this path can never be the odd one out
-                                // that deadlocks against a concurrent insert.
-                                drop(links_a);
-
-                                // Add bidirectional edge
-                                if layer < self.nodes[new_neighbor].layers() {
-                                    let mut reverse = self.nodes[new_neighbor].links[layer].write();
-                                    if !reverse.contains(&neighbor_a) {
-                                        reverse.push(neighbor_a);
+                        if layer < self.nodes.layers(neighbor_a) {
+                            let added = self
+                                .nodes
+                                .with_links_mut(neighbor_a, layer, |links| {
+                                    !links.contains(new_neighbor as u32)
+                                        && links.push(new_neighbor as u32)
+                                })
+                                .unwrap_or(false);
+                            // One lock at a time here too: the reverse edge is taken after
+                            // the first lock is released, so this path can never be the odd
+                            // one out that deadlocks against a concurrent insert.
+                            if added && layer < self.nodes.layers(new_neighbor) {
+                                self.nodes.with_links_mut(new_neighbor, layer, |reverse| {
+                                    if !reverse.contains(neighbor_a as u32) {
+                                        reverse.push(neighbor_a as u32);
                                     }
-                                }
+                                });
                             }
                         }
                     }
@@ -1742,10 +2143,10 @@ impl HnswIndex {
         let mut best_idx = None;
         let mut best_level = 0;
 
-        for (idx, node) in self.nodes.iter().enumerate() {
-            if !node.deleted && node.level >= best_level {
+        for idx in 0..self.nodes.len() {
+            if !self.nodes.is_deleted(idx) && self.nodes.level(idx) >= best_level {
                 best_idx = Some(idx);
-                best_level = node.level;
+                best_level = self.nodes.level(idx);
             }
         }
 
@@ -1755,23 +2156,8 @@ impl HnswIndex {
 
 impl crate::search::index_traits::SerializableIndex for HnswIndex {
     fn save(&self, path: &std::path::Path) -> crate::Result<()> {
-        match &self.quantized {
-            // Byte-for-byte the file this wrote before quantization existed: the mirror
-            // serialises the same fields in the same order, so an "hnsw-v2" file from this
-            // build is indistinguishable from one written by the previous build.
-            None => crate::search::index_persistence::write_index(
-                path,
-                "hnsw-v2",
-                &PlainIndexRef {
-                    config: &self.config,
-                    distance_metric: &self.distance_metric,
-                    nodes: &self.nodes,
-                    id_to_idx: &self.id_to_idx,
-                    entry_point: &self.entry_point,
-                },
-            ),
-            Some(_) => crate::search::index_persistence::write_index(path, "hnsw-v3", self),
-        }
+        // "hnsw-v4": the column layout of `Nodes`. v2 and v3 are read, never written.
+        crate::search::index_persistence::write_index(path, "hnsw-v4", self)
     }
 
     fn load(path: &std::path::Path) -> crate::Result<Self> {
@@ -1785,26 +2171,31 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
         // wrong rather than loudly absent. A rejected kind makes the restore path warn and
         // rebuild from the rows instead.
         match crate::search::index_persistence::read_kind(path)?.as_str() {
-            "hnsw-v3" => {
+            "hnsw-v4" => {
                 let mut index: HnswIndex =
-                    crate::search::index_persistence::read_index(path, "hnsw-v3")?;
-                if let Some(store) = &mut index.quantized {
-                    store.rebuild_symmetric();
-                }
+                    crate::search::index_persistence::read_index(path, "hnsw-v4")?;
+                index.after_load();
                 Ok(index)
             }
+            "hnsw-v3" => {
+                let old: LegacyV3 = crate::search::index_persistence::read_index(path, "hnsw-v3")?;
+                Ok(Self::from_legacy(
+                    old.config,
+                    old.distance_metric,
+                    old.nodes,
+                    old.entry_point,
+                    old.quantized,
+                ))
+            }
             _ => {
-                let plain: PlainIndex =
-                    crate::search::index_persistence::read_index(path, "hnsw-v2")?;
-                Ok(HnswIndex {
-                    rng: default_rng(),
-                    config: plain.config,
-                    distance_metric: plain.distance_metric,
-                    nodes: plain.nodes,
-                    id_to_idx: plain.id_to_idx,
-                    entry_point: plain.entry_point,
-                    quantized: None,
-                })
+                let old: LegacyV2 = crate::search::index_persistence::read_index(path, "hnsw-v2")?;
+                Ok(Self::from_legacy(
+                    old.config,
+                    old.distance_metric,
+                    old.nodes,
+                    old.entry_point,
+                    None,
+                ))
             }
         }
     }
@@ -1812,12 +2203,11 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
     fn stats(&self) -> crate::search::index_traits::IndexStats {
         // Quantized nodes store no vector, so this is zero for them and the codes are counted
         // by `resident_bytes_without_vectors` instead.
-        let dimension = self.nodes.first().map(|n| n.vector.len()).unwrap_or(0);
-        let vectors_bytes = self.nodes.len() * dimension * std::mem::size_of::<f32>();
+        let vectors_bytes = self.nodes.vectors.len() * std::mem::size_of::<f32>();
 
         crate::search::index_traits::IndexStats {
             // `nodes` keeps tombstoned entries, so this counts live vectors rather than slots.
-            total_vectors: self.nodes.iter().filter(|n| !n.deleted).count(),
+            total_vectors: self.nodes.live_count(),
             index_size_bytes: vectors_bytes + self.resident_bytes_without_vectors(),
             build_time_ms: 0,
         }
@@ -1849,7 +2239,7 @@ mod batch_insert_tests {
     }
 
     fn live_count(index: &HnswIndex) -> usize {
-        index.nodes.iter().filter(|n| !n.deleted).count()
+        index.nodes.live_count()
     }
 
     fn recall_against(
@@ -1865,11 +2255,14 @@ mod batch_insert_tests {
         let mut total = 0usize;
         for q in queries {
             let exact: HashSet<String> = {
-                let mut scored: Vec<(String, f32)> = index_a
-                    .nodes
-                    .iter()
-                    .filter(|n| !n.deleted)
-                    .map(|n| (n.id.clone(), index_a.calculate_distance(q, &n.vector)))
+                let mut scored: Vec<(String, f32)> = (0..index_a.nodes.len())
+                    .filter(|&i| !index_a.nodes.is_deleted(i))
+                    .map(|i| {
+                        (
+                            index_a.nodes.id(i).to_string(),
+                            index_a.calculate_distance(q, index_a.nodes.vector(i)),
+                        )
+                    })
                     .collect();
                 scored.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
                 scored.into_iter().take(k).map(|(id, _)| id).collect()
@@ -2019,45 +2412,37 @@ mod persistence_tests {
             "lost nodes across the format change"
         );
         assert_eq!(loaded.entry_point, Some(172), "entry point moved");
-        assert_eq!(loaded.id_to_idx.len(), 200);
+        assert_eq!(crate::search::index_traits::VectorIndex::len(&loaded), 200);
 
-        // The edges have to survive too, not just the node count -- a graph that read back
-        // with every edge list empty would still pass the assertions above.
-        let edges: usize = loaded
-            .nodes
-            .iter()
-            .map(|n| n.links.iter().map(|l| l.read().len()).sum::<usize>())
-            .sum();
+        let edges = loaded.nodes.total_edges();
         assert!(edges > 200, "edges did not survive the load: {edges}");
 
-        // And it has to answer queries: every node must find itself.
         for probe in [0usize, 57, 199] {
-            let node = &loaded.nodes[probe];
-            let hits = loaded.search(&node.vector, 1).unwrap();
+            let hits = loaded
+                .search(&loaded.nodes.vector(probe).to_vec(), 1)
+                .unwrap();
             assert_eq!(
-                hits[0].0, node.id,
+                hits[0].0,
+                loaded.nodes.id(probe),
                 "loaded graph could not find node {probe}"
             );
         }
 
-        // The nodes region has to come back byte for byte -- that is the part this change
-        // could have altered. The whole file cannot be compared: `id_to_idx` is a `HashMap`,
-        // bincode writes it in iteration order, and that order is randomised per process, so
-        // a golden file diverges from a faithful rewrite at the byte where the map starts
-        // (44,926 of 49,124 here) no matter what the node layout does.
-        //
-        // Offsets: a 23-byte envelope (8 magic + 4 version + 4 kind length + "hnsw-v2"),
-        // then the struct's fields in declaration order with `rng` skipped.
-        let prefix = bincode::serialize(&loaded.config).unwrap().len()
-            + bincode::serialize(&loaded.distance_metric).unwrap().len();
-        let start = 23 + prefix;
-        let nodes_bytes = bincode::serialize(&loaded.nodes).unwrap();
+        // Saved again, the graph is "hnsw-v4": the v2 layout is read, never written.
+        let again = dir.path().join("again.idx");
+        loaded.save(&again).unwrap();
         assert_eq!(
-            &HNSW_V2_GOLDEN[start..start + nodes_bytes.len()],
-            &nodes_bytes[..],
-            "`Vec<RwLock<Vec<usize>>>` does not encode like the `Vec<Vec<usize>>` that wrote \
-             this file -- the index kind must go to \"hnsw-v3\""
+            crate::search::index_persistence::read_kind(&again).unwrap(),
+            "hnsw-v4"
         );
+        let back = HnswIndex::load(&again).unwrap();
+        assert_eq!(back.nodes.total_edges(), edges);
+        for probe in [0usize, 57, 199] {
+            assert_eq!(
+                back.search(&back.nodes.vector(probe).to_vec(), 1).unwrap()[0].0,
+                loaded.nodes.id(probe)
+            );
+        }
     }
 }
 
@@ -2217,7 +2602,7 @@ mod quantized_tests {
         index.quantize(trained_pq(&corpus)).unwrap();
         assert!(index.is_quantized());
         assert!(
-            index.nodes.iter().all(|n| n.vector.is_empty()),
+            index.nodes.vectors_dropped(),
             "quantizing must drop the stored vectors"
         );
         // Two properties, kept apart. The walk must find what the codes still hold: within
@@ -2279,7 +2664,7 @@ mod quantized_tests {
     }
 
     #[test]
-    fn a_quantized_graph_round_trips_as_v3_and_a_plain_one_stays_v2() {
+    fn a_quantized_graph_round_trips_as_v4() {
         let corpus = unit_vectors(1500, 0x1234_5678_9ABC_DEF1);
         let dir = tempfile::tempdir().unwrap();
 
@@ -2288,7 +2673,7 @@ mod quantized_tests {
         plain.save(&plain_path).unwrap();
         assert_eq!(
             crate::search::index_persistence::read_kind(&plain_path).unwrap(),
-            "hnsw-v2"
+            "hnsw-v4"
         );
         let plain_back = HnswIndex::load(&plain_path).unwrap();
         assert!(!plain_back.is_quantized());
@@ -2300,7 +2685,7 @@ mod quantized_tests {
         quantized.save(&q_path).unwrap();
         assert_eq!(
             crate::search::index_persistence::read_kind(&q_path).unwrap(),
-            "hnsw-v3"
+            "hnsw-v4"
         );
         let back = HnswIndex::load(&q_path).unwrap();
         assert!(back.is_quantized());
