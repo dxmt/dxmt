@@ -186,7 +186,7 @@ impl ProductQuantizer {
 
         // k-means++ initialization: choose remaining centroids with probability proportional to distance
         for _ in 1..k {
-            let mut distances: Vec<f32> = subvectors
+            let distances: Vec<f32> = subvectors
                 .iter()
                 .map(|v| {
                     centroids
@@ -203,22 +203,32 @@ impl ProductQuantizer {
                 break;
             }
 
-            // Normalize to probabilities
-            for d in &mut distances {
-                *d /= sum;
-            }
-
-            // Choose next centroid based on weighted probability
-            let mut cumulative = 0.0;
-            let random_val: f32 = rand::random();
-            for (idx, &prob) in distances.iter().enumerate() {
-                cumulative += prob;
-                if cumulative >= random_val {
-                    centroids.push(subvectors[idx].clone());
+            // Choose the next centroid with probability proportional to its distance.
+            //
+            // Compared against `random * sum` rather than normalising the distances to
+            // probabilities and comparing against `random`: a 65,536-term f32 prefix sum of
+            // normalised weights can end at 0.9999 instead of 1, and a draw above that then
+            // selected nothing. The initialisation came out one centroid short, and the
+            // Lloyd step below indexed `centroids[255]` of a 255-long vector -- the 10M
+            // Cohere run died there in the 192-subspace training. If rounding still leaves
+            // the target unreached, the last point is the answer the exact sum would give.
+            let target = rand::random::<f32>() * sum;
+            let mut cumulative = 0.0f32;
+            let mut chosen = subvectors.len() - 1;
+            for (idx, &weight) in distances.iter().enumerate() {
+                cumulative += weight;
+                if cumulative >= target {
+                    chosen = idx;
                     break;
                 }
             }
+            centroids.push(subvectors[chosen].clone());
         }
+        debug_assert_eq!(
+            centroids.len(),
+            k,
+            "k-means++ must seed exactly k centroids"
+        );
 
         // Lloyd's algorithm iterations
         for iteration in 0..num_iterations {
