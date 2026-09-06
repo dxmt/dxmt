@@ -8,7 +8,7 @@
 //! VectorDBBench Cohere 768-d set, against a brute-force truth computed here rather than the
 //! shipped `neighbors.parquet` so the metric and the ordering are beyond doubt.
 //!
-//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000]
+//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [build=decoded]
 //!
 //! `<dir>` holds `train.f32` (row-major float32), `train_ids.i64`, `test.f32`, `test_ids.i64`,
 //! `neighbors.i64` (100 ids per query) as written by `convert.py`. `<dir>=synthetic` makes a
@@ -536,7 +536,18 @@ fn rss_mb() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn stage_hnsw(d: &Data, truth: &[Vec<u32>], pq96: Option<&(ProductQuantizer, PqCodes)>) {
+/// `build=decoded` builds the graph from vectors reconstructed out of their PQ codes instead
+/// of the originals. With the full vectors on disk a 100M build cannot score every candidate
+/// neighbour exactly, so the graph would be built on approximate distances; this is the
+/// cheapest stand-in for that (symmetric PQ distance, slightly worse than ADC) that needs no
+/// change to the insert path.
+fn stage_hnsw(
+    d: &Data,
+    truth: &[Vec<u32>],
+    pq96: Option<&(ProductQuantizer, PqCodes)>,
+    decoded_build: bool,
+) {
+    use dxmt_vectordb::search::quantization::product_quantization::PQCode;
     let before = rss_mb();
     let t = Instant::now();
     let mut index = HnswIndex::new(
@@ -547,13 +558,24 @@ fn stage_hnsw(d: &Data, truth: &[Vec<u32>], pq96: Option<&(ProductQuantizer, PqC
     while start < d.n {
         let end = (start + 50_000).min(d.n);
         let chunk: Vec<(String, Vec<f32>)> = (start..end)
-            .map(|i| (i.to_string(), d.row(i).to_vec()))
+            .map(|i| {
+                let v = match (decoded_build, pq96) {
+                    (true, Some((pq, codes))) => pq
+                        .decode(&PQCode {
+                            codes: codes.code(i as u32).to_vec(),
+                        })
+                        .unwrap(),
+                    _ => d.row(i).to_vec(),
+                };
+                (i.to_string(), v)
+            })
             .collect();
         index.insert_batch(chunk).unwrap();
         start = end;
     }
     println!(
-        "hnsw m=16 ef_c=200: built {} in {:.1}s, rss +{:.0} MB ({:.0} B/vector incl. the {} B vector)",
+        "hnsw m=16 ef_c=200 built from {} vectors: built {} in {:.1}s, rss +{:.0} MB ({:.0} B/vector incl. the {} B vector)",
+        if decoded_build { "PQ96-decoded" } else { "exact" },
         d.n,
         t.elapsed().as_secs_f64(),
         rss_mb() - before,
@@ -643,6 +665,7 @@ fn main() {
         .collect();
     let mut n = 1_000_000;
     let mut nq = 1000;
+    let mut decoded_build = false;
     for a in &args[2..] {
         if let Some(v) = a.strip_prefix("stages=") {
             stages = v.split(',').map(|s| s.to_string()).collect();
@@ -650,6 +673,8 @@ fn main() {
             n = v.parse().unwrap();
         } else if let Some(v) = a.strip_prefix("queries=") {
             nq = v.parse().unwrap();
+        } else if a == "build=decoded" {
+            decoded_build = true;
         }
     }
     if dir == "synthetic" && n == 1_000_000 {
@@ -683,7 +708,7 @@ fn main() {
         );
     }
     if stages.contains("hnsw") {
-        stage_hnsw(&d, &truth, pq96.as_ref());
+        stage_hnsw(&d, &truth, pq96.as_ref(), decoded_build);
     }
     println!("done, rss {:.0} MB", rss_mb());
 }
