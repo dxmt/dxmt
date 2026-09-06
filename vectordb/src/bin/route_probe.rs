@@ -646,13 +646,14 @@ fn stage_hnsw(
         start = end;
     }
     println!(
-        "hnsw m=16 ef_c=200 built from {} vectors: built {} in {:.1}s, rss +{:.0} MB ({:.0} B/vector incl. the {} B vector)",
+        "hnsw m=16 ef_c=200 built from {} vectors: built {} in {:.1}s, rss +{:.0} MB ({:.0} B/vector incl. the {} B vector; graph accounts for {:.0} B/vector)",
         if decoded_build { "PQ-decoded" } else { "exact" },
         d.n,
         t.elapsed().as_secs_f64(),
         rss_mb() - before,
         (rss_mb() - before) * 1_048_576.0 / d.n as f64,
-        DIM * 4
+        DIM * 4,
+        index.resident_bytes_without_vectors() as f64 / d.n as f64
     );
     for ef in [32usize, 64, 128, 256, 512, 1024, 2048] {
         let t = Instant::now();
