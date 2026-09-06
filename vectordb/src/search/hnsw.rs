@@ -1,4 +1,5 @@
 use crate::precomputed_query::PrecomputedQuery;
+use crate::search::quantization::product_quantization::ProductQuantizer;
 use crate::search::simd_distance::SimdDistance;
 use crate::types::{DenseVector, DistanceMetric, RecordId};
 use parking_lot::RwLock;
@@ -318,6 +319,136 @@ pub struct HnswIndex {
     nodes: Vec<Node>,
     id_to_idx: HashMap<RecordId, usize>,
     entry_point: Option<usize>,
+    /// Present once the graph traverses on PQ codes instead of full vectors; see
+    /// [`QuantizedStore`]. Files written without it stay readable as "hnsw-v2".
+    quantized: Option<QuantizedStore>,
+}
+
+/// The graph's vectors as PQ codes, once [`HnswIndex::quantize`] has run.
+///
+/// After quantizing, `nodes[i].vector` is empty and every distance the graph needs comes from
+/// here: query-to-node through an ADC table built once per query, node-to-node through a
+/// per-subspace centroid-to-centroid table. That is what lets the full vectors leave the index
+/// (and, later, memory): measured on 1M and 10M Cohere 768-d, a graph walked on 192-byte codes
+/// with the best 500 reranked on the originals matched an exact walk at the same `ef` to within
+/// 0.1 points of recall@100 (design/DISK_INDEX.md sections 2.7 and 2.10).
+///
+/// `codes` is indexed by node position: node `i` owns bytes `[i*m, (i+1)*m)`. Tombstoned nodes
+/// keep their slot, as they keep their `Node`.
+#[derive(Serialize, Deserialize)]
+pub struct QuantizedStore {
+    pq: ProductQuantizer,
+    m: usize,
+    codes: Vec<u8>,
+    /// `symmetric[sub * k * k + a * k + b]` = squared distance between centroids `a` and `b`
+    /// of subspace `sub`. Rebuilt from the codebooks on load rather than stored: 192
+    /// subspaces make it 50 MB, and it is a pure function of `pq`.
+    #[serde(skip)]
+    symmetric: Vec<f32>,
+}
+
+impl QuantizedStore {
+    fn from_quantizer(pq: ProductQuantizer) -> Self {
+        let m = pq.num_subvectors;
+        let mut store = Self {
+            pq,
+            m,
+            codes: Vec::new(),
+            symmetric: Vec::new(),
+        };
+        store.rebuild_symmetric();
+        store
+    }
+
+    fn rebuild_symmetric(&mut self) {
+        let k = self.pq.num_centroids;
+        let mut table = vec![0.0f32; self.m * k * k];
+        for (sub, codebook) in self.pq.codebooks.iter().enumerate() {
+            for a in 0..k {
+                for b in (a + 1)..k {
+                    let d: f32 = codebook[a]
+                        .iter()
+                        .zip(&codebook[b])
+                        .map(|(x, y)| (x - y) * (x - y))
+                        .sum();
+                    table[sub * k * k + a * k + b] = d;
+                    table[sub * k * k + b * k + a] = d;
+                }
+            }
+        }
+        self.symmetric = table;
+    }
+
+    #[inline]
+    fn code(&self, idx: usize) -> &[u8] {
+        &self.codes[idx * self.m..(idx + 1) * self.m]
+    }
+
+    fn push(&mut self, vector: &DenseVector) -> crate::Result<()> {
+        let code = self.pq.encode(vector)?;
+        self.codes.extend_from_slice(&code.codes);
+        Ok(())
+    }
+
+    /// Squared distance between two nodes, summed over subspaces from the centroid table.
+    #[inline]
+    fn node_distance(&self, a: usize, b: usize) -> f32 {
+        let k = self.pq.num_centroids;
+        let (ca, cb) = (self.code(a), self.code(b));
+        let mut total = 0.0f32;
+        for sub in 0..self.m {
+            total += self.symmetric[sub * k * k + ca[sub] as usize * k + cb[sub] as usize];
+        }
+        total
+    }
+
+    #[inline]
+    fn adc(&self, table: &[f32], idx: usize) -> f32 {
+        let k = self.pq.num_centroids;
+        let mut total = 0.0f32;
+        for (sub, &c) in self.code(idx).iter().enumerate() {
+            total += table[sub * k + c as usize];
+        }
+        total
+    }
+
+    fn resident_bytes(&self) -> usize {
+        self.codes.len()
+            + self.pq.memory_usage()
+            + self.symmetric.len() * std::mem::size_of::<f32>()
+    }
+}
+
+/// How a query scores the nodes it visits. Built once per search by [`HnswIndex::scorer`].
+///
+/// Exact mode compares against the vector stored on the node; quantized mode compares an ADC
+/// table (squared distance from each query subvector to each centroid) against the node's
+/// code. Both rank the same way as the metric on unit-length inputs; only the exact one returns
+/// the metric's own value, which is why quantized results are reranked before they leave.
+pub enum QueryScorer<'a> {
+    Exact(&'a DenseVector),
+    Adc(Vec<f32>),
+}
+
+/// The "hnsw-v2" layout: [`HnswIndex`] without `quantized`. `save` writes through the borrowed
+/// form and `load` reads the owned one, so files from before quantization existed round-trip
+/// unchanged (`persistence_tests::hnsw_v2_files_still_load` pins the bytes).
+#[derive(Serialize)]
+struct PlainIndexRef<'a> {
+    config: &'a HnswConfig,
+    distance_metric: &'a DistanceMetric,
+    nodes: &'a [Node],
+    id_to_idx: &'a HashMap<RecordId, usize>,
+    entry_point: &'a Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct PlainIndex {
+    config: HnswConfig,
+    distance_metric: DistanceMetric,
+    nodes: Vec<Node>,
+    id_to_idx: HashMap<RecordId, usize>,
+    entry_point: Option<usize>,
 }
 
 fn default_rng() -> StdRng {
@@ -334,7 +465,99 @@ impl HnswIndex {
             nodes: Vec::new(),
             id_to_idx: HashMap::new(),
             entry_point: None,
+            quantized: None,
         }
+    }
+
+    /// Build the scorer for one (already `prepare`d) query.
+    fn scorer<'a>(&self, query: &'a DenseVector) -> QueryScorer<'a> {
+        match &self.quantized {
+            None => QueryScorer::Exact(query),
+            Some(q) => {
+                let k = q.pq.num_centroids;
+                let dim = q.pq.subvector_dim;
+                let mut table = vec![0.0f32; q.m * k];
+                for (sub, codebook) in q.pq.codebooks.iter().enumerate() {
+                    let qs = &query[sub * dim..(sub + 1) * dim];
+                    for (c, centroid) in codebook.iter().enumerate() {
+                        table[sub * k + c] = qs
+                            .iter()
+                            .zip(centroid)
+                            .map(|(x, y)| (x - y) * (x - y))
+                            .sum();
+                    }
+                }
+                QueryScorer::Adc(table)
+            }
+        }
+    }
+
+    /// Distance from the query to node `idx` under `scorer`.
+    #[inline]
+    fn score(&self, scorer: &QueryScorer<'_>, idx: usize) -> f32 {
+        match scorer {
+            QueryScorer::Exact(q) => self.calculate_distance(q, &self.nodes[idx].vector),
+            QueryScorer::Adc(table) => self
+                .quantized
+                .as_ref()
+                .expect("an ADC scorer exists only for a quantized graph")
+                .adc(table, idx),
+        }
+    }
+
+    /// Distance between two nodes, for neighbour selection and pruning.
+    #[inline]
+    fn node_distance(&self, a: usize, b: usize) -> f32 {
+        match &self.quantized {
+            None => self.calculate_distance(&self.nodes[a].vector, &self.nodes[b].vector),
+            Some(q) => q.node_distance(a, b),
+        }
+    }
+
+    /// Whether the graph traverses on PQ codes.
+    pub fn is_quantized(&self) -> bool {
+        self.quantized.is_some()
+    }
+
+    /// Switch the graph to PQ codes: encode every node, drop the stored vectors.
+    ///
+    /// `pq` must be trained on this graph's metric-prepared vectors (unit length for cosine).
+    /// The graph itself is untouched -- links chosen with exact distances stay -- and every
+    /// later insert plans with ADC against the codes. A graph built on approximate distances
+    /// from the start measured no worse (DISK_INDEX.md section 2.5).
+    pub fn quantize(&mut self, pq: ProductQuantizer) -> crate::Result<()> {
+        if self.quantized.is_some() {
+            return Err(crate::Error::InvalidInput(
+                "HNSW graph is already quantized".to_string(),
+            ));
+        }
+        let mut store = QuantizedStore::from_quantizer(pq);
+        store.codes.reserve(self.nodes.len() * store.m);
+        for node in &self.nodes {
+            store.push(&node.vector)?;
+        }
+        for node in &mut self.nodes {
+            node.vector = Vec::new();
+        }
+        self.quantized = Some(store);
+        Ok(())
+    }
+
+    /// Bytes the graph holds beyond its vectors: links, plus codes and tables once quantized.
+    pub fn resident_bytes_without_vectors(&self) -> usize {
+        let links: usize = self
+            .nodes
+            .iter()
+            .map(|n| {
+                n.links.iter().map(|l| l.read().len()).sum::<usize>() * std::mem::size_of::<usize>()
+            })
+            .sum();
+        links
+            + self
+                .quantized
+                .as_ref()
+                .map(|q| q.resident_bytes())
+                .unwrap_or(0)
     }
 
     /// Put a vector into the form this index scores in.
@@ -420,10 +643,9 @@ impl HnswIndex {
             if selected.len() >= m {
                 break;
             }
-            let crowded = selected.iter().any(|&kept| {
-                self.calculate_distance(&self.nodes[idx].vector, &self.nodes[kept].vector)
-                    < dist_to_base
-            });
+            let crowded = selected
+                .iter()
+                .any(|&kept| self.node_distance(idx, kept) < dist_to_base);
             if !crowded {
                 selected.push(idx);
             }
@@ -454,14 +676,14 @@ impl HnswIndex {
     /// neighbors are still marked visited to prevent repeated re-exploration.
     fn search_layer(
         &self,
-        query: &DenseVector,
+        scorer: &QueryScorer<'_>,
         entry_points: Vec<usize>,
         ef: usize,
         layer: usize,
         filter_idxs: Option<&HashSet<usize>>,
     ) -> Vec<(usize, f32)> {
         self.search_layer_by(
-            |idx| self.calculate_distance(query, &self.nodes[idx].vector),
+            |idx| self.score(scorer, idx),
             entry_points,
             ef,
             layer,
@@ -582,7 +804,7 @@ impl HnswIndex {
     /// Accepts the same `filter_idxs` parameter as `search_layer` for Acorn filtering.
     fn search_layer_parallel(
         &self,
-        query: &DenseVector,
+        scorer: &QueryScorer<'_>,
         entry_points: Vec<usize>,
         ef: usize,
         layer: usize,
@@ -598,7 +820,7 @@ impl HnswIndex {
                 continue;
             }
             // Same rule as `search_layer`: the queue is unfiltered, the result set is not.
-            let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+            let dist = self.score(scorer, idx);
             candidates.push(Candidate {
                 idx,
                 distance: dist,
@@ -650,8 +872,7 @@ impl HnswIndex {
                         .par_iter()
                         .filter(|&&idx| filter_idxs.is_none_or(|f| f.contains(&idx)))
                         .map(|&neighbor_idx| {
-                            let dist =
-                                self.calculate_distance(query, &self.nodes[neighbor_idx].vector);
+                            let dist = self.score(scorer, neighbor_idx);
                             (neighbor_idx, dist)
                         })
                         .collect()
@@ -660,8 +881,7 @@ impl HnswIndex {
                         .iter()
                         .filter(|&&idx| filter_idxs.is_none_or(|f| f.contains(&idx)))
                         .map(|&neighbor_idx| {
-                            let dist =
-                                self.calculate_distance(query, &self.nodes[neighbor_idx].vector);
+                            let dist = self.score(scorer, neighbor_idx);
                             (neighbor_idx, dist)
                         })
                         .collect()
@@ -693,7 +913,7 @@ impl HnswIndex {
                         .iter()
                         .filter(|&&i| !filter_idxs.unwrap().contains(&i))
                     {
-                        let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+                        let dist = self.score(scorer, idx);
                         if dist < w.peek().map(|r| r.distance).unwrap_or(f32::INFINITY)
                             || candidates.len() < ef
                         {
@@ -719,15 +939,11 @@ impl HnswIndex {
     /// Greedy search for upper layers (find single closest point)
     fn search_layer_closest(
         &self,
-        query: &DenseVector,
+        scorer: &QueryScorer<'_>,
         entry_points: Vec<usize>,
         layer: usize,
     ) -> Vec<usize> {
-        self.search_layer_closest_by(
-            |idx| self.calculate_distance(query, &self.nodes[idx].vector),
-            entry_points,
-            layer,
-        )
+        self.search_layer_closest_by(|idx| self.score(scorer, idx), entry_points, layer)
     }
 
     /// `search_layer_closest` with the distance supplied by the caller, per node index.
@@ -815,6 +1031,7 @@ impl HnswIndex {
             return Ok(Vec::new());
         }
         let query = &self.prepare(query.clone());
+        let scorer = self.scorer(query);
 
         let entry = self.entry_point.unwrap();
         let entry_level = self.nodes[entry].level;
@@ -822,7 +1039,7 @@ impl HnswIndex {
 
         // Search from top layer to layer 1 (greedy search for closest point)
         for lc in (1..=entry_level).rev() {
-            curr_nearest = self.search_layer_closest(query, curr_nearest, lc);
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
         }
 
         // Rayon has a non-trivial scheduling cost for the small neighbor lists
@@ -832,7 +1049,7 @@ impl HnswIndex {
         // searches, where it can avoid scoring rejected candidates, but use
         // the cache-friendly sequential loop for the common unfiltered case.
         let ef = ef_override.max(k);
-        let candidates = self.search_layer(query, curr_nearest, ef, 0, None);
+        let candidates = self.search_layer(&scorer, curr_nearest, ef, 0, None);
 
         // Return top k
         Ok(candidates
@@ -870,6 +1087,7 @@ impl HnswIndex {
             return Ok(Vec::new());
         }
         let query = &self.prepare(query.clone());
+        let scorer = self.scorer(query);
 
         let entry = self.entry_point.unwrap();
         let entry_level = self.nodes[entry].level;
@@ -877,15 +1095,15 @@ impl HnswIndex {
 
         // Upper layers: greedy traversal without filter (find good entry to layer 0)
         for lc in (1..=entry_level).rev() {
-            curr_nearest = self.search_layer_closest(query, curr_nearest, lc);
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
         }
 
         // Layer 0: apply Acorn filter
         let ef = ef_override.max(k);
         let candidates = if self.nodes.len() > 1000 {
-            self.search_layer_parallel(query, curr_nearest, ef, 0, Some(&filter_idxs))
+            self.search_layer_parallel(&scorer, curr_nearest, ef, 0, Some(&filter_idxs))
         } else {
-            self.search_layer(query, curr_nearest, ef, 0, Some(&filter_idxs))
+            self.search_layer(&scorer, curr_nearest, ef, 0, Some(&filter_idxs))
         };
 
         Ok(candidates
@@ -935,14 +1153,15 @@ impl HnswIndex {
         let entry_level = self.nodes[entry].level;
         let mut curr_nearest = vec![entry];
 
+        let scorer = self.scorer(&precomputed.vector);
         // Search upper layers
         for lc in (1..=entry_level).rev() {
-            curr_nearest = self.search_layer_closest(&precomputed.vector, curr_nearest, lc);
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
         }
 
         // Search layer 0 with precomputed optimization
         let ef = self.config.ef_search.max(k);
-        let candidates = self.search_layer(&precomputed.vector, curr_nearest, ef, 0, None);
+        let candidates = self.search_layer(&scorer, curr_nearest, ef, 0, None);
 
         Ok(candidates
             .into_iter()
@@ -1105,14 +1324,15 @@ impl HnswIndex {
     ) -> Vec<Vec<usize>> {
         let mut per_layer = vec![Vec::new(); level + 1];
         let mut curr_nearest = vec![entry];
+        let scorer = self.scorer(vector);
 
         for lc in ((level + 1).min(entry_level + 1)..=entry_level).rev() {
-            curr_nearest = self.search_layer_closest(vector, curr_nearest, lc);
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
         }
 
         for lc in (0..=level.min(entry_level)).rev() {
             let candidates = self.search_layer(
-                vector,
+                &scorer,
                 curr_nearest.clone(),
                 self.config.ef_construction,
                 lc,
@@ -1146,6 +1366,7 @@ impl HnswIndex {
         neighbors_per_layer: Vec<Vec<usize>>,
     ) -> usize {
         let idx = self.nodes.len();
+        let vector = self.take_or_encode(vector);
         let mut node = Node::new(id.clone(), vector, level);
         for (lc, chosen) in neighbors_per_layer.into_iter().enumerate() {
             *node.links[lc].get_mut() = chosen;
@@ -1153,6 +1374,21 @@ impl HnswIndex {
         self.nodes.push(node);
         self.id_to_idx.insert(id, idx);
         idx
+    }
+
+    /// What a new node stores: the vector itself, or -- once quantized -- nothing, with its
+    /// code appended to the store instead. Called exactly once per node pushed, which is what
+    /// keeps `codes` aligned with `nodes`.
+    fn take_or_encode(&mut self, vector: DenseVector) -> DenseVector {
+        match &mut self.quantized {
+            None => vector,
+            Some(store) => {
+                store
+                    .push(&vector)
+                    .expect("vector was dimension-checked before reaching the graph");
+                Vec::new()
+            }
+        }
     }
 
     /// Add the reverse edge on every neighbour `idx` chose, pruning any list that overflows.
@@ -1204,10 +1440,7 @@ impl HnswIndex {
         // matter most -- the ones popular enough to overflow.
         let mut neighbors_with_dist: Vec<_> = links
             .iter()
-            .map(|&n_idx| {
-                let dist = self.calculate_distance(&neighbor.vector, &self.nodes[n_idx].vector);
-                (n_idx, dist)
-            })
+            .map(|&n_idx| (n_idx, self.node_distance(neighbor_idx, n_idx)))
             .collect();
         neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         *links = self.select_neighbors_heuristic(&neighbors_with_dist, max_neighbors);
@@ -1225,7 +1458,8 @@ impl HnswIndex {
         let idx = self.nodes.len();
         let level = self.select_level();
 
-        let mut node = Node::new(id.clone(), vector.clone(), level);
+        let stored = self.take_or_encode(vector.clone());
+        let mut node = Node::new(id.clone(), stored, level);
 
         if self.nodes.is_empty() || self.entry_point.is_none() {
             self.nodes.push(node);
@@ -1237,16 +1471,17 @@ impl HnswIndex {
         let entry = self.entry_point.unwrap();
         let entry_level = self.nodes[entry].level;
         let mut curr_nearest = vec![entry];
+        let scorer = self.scorer(&vector);
 
         // Search from top to target layer
         for lc in ((level + 1).min(entry_level + 1)..=entry_level).rev() {
-            curr_nearest = self.search_layer_closest(&vector, curr_nearest, lc);
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
         }
 
         // Insert at all levels from level to 0
         for lc in (0..=level.min(entry_level)).rev() {
             let candidates = self.search_layer(
-                &vector,
+                &scorer,
                 curr_nearest.clone(),
                 self.config.ef_construction,
                 lc,
@@ -1443,13 +1678,7 @@ impl HnswIndex {
                         .filter(|&&n| {
                             n != neighbor_a && n < self.nodes.len() && !self.nodes[n].deleted
                         })
-                        .map(|&n| {
-                            let dist = self.calculate_distance(
-                                &self.nodes[neighbor_a].vector,
-                                &self.nodes[n].vector,
-                            );
-                            (n, dist)
-                        })
+                        .map(|&n| (n, self.node_distance(neighbor_a, n)))
                         .collect();
 
                     distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -1502,7 +1731,23 @@ impl HnswIndex {
 
 impl crate::search::index_traits::SerializableIndex for HnswIndex {
     fn save(&self, path: &std::path::Path) -> crate::Result<()> {
-        crate::search::index_persistence::write_index(path, "hnsw-v2", self)
+        match &self.quantized {
+            // Byte-for-byte the file this wrote before quantization existed: the mirror
+            // serialises the same fields in the same order, so an "hnsw-v2" file from this
+            // build is indistinguishable from one written by the previous build.
+            None => crate::search::index_persistence::write_index(
+                path,
+                "hnsw-v2",
+                &PlainIndexRef {
+                    config: &self.config,
+                    distance_metric: &self.distance_metric,
+                    nodes: &self.nodes,
+                    id_to_idx: &self.id_to_idx,
+                    entry_point: &self.entry_point,
+                },
+            ),
+            Some(_) => crate::search::index_persistence::write_index(path, "hnsw-v3", self),
+        }
     }
 
     fn load(path: &std::path::Path) -> crate::Result<Self> {
@@ -1515,24 +1760,41 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
         // v1 file read back would be scored against normalised queries — every distance quietly
         // wrong rather than loudly absent. A rejected kind makes the restore path warn and
         // rebuild from the rows instead.
-        crate::search::index_persistence::read_index(path, "hnsw-v2")
+        match crate::search::index_persistence::read_kind(path)?.as_str() {
+            "hnsw-v3" => {
+                let mut index: HnswIndex =
+                    crate::search::index_persistence::read_index(path, "hnsw-v3")?;
+                if let Some(store) = &mut index.quantized {
+                    store.rebuild_symmetric();
+                }
+                Ok(index)
+            }
+            _ => {
+                let plain: PlainIndex =
+                    crate::search::index_persistence::read_index(path, "hnsw-v2")?;
+                Ok(HnswIndex {
+                    rng: default_rng(),
+                    config: plain.config,
+                    distance_metric: plain.distance_metric,
+                    nodes: plain.nodes,
+                    id_to_idx: plain.id_to_idx,
+                    entry_point: plain.entry_point,
+                    quantized: None,
+                })
+            }
+        }
     }
 
     fn stats(&self) -> crate::search::index_traits::IndexStats {
+        // Quantized nodes store no vector, so this is zero for them and the codes are counted
+        // by `resident_bytes_without_vectors` instead.
         let dimension = self.nodes.first().map(|n| n.vector.len()).unwrap_or(0);
         let vectors_bytes = self.nodes.len() * dimension * std::mem::size_of::<f32>();
-        let graph_bytes: usize = self
-            .nodes
-            .iter()
-            .map(|n| {
-                n.links.iter().map(|l| l.read().len()).sum::<usize>() * std::mem::size_of::<usize>()
-            })
-            .sum();
 
         crate::search::index_traits::IndexStats {
             // `nodes` keeps tombstoned entries, so this counts live vectors rather than slots.
             total_vectors: self.nodes.iter().filter(|n| !n.deleted).count(),
-            index_size_bytes: vectors_bytes + graph_bytes,
+            index_size_bytes: vectors_bytes + self.resident_bytes_without_vectors(),
             build_time_ms: 0,
         }
     }
@@ -1772,5 +2034,264 @@ mod persistence_tests {
             "`Vec<RwLock<Vec<usize>>>` does not encode like the `Vec<Vec<usize>>` that wrote \
              this file -- the index kind must go to \"hnsw-v3\""
         );
+    }
+}
+
+#[cfg(test)]
+mod quantized_tests {
+    use super::*;
+    use crate::search::index_traits::SerializableIndex;
+
+    const DIM: usize = 64;
+
+    /// Distinct unit vectors drawn around 40 shared centres, so the data has the structure a
+    /// product quantizer relies on. Uniform noise has none: 8 subspaces of 32 centroids over
+    /// 64 uniform dimensions lose most of the neighbourhood, and a first version of these tests
+    /// on uniform data read 0.58 recall and looked like a bug in the walk. It was the data --
+    /// the brute-force scan over the same codes scored the same. `centres_seed` is fixed so
+    /// that query and corpus draws share the centres.
+    fn unit_vectors(n: usize, seed: u64) -> Vec<DenseVector> {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let mut cstate = 0xC0FFEE_u64;
+        let mut cnext = move || {
+            cstate ^= cstate << 13;
+            cstate ^= cstate >> 7;
+            cstate ^= cstate << 17;
+            (cstate >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let centres: Vec<DenseVector> = (0..40)
+            .map(|_| (0..DIM).map(|_| cnext()).collect())
+            .collect();
+        (0..n)
+            .map(|i| {
+                let c = &centres[i % centres.len()];
+                let mut v: DenseVector = (0..DIM).map(|d| c[d] + 0.15 * next()).collect();
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                v.iter_mut().for_each(|x| *x /= norm);
+                v
+            })
+            .collect()
+    }
+
+    /// recall@10 of a brute-force scan over the codes with an exact rerank of the best `r`:
+    /// the most any walk on the same codes can reach.
+    fn scan_bound(
+        index: &HnswIndex,
+        corpus: &[DenseVector],
+        queries: &[DenseVector],
+        r: usize,
+    ) -> f64 {
+        let store = index.quantized.as_ref().unwrap();
+        let mut hits = 0;
+        for q in queries {
+            let truth = exact_top(corpus, q, 10);
+            let QueryScorer::Adc(table) = index.scorer(q) else {
+                panic!("quantized graph must give an ADC scorer")
+            };
+            let mut scored: Vec<(f32, usize)> = (0..corpus.len())
+                .map(|i| (store.adc(&table, i), i))
+                .collect();
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut reranked: Vec<(f32, usize)> = scored
+                .iter()
+                .take(r)
+                .map(|&(_, i)| {
+                    (
+                        1.0 - crate::search::simd_distance::dot_product(q, &corpus[i]),
+                        i,
+                    )
+                })
+                .collect();
+            reranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+            hits += reranked
+                .iter()
+                .take(10)
+                .filter(|(_, i)| truth.contains(i))
+                .count();
+        }
+        hits as f64 / (10 * queries.len()) as f64
+    }
+
+    fn exact_top(corpus: &[DenseVector], q: &DenseVector, k: usize) -> Vec<usize> {
+        let mut scored: Vec<(f32, usize)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (1.0 - crate::search::simd_distance::dot_product(q, v), i))
+            .collect();
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+        scored.into_iter().take(k).map(|(_, i)| i).collect()
+    }
+
+    fn build(corpus: &[DenseVector]) -> HnswIndex {
+        let mut index = HnswIndex::new(
+            DistanceMetric::Cosine,
+            Some(HnswConfig::from_params(16, 100, 64)),
+        );
+        let items: Vec<(RecordId, DenseVector)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string(), v.clone()))
+            .collect();
+        index.insert_batch(items).unwrap();
+        index
+    }
+
+    fn trained_pq(corpus: &[DenseVector]) -> ProductQuantizer {
+        // 16 subspaces of 4 dims, 64 centroids: fine enough that the codes keep the
+        // neighbourhood (the scan bound below reads it), small enough to train on 3,000.
+        let mut pq = ProductQuantizer::new(DIM, 16, 64, DistanceMetric::Euclidean).unwrap();
+        pq.train(corpus, 10).unwrap();
+        pq
+    }
+
+    /// recall@10 of `index` against brute force, reranking the walk's best `r` exactly.
+    fn recall(
+        index: &HnswIndex,
+        corpus: &[DenseVector],
+        queries: &[DenseVector],
+        ef: usize,
+        r: usize,
+    ) -> f64 {
+        let mut hits = 0;
+        for q in queries {
+            let truth = exact_top(corpus, q, 10);
+            let walk = index.search_with_ef(q, r, ef).unwrap();
+            let mut reranked: Vec<(f32, usize)> = walk
+                .iter()
+                .map(|(id, _)| {
+                    let i: usize = id.parse().unwrap();
+                    (
+                        1.0 - crate::search::simd_distance::dot_product(q, &corpus[i]),
+                        i,
+                    )
+                })
+                .collect();
+            reranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+            hits += reranked
+                .iter()
+                .take(10)
+                .filter(|(_, i)| truth.contains(i))
+                .count();
+        }
+        hits as f64 / (10 * queries.len()) as f64
+    }
+
+    #[test]
+    fn a_quantized_walk_finds_what_the_exact_walk_finds() {
+        let corpus = unit_vectors(3000, 0x9E3779B97F4A7C15);
+        let queries = unit_vectors(50, 0xD1B54A32D192ED03);
+        let mut index = build(&corpus);
+        let exact = recall(&index, &corpus, &queries, 64, 10);
+        assert!(exact > 0.9, "exact walk recall {exact}");
+
+        index.quantize(trained_pq(&corpus)).unwrap();
+        assert!(index.is_quantized());
+        assert!(
+            index.nodes.iter().all(|n| n.vector.is_empty()),
+            "quantizing must drop the stored vectors"
+        );
+        // Two properties, kept apart. The walk must find what the codes still hold: within
+        // a few points of a brute-force scan over the same codes. And the codes plus a rerank
+        // must land near the exact walk -- with a 200-candidate rerank here, because
+        // 16 x 64-centroid codes on this synthetic data are coarser than the 192-byte codes
+        // measured on real embeddings (where 500 candidates matched exact recall@100).
+        let walk = recall(&index, &corpus, &queries, 256, 200);
+        let bound = scan_bound(&index, &corpus, &queries, 200);
+        assert!(
+            walk >= bound - 0.05,
+            "walk on codes with a 200-candidate rerank: {walk}; a brute-force scan over the \
+             same codes reaches {bound}, so the walk is losing what the codes still have"
+        );
+        assert!(
+            walk >= exact - 0.1,
+            "walk on codes with a 200-candidate rerank: {walk}, exact walk: {exact}, scan \
+             bound {bound}"
+        );
+    }
+
+    #[test]
+    fn inserts_after_quantizing_are_found() {
+        let mut corpus = unit_vectors(3000, 0x2545F4914F6CDD1D);
+        let mut index = build(&corpus);
+        index.quantize(trained_pq(&corpus)).unwrap();
+
+        let more = unit_vectors(500, 0xA0761D6478BD642F);
+        let items: Vec<(RecordId, DenseVector)> = more
+            .iter()
+            .enumerate()
+            .map(|(i, v)| ((3000 + i).to_string(), v.clone()))
+            .collect();
+        index.insert_batch(items).unwrap();
+        corpus.extend(more.iter().cloned());
+        assert_eq!(index.quantized.as_ref().unwrap().codes.len(), 3500 * 16);
+
+        // Each late vector, queried by itself and reranked exactly, comes back first.
+        let mut found = 0;
+        for (i, v) in more.iter().enumerate().take(100) {
+            let walk = index.search_with_ef(v, 50, 64).unwrap();
+            let best = walk
+                .iter()
+                .map(|(id, _)| id.parse::<usize>().unwrap())
+                .min_by(|&a, &b| {
+                    let da = 1.0 - crate::search::simd_distance::dot_product(v, &corpus[a]);
+                    let db = 1.0 - crate::search::simd_distance::dot_product(v, &corpus[b]);
+                    da.total_cmp(&db)
+                })
+                .unwrap();
+            if best == 3000 + i {
+                found += 1;
+            }
+        }
+        assert!(
+            found >= 95,
+            "only {found}/100 late inserts found themselves"
+        );
+    }
+
+    #[test]
+    fn a_quantized_graph_round_trips_as_v3_and_a_plain_one_stays_v2() {
+        let corpus = unit_vectors(1500, 0x1234_5678_9ABC_DEF1);
+        let dir = tempfile::tempdir().unwrap();
+
+        let plain = build(&corpus);
+        let plain_path = dir.path().join("plain.idx");
+        plain.save(&plain_path).unwrap();
+        assert_eq!(
+            crate::search::index_persistence::read_kind(&plain_path).unwrap(),
+            "hnsw-v2"
+        );
+        let plain_back = HnswIndex::load(&plain_path).unwrap();
+        assert!(!plain_back.is_quantized());
+        assert_eq!(plain_back.nodes.len(), 1500);
+
+        let mut quantized = build(&corpus);
+        quantized.quantize(trained_pq(&corpus)).unwrap();
+        let q_path = dir.path().join("quantized.idx");
+        quantized.save(&q_path).unwrap();
+        assert_eq!(
+            crate::search::index_persistence::read_kind(&q_path).unwrap(),
+            "hnsw-v3"
+        );
+        let back = HnswIndex::load(&q_path).unwrap();
+        assert!(back.is_quantized());
+        let store = back.quantized.as_ref().unwrap();
+        assert_eq!(store.codes.len(), 1500 * 16);
+        assert!(
+            !store.symmetric.is_empty(),
+            "the centroid table is rebuilt on load, not stored"
+        );
+        for q in corpus.iter().take(20) {
+            assert_eq!(
+                quantized.search_with_ef(q, 10, 64).unwrap(),
+                back.search_with_ef(q, 10, 64).unwrap(),
+                "a loaded quantized graph must answer exactly as the one that was saved"
+            );
+        }
     }
 }

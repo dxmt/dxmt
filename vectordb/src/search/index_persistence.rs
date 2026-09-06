@@ -60,6 +60,28 @@ pub fn write_index<T: Serialize>(path: &Path, kind: &str, value: &T) -> crate::R
     Ok(())
 }
 
+/// The `kind` an index file was written with, for a loader that accepts more than one.
+pub fn read_kind(path: &Path) -> crate::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).map_err(|_| {
+        crate::Error::Serialization(format!("{}: too short to be an index file", path.display()))
+    })?;
+    if &magic != MAGIC {
+        return Err(crate::Error::Serialization(format!(
+            "{}: not a DXMT index file",
+            path.display()
+        )));
+    }
+    let mut version = [0u8; 4];
+    file.read_exact(&mut version)?;
+    let mut kind_len = [0u8; 4];
+    file.read_exact(&mut kind_len)?;
+    let mut kind = vec![0u8; u32::from_le_bytes(kind_len) as usize];
+    file.read_exact(&mut kind)?;
+    Ok(String::from_utf8_lossy(&kind).into_owned())
+}
+
 /// Read a value written by [`write_index`], requiring the same `kind`.
 pub fn read_index<T: DeserializeOwned>(path: &Path, kind: &str) -> crate::Result<T> {
     let mut file = std::fs::File::open(path)?;
