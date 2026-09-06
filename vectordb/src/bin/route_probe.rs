@@ -8,7 +8,7 @@
 //! VectorDBBench Cohere 768-d set, against a brute-force truth computed here rather than the
 //! shipped `neighbors.parquet` so the metric and the ordering are beyond doubt.
 //!
-//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [build=decoded]
+//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [pq=96] [build=decoded]
 //!
 //! `<dir>` holds `train.f32` (row-major float32), `train_ids.i64`, `test.f32`, `test_ids.i64`,
 //! `neighbors.i64` (100 ids per query) as written by `convert.py`. `<dir>=synthetic` makes a
@@ -31,6 +31,14 @@ const DIM: usize = 768;
 
 /// `k` of recall@k. VectorDBBench scores recall@100, so 10 (the default) and 100 both matter.
 static K_OF: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// `pq=<m>`: the code size (bytes per vector) the graph walk, the IVF stage and the decoded
+/// build use. 96 is the default; at recall@100 the 96-byte code needs a 1,000-candidate
+/// rerank where 192 bytes need 200, so both are worth walking with.
+static WALK_M: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+fn walk_m() -> usize {
+    *WALK_M.get().unwrap_or(&96)
+}
 #[allow(non_snake_case)]
 fn K() -> usize {
     *K_OF.get().unwrap_or(&10)
@@ -368,7 +376,7 @@ fn stage_pq(d: &Data, truth: &[Vec<u32>]) -> Option<(ProductQuantizer, PqCodes)>
             print!(" R{r}={:.4}", recall(&reranked, truth));
         }
         println!();
-        if m == 96 {
+        if m == walk_m() {
             keep = Some((pq, codes));
         }
     }
@@ -559,7 +567,7 @@ fn stage_ivf(
                     .collect();
                 let pq_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64
                     * rayon::current_num_threads() as f64;
-                print!(" | pq96+rerank {:.2} ms/thread:", pq_ms);
+                print!(" | pq{}+rerank {:.2} ms/thread:", walk_m(), pq_ms);
                 for (ri, r) in rerank_at().iter().enumerate() {
                     let found: Vec<Vec<u32>> = with_pq.iter().map(|v| v[ri].clone()).collect();
                     print!(" R{r}={:.4}", recall(&found, truth));
@@ -621,14 +629,14 @@ fn stage_hnsw(
     }
     println!(
         "hnsw m=16 ef_c=200 built from {} vectors: built {} in {:.1}s, rss +{:.0} MB ({:.0} B/vector incl. the {} B vector)",
-        if decoded_build { "PQ96-decoded" } else { "exact" },
+        if decoded_build { "PQ-decoded" } else { "exact" },
         d.n,
         t.elapsed().as_secs_f64(),
         rss_mb() - before,
         (rss_mb() - before) * 1_048_576.0 / d.n as f64,
         DIM * 4
     );
-    for ef in [32usize, 64, 128, 256, 512] {
+    for ef in [32usize, 64, 128, 256, 512, 1024, 2048] {
         let t = Instant::now();
         let found: Vec<Vec<u32>> = d
             .queries
@@ -664,7 +672,7 @@ fn stage_hnsw(
         return;
     };
     let row_of = |idx: usize| index.node_id(idx).parse::<u32>().unwrap();
-    for ef in [64usize, 128, 256, 512] {
+    for ef in [64usize, 128, 256, 512, 1024, 2048] {
         let t = Instant::now();
         let walks: Vec<Vec<u32>> = d
             .queries
@@ -685,7 +693,8 @@ fn stage_hnsw(
             .map(|w| w[..K().min(w.len())].to_vec())
             .collect();
         print!(
-            "  pq96-walk ef={ef:<3} {:.3} ms/query/thread; recall no-rerank {:.4}; rerank",
+            "  pq{}-walk ef={ef:<4} {:.3} ms/query/thread; recall no-rerank {:.4}; rerank",
+            walk_m(),
             walk_ms,
             recall(&no_rerank, truth)
         );
@@ -724,6 +733,8 @@ fn main() {
             nq = v.parse().unwrap();
         } else if let Some(v) = a.strip_prefix("k=") {
             K_OF.set(v.parse().unwrap()).unwrap();
+        } else if let Some(v) = a.strip_prefix("pq=") {
+            WALK_M.set(v.parse().unwrap()).unwrap();
         } else if a == "build=decoded" {
             decoded_build = true;
         }
@@ -745,8 +756,8 @@ fn main() {
     } else {
         None
     };
-    if pq96.is_none() && stages.contains("hnsw") {
-        pq96 = Some(build_pq(&d, 96));
+    if pq96.is_none() && (stages.contains("hnsw") || stages.contains("ivf")) {
+        pq96 = Some(build_pq(&d, walk_m()));
     }
     if stages.contains("sq") {
         stage_sq(&d, &truth);
