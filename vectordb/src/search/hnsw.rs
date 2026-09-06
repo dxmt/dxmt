@@ -627,6 +627,16 @@ pub struct PreparedBatch {
 
 /// What [`HnswIndex::apply_batch`] hands to the linking phase: the new nodes and the entry
 /// level everything in the batch was planned against.
+/// What `plan_batch` decided for a prepared batch: each node's neighbours per layer, and --
+/// once the graph is quantized -- each node's code, encoded in the parallel planning phase
+/// rather than one at a time under the write lock while appending. Encoding a 768-d vector
+/// into 192 subspaces is about 200k multiplies; serially in the append phase that was
+/// 0.44 ms per row, 440 s over a million.
+pub struct BatchPlan {
+    links: Vec<Vec<Vec<usize>>>,
+    codes: Vec<Option<Vec<u8>>>,
+}
+
 pub struct AppliedBatch {
     nodes: Vec<(usize, usize)>,
     entry_level: usize,
@@ -849,9 +859,18 @@ impl QuantizedStore {
     }
 
     fn push(&mut self, vector: &[f32]) -> crate::Result<()> {
-        let code = self.pq.encode(&vector.to_vec())?;
-        self.codes.extend_from_slice(&code.codes);
+        let code = self.encode(vector);
+        self.codes.extend_from_slice(&code);
         Ok(())
+    }
+
+    /// The code for one (metric-prepared) vector. Infallible: the graph checks dimensions
+    /// before a vector reaches it.
+    fn encode(&self, vector: &[f32]) -> Vec<u8> {
+        self.pq
+            .encode(&vector.to_vec())
+            .expect("vector was dimension-checked before reaching the graph")
+            .codes
     }
 
     /// Squared distance between two nodes, summed over subspaces from the centroid table.
@@ -1091,8 +1110,13 @@ impl HnswIndex {
         }
         let mut store = QuantizedStore::from_quantizer(pq);
         store.codes.reserve(self.nodes.len() * store.m);
-        for idx in 0..self.nodes.len() {
-            store.push(self.nodes.vector(idx))?;
+        // Encoded on every core: serially, a million 768-d rows took 442 s.
+        let codes: Vec<Vec<u8>> = (0..self.nodes.len())
+            .into_par_iter()
+            .map(|idx| store.encode(self.nodes.vector(idx)))
+            .collect();
+        for code in codes {
+            store.codes.extend_from_slice(&code);
         }
         self.nodes.drop_vectors();
         self.quantized = Some(store);
@@ -1797,34 +1821,35 @@ impl HnswIndex {
     }
 
     /// A. Plan. Read-only, `&self`, every core.
-    pub fn plan_batch(&self, prepared: &PreparedBatch) -> Vec<Vec<Vec<usize>>> {
+    pub fn plan_batch(&self, prepared: &PreparedBatch) -> BatchPlan {
         let started = std::time::Instant::now();
-        let plans = prepared
+        let (links, codes): (Vec<_>, Vec<_>) = prepared
             .items
             .par_iter()
             .map(|(_, vector, level)| {
-                self.plan_neighbors(vector, *level, prepared.entry, prepared.entry_level)
+                let links =
+                    self.plan_neighbors(vector, *level, prepared.entry, prepared.entry_level);
+                let code = self.quantized.as_ref().map(|store| store.encode(vector));
+                (links, code)
             })
-            .collect();
+            .unzip();
         record_phase(0, started);
-        plans
+        BatchPlan { links, codes }
     }
 
     /// B. Append the nodes and their own forward edges. Serial `&mut self`, but pure pushes --
     /// for a 380-record group at 768 dimensions this is about a megabyte of memcpy. The whole
     /// batch is appended before the linking starts, so `nodes` does not grow while that runs
     /// and no index into it can be invalidated.
-    pub fn apply_batch(
-        &mut self,
-        prepared: PreparedBatch,
-        plans: Vec<Vec<Vec<usize>>>,
-    ) -> AppliedBatch {
+    pub fn apply_batch(&mut self, prepared: PreparedBatch, plan: BatchPlan) -> AppliedBatch {
         let started = std::time::Instant::now();
         let entry_level = prepared.entry_level;
-        let mut applied: Vec<(usize, usize)> = Vec::with_capacity(plans.len());
+        let mut applied: Vec<(usize, usize)> = Vec::with_capacity(plan.links.len());
         let mut new_entry: Option<usize> = None;
-        for ((id, vector, level), plan) in prepared.items.into_iter().zip(plans) {
-            let idx = self.push_planned_node(id, vector, level, plan);
+        for (((id, vector, level), links), code) in
+            prepared.items.into_iter().zip(plan.links).zip(plan.codes)
+        {
+            let idx = self.push_planned_node(id, vector, level, links, code);
             if level > entry_level {
                 new_entry = Some(idx);
             }
@@ -1909,12 +1934,21 @@ impl HnswIndex {
         vector: DenseVector,
         level: usize,
         neighbors_per_layer: Vec<Vec<usize>>,
+        code: Option<Vec<u8>>,
     ) -> usize {
         let links: Vec<Vec<u32>> = neighbors_per_layer
             .into_iter()
             .map(|l| l.into_iter().map(|n| n as u32).collect())
             .collect();
-        self.push_node(&id, vector, level, &links)
+        match (code, &mut self.quantized) {
+            (Some(code), Some(store)) => {
+                store.codes.extend_from_slice(&code);
+                let idx = self.nodes.push(&id, None, level, &links);
+                self.register_id(&id, idx);
+                idx
+            }
+            _ => self.push_node(&id, vector, level, &links),
+        }
     }
 
     /// Append a node: its vector goes on the node while the graph is exact, or into the
