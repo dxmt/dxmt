@@ -5,11 +5,10 @@
 //! `with_vector` and `get_record`. Those can read from a file. This is that file: fixed-size
 //! rows of `dim` little-endian `f32`s, appended in insertion order, read through a memory map.
 //!
-//! A rerank wants a few hundred rows scattered across the file. Reading them one `pread` at a
-//! time serialises the disk; instead the rows are sorted, `madvise(MADV_WILLNEED)` is issued
-//! for all of them at once so the kernel schedules the reads in parallel, and only then are
-//! the pages touched. Warm, that is a few hundred memcpys; cold, one round of parallel NVMe
-//! reads rather than a few hundred sequential ones.
+//! A rerank wants a few hundred rows scattered across the file. Warm, they are borrowed
+//! straight from the mapping, no copy and no syscall. Cold, a page fault per row serialises
+//! the disk, so the rows are read with `pread` across the rayon pool instead; [`IoMode`]
+//! says how the two are chosen.
 //!
 //! Beside it, `<name>.rows` records `(id, row)` for every appended row, in the same order and
 //! flushed with it, so a restart rebuilds the id-to-row map without the snapshot having to
@@ -22,13 +21,71 @@
 
 use memmap2::{Mmap, MmapOptions};
 use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+/// How a rerank's rows are read.
+///
+/// Measured on 1M rows (3 GB) after a restart with the page cache dropped (design doc
+/// section 4, phase 2): touching the rows through the mapping cost a p99 of 326 ms with the
+/// kernel's own fault-around and readahead, and 80 ms with a `madvise(WILLNEED)` per row --
+/// the advised reads did not overlap, 500 pages came in at about 80 us each. A page fault is
+/// one read at a time; a rerank wants a few hundred at once. So a cold query reads its rows
+/// with `pread` across the rayon pool, and a warm one keeps the zero-copy mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoMode {
+    /// Always through the mapping.
+    Mmap,
+    /// Always parallel `pread`.
+    Parallel,
+    /// Mapping while it does not fault to disk; parallel reads once it does, re-probing the
+    /// mapping every [`PROBE_EVERY`] queries. `getrusage` major-fault counts are the signal:
+    /// one syscall per mapped query, exact, and free of guesswork about the page cache.
+    Adaptive,
+}
+
+/// In adaptive mode, how many parallel-read queries pass between probes of the mapping.
+const PROBE_EVERY: u32 = 32;
+
+/// Rows per parallel read task. 500 rows over 16-row tasks is about one task per core.
+const PARALLEL_CHUNK: usize = 16;
+
+fn io_mode() -> IoMode {
+    static MODE: std::sync::OnceLock<IoMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("DB_VECTOR_IO").ok().as_deref() {
+        Some("mmap") => IoMode::Mmap,
+        Some("parallel") => IoMode::Parallel,
+        _ => IoMode::Adaptive,
+    })
+}
+
+/// Major page faults taken by the calling thread so far, or `None` where that is not
+/// available (adaptive mode then behaves as `Mmap`).
+fn major_faults() -> Option<i64> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `ru` is a valid, writable rusage; RUSAGE_THREAD is Linux-specific.
+        if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut ru) } == 0 {
+            return Some(ru.ru_majflt);
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// `DB_VECTOR_PREFETCH=1` issues a `madvise(WILLNEED)` per row before touching the mapping.
+/// Off by default: on 1M rows it cost 13% of warm QPS in syscalls and, cold, the advised
+/// reads still arrived one at a time (p99 80 ms). The parallel path is what serves cold rows.
 fn prefetch_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("DB_VECTOR_PREFETCH").ok().as_deref() != Some("0"))
+    *ON.get_or_init(|| std::env::var("DB_VECTOR_PREFETCH").ok().as_deref() == Some("1"))
 }
 
 pub struct VectorFile {
@@ -39,6 +96,12 @@ pub struct VectorFile {
     writer: Mutex<Writer>,
     /// Covers `mapped_rows` rows; rows past it need a remap.
     map: RwLock<Mapped>,
+    /// A read-only handle for positional reads, shared by the parallel path.
+    reader: File,
+    /// Adaptive mode: the last mapped query faulted to disk.
+    cold: AtomicBool,
+    /// Adaptive mode: parallel queries since the mapping was last probed.
+    since_probe: AtomicU32,
 }
 
 struct Writer {
@@ -126,6 +189,9 @@ impl VectorFile {
                 mmap: None,
                 rows: 0,
             }),
+            reader: File::open(path)?,
+            cold: AtomicBool::new(false),
+            since_probe: AtomicU32::new(0),
         };
         this.remap(rows)?;
         Ok((this, ids))
@@ -235,7 +301,70 @@ impl VectorFile {
     /// this exists to avoid.
     ///
     /// `DB_VECTOR_PREFETCH=0` skips the `madvise` pass, for measuring what it costs.
-    pub fn with_rows(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
+    pub fn with_rows(&self, rows: &[u64], f: impl FnMut(usize, Option<&[f32]>)) {
+        let mode = io_mode();
+        let parallel = match mode {
+            IoMode::Mmap => false,
+            IoMode::Parallel => true,
+            IoMode::Adaptive => {
+                self.cold.load(Ordering::Relaxed)
+                    && !self
+                        .since_probe
+                        .fetch_add(1, Ordering::Relaxed)
+                        .is_multiple_of(PROBE_EVERY)
+            }
+        };
+        if parallel {
+            self.with_rows_parallel(rows, f);
+        } else {
+            let before = major_faults();
+            self.with_rows_mapped(rows, f);
+            if mode == IoMode::Adaptive {
+                if let (Some(before), Some(after)) = (before, major_faults()) {
+                    self.cold.store(after > before, Ordering::Relaxed);
+                    self.since_probe.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Whether adaptive mode currently reads in parallel. For tests and diagnostics.
+    pub fn is_cold(&self) -> bool {
+        self.cold.load(Ordering::Relaxed)
+    }
+
+    /// The rows read with positional reads spread over the rayon pool, then handed to `f`
+    /// on the calling thread in the order asked. Allocates a buffer per row; this is the
+    /// cold path, where the disk is the cost.
+    fn with_rows_parallel(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
+        use std::os::unix::fs::FileExt;
+        let mapped_rows = self.map.read().rows;
+        let bufs: Vec<Option<Vec<f32>>> = rows
+            .par_chunks(PARALLEL_CHUNK)
+            .flat_map_iter(|chunk| {
+                let mut out = Vec::with_capacity(chunk.len());
+                let mut buf = vec![0u8; self.row_bytes];
+                for &row in chunk {
+                    if row < mapped_rows
+                        && self
+                            .reader
+                            .read_exact_at(&mut buf, row * self.row_bytes as u64)
+                            .is_ok()
+                    {
+                        out.push(Some(Self::decode(&buf)));
+                    } else {
+                        out.push(None);
+                    }
+                }
+                out
+            })
+            .collect();
+        for (i, v) in bufs.iter().enumerate() {
+            f(i, v.as_deref());
+        }
+    }
+
+    fn with_rows_mapped(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
         let m = self.map.read();
         let Some(mmap) = m.mmap.as_ref() else {
             for i in 0..rows.len() {
@@ -356,6 +485,30 @@ mod tests {
         assert_eq!(by_i[&0].as_ref().unwrap(), &b);
         assert_eq!(by_i[&1], None);
         assert_eq!(by_i[&2].as_ref().unwrap(), &a);
+    }
+
+    #[test]
+    fn the_parallel_path_reads_what_the_mapping_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = VectorFile::open(&dir.path().join("t.f32"), 8).unwrap();
+        let items: Vec<Vec<f32>> = (0..100).map(|i| v(i, 8)).collect();
+        let ids: Vec<String> = (0..100).map(|i| i.to_string()).collect();
+        let refs: Vec<(&str, &[f32])> = ids
+            .iter()
+            .zip(&items)
+            .map(|(id, v)| (id.as_str(), v.as_slice()))
+            .collect();
+        file.append(&refs).unwrap();
+        let rows: Vec<u64> = vec![99, 3, 250, 0, 42, 42, 7];
+        let mut mapped = Vec::new();
+        file.with_rows_mapped(&rows, |i, r| mapped.push((i, r.map(|r| r.to_vec()))));
+        let mut parallel = Vec::new();
+        file.with_rows_parallel(&rows, |i, r| parallel.push((i, r.map(|r| r.to_vec()))));
+        mapped.sort_by_key(|(i, _)| *i);
+        parallel.sort_by_key(|(i, _)| *i);
+        assert_eq!(mapped, parallel);
+        assert_eq!(parallel[2].1, None, "row 250 is past the end");
+        assert_eq!(parallel[0].1.as_ref().unwrap(), &items[99]);
     }
 
     #[test]
