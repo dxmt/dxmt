@@ -673,6 +673,138 @@ pub struct QuantizedStore {
     /// subspaces make it 50 MB, and it is a pure function of `pq`.
     #[serde(skip)]
     symmetric: Vec<f32>,
+    /// `sub * k` per subspace, as `i32` lanes for the gather path.
+    #[serde(skip)]
+    adc_bases: Vec<i32>,
+    /// `sub * k * k` per subspace, likewise.
+    #[serde(skip)]
+    sym_bases: Vec<i32>,
+}
+
+/// Sum of `table[bases[sub] + code[sub]]` over subspaces: the ADC score of one code.
+type AdcFn = fn(&[f32], &[u8], &[i32]) -> f32;
+/// Sum of `table[bases[sub] + a[sub] * k + b[sub]]` over subspaces: a symmetric distance.
+type SymFn = fn(&[f32], &[u8], &[u8], &[i32], usize) -> f32;
+
+/// Eight independent partial sums. The obvious loop is one dependent chain of float adds --
+/// 192 of them at four cycles each, about 250 ns per candidate before a single cache miss --
+/// and that chain, not the loads, was what made the walk on codes twice as slow as the
+/// exact one (DISK_INDEX.md section 2.7).
+#[allow(clippy::needless_range_loop)] // the lane index is the unroll
+fn adc_scalar(table: &[f32], code: &[u8], bases: &[i32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let mut chunks = code.chunks_exact(8);
+    let mut base_chunks = bases.chunks_exact(8);
+    for (c, b) in (&mut chunks).zip(&mut base_chunks) {
+        for lane in 0..8 {
+            acc[lane] += table[(b[lane] + c[lane] as i32) as usize];
+        }
+    }
+    let mut total = acc.iter().sum::<f32>();
+    for (i, &c) in chunks.remainder().iter().enumerate() {
+        let sub = code.len() - chunks.remainder().len() + i;
+        total += table[(bases[sub] + c as i32) as usize];
+    }
+    total
+}
+
+#[allow(clippy::needless_range_loop)] // the lane index is the unroll
+fn sym_scalar(table: &[f32], a: &[u8], b: &[u8], bases: &[i32], k: usize) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let n = a.len();
+    let full = n - n % 8;
+    for sub in (0..full).step_by(8) {
+        for lane in 0..8 {
+            let s = sub + lane;
+            acc[lane] += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
+        }
+    }
+    let mut total = acc.iter().sum::<f32>();
+    for s in full..n {
+        total += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn adc_avx2(table: &[f32], code: &[u8], bases: &[i32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let full = code.len() - code.len() % 8;
+    let mut sub = 0;
+    while sub < full {
+        // Eight code bytes -> eight i32 lanes, plus each lane's subspace base, gathered
+        // from the table in one instruction.
+        let bytes = _mm_loadl_epi64(code.as_ptr().add(sub) as *const __m128i);
+        let idx = _mm256_add_epi32(
+            _mm256_cvtepu8_epi32(bytes),
+            _mm256_loadu_si256(bases.as_ptr().add(sub) as *const __m256i),
+        );
+        acc = _mm256_add_ps(acc, _mm256_i32gather_ps::<4>(table.as_ptr(), idx));
+        sub += 8;
+    }
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
+    let mut total = lanes.iter().sum::<f32>();
+    for s in full..code.len() {
+        total += table[(bases[s] + code[s] as i32) as usize];
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn sym_avx2(table: &[f32], a: &[u8], b: &[u8], bases: &[i32], k: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let kv = _mm256_set1_epi32(k as i32);
+    let full = a.len() - a.len() % 8;
+    let mut sub = 0;
+    while sub < full {
+        let av = _mm256_cvtepu8_epi32(_mm_loadl_epi64(a.as_ptr().add(sub) as *const __m128i));
+        let bv = _mm256_cvtepu8_epi32(_mm_loadl_epi64(b.as_ptr().add(sub) as *const __m128i));
+        let idx = _mm256_add_epi32(
+            _mm256_add_epi32(_mm256_mullo_epi32(av, kv), bv),
+            _mm256_loadu_si256(bases.as_ptr().add(sub) as *const __m256i),
+        );
+        acc = _mm256_add_ps(acc, _mm256_i32gather_ps::<4>(table.as_ptr(), idx));
+        sub += 8;
+    }
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
+    let mut total = lanes.iter().sum::<f32>();
+    for s in full..a.len() {
+        total += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
+    }
+    total
+}
+
+/// Resolved once, like `simd_distance::dot_product`: the feature check is off the hot path.
+fn adc_fn() -> AdcFn {
+    static F: std::sync::OnceLock<AdcFn> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return |t, c, b| unsafe { adc_avx2(t, c, b) };
+            }
+        }
+        adc_scalar
+    })
+}
+
+fn sym_fn() -> SymFn {
+    static F: std::sync::OnceLock<SymFn> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return |t, a, b, bases, k| unsafe { sym_avx2(t, a, b, bases, k) };
+            }
+        }
+        sym_scalar
+    })
 }
 
 impl QuantizedStore {
@@ -683,6 +815,8 @@ impl QuantizedStore {
             m,
             codes: Vec::new(),
             symmetric: Vec::new(),
+            adc_bases: Vec::new(),
+            sym_bases: Vec::new(),
         };
         store.rebuild_symmetric();
         store
@@ -705,6 +839,8 @@ impl QuantizedStore {
             }
         }
         self.symmetric = table;
+        self.adc_bases = (0..self.m).map(|sub| (sub * k) as i32).collect();
+        self.sym_bases = (0..self.m).map(|sub| (sub * k * k) as i32).collect();
     }
 
     #[inline]
@@ -721,23 +857,18 @@ impl QuantizedStore {
     /// Squared distance between two nodes, summed over subspaces from the centroid table.
     #[inline]
     fn node_distance(&self, a: usize, b: usize) -> f32 {
-        let k = self.pq.num_centroids;
-        let (ca, cb) = (self.code(a), self.code(b));
-        let mut total = 0.0f32;
-        for sub in 0..self.m {
-            total += self.symmetric[sub * k * k + ca[sub] as usize * k + cb[sub] as usize];
-        }
-        total
+        sym_fn()(
+            &self.symmetric,
+            self.code(a),
+            self.code(b),
+            &self.sym_bases,
+            self.pq.num_centroids,
+        )
     }
 
     #[inline]
     fn adc(&self, table: &[f32], idx: usize) -> f32 {
-        let k = self.pq.num_centroids;
-        let mut total = 0.0f32;
-        for (sub, &c) in self.code(idx).iter().enumerate() {
-            total += table[sub * k + c as usize];
-        }
-        total
+        adc_fn()(table, self.code(idx), &self.adc_bases)
     }
 
     fn resident_bytes(&self) -> usize {
@@ -2442,6 +2573,61 @@ mod persistence_tests {
                 back.search(&back.nodes.vector(probe).to_vec(), 1).unwrap()[0].0,
                 loaded.nodes.id(probe)
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod adc_kernel_tests {
+    use super::*;
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// The unrolled and gathered kernels must agree with the plain loop on every code
+    /// length, including the tails that are not a multiple of eight.
+    #[test]
+    fn kernels_agree_with_the_plain_loop() {
+        let k = 256usize;
+        let mut st = 0x9E37_79B9_7F4A_7C15_u64;
+        for m in [3usize, 8, 13, 48, 96, 192] {
+            let table: Vec<f32> = (0..m * k)
+                .map(|_| (xorshift(&mut st) >> 40) as f32 / 1e6)
+                .collect();
+            let sym: Vec<f32> = (0..m * k * k)
+                .map(|_| (xorshift(&mut st) >> 44) as f32 / 1e5)
+                .collect();
+            let a: Vec<u8> = (0..m).map(|_| xorshift(&mut st) as u8).collect();
+            let b: Vec<u8> = (0..m).map(|_| xorshift(&mut st) as u8).collect();
+            let adc_bases: Vec<i32> = (0..m).map(|sub| (sub * k) as i32).collect();
+            let sym_bases: Vec<i32> = (0..m).map(|sub| (sub * k * k) as i32).collect();
+
+            let plain: f32 = (0..m).map(|sub| table[sub * k + a[sub] as usize]).sum();
+            let plain_sym: f32 = (0..m)
+                .map(|sub| sym[sub * k * k + a[sub] as usize * k + b[sub] as usize])
+                .sum();
+            for (name, got) in [
+                ("scalar", adc_scalar(&table, &a, &adc_bases)),
+                ("dispatched", adc_fn()(&table, &a, &adc_bases)),
+            ] {
+                assert!(
+                    (got - plain).abs() <= 1e-3 * plain.abs().max(1.0),
+                    "adc {name} m={m}: {got} vs {plain}"
+                );
+            }
+            for (name, got) in [
+                ("scalar", sym_scalar(&sym, &a, &b, &sym_bases, k)),
+                ("dispatched", sym_fn()(&sym, &a, &b, &sym_bases, k)),
+            ] {
+                assert!(
+                    (got - plain_sym).abs() <= 1e-3 * plain_sym.abs().max(1.0),
+                    "sym {name} m={m}: {got} vs {plain_sym}"
+                );
+            }
         }
     }
 }

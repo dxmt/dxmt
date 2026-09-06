@@ -8,7 +8,7 @@
 //! VectorDBBench Cohere 768-d set, against a brute-force truth computed here rather than the
 //! shipped `neighbors.parquet` so the metric and the ordering are beyond doubt.
 //!
-//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [pq=96] [build=decoded]
+//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [pq=96] [build=decoded] [quantize=1]
 //!
 //! `<dir>` holds `train.f32` (row-major float32), `train_ids.i64`, `test.f32`, `test_ids.i64`,
 //! `neighbors.i64` (100 ids per query) as written by `convert.py`. `<dir>=synthetic` makes a
@@ -618,6 +618,7 @@ fn stage_hnsw(
     truth: &[Vec<u32>],
     pq96: Option<&(ProductQuantizer, PqCodes)>,
     decoded_build: bool,
+    quantize_graph: bool,
 ) {
     use dxmt_vectordb::search::quantization::product_quantization::PQCode;
     let before = rss_mb();
@@ -683,6 +684,59 @@ fn stage_hnsw(
             rayon::current_num_threads()
         );
     }
+    // The graph's own quantized path (`HnswIndex::quantize` + `search_with_ef`), timed as
+    // the server runs it, with the codes' size from `pq=`. This is the number the SIMD
+    // ADC work is judged on.
+    if quantize_graph {
+        let Some((pq, _)) = pq96 else {
+            return;
+        };
+        let t = Instant::now();
+        index.quantize(pq.clone()).unwrap();
+        println!(
+            "quantized the graph in {:.1}s; graph accounts for {:.0} B/vector {}",
+            t.elapsed().as_secs_f64(),
+            index.resident_bytes_without_vectors() as f64 / d.n as f64,
+            mem_tag()
+        );
+        for ef in [256usize, 512, 1024, 2048] {
+            let r = 500.min(ef);
+            let t = Instant::now();
+            let walks: Vec<Vec<u32>> = d
+                .queries
+                .par_iter()
+                .map(|q| {
+                    index
+                        .search_with_ef(q, r, ef)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(id, _)| id.parse::<u32>().unwrap())
+                        .collect()
+                })
+                .collect();
+            let par_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64;
+            let t = Instant::now();
+            for q in d.queries.iter().take(200) {
+                index.search_with_ef(q, r, ef).unwrap();
+            }
+            let single_ms = t.elapsed().as_secs_f64() * 1000.0 / 200.0;
+            let reranked: Vec<Vec<u32>> = d
+                .queries
+                .par_iter()
+                .zip(&walks)
+                .map(|(q, w)| rerank(d, q, w, r))
+                .collect();
+            println!(
+                "  quantized-graph ef={ef:<4} R{r}: recall {:.4}  {:.3} ms/query single-thread, {:.3} ms/query wall over {} threads",
+                recall(&reranked, truth),
+                single_ms,
+                par_ms,
+                rayon::current_num_threads()
+            );
+        }
+        return;
+    }
+
     // Route C as it would actually run: the graph walked on ADC over 96-byte codes with the
     // full vectors consulted only to rerank the walk's best `R`. The PQ stage's full-scan
     // rerank numbers are this measurement's upper bound; the gap between the two is what the
@@ -743,6 +797,7 @@ fn main() {
     let mut n = 1_000_000;
     let mut nq = 1000;
     let mut decoded_build = false;
+    let mut quantize_graph = false;
     for a in &args[2..] {
         if let Some(v) = a.strip_prefix("stages=") {
             stages = v.split(',').map(|s| s.to_string()).collect();
@@ -756,6 +811,8 @@ fn main() {
             WALK_M.set(v.parse().unwrap()).unwrap();
         } else if a == "build=decoded" {
             decoded_build = true;
+        } else if a == "quantize=1" {
+            quantize_graph = true;
         }
     }
     if dir == "synthetic" && n == 1_000_000 {
@@ -790,7 +847,7 @@ fn main() {
         );
     }
     if stages.contains("hnsw") {
-        stage_hnsw(&d, &truth, pq96.as_ref(), decoded_build);
+        stage_hnsw(&d, &truth, pq96.as_ref(), decoded_build, quantize_graph);
     }
     println!("done {}", mem_tag());
 }
