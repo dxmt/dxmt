@@ -137,28 +137,29 @@ impl ProductQuantizer {
             training_data.len()
         );
 
-        // Train each subspace independently
-        for subspace_idx in 0..self.num_subvectors {
-            let start_dim = subspace_idx * self.subvector_dim;
-            let end_dim = start_dim + self.subvector_dim;
-
-            // Extract subvectors for this subspace
-            let subvectors: Vec<DenseVector> = training_data
-                .iter()
-                .map(|v| v[start_dim..end_dim].to_vec())
-                .collect();
-
-            // Run k-means clustering
-            let centroids = self.kmeans_clustering(&subvectors, num_iterations)?;
-
-            self.codebooks[subspace_idx] = centroids;
-
-            tracing::debug!(
-                "Trained subspace {} ({} centroids)",
-                subspace_idx,
-                self.num_centroids
-            );
-        }
+        // Each subspace is an independent k-means, so they train in parallel. The k-means++
+        // seeding below is O(k^2 n) per subspace; sequentially, 96 subspaces x 256 centroids x
+        // 65,536 training vectors did not finish inside ten minutes on one core.
+        use rayon::prelude::*;
+        let subvector_dim = self.subvector_dim;
+        self.codebooks = (0..self.num_subvectors)
+            .into_par_iter()
+            .map(|subspace_idx| {
+                let start_dim = subspace_idx * subvector_dim;
+                let end_dim = start_dim + subvector_dim;
+                let subvectors: Vec<DenseVector> = training_data
+                    .iter()
+                    .map(|v| v[start_dim..end_dim].to_vec())
+                    .collect();
+                let centroids = self.kmeans_clustering(&subvectors, num_iterations)?;
+                tracing::debug!(
+                    "Trained subspace {} ({} centroids)",
+                    subspace_idx,
+                    self.num_centroids
+                );
+                Ok(centroids)
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
 
         tracing::info!("PQ training completed successfully");
         Ok(())
