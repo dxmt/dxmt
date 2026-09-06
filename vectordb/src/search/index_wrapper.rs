@@ -93,7 +93,9 @@ impl IndexWrapper {
         };
         // `None` means the batch was small enough that the serial path took it already.
         let Some(prepared) = prepared else {
-            return Ok(());
+            // The graph took the batch one row at a time (too small, or the graph too
+            // young to plan in parallel); the wrapper index still gets its turn.
+            return self.index.write().await.after_batch();
         };
 
         // A. Planning: shared, and every core.
@@ -122,7 +124,11 @@ impl IndexWrapper {
                 .expect("the structural lock holds the index type still")
                 .link_batch(&applied);
         }
-        Ok(())
+        // The phased path above talks to the inner graph directly, so an index wrapping it
+        // never saw the batch; this is its chance. HNSW-PQ quantizes itself here at its
+        // row threshold -- the 1M acceptance run streamed a million rows through this path
+        // as an exact graph and only quantized in the rebuild afterwards.
+        self.index.write().await.after_batch()
     }
 
     /// Search for nearest neighbors - requires read lock
@@ -515,5 +521,60 @@ mod tests {
 
         let names = collection.list_index_names().await;
         assert_eq!(names.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod after_batch_tests {
+    use super::*;
+    use crate::search::hnsw_pq::{HnswPqConfig, HnswPqIndex};
+    use crate::types::DistanceMetric;
+
+    /// The wrapper's phased insert reaches the inner graph through `as_hnsw_mut`; the
+    /// index around it must still get to quantize itself at its threshold.
+    #[tokio::test]
+    async fn a_phased_batch_insert_lets_hnsw_pq_quantize_itself() {
+        let config = HnswPqConfig {
+            num_subvectors: 16,
+            num_centroids: 32,
+            quantize_at_rows: 1500,
+            ..HnswPqConfig::default()
+        };
+        let index = HnswPqIndex::new(64, DistanceMetric::Cosine, Some(config)).unwrap();
+        let wrapper = IndexWrapper::new(Box::new(index));
+
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let batch = |from: usize,
+                     to: usize,
+                     next: &mut dyn FnMut() -> f32|
+         -> Vec<(RecordId, DenseVector)> {
+            (from..to)
+                .map(|i| (i.to_string(), (0..64).map(|_| next()).collect()))
+                .collect()
+        };
+        wrapper
+            .insert_batch(batch(0, 1000, &mut next))
+            .await
+            .unwrap();
+        assert!(
+            wrapper.wants_rebuild().await,
+            "exact and past the training minimum"
+        );
+        wrapper
+            .insert_batch(batch(1000, 2000, &mut next))
+            .await
+            .unwrap();
+        assert!(
+            !wrapper.wants_rebuild().await,
+            "crossing the threshold through the phased path must quantize"
+        );
+        assert_eq!(wrapper.rerank_candidates(10).await, Some(100));
+        assert_eq!(wrapper.len().await, 2000);
     }
 }

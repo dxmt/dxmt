@@ -298,6 +298,10 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         HnswPqIndex::rerank_candidates(self, k)
     }
 
+    fn after_batch(&mut self) -> crate::Result<()> {
+        self.maybe_quantize()
+    }
+
     fn wants_rebuild(&self) -> bool {
         !self.hnsw.is_quantized()
             && crate::search::index_traits::VectorIndex::len(&self.hnsw) >= self.training_minimum()

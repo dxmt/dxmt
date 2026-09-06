@@ -74,6 +74,13 @@ pub trait VectorIndex: Send + Sync {
         false
     }
 
+    /// Called by the index wrapper after a batch it inserted through the phased HNSW path
+    /// (`as_hnsw_mut`), which bypasses `add_batch`. A wrapper index that has bookkeeping to
+    /// do per batch -- HNSW-PQ quantizing itself once it is large enough -- does it here.
+    fn after_batch(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+
     fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {
         None
     }
