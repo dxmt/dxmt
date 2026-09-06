@@ -412,15 +412,21 @@ impl ProductQuantizer {
         Ok(total_distance)
     }
 
-    /// Compute distance between two subvectors
+    /// Per-subspace term of the ADC table and of k-means assignment.
+    ///
+    /// Euclidean is the *squared* distance. The table sums one term per subspace, and a sum
+    /// of squared subspace distances is the squared distance of the whole vector; a sum of
+    /// square roots is not, and does not rank the same way. Measured on 1M Cohere 768-d with
+    /// a full scan over the codes, the square-root version scored 0.5-1.9 points lower
+    /// recall@10 before rerank (48, 96 and 192 subspaces). k-means is unaffected: argmin is
+    /// the same under the square.
     fn compute_subvector_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         match self.distance_metric {
             DistanceMetric::Euclidean => a
                 .iter()
                 .zip(b.iter())
-                .map(|(x, y)| (x - y).powi(2))
-                .sum::<f32>()
-                .sqrt(),
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f32>(),
             DistanceMetric::Cosine => {
                 let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                 let norm_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
