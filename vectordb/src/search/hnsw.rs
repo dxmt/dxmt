@@ -460,6 +460,29 @@ impl HnswIndex {
         layer: usize,
         filter_idxs: Option<&HashSet<usize>>,
     ) -> Vec<(usize, f32)> {
+        self.search_layer_by(
+            |idx| self.calculate_distance(query, &self.nodes[idx].vector),
+            entry_points,
+            ef,
+            layer,
+            filter_idxs,
+        )
+    }
+
+    /// `search_layer` with the distance supplied by the caller, per node index.
+    ///
+    /// The traversal does not care where a distance comes from. Scoring a node from a
+    /// compressed copy of its vector -- an ADC table over PQ codes, say -- instead of from the
+    /// full vector stored on the node is what lets the full vectors leave memory, and the
+    /// route probe measures what that costs in recall before the index is changed to do it.
+    fn search_layer_by(
+        &self,
+        score: impl Fn(usize) -> f32,
+        entry_points: Vec<usize>,
+        ef: usize,
+        layer: usize,
+        filter_idxs: Option<&HashSet<usize>>,
+    ) -> Vec<(usize, f32)> {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new(); // Min-heap for exploration
         let mut w = BinaryHeap::new(); // Max-heap for results
@@ -474,7 +497,7 @@ impl HnswIndex {
             // both is how a filtered search returns nothing — with the queue empty the loop
             // below never runs, so a selective filter came back empty for every query whose
             // entry point happened not to match. At 2% selectivity that was 98% of queries.
-            let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+            let dist = score(idx);
             candidates.push(Candidate {
                 idx,
                 distance: dist,
@@ -516,7 +539,7 @@ impl HnswIndex {
                     // Mark visited regardless — prevents redundant re-visits
                     visited.insert(neighbor_idx);
 
-                    let dist = self.calculate_distance(query, &self.nodes[neighbor_idx].vector);
+                    let dist = score(neighbor_idx);
 
                     // Always add to exploration candidates so graph can bridge through non-matching nodes
                     if dist < w.peek().map(|r| r.distance).unwrap_or(f32::INFINITY) || w.len() < ef
@@ -700,6 +723,20 @@ impl HnswIndex {
         entry_points: Vec<usize>,
         layer: usize,
     ) -> Vec<usize> {
+        self.search_layer_closest_by(
+            |idx| self.calculate_distance(query, &self.nodes[idx].vector),
+            entry_points,
+            layer,
+        )
+    }
+
+    /// `search_layer_closest` with the distance supplied by the caller, per node index.
+    fn search_layer_closest_by(
+        &self,
+        score: impl Fn(usize) -> f32,
+        entry_points: Vec<usize>,
+        layer: usize,
+    ) -> Vec<usize> {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new();
         let mut w = BinaryHeap::new();
@@ -709,7 +746,7 @@ impl HnswIndex {
             if idx >= self.nodes.len() || self.nodes[idx].deleted {
                 continue; // Skip deleted nodes
             }
-            let dist = self.calculate_distance(query, &self.nodes[idx].vector);
+            let dist = score(idx);
             candidates.push(Candidate {
                 idx,
                 distance: dist,
@@ -742,7 +779,7 @@ impl HnswIndex {
                     }
                     visited.insert(neighbor_idx);
 
-                    let dist = self.calculate_distance(query, &self.nodes[neighbor_idx].vector);
+                    let dist = score(neighbor_idx);
 
                     // Update if better
                     if dist < w.peek().map(|r| r.distance).unwrap_or(f32::INFINITY) {
@@ -856,6 +893,27 @@ impl HnswIndex {
             .take(k)
             .map(|(idx, dist)| (self.nodes[idx].id.clone(), dist))
             .collect())
+    }
+
+    /// Search with the distance to each node supplied by the caller, by node index.
+    ///
+    /// Returns the `ef` best `(node index, score)` at layer 0, nearest first; map an index back
+    /// to its record with [`Self::node_id`]. This is the traversal alone: no reranking, no
+    /// filter, no deleted-node tombstones beyond what the layer walk skips itself.
+    pub fn search_by_score(&self, score: impl Fn(usize) -> f32, ef: usize) -> Vec<(usize, f32)> {
+        let Some(entry) = self.entry_point else {
+            return Vec::new();
+        };
+        let mut curr_nearest = vec![entry];
+        for lc in (1..=self.nodes[entry].level).rev() {
+            curr_nearest = self.search_layer_closest_by(&score, curr_nearest, lc);
+        }
+        self.search_layer_by(&score, curr_nearest, ef, 0, None)
+    }
+
+    /// The record stored at a node index, as returned by [`Self::search_by_score`].
+    pub fn node_id(&self, idx: usize) -> &RecordId {
+        &self.nodes[idx].id
     }
 
     /// Search with precomputed query (for cosine similarity optimization)

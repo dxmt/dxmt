@@ -25,6 +25,10 @@ name = "benchmark"
 path = "src/bin/benchmark.rs"
 required-features = ["benchmarks"]
 
+[[bin]]
+name = "route_probe"
+path = "src/bin/route_probe.rs"
+
 
 
 [[example]]
