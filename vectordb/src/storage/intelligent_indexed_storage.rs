@@ -3567,22 +3567,26 @@ impl IntelligentIndexedStorage {
             }
             (in_memory, on_disk, table_data.vector_file.clone())
         };
-        let mut candidates_with_vectors = vectors;
-        if let (Some(file), false) = (file, file_rows.is_empty()) {
-            let rows: Vec<u64> = file_rows.iter().map(|(_, row)| *row).collect();
-            for ((id, _), vector) in file_rows.into_iter().zip(file.read_rows(&rows)) {
-                if let Some(vector) = vector {
-                    candidates_with_vectors.push((id, vector));
-                }
-            }
-        }
-        let mut exact: Vec<(RecordId, f32)> = candidates_with_vectors
+        let mut exact: Vec<(RecordId, f32)> = vectors
             .into_iter()
             .filter_map(|(id, vector)| {
                 let dist = metric.calculate(query, &vector).ok()?;
                 Some((id, dist))
             })
             .collect();
+        if let (Some(file), false) = (file, file_rows.is_empty()) {
+            // Scored straight off the mapping: no copy, no allocation per candidate.
+            let rows: Vec<u64> = file_rows.iter().map(|(_, row)| *row).collect();
+            let mut ids: Vec<Option<RecordId>> =
+                file_rows.into_iter().map(|(id, _)| Some(id)).collect();
+            file.with_rows(&rows, |i, vector| {
+                if let (Some(vector), Some(id)) = (vector, ids[i].take()) {
+                    if let Ok(dist) = metric.calculate(query, vector) {
+                        exact.push((id, dist));
+                    }
+                }
+            });
+        }
         exact.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         exact.truncate(k);
         Ok(exact)

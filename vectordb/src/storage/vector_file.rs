@@ -26,6 +26,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+fn prefetch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DB_VECTOR_PREFETCH").ok().as_deref() != Some("0"))
+}
+
 pub struct VectorFile {
     path: PathBuf,
     dim: usize,
@@ -209,20 +214,8 @@ impl VectorFile {
         // Sorted, so the advice and the touches walk the file forward.
         let mut order: Vec<usize> = (0..rows.len()).collect();
         order.sort_unstable_by_key(|&i| rows[i]);
-        #[cfg(unix)]
-        for &i in &order {
-            let row = rows[i];
-            if row < m.rows {
-                let start = row as usize * self.row_bytes;
-                // SAFETY: the range lies inside the mapping; advice does not alter memory.
-                unsafe {
-                    libc::madvise(
-                        mmap.as_ptr().add(start & !4095) as *mut libc::c_void,
-                        self.row_bytes + (start & 4095),
-                        libc::MADV_WILLNEED,
-                    );
-                }
-            }
+        if prefetch_enabled() {
+            self.advise(mmap, &order, rows, m.rows);
         }
         let mut out = vec![None; rows.len()];
         for &i in &order {
@@ -234,6 +227,64 @@ impl VectorFile {
         }
         out
     }
+
+    /// Visit many rows without copying them: `f(i, Some(row_i))` for each requested row, in
+    /// the order asked, with the floats borrowed straight from the mapping. The prefetch is
+    /// the same as `read_rows`; the copy and the allocation per row are not. A rerank of 500
+    /// candidates made 500 `Vec<f32>`s of 3 KB per query through `read_rows`, which is what
+    /// this exists to avoid.
+    ///
+    /// `DB_VECTOR_PREFETCH=0` skips the `madvise` pass, for measuring what it costs.
+    pub fn with_rows(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
+        let m = self.map.read();
+        let Some(mmap) = m.mmap.as_ref() else {
+            for i in 0..rows.len() {
+                f(i, None);
+            }
+            return;
+        };
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_unstable_by_key(|&i| rows[i]);
+        if prefetch_enabled() {
+            self.advise(mmap, &order, rows, m.rows);
+        }
+        for &i in &order {
+            let row = rows[i];
+            if row < m.rows {
+                let start = row as usize * self.row_bytes;
+                let bytes = &mmap[start..start + self.row_bytes];
+                // SAFETY: the mapping is page-aligned and every row starts at a multiple of
+                // `row_bytes`, itself a multiple of 4, so the slice is 4-byte aligned; it lies
+                // inside the mapping, and the file is never modified in place.
+                let floats =
+                    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) };
+                f(i, Some(floats));
+            } else {
+                f(i, None);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn advise(&self, mmap: &Mmap, order: &[usize], rows: &[u64], mapped_rows: u64) {
+        for &i in order {
+            let row = rows[i];
+            if row < mapped_rows {
+                let start = row as usize * self.row_bytes;
+                // SAFETY: the range lies inside the mapping; advice does not alter memory.
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr().add(start & !4095) as *mut libc::c_void,
+                        self.row_bytes + (start & 4095),
+                        libc::MADV_WILLNEED,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn advise(&self, _mmap: &Mmap, _order: &[usize], _rows: &[u64], _mapped_rows: u64) {}
 
     fn decode(bytes: &[u8]) -> Vec<f32> {
         bytes
@@ -288,6 +339,23 @@ mod tests {
         );
         assert_eq!(file.rows(), 3);
         assert_eq!(file.read(2).unwrap(), c);
+    }
+
+    #[test]
+    fn with_rows_borrows_what_read_rows_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = VectorFile::open(&dir.path().join("t.f32"), 8).unwrap();
+        let a = v(1, 8);
+        let b = v(2, 8);
+        file.append(&[("a", a.as_slice()), ("b", b.as_slice())])
+            .unwrap();
+        let mut seen = Vec::new();
+        file.with_rows(&[1, 5, 0], |i, row| seen.push((i, row.map(|r| r.to_vec()))));
+        assert_eq!(seen.len(), 3);
+        let by_i: std::collections::HashMap<usize, Option<Vec<f32>>> = seen.into_iter().collect();
+        assert_eq!(by_i[&0].as_ref().unwrap(), &b);
+        assert_eq!(by_i[&1], None);
+        assert_eq!(by_i[&2].as_ref().unwrap(), &a);
     }
 
     #[test]
