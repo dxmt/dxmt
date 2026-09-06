@@ -8,7 +8,7 @@
 //! VectorDBBench Cohere 768-d set, against a brute-force truth computed here rather than the
 //! shipped `neighbors.parquet` so the metric and the ordering are beyond doubt.
 //!
-//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [build=decoded]
+//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [build=decoded]
 //!
 //! `<dir>` holds `train.f32` (row-major float32), `train_ids.i64`, `test.f32`, `test_ids.i64`,
 //! `neighbors.i64` (100 ids per query) as written by `convert.py`. `<dir>=synthetic` makes a
@@ -28,7 +28,23 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Instant;
 
 const DIM: usize = 768;
-const K: usize = 10;
+
+/// `k` of recall@k. VectorDBBench scores recall@100, so 10 (the default) and 100 both matter.
+static K_OF: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+#[allow(non_snake_case)]
+fn K() -> usize {
+    *K_OF.get().unwrap_or(&10)
+}
+
+/// How many walk/scan candidates to rerank exactly, per `K()`.
+fn rerank_at() -> Vec<usize> {
+    let k = K();
+    [1, 2, 5, 10, 20, 50].iter().map(|f| f * k).collect()
+}
+
+fn scan_cap() -> usize {
+    *rerank_at().last().unwrap()
+}
 
 struct Data {
     n: usize,
@@ -104,7 +120,7 @@ fn load(dir: &str, n: usize, nq: usize) -> Data {
         .map(|ids| {
             ids.iter()
                 .filter_map(|id| row_of.get(id).copied())
-                .take(K)
+                .take(K())
                 .collect()
         })
         .collect();
@@ -159,8 +175,8 @@ fn exact_truth(d: &Data) -> Vec<Vec<u32>> {
             let mut scored: Vec<(f32, u32)> = (0..d.n)
                 .map(|i| (dot_product(q, d.row(i)), i as u32))
                 .collect();
-            scored.select_nth_unstable_by(K - 1, |a, b| b.0.total_cmp(&a.0));
-            scored.truncate(K);
+            scored.select_nth_unstable_by(K() - 1, |a, b| b.0.total_cmp(&a.0));
+            scored.truncate(K());
             scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
             scored.into_iter().map(|(_, i)| i).collect()
         })
@@ -171,10 +187,11 @@ fn exact_truth(d: &Data) -> Vec<Vec<u32>> {
         .map(|(a, b)| a.iter().filter(|x| b.contains(x)).count())
         .sum();
     println!(
-        "truth: exact top-{K} for {} queries in {:.1}s; overlap with shipped neighbours {:.4}",
+        "truth: exact top-{} for {} queries in {:.1}s; overlap with shipped neighbours {:.4}",
+        K(),
         d.queries.len(),
         t.elapsed().as_secs_f64(),
-        agree as f64 / (K * d.queries.len()) as f64
+        agree as f64 / (K() * d.queries.len()) as f64
     );
     truth
 }
@@ -185,7 +202,7 @@ fn recall(found: &[Vec<u32>], truth: &[Vec<u32>]) -> f64 {
         .zip(truth)
         .map(|(f, t)| f.iter().filter(|x| t.contains(x)).count())
         .sum();
-    hit as f64 / (K * truth.len()) as f64
+    hit as f64 / (K() * truth.len()) as f64
 }
 
 /// Smallest-first heap capped at `cap`, keyed on a score where larger is better.
@@ -221,7 +238,7 @@ fn top_by<F: Fn(u32) -> f32>(ids: impl Iterator<Item = u32>, cap: usize, score: 
 }
 
 fn rerank(d: &Data, q: &[f32], cands: &[u32], r: usize) -> Vec<u32> {
-    top_by(cands.iter().take(r).copied(), K, |i| {
+    top_by(cands.iter().take(r).copied(), K(), |i| {
         dot_product(q, d.row(i as usize))
     })
 }
@@ -235,8 +252,6 @@ fn sample(d: &Data, want: usize) -> Vec<Vec<f32>> {
         .map(|i| d.row(i).to_vec())
         .collect()
 }
-
-const RERANK_AT: [usize; 6] = [10, 20, 50, 100, 200, 500];
 
 struct PqCodes {
     m: usize,
@@ -300,22 +315,22 @@ fn stage_pq(d: &Data, truth: &[Vec<u32>]) -> Option<(ProductQuantizer, PqCodes)>
             .par_iter()
             .map(|q| {
                 let (asis, sq) = luts(&pq, q);
-                let corrected = top_by(0..d.n as u32, 500, |i| adc(&sq, codes.code(i)));
-                let crate_lut = top_by(0..d.n as u32, K, |i| adc(&asis, codes.code(i)));
+                let corrected = top_by(0..d.n as u32, scan_cap(), |i| adc(&sq, codes.code(i)));
+                let crate_lut = top_by(0..d.n as u32, K(), |i| adc(&asis, codes.code(i)));
                 (corrected, crate_lut)
             })
             .collect();
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64
             * rayon::current_num_threads() as f64;
-        let no_rerank: Vec<Vec<u32>> = per_query.iter().map(|(c, _)| c[..K].to_vec()).collect();
+        let no_rerank: Vec<Vec<u32>> = per_query.iter().map(|(c, _)| c[..K()].to_vec()).collect();
         let crate_lut: Vec<Vec<u32>> = per_query.iter().map(|(_, c)| c.clone()).collect();
         print!(
-            "  full scan {:.1} ms/query/thread; recall@10 crate-lut {:.4}, squared-lut {:.4}; rerank",
+            "  full scan {:.1} ms/query/thread; recall crate-lut {:.4}, squared-lut {:.4}; rerank",
             scan_ms,
             recall(&crate_lut, truth),
             recall(&no_rerank, truth)
         );
-        for r in RERANK_AT {
+        for r in rerank_at() {
             let reranked: Vec<Vec<u32>> = d
                 .queries
                 .par_iter()
@@ -360,7 +375,7 @@ fn stage_sq(d: &Data, truth: &[Vec<u32>]) {
         .par_iter()
         .map(|q| {
             // dot(q, lo + step*c) = lo*sum(q) + step*dot(q, c); the constant does not rank.
-            top_by(0..d.n as u32, 500, |i| {
+            top_by(0..d.n as u32, scan_cap(), |i| {
                 let c = &codes[i as usize * DIM..(i as usize + 1) * DIM];
                 q.iter().zip(c).map(|(a, &b)| a * b as f32).sum::<f32>()
             })
@@ -368,13 +383,13 @@ fn stage_sq(d: &Data, truth: &[Vec<u32>]) {
         .collect();
     let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64
         * rayon::current_num_threads() as f64;
-    let no_rerank: Vec<Vec<u32>> = per_query.iter().map(|c| c[..K].to_vec()).collect();
+    let no_rerank: Vec<Vec<u32>> = per_query.iter().map(|c| c[..K()].to_vec()).collect();
     print!(
-        "  full scan {:.1} ms/query/thread; recall@10 {:.4}; rerank",
+        "  full scan {:.1} ms/query/thread; recall {:.4}; rerank",
         scan_ms,
         recall(&no_rerank, truth)
     );
-    for r in RERANK_AT {
+    for r in rerank_at() {
         let reranked: Vec<Vec<u32>> = d
             .queries
             .par_iter()
@@ -477,7 +492,7 @@ fn stage_ivf(
                         .flat_map(|&j| lists[j as usize].iter().copied());
                     let scanned: usize = probe.iter().map(|&j| lists[j as usize].len()).sum();
                     (
-                        top_by(ids, K, |i| dot_product(q, d.row(i as usize))),
+                        top_by(ids, K(), |i| dot_product(q, d.row(i as usize))),
                         scanned,
                     )
                 })
@@ -507,14 +522,17 @@ fn stage_ivf(
                         let ids = probe
                             .iter()
                             .flat_map(|&j| lists[j as usize].iter().copied());
-                        let cands = top_by(ids, 500, |i| adc(&sq, codes.code(i)));
-                        RERANK_AT.iter().map(|&r| rerank(d, q, &cands, r)).collect()
+                        let cands = top_by(ids, scan_cap(), |i| adc(&sq, codes.code(i)));
+                        rerank_at()
+                            .iter()
+                            .map(|&r| rerank(d, q, &cands, r))
+                            .collect()
                     })
                     .collect();
                 let pq_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64
                     * rayon::current_num_threads() as f64;
                 print!(" | pq96+rerank {:.2} ms/thread:", pq_ms);
-                for (ri, r) in RERANK_AT.iter().enumerate() {
+                for (ri, r) in rerank_at().iter().enumerate() {
                     let found: Vec<Vec<u32>> = with_pq.iter().map(|v| v[ri].clone()).collect();
                     print!(" R{r}={:.4}", recall(&found, truth));
                 }
@@ -589,7 +607,7 @@ fn stage_hnsw(
             .par_iter()
             .map(|q| {
                 index
-                    .search_with_ef(q, K, ef)
+                    .search_with_ef(q, K(), ef)
                     .unwrap()
                     .into_iter()
                     .map(|(id, _)| id.parse::<u32>().unwrap())
@@ -599,7 +617,7 @@ fn stage_hnsw(
         let par_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64;
         let t = Instant::now();
         for q in d.queries.iter().take(200) {
-            index.search_with_ef(q, K, ef).unwrap();
+            index.search_with_ef(q, K(), ef).unwrap();
         }
         let single_ms = t.elapsed().as_secs_f64() * 1000.0 / 200.0;
         println!(
@@ -634,13 +652,16 @@ fn stage_hnsw(
             .collect();
         let walk_ms = t.elapsed().as_secs_f64() * 1000.0 / d.queries.len() as f64
             * rayon::current_num_threads() as f64;
-        let no_rerank: Vec<Vec<u32>> = walks.iter().map(|w| w[..K.min(w.len())].to_vec()).collect();
+        let no_rerank: Vec<Vec<u32>> = walks
+            .iter()
+            .map(|w| w[..K().min(w.len())].to_vec())
+            .collect();
         print!(
             "  pq96-walk ef={ef:<3} {:.3} ms/query/thread; recall no-rerank {:.4}; rerank",
             walk_ms,
             recall(&no_rerank, truth)
         );
-        for r in RERANK_AT {
+        for r in rerank_at() {
             if r > ef {
                 break;
             }
@@ -673,6 +694,8 @@ fn main() {
             n = v.parse().unwrap();
         } else if let Some(v) = a.strip_prefix("queries=") {
             nq = v.parse().unwrap();
+        } else if let Some(v) = a.strip_prefix("k=") {
+            K_OF.set(v.parse().unwrap()).unwrap();
         } else if a == "build=decoded" {
             decoded_build = true;
         }
@@ -682,8 +705,9 @@ fn main() {
         nq = 100;
     }
     println!(
-        "route_probe: {} threads, rss {:.0} MB",
+        "route_probe: {} threads, recall@{}, rss {:.0} MB",
         rayon::current_num_threads(),
+        K(),
         rss_mb()
     );
     let d = load(&dir, n, nq);
