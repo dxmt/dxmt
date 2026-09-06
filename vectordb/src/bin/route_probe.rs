@@ -71,12 +71,26 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
+/// Streamed rather than `fs::read` + convert: at 10M x 768 the byte copy is 30 GB, and holding
+/// it next to the float copy while converting took the process to 108 GB on a 125 GB box.
 fn read_f32(path: &str) -> Vec<f32> {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let len = file.metadata().unwrap().len() as usize;
+    let mut out: Vec<f32> = Vec::with_capacity(len / 4);
+    let mut buf = vec![0u8; 64 << 20];
+    loop {
+        let got = file.read(&mut buf).unwrap();
+        if got == 0 {
+            break;
+        }
+        out.extend(
+            buf[..got - got % 4]
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+        );
+    }
+    out
 }
 
 fn read_i64(path: &str) -> Vec<i64> {
@@ -272,10 +286,24 @@ fn build_pq(d: &Data, m: usize) -> (ProductQuantizer, PqCodes) {
     pq.train(&training, 25).unwrap();
     let train_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let codes: Vec<u8> = (0..d.n)
-        .into_par_iter()
-        .flat_map_iter(|i| pq.encode(&d.row(i).to_vec()).unwrap().codes)
-        .collect();
+    // One reused 768-float buffer per 4,096-row chunk instead of a fresh `to_vec` per row: ten
+    // million 3 KB allocations churned through 32 malloc arenas is what the allocator held on
+    // to when the 10M run reached 108 GB resident.
+    let codes: Vec<u8> = d
+        .train
+        .par_chunks(DIM * 4096)
+        .map(|rows| {
+            let mut buf = Vec::with_capacity(DIM);
+            let mut out = Vec::with_capacity(rows.len() / DIM * m);
+            for row in rows.chunks_exact(DIM) {
+                buf.clear();
+                buf.extend_from_slice(row);
+                out.extend(pq.encode(&buf).unwrap().codes);
+            }
+            out
+        })
+        .collect::<Vec<Vec<u8>>>()
+        .concat();
     println!(
         "pq m={m} ({m} B/vector, {:.0}x): trained on {} in {:.1}s, encoded {} in {:.1}s",
         (DIM * 4) as f64 / m as f64,
