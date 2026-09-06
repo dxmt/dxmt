@@ -147,12 +147,13 @@ fn load(dir: &str, n: usize, nq: usize) -> Data {
         })
         .collect();
     println!(
-        "loaded {} rows x {} dims, {} queries, {} shipped neighbours/query, in {:.1}s",
+        "loaded {} rows x {} dims, {} queries, {} shipped neighbours/query, in {:.1}s {}",
         n,
         DIM,
         queries.len(),
         per,
-        t.elapsed().as_secs_f64()
+        t.elapsed().as_secs_f64(),
+        mem_tag()
     );
     Data {
         n,
@@ -209,11 +210,12 @@ fn exact_truth(d: &Data) -> Vec<Vec<u32>> {
         .map(|(a, b)| a.iter().filter(|x| b.contains(x)).count())
         .sum();
     println!(
-        "truth: exact top-{} for {} queries in {:.1}s; overlap with shipped neighbours {:.4}",
+        "truth: exact top-{} for {} queries in {:.1}s; overlap with shipped neighbours {:.4} {}",
         K(),
         d.queries.len(),
         t.elapsed().as_secs_f64(),
-        agree as f64 / (K() * d.queries.len()) as f64
+        agree as f64 / (K() * d.queries.len()) as f64,
+        mem_tag()
     );
     truth
 }
@@ -313,12 +315,13 @@ fn build_pq(d: &Data, m: usize) -> (ProductQuantizer, PqCodes) {
         .collect::<Vec<Vec<u8>>>()
         .concat();
     println!(
-        "pq m={m} ({m} B/vector, {:.0}x): trained on {} in {:.1}s, encoded {} in {:.1}s",
+        "pq m={m} ({m} B/vector, {:.0}x): trained on {} in {:.1}s, encoded {} in {:.1}s {}",
         (DIM * 4) as f64 / m as f64,
         training.len(),
         train_s,
         d.n,
-        t.elapsed().as_secs_f64()
+        t.elapsed().as_secs_f64(),
+        mem_tag()
     );
     (pq, PqCodes { m, codes })
 }
@@ -375,7 +378,7 @@ fn stage_pq(d: &Data, truth: &[Vec<u32>]) -> Option<(ProductQuantizer, PqCodes)>
                 .collect();
             print!(" R{r}={:.4}", recall(&reranked, truth));
         }
-        println!();
+        println!(" {}", mem_tag());
         if m == walk_m() {
             keep = Some((pq, codes));
         }
@@ -434,7 +437,7 @@ fn stage_sq(d: &Data, truth: &[Vec<u32>]) {
             .collect();
         print!(" R{r}={:.4}", recall(&reranked, truth));
     }
-    println!();
+    println!(" {}", mem_tag());
 }
 
 /// Spherical k-means on a sample, then assign the whole corpus.
@@ -573,9 +576,28 @@ fn stage_ivf(
                     print!(" R{r}={:.4}", recall(&found, truth));
                 }
             }
-            println!();
+            println!(" {}", mem_tag());
         }
     }
+}
+
+/// Peak resident size so far, so a log shows which stage set it.
+fn hwm_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines().find(|l| l.starts_with("VmHWM:")).and_then(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|k| k.parse::<f64>().ok())
+            })
+        })
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(0.0)
+}
+
+fn mem_tag() -> String {
+    format!("[rss {:.0} MB, peak {:.0} MB]", rss_mb(), hwm_mb())
 }
 
 fn rss_mb() -> f64 {
@@ -710,7 +732,7 @@ fn stage_hnsw(
                 .collect();
             print!(" R{r}={:.4}", recall(&reranked, truth));
         }
-        println!();
+        println!(" {}", mem_tag());
     }
 }
 
@@ -773,5 +795,5 @@ fn main() {
     if stages.contains("hnsw") {
         stage_hnsw(&d, &truth, pq96.as_ref(), decoded_build);
     }
-    println!("done, rss {:.0} MB", rss_mb());
+    println!("done {}", mem_tag());
 }
