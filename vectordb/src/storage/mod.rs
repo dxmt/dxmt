@@ -23,6 +23,7 @@ pub mod tier_promotion;
 pub mod tiered;
 pub mod tombstone_tracker;
 pub mod traits;
+pub mod vector_file;
 pub mod wal_entry; // New: WAL entry definitions
                    // Removed
 

@@ -162,6 +162,12 @@ impl PartitionedIvfIndex {
     }
 
     /// Attach the object store partitions are fetched from and written to.
+    ///
+    /// `#[inline]`: under the release profile (fat LTO, one codegen unit, panic=abort) the
+    /// `vectordb` binary failed to link with this symbol undefined -- referenced from the
+    /// `Result::map` closure in `restore_table` that the binary instantiates -- while the
+    /// library itself compiled. Inlining sidesteps the cross-crate instantiation.
+    #[inline]
     pub fn with_store(mut self, store: Arc<dyn ObjectStorage + Send + Sync>) -> Self {
         self.store = Some(store);
         self
