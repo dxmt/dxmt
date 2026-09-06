@@ -194,15 +194,11 @@ fn exact_truth(d: &Data) -> Vec<Vec<u32>> {
     let truth: Vec<Vec<u32>> = d
         .queries
         .par_iter()
-        .map(|q| {
-            let mut scored: Vec<(f32, u32)> = (0..d.n)
-                .map(|i| (dot_product(q, d.row(i)), i as u32))
-                .collect();
-            scored.select_nth_unstable_by(K() - 1, |a, b| b.0.total_cmp(&a.0));
-            scored.truncate(K());
-            scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-            scored.into_iter().map(|(_, i)| i).collect()
-        })
+        // A bounded heap rather than scoring into an n-long vector per query: the 1M run's
+        // resident size grew by 7.5 GB across this stage -- a thousand 8 MB vectors the
+        // allocator never handed back -- and the 10M version of that is what the box cannot
+        // hold.
+        .map(|q| top_by(0..d.n as u32, K(), |i| dot_product(q, d.row(i as usize))))
         .collect();
     let agree: usize = truth
         .iter()
