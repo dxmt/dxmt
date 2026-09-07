@@ -93,9 +93,105 @@ fn prefetch_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("DB_VECTOR_PREFETCH").ok().as_deref() == Some("1"))
 }
 
+/// How a row is stored: four bytes a dimension, or two.
+///
+/// Half precision halves the file and doubles what the page cache covers. At 100M rows
+/// the file is 307 GB in f32 against a ~90 GB cache -- every rerank misses on most of
+/// its 500 rows -- and 154 GB in f16. The rerank distances are computed in f32 after
+/// decoding; whether the 11-bit mantissa moves recall is measured, not assumed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VectorFormat {
+    F32,
+    F16,
+}
+
+impl VectorFormat {
+    fn bytes_per_dim(self) -> usize {
+        match self {
+            VectorFormat::F32 => 4,
+            VectorFormat::F16 => 2,
+        }
+    }
+
+    /// The file extension a format is stored under.
+    pub fn extension(self) -> &'static str {
+        match self {
+            VectorFormat::F32 => "f32",
+            VectorFormat::F16 => "f16",
+        }
+    }
+}
+
+/// IEEE 754 binary16 from f32, round to nearest even; out-of-range magnitudes saturate to
+/// the half infinities. Hand-rolled to keep the crate's dependency list where it is.
+pub fn f32_to_f16_bits(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+    if exp == 0xff {
+        // Inf or NaN.
+        return sign | 0x7c00 | if mant != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        // Subnormal or zero in half precision.
+        if e < -10 {
+            return sign;
+        }
+        let m = mant | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        let half_mant = m >> shift;
+        let remainder = m & ((1 << shift) - 1);
+        let halfway = 1 << (shift - 1);
+        let mut h = half_mant as u16;
+        if remainder > halfway || (remainder == halfway && (h & 1) == 1) {
+            h += 1;
+        }
+        return sign | h;
+    }
+    let mut h = ((e as u32) << 10 | (mant >> 13)) as u16;
+    let remainder = mant & 0x1fff;
+    if remainder > 0x1000 || (remainder == 0x1000 && (h & 1) == 1) {
+        h += 1; // may carry into the exponent, which is the correct rounding
+    }
+    sign | h
+}
+
+/// f32 from IEEE 754 binary16 bits.
+pub fn f16_bits_to_f32(h: u16) -> f32 {
+    let sign = ((h & 0x8000) as u32) << 16;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let mant = (h & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            // Subnormal: normalise.
+            let mut m = mant;
+            let mut e: i32 = 1;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x3ff;
+            sign | (((e + 127 - 15) as u32) << 23) | (m << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (mant << 13)
+    } else {
+        sign | ((exp + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
 pub struct VectorFile {
     path: PathBuf,
     dim: usize,
+    format: VectorFormat,
     row_bytes: usize,
     /// Appends go through the file handle; the map is re-created to cover them.
     writer: Mutex<Writer>,
@@ -125,6 +221,16 @@ impl VectorFile {
     /// Open or create `<path>` and `<path>.rows`. Returns the file and the `(id, row)` pairs
     /// it already holds, oldest first, for the caller to fold into its id map.
     pub fn open(path: &Path, dim: usize) -> crate::Result<(Self, Vec<(String, u64)>)> {
+        Self::open_with(path, dim, VectorFormat::F32)
+    }
+
+    /// Open or create with an explicit row format. The caller keeps the format straight
+    /// across reopens (by file extension, see `VectorFormat::extension`).
+    pub fn open_with(
+        path: &Path,
+        dim: usize,
+        format: VectorFormat,
+    ) -> crate::Result<(Self, Vec<(String, u64)>)> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -133,7 +239,7 @@ impl VectorFile {
             .append(true)
             .read(true)
             .open(path)?;
-        let row_bytes = dim * std::mem::size_of::<f32>();
+        let row_bytes = dim * format.bytes_per_dim();
         let len = file.metadata()?.len();
         if row_bytes > 0 && len % row_bytes as u64 != 0 {
             return Err(crate::Error::Serialization(format!(
@@ -184,6 +290,7 @@ impl VectorFile {
         let this = Self {
             path: path.to_path_buf(),
             dim,
+            format,
             row_bytes,
             writer: Mutex::new(Writer {
                 file,
@@ -214,6 +321,10 @@ impl VectorFile {
         self.dim
     }
 
+    pub fn format(&self) -> VectorFormat {
+        self.format
+    }
+
     /// Rows appended so far, dead ones included.
     pub fn rows(&self) -> u64 {
         self.writer.lock().rows
@@ -232,8 +343,17 @@ impl VectorFile {
                     actual: v.len(),
                 });
             }
-            for x in *v {
-                data.extend_from_slice(&x.to_le_bytes());
+            match self.format {
+                VectorFormat::F32 => {
+                    for x in *v {
+                        data.extend_from_slice(&x.to_le_bytes());
+                    }
+                }
+                VectorFormat::F16 => {
+                    for x in *v {
+                        data.extend_from_slice(&f32_to_f16_bits(*x).to_le_bytes());
+                    }
+                }
             }
             lines.push_str(&format!("{}\t{}\n", first + i as u64, id));
         }
@@ -273,7 +393,7 @@ impl VectorFile {
             return None;
         }
         let start = row as usize * self.row_bytes;
-        Some(Self::decode(&mmap[start..start + self.row_bytes]))
+        Some(self.decode(&mmap[start..start + self.row_bytes]))
     }
 
     /// Many rows, prefetched together, returned in the order asked. A row past the end is
@@ -294,7 +414,7 @@ impl VectorFile {
             let row = rows[i];
             if row < m.rows {
                 let start = row as usize * self.row_bytes;
-                out[i] = Some(Self::decode(&mmap[start..start + self.row_bytes]));
+                out[i] = Some(self.decode(&mmap[start..start + self.row_bytes]));
             }
         }
         out
@@ -374,7 +494,7 @@ impl VectorFile {
                             .read_exact_at(&mut buf, row * self.row_bytes as u64)
                             .is_ok()
                     {
-                        out.push(Some(Self::decode(&buf)));
+                        out.push(Some(self.decode(&buf)));
                     } else {
                         out.push(None);
                     }
@@ -400,17 +520,29 @@ impl VectorFile {
         if prefetch_enabled() {
             self.advise(mmap, &order, rows, m.rows);
         }
+        let mut scratch: Vec<f32> = Vec::new();
         for &i in &order {
             let row = rows[i];
             if row < m.rows {
                 let start = row as usize * self.row_bytes;
                 let bytes = &mmap[start..start + self.row_bytes];
-                // SAFETY: the mapping is page-aligned and every row starts at a multiple of
-                // `row_bytes`, itself a multiple of 4, so the slice is 4-byte aligned; it lies
-                // inside the mapping, and the file is never modified in place.
-                let floats =
-                    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) };
-                f(i, Some(floats));
+                match self.format {
+                    VectorFormat::F32 => {
+                        // SAFETY: the mapping is page-aligned and every row starts at a
+                        // multiple of `row_bytes`, itself a multiple of 4, so the slice is
+                        // 4-byte aligned; it lies inside the mapping, and the file is never
+                        // modified in place.
+                        let floats = unsafe {
+                            std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim)
+                        };
+                        f(i, Some(floats));
+                    }
+                    VectorFormat::F16 => {
+                        // One scratch buffer per query, not one per row.
+                        self.decode_into(bytes, &mut scratch);
+                        f(i, Some(&scratch));
+                    }
+                }
             } else {
                 f(i, None);
             }
@@ -438,11 +570,26 @@ impl VectorFile {
     #[cfg(not(unix))]
     fn advise(&self, _mmap: &Mmap, _order: &[usize], _rows: &[u64], _mapped_rows: u64) {}
 
-    fn decode(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
+    fn decode(&self, bytes: &[u8]) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.dim);
+        self.decode_into(bytes, &mut out);
+        out
+    }
+
+    fn decode_into(&self, bytes: &[u8], out: &mut Vec<f32>) {
+        out.clear();
+        match self.format {
+            VectorFormat::F32 => out.extend(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+            ),
+            VectorFormat::F16 => out.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]))),
+            ),
+        }
     }
 }
 
@@ -532,6 +679,46 @@ mod tests {
         assert_eq!(mapped, parallel);
         assert_eq!(parallel[2].1, None, "row 250 is past the end");
         assert_eq!(parallel[0].1.as_ref().unwrap(), &items[99]);
+    }
+
+    #[test]
+    fn half_precision_round_trips_within_its_mantissa() {
+        for &x in &[
+            0.0f32, -0.0, 1.0, -1.0, 0.3333, 65504.0, 1e-5, 6.1e-5, -2.71, 1e-8,
+        ] {
+            let back = f16_bits_to_f32(f32_to_f16_bits(x));
+            let tol = (x.abs() * 1e-3).max(1e-7);
+            assert!((back - x).abs() <= tol, "{x} -> {back}");
+        }
+        assert!(f16_bits_to_f32(f32_to_f16_bits(1e6)).is_infinite());
+        assert!(f16_bits_to_f32(f32_to_f16_bits(f32::NAN)).is_nan());
+        assert_eq!(f32_to_f16_bits(1.0), 0x3c00);
+        assert_eq!(f32_to_f16_bits(-2.0), 0xc000);
+        assert_eq!(f32_to_f16_bits(0.5), 0x3800);
+    }
+
+    #[test]
+    fn an_f16_file_stores_half_the_bytes_and_reads_back_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.f16");
+        let (file, _) = VectorFile::open_with(&path, 8, VectorFormat::F16).unwrap();
+        let a: Vec<f32> = (0..8).map(|d| (d as f32 - 3.5) * 0.37).collect();
+        file.append(&[("a", a.as_slice())]).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 16);
+        let back = file.read(0).unwrap();
+        for (x, y) in a.iter().zip(&back) {
+            assert!((x - y).abs() <= x.abs() * 1e-3 + 1e-6, "{x} vs {y}");
+        }
+        let mut seen = Vec::new();
+        file.with_rows_mapped(&[0], |_, r| seen.push(r.unwrap().to_vec()));
+        assert_eq!(seen[0], back);
+        let mut par = Vec::new();
+        file.with_rows_parallel(&[0], |_, r| par.push(r.unwrap().to_vec()));
+        assert_eq!(par[0], back);
+        drop(file);
+        let (file, ids) = VectorFile::open_with(&path, 8, VectorFormat::F16).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(file.read(0).unwrap(), back);
     }
 
     #[test]

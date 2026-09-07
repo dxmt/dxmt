@@ -2144,8 +2144,14 @@ impl IntelligentIndexedStorage {
         Ok(RecordStore::Disk(Box::new(store)))
     }
 
-    fn vector_file_path(wal_dir: &std::path::Path, table_name: &str) -> PathBuf {
-        wal_dir.join("vectors").join(format!("{table_name}.f32"))
+    fn vector_file_path_for(
+        wal_dir: &std::path::Path,
+        table_name: &str,
+        format: crate::storage::vector_file::VectorFormat,
+    ) -> PathBuf {
+        wal_dir
+            .join("vectors")
+            .join(format!("{table_name}.{}", format.extension()))
     }
 
     /// `DB_VECTOR_STORE=disk` keeps every table's full vectors in a row file under the WAL
@@ -2162,12 +2168,29 @@ impl IntelligentIndexedStorage {
         // Keyed by name, not id: a restore recreates the table with a new id and must find
         // the same file. A fresh `CREATE TABLE` (logged, not replayed or restored) starts
         // from an empty file -- whatever a same-named table left behind is not this table's.
-        let path = Self::vector_file_path(wal_dir, &table.name);
-        if fresh {
-            let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(crate::storage::vector_file::VectorFile::rows_path(&path));
-        }
-        let (file, ids) = crate::storage::vector_file::VectorFile::open(&path, table.dimension)?;
+        use crate::storage::vector_file::{VectorFile, VectorFormat};
+        // A fresh table takes the format the environment asks for (`DB_VECTOR_F16=1` for
+        // half precision); a reopened one keeps whichever file it already has.
+        let wanted_format = if std::env::var("DB_VECTOR_F16").ok().as_deref() == Some("1") {
+            VectorFormat::F16
+        } else {
+            VectorFormat::F32
+        };
+        let format = if fresh {
+            for f in [VectorFormat::F32, VectorFormat::F16] {
+                let p = Self::vector_file_path_for(wal_dir, &table.name, f);
+                let _ = std::fs::remove_file(&p);
+                let _ = std::fs::remove_file(VectorFile::rows_path(&p));
+            }
+            wanted_format
+        } else {
+            [VectorFormat::F16, VectorFormat::F32]
+                .into_iter()
+                .find(|f| Self::vector_file_path_for(wal_dir, &table.name, *f).exists())
+                .unwrap_or(wanted_format)
+        };
+        let path = Self::vector_file_path_for(wal_dir, &table.name, format);
+        let (file, ids) = VectorFile::open_with(&path, table.dimension, format)?;
         // Later rows win: an update appends a new row for the same id.
         let rows: HashMap<RecordId, u64> = ids.into_iter().collect();
         info!(
@@ -4331,10 +4354,16 @@ impl IntelligentIndexedStorage {
             // The row file goes with the table. Best effort: a file that will not delete is
             // orphaned, not a failed drop.
             if let Some(wal_dir) = &self.wal_dir {
-                let path = Self::vector_file_path(wal_dir, name);
-                let _ = std::fs::remove_file(&path);
-                let _ =
-                    std::fs::remove_file(crate::storage::vector_file::VectorFile::rows_path(&path));
+                for f in [
+                    crate::storage::vector_file::VectorFormat::F32,
+                    crate::storage::vector_file::VectorFormat::F16,
+                ] {
+                    let path = Self::vector_file_path_for(wal_dir, name, f);
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(
+                        crate::storage::vector_file::VectorFile::rows_path(&path),
+                    );
+                }
                 let rec = Self::record_file_path(wal_dir, name);
                 let _ = std::fs::remove_file(&rec);
                 let mut log = rec.as_os_str().to_owned();
