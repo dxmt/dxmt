@@ -8,7 +8,7 @@
 //! VectorDBBench Cohere 768-d set, against a brute-force truth computed here rather than the
 //! shipped `neighbors.parquet` so the metric and the ordering are beyond doubt.
 //!
-//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [pq=96] [build=decoded] [quantize=1]
+//!     route_probe <dir> [stages=truth,pq,sq,ivf,hnsw] [n=1000000] [queries=1000] [k=10] [pq=96] [build=decoded] [quantize=1] [quantize_at=N]
 //!
 //! `<dir>` holds `train.f32` (row-major float32), `train_ids.i64`, `test.f32`, `test_ids.i64`,
 //! `neighbors.i64` (100 ids per query) as written by `convert.py`. `<dir>=synthetic` makes a
@@ -619,6 +619,7 @@ fn stage_hnsw(
     pq96: Option<&(ProductQuantizer, PqCodes)>,
     decoded_build: bool,
     quantize_graph: bool,
+    quantize_at: usize,
 ) {
     use dxmt_vectordb::search::quantization::product_quantization::PQCode;
     let before = rss_mb();
@@ -627,9 +628,30 @@ fn stage_hnsw(
         DistanceMetric::Cosine,
         Some(HnswConfig::from_params(16, 200, 256)),
     );
+    // `quantize_at=N`: the server's streaming build -- exact until N rows, then the graph
+    // is quantized and every later row is planned with ADC against the codes and pruned
+    // with the code-to-code table. The 10M server run lost five points of recall against
+    // the probe's exact-then-quantize build; this reproduces the server's build in-process.
+    let mut quantized_during_build = false;
     let mut start = 0;
     while start < d.n {
-        let end = (start + 50_000).min(d.n);
+        if quantize_at > 0 && !quantized_during_build && start >= quantize_at {
+            let Some((pq, _)) = pq96 else {
+                panic!("quantize_at needs the pq stage's model");
+            };
+            let t = Instant::now();
+            index.quantize(pq.clone()).unwrap();
+            quantized_during_build = true;
+            println!(
+                "quantized the graph at {start} rows in {:.1}s; the remaining {} rows build on codes",
+                t.elapsed().as_secs_f64(),
+                d.n - start
+            );
+        }
+        let mut end = (start + 50_000).min(d.n);
+        if quantize_at > 0 && start < quantize_at {
+            end = end.min(quantize_at); // quantize exactly at the requested row
+        }
         let chunk: Vec<(String, Vec<f32>)> = (start..end)
             .map(|i| {
                 let v = match (decoded_build, pq96) {
@@ -657,6 +679,9 @@ fn stage_hnsw(
         index.resident_bytes_without_vectors() as f64 / d.n as f64
     );
     for ef in [32usize, 64, 128, 256, 512, 1024, 2048] {
+        if quantized_during_build {
+            break; // no exact walk to measure: the graph already holds codes
+        }
         let t = Instant::now();
         let found: Vec<Vec<u32>> = d
             .queries
@@ -687,12 +712,14 @@ fn stage_hnsw(
     // The graph's own quantized path (`HnswIndex::quantize` + `search_with_ef`), timed as
     // the server runs it, with the codes' size from `pq=`. This is the number the SIMD
     // ADC work is judged on.
-    if quantize_graph {
+    if quantize_graph || quantized_during_build {
         let Some((pq, _)) = pq96 else {
             return;
         };
         let t = Instant::now();
-        index.quantize(pq.clone()).unwrap();
+        if !quantized_during_build {
+            index.quantize(pq.clone()).unwrap();
+        }
         println!(
             "quantized the graph in {:.1}s; graph accounts for {:.0} B/vector {}",
             t.elapsed().as_secs_f64(),
@@ -798,6 +825,7 @@ fn main() {
     let mut nq = 1000;
     let mut decoded_build = false;
     let mut quantize_graph = false;
+    let mut quantize_at = 0usize;
     for a in &args[2..] {
         if let Some(v) = a.strip_prefix("stages=") {
             stages = v.split(',').map(|s| s.to_string()).collect();
@@ -813,6 +841,8 @@ fn main() {
             decoded_build = true;
         } else if a == "quantize=1" {
             quantize_graph = true;
+        } else if let Some(v) = a.strip_prefix("quantize_at=") {
+            quantize_at = v.parse().unwrap();
         }
     }
     if dir == "synthetic" && n == 1_000_000 {
@@ -847,7 +877,14 @@ fn main() {
         );
     }
     if stages.contains("hnsw") {
-        stage_hnsw(&d, &truth, pq96.as_ref(), decoded_build, quantize_graph);
+        stage_hnsw(
+            &d,
+            &truth,
+            pq96.as_ref(),
+            decoded_build,
+            quantize_graph,
+            quantize_at,
+        );
     }
     println!("done {}", mem_tag());
 }
