@@ -75,80 +75,144 @@ impl HnswConfig {
 /// pool because it needs no pool and cannot be contended, which suits us: `search_layer` takes
 /// `&self` and would otherwise have to lock something to get a scratch buffer.
 mod visited {
+    // The set of nodes a search has touched.
+    //
+    // This used to be one `u32` stamp per node of the graph, kept per thread: 4 bytes a
+    // node, which at 10M nodes is 40 MB a thread and, with every worker thread that ever
+    // searched holding one, about 2.4 GB of the 7 GB the 10M acceptance run kept resident.
+    // At 100M it would be 400 MB a thread. A search visits a few tens of thousands of nodes
+    // however large the graph is, so the set is now a small open-addressing hash table with
+    // generation stamps -- a few megabytes a thread, independent of the graph's size, and
+    // nothing to clear between searches.
     use std::cell::RefCell;
 
     thread_local! {
-        static BUFFER: RefCell<(u32, Vec<u32>)> = const { RefCell::new((0, Vec::new())) };
+        static BUFFER: RefCell<(u32, Vec<u64>)> = const { RefCell::new((0, Vec::new())) };
     }
 
+    /// Slots to start with: enough for the visits of an `ef`-2048 search without growing.
+    const INITIAL_SLOTS: usize = 1 << 16;
+
+    /// A slot packs `generation << 32 | node index`; a slot from an older generation is free.
     pub(super) struct Visited {
         generation: u32,
-        stamps: Vec<u32>,
+        slots: Vec<u64>,
+        len: usize,
     }
 
     impl Visited {
-        /// Take the thread's buffer, sized for `capacity` nodes, and start a new generation.
-        pub(super) fn start(capacity: usize) -> Self {
+        /// Take the thread's table and start a new generation. `_graph_size` is what the
+        /// stamp array used to be sized by; the table does not depend on it.
+        pub(super) fn start(_graph_size: usize) -> Self {
             BUFFER.with(|cell| {
-                let (generation, stamps) = &mut *cell.borrow_mut();
-                let mut stamps = std::mem::take(stamps);
-                if stamps.len() < capacity {
-                    stamps.resize(capacity, 0);
+                let (generation, slots) = &mut *cell.borrow_mut();
+                let mut slots = std::mem::take(slots);
+                if slots.is_empty() {
+                    slots = vec![0; INITIAL_SLOTS];
                 }
-                // Wrapping past u32::MAX would make stale stamps read as current, so clear
-                // once every four billion traversals rather than never.
                 *generation = generation.wrapping_add(1);
                 if *generation == 0 {
-                    stamps.iter_mut().for_each(|s| *s = 0);
+                    slots.iter_mut().for_each(|s| *s = 0);
                     *generation = 1;
                 }
                 Visited {
                     generation: *generation,
-                    stamps,
+                    slots,
+                    len: 0,
                 }
             })
         }
 
-        pub(super) fn contains(&self, idx: usize) -> bool {
-            self.stamps.get(idx) == Some(&self.generation)
+        #[inline]
+        fn hash(idx: usize) -> usize {
+            // Fibonacci hashing: node indices are dense, so a multiply spreads them.
+            (idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize >> 20
         }
 
-        /// Mark `idx` visited, returning whether it already was.
-        pub(super) fn insert(&mut self, idx: usize) -> bool {
-            if idx >= self.stamps.len() {
-                self.stamps.resize(idx + 1, 0);
+        #[inline]
+        fn slot_of(&self, idx: usize) -> (usize, bool) {
+            let mask = self.slots.len() - 1;
+            let tag = (self.generation as u64) << 32 | idx as u64;
+            let mut i = Self::hash(idx) & mask;
+            loop {
+                let s = self.slots[i];
+                if s == tag {
+                    return (i, true);
+                }
+                if (s >> 32) as u32 != self.generation {
+                    return (i, false);
+                }
+                i = (i + 1) & mask;
             }
-            let seen = self.stamps[idx] == self.generation;
-            self.stamps[idx] = self.generation;
+        }
+
+        pub(super) fn contains(&self, idx: usize) -> bool {
+            self.slot_of(idx).1
+        }
+
+        /// Mark `idx` visited; `true` if it already was.
+        pub(super) fn insert(&mut self, idx: usize) -> bool {
+            if self.len * 2 >= self.slots.len() {
+                self.grow();
+            }
+            let (i, seen) = self.slot_of(idx);
+            if !seen {
+                self.slots[i] = (self.generation as u64) << 32 | idx as u64;
+                self.len += 1;
+            }
             seen
+        }
+
+        fn grow(&mut self) {
+            let doubled = self.slots.len() * 2;
+            let old = std::mem::replace(&mut self.slots, vec![0; doubled]);
+            self.len = 0;
+            for s in old {
+                if (s >> 32) as u32 == self.generation {
+                    let idx = (s & 0xffff_ffff) as usize;
+                    let (i, _) = self.slot_of(idx);
+                    self.slots[i] = s;
+                    self.len += 1;
+                }
+            }
         }
     }
 
     impl Drop for Visited {
         fn drop(&mut self) {
-            // Hand the allocation back so the next traversal on this thread reuses it.
             BUFFER.with(|cell| {
-                cell.borrow_mut().1 = std::mem::take(&mut self.stamps);
+                cell.borrow_mut().1 = std::mem::take(&mut self.slots);
             });
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_set_forgets_across_generations_and_grows_within_one() {
+            let mut v = Visited::start(1_000_000);
+            assert!(!v.contains(7));
+            assert!(!v.insert(7));
+            assert!(v.insert(7), "second insert reports it was seen");
+            assert!(v.contains(7));
+            // More than the initial slots' half-load, so it grows and rehashes.
+            for i in 0..100_000usize {
+                v.insert(i * 13);
+            }
+            for i in 0..100_000usize {
+                assert!(v.contains(i * 13), "{i} lost in a grow");
+            }
+            assert!(!v.contains(5));
+            drop(v);
+            let v = Visited::start(1_000_000);
+            assert!(!v.contains(7), "a new generation starts empty");
+            assert!(!v.contains(13 * 500));
         }
     }
 }
 
-/// One vector and its outgoing edges, one edge list per layer.
-///
-/// The edge lists are behind a lock each because pruning a neighbour's list is where insert
-/// spends most of its CPU (about 78% of the profile, all of it distance calculations), and a
-/// single lock over the whole graph is what kept that on one core. Per-node locking is what
-/// Qdrant, Weaviate and hnswlib all do for the same reason.
-///
-/// `RwLock` is not `Clone`, so neither is `Node` — nothing ever cloned a whole one; the
-/// clones in this file are all of a single field. `serde(rename)` keeps the field's name in
-/// self-describing formats, and parking_lot's `serde` impl is transparent, so the bincode
-/// encoding is byte-for-byte what `Vec<Vec<usize>>` wrote. `hnsw_v2_files_still_load` pins
-/// that against a file written before this change.
-/// The node as "hnsw-v2" and "hnsw-v3" files store it. Read-only: `load` converts it into
-/// [`Nodes`]. It cost 616-785 bytes per node beyond the vector (a `String`, a `Vec` header, a
-/// `Vec` of locked `Vec<usize>` edge lists), measured on 1M and 10M Cohere 768-d.
 #[derive(Debug, Serialize, Deserialize)]
 struct LegacyNode {
     id: RecordId,
