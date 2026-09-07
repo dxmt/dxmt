@@ -47,7 +47,8 @@ pub enum IoMode {
     Adaptive,
 }
 
-/// In adaptive mode, how many parallel-read queries pass between probes of the mapping.
+/// In adaptive mode, how many warm queries pass between probes of the mapping. While cold
+/// every query probes: the probe is eight rows, and it is the only way back to the mapping.
 const PROBE_EVERY: u32 = 32;
 
 /// Rows a probe touches through the mapping. A probe that mapped the whole query paid up to
@@ -435,27 +436,25 @@ impl VectorFile {
         }
     }
 
-    /// Warm: the whole query through the mapping, and it stays warm until a mapped query
-    /// takes a major fault. Cold: parallel reads, and every [`PROBE_EVERY`] queries the first
-    /// [`PROBE_ROWS`] rows go through the mapping to see whether the disk still answers.
+    /// Both directions start with the same [`PROBE_ROWS`]-row probe through the mapping, and
+    /// the answer decides how the rest of the query is read: mapped while the pages are
+    /// resident, parallel `pread` once one of them is not. Warm queries skip the probe
+    /// entirely -- it is only paid when the last one faulted, or every [`PROBE_EVERY`]
+    /// queries while cold to see whether the file has come back into cache.
+    ///
+    /// The warm path used to commit the whole query to the mapping and check the fault
+    /// count afterwards, which made the *detector* the expensive part: on a file bigger
+    /// than the page cache, one query in a few dozen would map 500 rows and serialise a
+    /// major fault for each of them. Measured on the 100M table (154 GB of rows, ~70 GB of
+    /// cache), that is a cold p99 of 282 ms and a worst query of 736 ms against 99 ms and
+    /// 175 ms for plain parallel reads -- while the warm percentiles of the two are
+    /// identical to within noise. Nothing about the mapping is worth a 500-fault query, so
+    /// the probe now bounds what a wrong guess costs in either direction.
     fn with_rows_adaptive(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
-        if !self.cold.load(Ordering::Relaxed) {
-            let before = major_faults();
+        let cold = self.cold.load(Ordering::Relaxed);
+        // Warm and staying warm: no probe, no split, exactly the mapped path.
+        if !cold && !self.probe_due() {
             self.with_rows_mapped(rows, &mut f);
-            if let (Some(before), Some(after)) = (before, major_faults()) {
-                if after > before {
-                    self.cold.store(true, Ordering::Relaxed);
-                    self.since_probe.store(0, Ordering::Relaxed);
-                }
-            }
-            return;
-        }
-        let probe = self
-            .since_probe
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(PROBE_EVERY);
-        if !probe {
-            self.with_rows_parallel(rows, f);
             return;
         }
         let (head, tail) = rows.split_at(PROBE_ROWS.min(rows.len()));
@@ -463,12 +462,26 @@ impl VectorFile {
         self.with_rows_mapped(head, &mut f);
         let faulted = match (before, major_faults()) {
             (Some(b), Some(a)) => a > b,
-            _ => false,
+            // No fault counter (not Linux): believe the state we already had.
+            _ => cold,
         };
-        self.with_rows_parallel(tail, |i, r| f(i + head.len(), r));
-        if !faulted {
+        if faulted {
+            self.cold.store(true, Ordering::Relaxed);
+            self.since_probe.store(0, Ordering::Relaxed);
+            self.with_rows_parallel(tail, |i, r| f(i + head.len(), r));
+        } else {
             self.cold.store(false, Ordering::Relaxed);
+            self.with_rows_mapped(tail, |i, r| f(i + head.len(), r));
         }
+    }
+
+    /// Whether this query pays the probe: always while cold, and once every
+    /// [`PROBE_EVERY`] queries while warm, so a file that falls out of cache is noticed
+    /// without every warm query paying for the check.
+    fn probe_due(&self) -> bool {
+        self.since_probe
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(PROBE_EVERY)
     }
 
     /// Whether adaptive mode currently reads in parallel. For tests and diagnostics.
@@ -679,6 +692,63 @@ mod tests {
         assert_eq!(mapped, parallel);
         assert_eq!(parallel[2].1, None, "row 250 is past the end");
         assert_eq!(parallel[0].1.as_ref().unwrap(), &items[99]);
+    }
+
+    /// Adaptive mode returns exactly what the other two return, in every state, and never
+    /// hands a query to the mapping without first bounding what a fault would cost. A page
+    /// cache cannot be emptied from a unit test, so this asserts the contract that survives
+    /// either answer: same rows, same order, same `None` past the end, warm or cold.
+    #[test]
+    fn adaptive_reads_agree_with_both_paths_whichever_way_it_guesses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = VectorFile::open(&dir.path().join("t.f32"), 8).unwrap();
+        let items: Vec<Vec<f32>> = (0..100).map(|i| v(i, 8)).collect();
+        let ids: Vec<String> = (0..100).map(|i| i.to_string()).collect();
+        let refs: Vec<(&str, &[f32])> = ids
+            .iter()
+            .zip(&items)
+            .map(|(id, v)| (id.as_str(), v.as_slice()))
+            .collect();
+        file.append(&refs).unwrap();
+        let rows: Vec<u64> = vec![99, 3, 250, 0, 42, 42, 7, 11, 12, 13, 14];
+        let mut want = Vec::new();
+        file.with_rows_mapped(&rows, |i, r| want.push((i, r.map(|r| r.to_vec()))));
+        want.sort_by_key(|(i, _)| *i);
+
+        // Both starting states, and enough queries from each to cross PROBE_EVERY.
+        for start_cold in [false, true] {
+            file.cold.store(start_cold, Ordering::Relaxed);
+            file.since_probe.store(0, Ordering::Relaxed);
+            for q in 0..(PROBE_EVERY as usize * 2 + 3) {
+                let mut got = Vec::new();
+                file.with_rows_adaptive(&rows, |i, r| got.push((i, r.map(|r| r.to_vec()))));
+                got.sort_by_key(|(i, _)| *i);
+                assert_eq!(got, want, "start_cold={start_cold} query {q}");
+            }
+        }
+
+        // A short query is all probe and must still be complete.
+        for start_cold in [false, true] {
+            file.cold.store(start_cold, Ordering::Relaxed);
+            let short: Vec<u64> = vec![5, 6];
+            let mut want_short = Vec::new();
+            file.with_rows_mapped(&short, |i, r| want_short.push((i, r.map(|r| r.to_vec()))));
+            let mut got = Vec::new();
+            file.with_rows_adaptive(&short, |i, r| got.push((i, r.map(|r| r.to_vec()))));
+            want_short.sort_by_key(|(i, _)| *i);
+            got.sort_by_key(|(i, _)| *i);
+            assert_eq!(got, want_short, "short query, start_cold={start_cold}");
+        }
+
+        // A file this small is entirely in cache after the writes above, so no probe can
+        // fault and adaptive must settle warm rather than flapping.
+        file.cold.store(true, Ordering::Relaxed);
+        file.with_rows_adaptive(&rows, |_, _| {});
+        #[cfg(target_os = "linux")]
+        assert!(
+            !file.is_cold(),
+            "a fully cached file stayed on the cold path"
+        );
     }
 
     #[test]
