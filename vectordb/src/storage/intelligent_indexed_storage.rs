@@ -3299,7 +3299,12 @@ impl IntelligentIndexedStorage {
             if let (Some(filter), Some((cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                if *selectivity < 0.05 && cardinality.exp < Self::in_graph_filter_max_ids() {
+                // The matching ids are computed for every selective filter, not only the ones
+                // small enough for the in-graph walk: the pre-filtering branch below uses
+                // them to drop non-matching candidates *before* the exact rerank. Without
+                // that, a 1%-selectivity query fetched 30,000 candidates and reranked all of
+                // them -- 30,000 vector reads per query, 480 ms p99 with the vectors on disk.
+                if *selectivity < 0.05 {
                     let filter_ids = table_data.payload_index.get_matching_ids(filter);
                     // Exact scoring over the candidate set, when the set is small enough that
                     // doing so beats walking the graph. `result_limit * 4` alone made that
@@ -3308,7 +3313,9 @@ impl IntelligentIndexedStorage {
                     // that measured 24 ms p50, where scoring 400 vectors takes microseconds and
                     // is exact rather than approximate. The absolute floor is what matters —
                     // a filtered walk visits on the order of `ef * m` nodes anyway.
-                    if filter_ids.len() <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX) {
+                    if cardinality.exp < Self::in_graph_filter_max_ids()
+                        && filter_ids.len() <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX)
+                    {
                         let mut scored: Vec<(RecordId, f32)> = filter_ids
                             .iter()
                             .filter_map(|id| {
@@ -3371,7 +3378,8 @@ impl IntelligentIndexedStorage {
                     // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
                     // for a small enough set, their exact scores were computed in phase 1 while
                     // the map lock was held.
-                    let filter_ids = precomputed_filter_ids.unwrap_or_default();
+                    let empty = std::collections::HashSet::new();
+                    let filter_ids = precomputed_filter_ids.as_ref().unwrap_or(&empty);
                     info!(
                         "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
                         selectivity * 100.0,
@@ -3403,7 +3411,8 @@ impl IntelligentIndexedStorage {
                                 &query.vector,
                                 result_limit,
                                 filtered_ef,
-                                Some(&filter_ids),
+                                Some(filter_ids),
+                                None,
                             )
                             .await?
                         }
@@ -3435,6 +3444,7 @@ impl IntelligentIndexedStorage {
                             fetch,
                             ef_hint,
                             None,
+                            precomputed_filter_ids.as_ref(),
                         )
                         .await?;
                     (r, true, fetch)
@@ -3468,6 +3478,7 @@ impl IntelligentIndexedStorage {
                             fetch,
                             ef_hint,
                             None,
+                            None,
                         )
                         .await?;
                     (r, true, fetch)
@@ -3482,6 +3493,7 @@ impl IntelligentIndexedStorage {
                         &query.vector,
                         result_limit,
                         ef_hint,
+                        None,
                         None,
                     )
                     .await?;
@@ -3538,6 +3550,7 @@ impl IntelligentIndexedStorage {
                     fetched,
                     ef_hint.max(fetched),
                     None,
+                    precomputed_filter_ids.as_ref(),
                 )
                 .await?;
             hits = self
@@ -3601,6 +3614,7 @@ impl IntelligentIndexedStorage {
         k: usize,
         ef: usize,
         filter_ids: Option<&std::collections::HashSet<String>>,
+        keep: Option<&std::collections::HashSet<String>>,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
         let Some(candidates) = index.rerank_candidates(k).await else {
             return match filter_ids {
@@ -3609,7 +3623,7 @@ impl IntelligentIndexedStorage {
             };
         };
         let fetch = candidates.max(k);
-        let approximate = match filter_ids {
+        let mut approximate = match filter_ids {
             Some(ids) => {
                 index
                     .search_with_filter(query, fetch, ef.max(fetch), ids)
@@ -3621,6 +3635,11 @@ impl IntelligentIndexedStorage {
                     .await?
             }
         };
+        // A pre-filtered fetch is amplified by 1/selectivity; the candidates that fail the
+        // filter are dropped here, before any vector is read for them.
+        if let Some(keep) = keep {
+            approximate.retain(|(id, _)| keep.contains(id));
+        }
         // Resolve under the map lock, read and score outside it: with the vectors on disk
         // the reads can take milliseconds cold, and writers must not wait on them.
         let (vectors, file_rows, file) = {
