@@ -159,8 +159,13 @@ impl RecordFile {
 pub struct RowStore {
     ids: IdTable,
     tombstone: Vec<bool>,
+    /// The row of `vectors/<name>.f32` holding each record's vector, or `NO_VECTOR_ROW`.
+    /// Eight bytes here replace a `HashMap<String, u64>` entry of about seventy.
+    vector_rows: Vec<u64>,
     file: RecordFile,
 }
+
+const NO_VECTOR_ROW: u64 = u64::MAX;
 
 impl RowStore {
     /// Open or create `<path>` and `<path>.log`, replaying the log into the id table.
@@ -183,18 +188,35 @@ impl RowStore {
 
         let mut ids = IdTable::new();
         let mut tombstone = Vec::new();
+        let mut vector_rows = Vec::new();
         let mut ends = vec![0u64];
         for line in BufReader::new(File::open(&log_path)?).lines() {
             let line = line?;
-            let mut parts = line.splitn(3, '\t');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("add"), Some(len), Some(id)) => {
+            let mut parts = line.splitn(4, '\t');
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                // `add <len> <vector row or -> <id>`; a log written before the vector row
+                // column reads as `add <len> <id>`.
+                (Some("add"), Some(len), Some(third), fourth) => {
+                    let (vrow, id) = match fourth {
+                        Some(id) => (third, id),
+                        None => ("-", third),
+                    };
                     let len: u64 = len.parse().map_err(|_| {
                         crate::Error::Serialization(format!(
                             "{}: bad line {line:?}",
                             log_path.display()
                         ))
                     })?;
+                    let vector_row = if vrow == "-" {
+                        NO_VECTOR_ROW
+                    } else {
+                        vrow.parse().map_err(|_| {
+                            crate::Error::Serialization(format!(
+                                "{}: bad vector row in {line:?}",
+                                log_path.display()
+                            ))
+                        })?
+                    };
                     let end = ends.last().unwrap() + len;
                     if end > data_len {
                         // The log is written after the data, so this is a torn data file.
@@ -210,8 +232,9 @@ impl RowStore {
                     debug_assert_eq!(row as usize + 1, ends.len());
                     ends.push(end);
                     tombstone.push(false);
+                    vector_rows.push(vector_row);
                 }
-                (Some("del"), Some(id), _) => {
+                (Some("del"), Some(id), _, _) => {
                     if let Some(row) = ids.forget(id) {
                         tombstone[row as usize] = true;
                     }
@@ -236,8 +259,16 @@ impl RowStore {
         Ok(Self {
             ids,
             tombstone,
+            vector_rows,
             file,
         })
+    }
+
+    /// The vector file row recorded for `id`, if the record has one.
+    pub fn vector_row(&self, id: &str) -> Option<u64> {
+        let row = self.ids.row_of(id)?;
+        let v = self.vector_rows[row as usize];
+        (v != NO_VECTOR_ROW).then_some(v)
     }
 
     pub fn len(&self) -> usize {
@@ -261,19 +292,22 @@ impl RowStore {
 
     /// Append `records` as new rows, durably. An id already present is repointed to its new
     /// row and the old one tombstoned.
-    pub fn append(&mut self, records: &[Arc<Record>]) -> crate::Result<()> {
+    pub fn append(&mut self, records: &[(Arc<Record>, Option<u64>)]) -> crate::Result<()> {
         if records.is_empty() {
             return Ok(());
         }
         let mut data = Vec::new();
         let mut log = String::new();
         let mut lens = Vec::with_capacity(records.len());
-        for r in records {
+        for (r, vrow) in records {
             let bytes =
                 rmp_serde::to_vec(&**r).map_err(|e| crate::Error::Serialization(e.to_string()))?;
             lens.push(bytes.len() as u64);
             data.extend_from_slice(&bytes);
-            log.push_str(&format!("add\t{}\t{}\n", bytes.len(), r.id));
+            match vrow {
+                Some(v) => log.push_str(&format!("add\t{}\t{}\t{}\n", bytes.len(), v, r.id)),
+                None => log.push_str(&format!("add\t{}\t-\t{}\n", bytes.len(), r.id)),
+            }
         }
         {
             let mut f = self.file.data.lock();
@@ -285,7 +319,7 @@ impl RowStore {
             f.write_all(log.as_bytes())?;
             f.sync_data()?;
         }
-        for (r, len) in records.iter().zip(lens) {
+        for ((r, vrow), len) in records.iter().zip(lens) {
             if let Some(old) = self.ids.row_of(&r.id) {
                 self.tombstone[old as usize] = true;
             }
@@ -294,6 +328,7 @@ impl RowStore {
             let end = self.file.ends.last().unwrap() + len;
             self.file.ends.push(end);
             self.tombstone.push(false);
+            self.vector_rows.push(vrow.unwrap_or(NO_VECTOR_ROW));
         }
         self.file.remap()
     }
@@ -342,6 +377,7 @@ impl RowStore {
             + self.ids.offsets.len() * 4
             + self.ids.by_hash.capacity() * 16
             + self.tombstone.len()
+            + self.vector_rows.len() * 8
             + self.file.ends.len() * 8
     }
 }
@@ -387,21 +423,31 @@ impl RecordStore {
         }
     }
 
-    pub fn insert(&mut self, record: Arc<Record>) -> crate::Result<()> {
+    /// Insert one record, with the row of its vector in the vector file if it has one.
+    pub fn insert(&mut self, record: Arc<Record>, vector_row: Option<u64>) -> crate::Result<()> {
         match self {
             RecordStore::Memory(m) => {
                 m.insert(record.id.clone(), record);
                 Ok(())
             }
-            RecordStore::Disk(s) => s.append(std::slice::from_ref(&record)),
+            RecordStore::Disk(s) => s.append(&[(record, vector_row)]),
+        }
+    }
+
+    /// The vector row this store remembers for `id`. Only the disk store keeps one; a
+    /// table with records in memory keeps its own map.
+    pub fn vector_row(&self, id: &str) -> Option<u64> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => s.vector_row(id),
         }
     }
 
     /// Insert many; on disk that is one append and one fsync.
-    pub fn insert_batch(&mut self, records: Vec<Arc<Record>>) -> crate::Result<()> {
+    pub fn insert_batch(&mut self, records: Vec<(Arc<Record>, Option<u64>)>) -> crate::Result<()> {
         match self {
             RecordStore::Memory(m) => {
-                for r in records {
+                for (r, _) in records {
                     m.insert(r.id.clone(), r);
                 }
                 Ok(())
@@ -478,13 +524,24 @@ mod tests {
         let path = dir.path().join("t.rec");
         let mut store = RowStore::open(&path).unwrap();
         store
-            .append(&[record("a", 1.0), record("b", 2.0), record("c", 3.0)])
+            .append(&[
+                (record("a", 1.0), Some(0)),
+                (record("b", 2.0), Some(1)),
+                (record("c", 3.0), None),
+            ])
             .unwrap();
+        assert_eq!(store.vector_row("a"), Some(0));
+        assert_eq!(store.vector_row("c"), None);
         assert_eq!(store.len(), 3);
         assert_eq!(store.get("b").unwrap().payload["v"], 2.0);
 
         // Update: a new row, the old one dead.
-        store.append(&[record("b", 20.0)]).unwrap();
+        store.append(&[(record("b", 20.0), Some(3))]).unwrap();
+        assert_eq!(
+            store.vector_row("b"),
+            Some(3),
+            "an update repoints the vector row"
+        );
         assert_eq!(store.len(), 3);
         assert_eq!(store.get("b").unwrap().payload["v"], 20.0);
 
@@ -502,12 +559,17 @@ mod tests {
         let store = RowStore::open(&path).unwrap();
         assert_eq!(store.len(), 2);
         assert_eq!(store.get("b").unwrap().payload["v"], 20.0);
+        assert_eq!(
+            store.vector_row("b"),
+            Some(3),
+            "vector rows survive a reopen"
+        );
         assert!(store.get("a").is_none());
         let mut seen = Vec::new();
         store.for_each(|r| seen.push(r.id.clone()));
         seen.sort();
         assert_eq!(seen, vec!["b", "c"]);
-        assert!(store.resident_bytes() < 200, "{}", store.resident_bytes());
+        assert!(store.resident_bytes() < 260, "{}", store.resident_bytes());
     }
 
     #[test]
@@ -515,7 +577,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.rec");
         let mut store = RowStore::open(&path).unwrap();
-        store.append(&[record("a", 1.0)]).unwrap();
+        store.append(&[(record("a", 1.0), None)]).unwrap();
         drop(store);
         std::fs::write(&path, b"").unwrap();
         let err = RowStore::open(&path).err().expect("must refuse");
@@ -530,9 +592,12 @@ mod tests {
             RecordStore::Disk(Box::new(RowStore::open(&dir.path().join("t.rec")).unwrap())),
         ] {
             store
-                .insert_batch(vec![record("x", 1.0), record("y", 2.0)])
+                .insert_batch(vec![
+                    (record("x", 1.0), Some(0)),
+                    (record("y", 2.0), Some(1)),
+                ])
                 .unwrap();
-            store.insert(record("x", 3.0)).unwrap();
+            store.insert(record("x", 3.0), Some(2)).unwrap();
             assert_eq!(store.len(), 2);
             assert!(store.contains("y"));
             assert_eq!(store.get("x").unwrap().payload["v"], 3.0);

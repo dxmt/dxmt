@@ -496,6 +496,14 @@ struct IntelligentTableData {
 
 /// 性能统计
 impl IntelligentTableData {
+    /// Where `id`'s vector sits in the vector file: the record store knows when the records
+    /// are on disk (eight bytes a row), the map knows when they are in memory.
+    fn vector_row(&self, id: &str) -> Option<u64> {
+        self.records
+            .vector_row(id)
+            .or_else(|| self.vector_rows.get(id).copied())
+    }
+
     /// The full vector of `record`: from the record while it holds one, else from disk.
     fn vector_for(&self, record: &Record) -> Vec<f32> {
         if !record.vector.is_empty() {
@@ -503,8 +511,8 @@ impl IntelligentTableData {
         }
         self.vector_file
             .as_ref()
-            .zip(self.vector_rows.get(&record.id))
-            .and_then(|(file, &row)| file.read(row))
+            .zip(self.vector_row(&record.id))
+            .and_then(|(file, row)| file.read(row))
             .unwrap_or_default()
     }
 
@@ -520,7 +528,7 @@ impl IntelligentTableData {
         let ids = self.records.ids();
         let mut by_row: Vec<(u64, &RecordId)> = ids
             .iter()
-            .filter_map(|id| self.vector_rows.get(id).map(|&row| (row, id)))
+            .filter_map(|id| self.vector_row(id).map(|row| (row, id)))
             .collect();
         by_row.sort_unstable();
         let mut out = Vec::with_capacity(ids.len());
@@ -534,7 +542,7 @@ impl IntelligentTableData {
         }
         // Records that predate the vector file (no row) still carry their vector.
         for id in &ids {
-            if !self.vector_rows.contains_key(id) {
+            if self.vector_row(id).is_none() {
                 if let Some(r) = self.records.get(id) {
                     if !r.vector.is_empty() {
                         out.push((id.clone(), r.vector.clone()));
@@ -811,7 +819,7 @@ async fn process_insert_group(
             let mut owners: Vec<(usize, Vec<Record>)> = Vec::new();
             let mut new_records_count = 0;
             let mut staged = 0usize;
-            let mut to_store: Vec<Arc<Record>> = Vec::new();
+            let mut to_store: Vec<(Arc<Record>, Option<u64>)> = Vec::new();
 
             for (slot, batch) in batches.into_iter().enumerate() {
                 // Dimensions are checked across the whole request before any of it is applied.
@@ -896,14 +904,16 @@ async fn process_insert_group(
                     // vector when that lives in the row file.
                     let stored = match row {
                         Some(row) => {
-                            table_data.vector_rows.insert(record_id.clone(), row);
+                            if !table_data.records.is_on_disk() {
+                                table_data.vector_rows.insert(record_id.clone(), row);
+                            }
                             let mut stored = record.clone();
                             stored.vector = Vec::new();
                             stored
                         }
                         None => record.clone(),
                     };
-                    to_store.push(Arc::new(stored));
+                    to_store.push((Arc::new(stored), row));
 
                     to_insert.push((record_id, request.vector, request.named_vectors));
                     records.push(record);
@@ -1453,7 +1463,7 @@ impl IntelligentIndexedStorage {
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        data.records.insert(Arc::new(record.clone()))?;
+        data.records.insert(Arc::new(record.clone()), None)?;
         data.table.record_count = data.records.len() as u64;
         if record.updated_at > data.table.updated_at {
             data.table.updated_at = record.updated_at;
@@ -2588,7 +2598,7 @@ impl IntelligentIndexedStorage {
         data.selected_algorithm = meta.algorithm.clone();
 
         data.records
-            .insert_batch(meta.records.iter().map(Arc::clone).collect())?;
+            .insert_batch(meta.records.iter().map(|r| (Arc::clone(r), None)).collect())?;
         data.table.record_count = data.records.len() as u64;
 
         let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
@@ -3602,10 +3612,8 @@ impl IntelligentIndexedStorage {
                 // would decode a msgpack row per candidate -- 500 decodes a query, which
                 // cost 10-13% of QPS on the 1M acceptance run -- only to learn what the
                 // map already says.
-                if let Some(&row) = table_data.vector_rows.get(&id) {
-                    if table_data.records.contains(&id) {
-                        on_disk.push((id, row));
-                    }
+                if let Some(row) = table_data.vector_row(&id) {
+                    on_disk.push((id, row));
                     continue;
                 }
                 let Some(record) = table_data.records.get(&id) else {
@@ -5386,11 +5394,16 @@ impl IntelligentIndexedStorage {
                 .unwrap_or_else(|| (chrono::Utc::now(), 1, None));
 
             let index_vector = request.vector.clone();
+            let mut updated_vector_row: Option<u64> = None;
             let stored_vector = match &table_data.vector_file {
                 Some(file) if request.vector.len() == expected_dim => {
                     // Appended here under the map lock -- updates are rare and single.
                     let row = file.append(&[(record_id.as_str(), request.vector.as_slice())])?[0];
-                    table_data.vector_rows.insert(record_id.clone(), row);
+                    if table_data.records.is_on_disk() {
+                        updated_vector_row = Some(row);
+                    } else {
+                        table_data.vector_rows.insert(record_id.clone(), row);
+                    }
                     Vec::new()
                 }
                 _ => request.vector.clone(),
@@ -5410,7 +5423,9 @@ impl IntelligentIndexedStorage {
                 status: crate::types::RecordStatus::Active,
             };
 
-            table_data.records.insert(Arc::new(record.clone()))?;
+            table_data
+                .records
+                .insert(Arc::new(record.clone()), updated_vector_row)?;
 
             if let Some(old_payload_val) = old_payload.as_ref() {
                 table_data
