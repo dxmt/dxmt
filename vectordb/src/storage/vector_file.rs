@@ -50,6 +50,11 @@ pub enum IoMode {
 /// In adaptive mode, how many parallel-read queries pass between probes of the mapping.
 const PROBE_EVERY: u32 = 32;
 
+/// Rows a probe touches through the mapping. A probe that mapped the whole query paid up to
+/// 500 readahead-inflated faults when it guessed wrong -- on NVMe a cold p99 of 29 ms against
+/// 7.5 ms for plain parallel reads, and a worst query of 629 ms. Eight faults bound that.
+const PROBE_ROWS: usize = 8;
+
 /// Rows per parallel read task. 500 rows over 16-row tasks is about one task per core.
 const PARALLEL_CHUNK: usize = 16;
 
@@ -190,7 +195,8 @@ impl VectorFile {
                 rows: 0,
             }),
             reader: File::open(path)?,
-            cold: AtomicBool::new(false),
+            // Cold until a probe says otherwise: a fresh process has nothing mapped.
+            cold: AtomicBool::new(true),
             since_probe: AtomicU32::new(0),
         };
         this.remap(rows)?;
@@ -302,29 +308,46 @@ impl VectorFile {
     ///
     /// `DB_VECTOR_PREFETCH=0` skips the `madvise` pass, for measuring what it costs.
     pub fn with_rows(&self, rows: &[u64], f: impl FnMut(usize, Option<&[f32]>)) {
-        let mode = io_mode();
-        let parallel = match mode {
-            IoMode::Mmap => false,
-            IoMode::Parallel => true,
-            IoMode::Adaptive => {
-                self.cold.load(Ordering::Relaxed)
-                    && !self
-                        .since_probe
-                        .fetch_add(1, Ordering::Relaxed)
-                        .is_multiple_of(PROBE_EVERY)
-            }
-        };
-        if parallel {
-            self.with_rows_parallel(rows, f);
-        } else {
+        match io_mode() {
+            IoMode::Mmap => self.with_rows_mapped(rows, f),
+            IoMode::Parallel => self.with_rows_parallel(rows, f),
+            IoMode::Adaptive => self.with_rows_adaptive(rows, f),
+        }
+    }
+
+    /// Warm: the whole query through the mapping, and it stays warm until a mapped query
+    /// takes a major fault. Cold: parallel reads, and every [`PROBE_EVERY`] queries the first
+    /// [`PROBE_ROWS`] rows go through the mapping to see whether the disk still answers.
+    fn with_rows_adaptive(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
+        if !self.cold.load(Ordering::Relaxed) {
             let before = major_faults();
-            self.with_rows_mapped(rows, f);
-            if mode == IoMode::Adaptive {
-                if let (Some(before), Some(after)) = (before, major_faults()) {
-                    self.cold.store(after > before, Ordering::Relaxed);
+            self.with_rows_mapped(rows, &mut f);
+            if let (Some(before), Some(after)) = (before, major_faults()) {
+                if after > before {
+                    self.cold.store(true, Ordering::Relaxed);
                     self.since_probe.store(0, Ordering::Relaxed);
                 }
             }
+            return;
+        }
+        let probe = self
+            .since_probe
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(PROBE_EVERY);
+        if !probe {
+            self.with_rows_parallel(rows, f);
+            return;
+        }
+        let (head, tail) = rows.split_at(PROBE_ROWS.min(rows.len()));
+        let before = major_faults();
+        self.with_rows_mapped(head, &mut f);
+        let faulted = match (before, major_faults()) {
+            (Some(b), Some(a)) => a > b,
+            _ => false,
+        };
+        self.with_rows_parallel(tail, |i, r| f(i + head.len(), r));
+        if !faulted {
+            self.cold.store(false, Ordering::Relaxed);
         }
     }
 
