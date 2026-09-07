@@ -1767,6 +1767,36 @@ impl HnswIndex {
         self.nodes.id(idx)
     }
 
+    /// Score the nodes of `ids` against `query` -- no walk -- and return the best `k`
+    /// nearest first. Ids the graph does not hold are skipped. Exact on an exact graph, ADC
+    /// on a quantized one; either way it is one distance per id from memory.
+    pub fn scan_ids(&self, query: &DenseVector, ids: &[String], k: usize) -> Vec<(RecordId, f32)> {
+        let query = self.prepare(query.clone());
+        let scorer = self.scorer(&query);
+        let mut heap: BinaryHeap<Result> = BinaryHeap::with_capacity(k + 1);
+        for id in ids {
+            let Some(idx) = self.idx_of(id) else {
+                continue;
+            };
+            if self.nodes.is_deleted(idx) {
+                continue;
+            }
+            let distance = self.score(&scorer, idx);
+            if heap.len() < k {
+                heap.push(Result { idx, distance });
+            } else if heap.peek().is_some_and(|w| distance < w.distance) {
+                heap.pop();
+                heap.push(Result { idx, distance });
+            }
+        }
+        let mut out: Vec<(RecordId, f32)> = heap
+            .into_iter()
+            .map(|r| (self.nodes.id(r.idx).to_string(), r.distance))
+            .collect();
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
     /// Search with precomputed query (for cosine similarity optimization)
     pub fn search_with_precomputed(
         &self,

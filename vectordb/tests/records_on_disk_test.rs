@@ -64,6 +64,23 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na * nb)
 }
 
+fn brute_force_where(vs: &[Vec<f32>], q: &[f32], keep: impl Fn(usize) -> bool) -> Vec<String> {
+    let mut scored: Vec<(usize, f32)> = (0..ROWS)
+        .filter(|&i| keep(i))
+        .map(|i| (i, cosine(&vs[i], q)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored
+        .into_iter()
+        .take(K)
+        .map(|(i, _)| i.to_string())
+        .collect()
+}
+
+fn recall(found: &[String], truth: &[String]) -> f64 {
+    found.iter().filter(|id| truth.contains(id)).count() as f64 / truth.len() as f64
+}
+
 fn brute_force(vs: &[Vec<f32>], q: &[f32]) -> Vec<String> {
     let mut scored: Vec<(usize, f32)> = (0..ROWS).map(|i| (i, cosine(&vs[i], q))).collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -133,7 +150,7 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
                 vector: vs[i].clone(),
                 sparse_vector: None,
                 named_vectors: None,
-                payload: Some(serde_json::json!({ "bucket": i % 5 })),
+                payload: Some(serde_json::json!({ "bucket": i % 5, "rare": i % 100 })),
             })
             .collect();
         storage.insert_records("t", batch).await.unwrap();
@@ -207,6 +224,40 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
         .hits
         .iter()
         .all(|h| h.payload.as_ref().unwrap()["bucket"] == 2));
+
+    // A 1%-selectivity filter goes through the code scan: the 60 matching ids are scored
+    // from the resident codes and reranked exactly, with no graph walk.
+    let qi = 4321;
+    let rare = storage
+        .search(
+            "t",
+            SearchQuery {
+                vector: vs[qi].clone(),
+                top_k: K,
+                limit: K,
+                filter: Some(dxmt_vectordb::types::record::Filter {
+                    must: Some(vec![dxmt_vectordb::types::record::Condition {
+                        key: "rare".to_string(),
+                        operation: dxmt_vectordb::types::record::FilterOperation::Equal(
+                            serde_json::json!(7),
+                        ),
+                    }]),
+                    must_not: None,
+                    should: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let found: Vec<String> = rare.hits.iter().map(|h| h.id.clone()).collect();
+    assert_eq!(found.len(), K, "a 1% filter must still fill the top-{K}");
+    assert!(found
+        .iter()
+        .all(|id| id.parse::<usize>().unwrap() % 100 == 7));
+    let truth = brute_force_where(&vs, &vs[qi], |i| i % 100 == 7);
+    let r = recall(&found, &truth);
+    assert!(r >= 0.9, "1%-filter recall@{K}: {r:.3}");
 
     // Search: exact rerank from the file, own vector first, recall against brute force.
     let queries: Vec<usize> = (0..50).map(|i| i * 113 % ROWS).collect();

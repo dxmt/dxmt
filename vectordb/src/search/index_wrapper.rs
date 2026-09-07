@@ -179,6 +179,16 @@ impl IndexWrapper {
         self.index.read().await.rerank_candidates(k)
     }
 
+    /// See `VectorIndex::scan_ids`.
+    pub async fn scan_ids(
+        &self,
+        query: &DenseVector,
+        ids: &[String],
+        k: usize,
+    ) -> Option<Vec<(RecordId, f32)>> {
+        self.index.read().await.scan_ids(query, ids, k)
+    }
+
     /// See `VectorIndex::wants_rebuild`.
     pub async fn wants_rebuild(&self) -> bool {
         self.index.read().await.wants_rebuild()

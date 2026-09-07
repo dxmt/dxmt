@@ -3240,7 +3240,7 @@ impl IntelligentIndexedStorage {
             total_records,
             cardinality_and_sel,
             precomputed_filter_ids,
-            exact_scored,
+            mut exact_scored,
         ) = {
             let tables = self.read_tables("search").await;
 
@@ -3320,8 +3320,10 @@ impl IntelligentIndexedStorage {
                             .iter()
                             .filter_map(|id| {
                                 table_data.records.get(id).map(|rec| {
+                                    // `vector_for`, not `rec.vector`: with the vectors on
+                                    // disk the record's own field is empty.
                                     let dist = metric
-                                        .calculate(&query.vector, &rec.vector)
+                                        .calculate(&query.vector, &table_data.vector_for(&rec))
                                         .unwrap_or(f32::MAX);
                                     (id.clone(), dist)
                                 })
@@ -3374,7 +3376,42 @@ impl IntelligentIndexedStorage {
             if let (Some(_), Some((ref cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                if *selectivity < 0.05 && cardinality.exp < Self::in_graph_filter_max_ids() {
+                if exact_scored.is_none()
+                    && *selectivity < 0.05
+                    && precomputed_filter_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.len() <= Self::CODE_SCAN_MAX)
+                {
+                    // A selective filter over a quantized graph: score the matching ids from
+                    // the resident codes -- one ADC lookup each -- and rerank the best of
+                    // them exactly. No walk. The 30,000-wide walk this replaces measured
+                    // 43 QPS at 480 ms p99 on the 1%-selectivity 1M case with the vectors
+                    // on disk; 10,000 code scores take a few milliseconds.
+                    let ids: Vec<String> = precomputed_filter_ids
+                        .as_ref()
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let want = active_index
+                        .rerank_candidates(result_limit)
+                        .await
+                        .unwrap_or(result_limit)
+                        .max(result_limit);
+                    if let Some(scanned) = active_index.scan_ids(&query.vector, &ids, want).await {
+                        info!(
+                            "FILTER-CODE-SCAN: selectivity={:.2}%, candidates={}, kept={}",
+                            selectivity * 100.0,
+                            ids.len(),
+                            scanned.len()
+                        );
+                        let r = self
+                            .rerank_exact(tablename, metric, &query.vector, scanned, result_limit)
+                            .await?;
+                        exact_scored = Some(r);
+                    }
+                }
+                if let Some(scored) = exact_scored.take() {
+                    (scored, false, result_limit)
+                } else if *selectivity < 0.05 && cardinality.exp < Self::in_graph_filter_max_ids() {
                     // Acorn-style in-graph filter: selectivity < 5%. Both the matching ids and,
                     // for a small enough set, their exact scores were computed in phase 1 while
                     // the map lock was held.
@@ -3640,6 +3677,19 @@ impl IntelligentIndexedStorage {
         if let Some(keep) = keep {
             approximate.retain(|(id, _)| keep.contains(id));
         }
+        self.rerank_exact(tablename, metric, query, approximate, k)
+            .await
+    }
+
+    /// Score `approximate` candidates against the stored vectors and keep the best `k`.
+    async fn rerank_exact(
+        &self,
+        tablename: &str,
+        metric: DistanceMetric,
+        query: &DenseVector,
+        approximate: Vec<(RecordId, f32)>,
+        k: usize,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
         // Resolve under the map lock, read and score outside it: with the vectors on disk
         // the reads can take milliseconds cold, and writers must not wait on them.
         let (vectors, file_rows, file) = {
@@ -4961,6 +5011,11 @@ impl IntelligentIndexedStorage {
     /// exact. 2048 keeps the direct path bounded at roughly the number of nodes a walk with
     /// `ef = 128` and `m = 16` would touch regardless.
     const EXACT_FILTER_SCAN_MAX: usize = 2048;
+
+    /// Largest matching set scored from the index's resident codes instead of walked. At
+    /// a few hundred nanoseconds a code, 100,000 is tens of milliseconds -- past that a
+    /// walk with the filter applied in-graph is the cheaper shape.
+    const CODE_SCAN_MAX: usize = 100_000;
 
     /// Largest matching set the in-graph filter will materialise ids for.
     ///

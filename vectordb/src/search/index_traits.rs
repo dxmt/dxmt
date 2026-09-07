@@ -67,6 +67,16 @@ pub trait VectorIndex: Send + Sync {
         None
     }
 
+    /// Score `ids` against the query without walking the graph, best `k` first, with the
+    /// index's own (possibly approximate) distance. `None` when the index has no cheaper way
+    /// than a walk to score an arbitrary set -- an exact HNSW would have to read every
+    /// vector, which the caller can do itself. A quantized graph scores a code in a few
+    /// hundred nanoseconds from memory, so a 1%-selectivity filter over 1M rows is 10,000
+    /// scores and one rerank instead of a 30,000-wide walk (design/DISK_INDEX.md, phase 3).
+    fn scan_ids(&self, _query: &[f32], _ids: &[String], _k: usize) -> Option<Vec<(String, f32)>> {
+        None
+    }
+
     /// Whether a rebuild would produce a materially different index even though this one
     /// already holds every record -- an HNSW-PQ graph that has not quantized yet, say. The
     /// storage layer's rebuild skips "equivalent" indexes unless this says otherwise.
