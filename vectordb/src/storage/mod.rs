@@ -19,6 +19,7 @@ pub(crate) mod memory_guard;
 pub mod mmap_index;
 pub mod object;
 pub mod payload_index;
+pub mod record_store;
 pub mod tier_promotion;
 pub mod tiered;
 pub mod tombstone_tracker;

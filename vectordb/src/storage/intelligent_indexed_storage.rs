@@ -454,7 +454,10 @@ struct IntelligentTableData {
     /// 而 10M 条 × 9.5 KB 就是 90 GB 的临时拷贝叠在 90 GB 常驻之上 —— 实测在 125 GB 的机器上
     /// 被内核杀掉(design doc §34.3)。记录从不原地修改、只整体替换,所以引用计数就够,
     /// 一次快照的拷贝从每条 9.5 KB 降到 8 字节。
-    records: HashMap<RecordId, Arc<Record>>,
+    /// Where the records live: the map, or a row file on disk (`DB_RECORD_STORE=disk`,
+    /// phase 3 of design/DISK_INDEX.md). Same interface either way; `get` decodes from
+    /// disk when that is where the record is.
+    records: crate::storage::record_store::RecordStore,
 
     /// Full vectors on disk (`DB_VECTOR_STORE=disk`, design/DISK_INDEX.md section 4, phase 2).
     /// When set, the `Record`s in `records` carry an empty `vector` and `vector_rows` says
@@ -509,19 +512,18 @@ impl IntelligentTableData {
     /// file order, a few thousand at a time, rather than one row per record.
     fn vectors_for_index(&self) -> Vec<(RecordId, Vec<f32>)> {
         let Some(file) = &self.vector_file else {
-            return self
-                .records
-                .iter()
-                .map(|(id, r)| (id.clone(), r.vector.clone()))
-                .collect();
+            let mut out = Vec::with_capacity(self.records.len());
+            self.records
+                .for_each(|r| out.push((r.id.clone(), r.vector.clone())));
+            return out;
         };
-        let mut by_row: Vec<(u64, &RecordId)> = self
-            .records
-            .keys()
+        let ids = self.records.ids();
+        let mut by_row: Vec<(u64, &RecordId)> = ids
+            .iter()
             .filter_map(|id| self.vector_rows.get(id).map(|&row| (row, id)))
             .collect();
         by_row.sort_unstable();
-        let mut out = Vec::with_capacity(self.records.len());
+        let mut out = Vec::with_capacity(ids.len());
         for chunk in by_row.chunks(4096) {
             let rows: Vec<u64> = chunk.iter().map(|(row, _)| *row).collect();
             for ((_, id), vector) in chunk.iter().zip(file.read_rows(&rows)) {
@@ -530,10 +532,14 @@ impl IntelligentTableData {
                 }
             }
         }
-        // Records that predate the file (no row) still carry their vector.
-        for (id, r) in &self.records {
-            if !self.vector_rows.contains_key(id) && !r.vector.is_empty() {
-                out.push((id.clone(), r.vector.clone()));
+        // Records that predate the vector file (no row) still carry their vector.
+        for id in &ids {
+            if !self.vector_rows.contains_key(id) {
+                if let Some(r) = self.records.get(id) {
+                    if !r.vector.is_empty() {
+                        out.push((id.clone(), r.vector.clone()));
+                    }
+                }
             }
         }
         out
@@ -805,6 +811,7 @@ async fn process_insert_group(
             let mut owners: Vec<(usize, Vec<Record>)> = Vec::new();
             let mut new_records_count = 0;
             let mut staged = 0usize;
+            let mut to_store: Vec<Arc<Record>> = Vec::new();
 
             for (slot, batch) in batches.into_iter().enumerate() {
                 // Dimensions are checked across the whole request before any of it is applied.
@@ -896,9 +903,7 @@ async fn process_insert_group(
                         }
                         None => record.clone(),
                     };
-                    table_data
-                        .records
-                        .insert(record_id.clone(), Arc::new(stored));
+                    to_store.push(Arc::new(stored));
 
                     to_insert.push((record_id, request.vector, request.named_vectors));
                     records.push(record);
@@ -908,6 +913,8 @@ async fn process_insert_group(
                 owners.push((slot, records));
             }
 
+            // One append (and, on disk, one fsync) for the whole group.
+            table_data.records.insert_batch(to_store)?;
             table_data.table.record_count += new_records_count;
             table_data.table.updated_at = chrono::Utc::now();
 
@@ -1446,8 +1453,7 @@ impl IntelligentIndexedStorage {
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        data.records
-            .insert(record.id.clone(), Arc::new(record.clone()));
+        data.records.insert(Arc::new(record.clone()))?;
         data.table.record_count = data.records.len() as u64;
         if record.updated_at > data.table.updated_at {
             data.table.updated_at = record.updated_at;
@@ -1554,7 +1560,7 @@ impl IntelligentIndexedStorage {
                         TableTemplate {
                             table: data.table.clone(),
                             algorithm: data.selected_algorithm.clone(),
-                            records: data.records.values().cloned().collect(),
+                            records: data.records.snapshot_records(),
                         },
                     )
                 })
@@ -2091,6 +2097,43 @@ impl IntelligentIndexedStorage {
         Box::new(index.with_store(store))
     }
 
+    fn record_file_path(wal_dir: &std::path::Path, table_name: &str) -> PathBuf {
+        wal_dir.join("records").join(format!("{table_name}.rec"))
+    }
+
+    /// `DB_RECORD_STORE=disk` keeps every table's records in a row file under the WAL
+    /// directory instead of in memory (phase 3). Like the vector file: keyed by table name,
+    /// wiped by a fresh `CREATE TABLE`, reused by a restore or replay.
+    fn open_record_store(
+        &self,
+        table: &Table,
+        fresh: bool,
+    ) -> crate::Result<crate::storage::record_store::RecordStore> {
+        use crate::storage::record_store::{RecordStore, RowStore};
+        let wanted = std::env::var("DB_RECORD_STORE").ok().as_deref() == Some("disk");
+        let Some(wal_dir) = self.wal_dir.as_ref().filter(|_| wanted) else {
+            if wanted {
+                warn!("DB_RECORD_STORE=disk needs a WAL directory; keeping records in memory");
+            }
+            return Ok(RecordStore::memory());
+        };
+        let path = Self::record_file_path(wal_dir, &table.name);
+        if fresh {
+            let _ = std::fs::remove_file(&path);
+            let mut log = path.as_os_str().to_owned();
+            log.push(".log");
+            let _ = std::fs::remove_file(PathBuf::from(log));
+        }
+        let store = RowStore::open(&path)?;
+        info!(
+            "table '{}': records on disk at {} ({} live)",
+            table.name,
+            path.display(),
+            store.len()
+        );
+        Ok(RecordStore::Disk(Box::new(store)))
+    }
+
     fn vector_file_path(wal_dir: &std::path::Path, table_name: &str) -> PathBuf {
         wal_dir.join("vectors").join(format!("{table_name}.f32"))
     }
@@ -2544,10 +2587,8 @@ impl IntelligentIndexedStorage {
         data.table.index_type = index_type_of(&meta.algorithm);
         data.selected_algorithm = meta.algorithm.clone();
 
-        for record in &meta.records {
-            // Already an `Arc` from the file; cloning the handle is the point.
-            data.records.insert(record.id.clone(), Arc::clone(record));
-        }
+        data.records
+            .insert_batch(meta.records.iter().map(Arc::clone).collect())?;
         data.table.record_count = data.records.len() as u64;
 
         let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
@@ -3035,9 +3076,10 @@ impl IntelligentIndexedStorage {
         };
 
         let (vector_file, vector_rows) = self.open_vector_file(&table, log)?;
+        let records = self.open_record_store(&table, log)?;
         let table_data = IntelligentTableData {
             table: table.clone(),
-            records: HashMap::new(),
+            records,
             vector_file,
             vector_rows,
             selected_algorithm: index_decision.selected_algorithm.clone(),
@@ -3642,7 +3684,7 @@ impl IntelligentIndexedStorage {
                                     None
                                 },
                                 if query.with_vector {
-                                    Some(table_data.vector_for(r))
+                                    Some(table_data.vector_for(&r))
                                 } else {
                                     None
                                 },
@@ -4148,7 +4190,7 @@ impl IntelligentIndexedStorage {
                                     None
                                 },
                                 if request.with_vector {
-                                    Some(table_data.vector_for(r))
+                                    Some(table_data.vector_for(&r))
                                 } else {
                                     None
                                 },
@@ -4277,6 +4319,11 @@ impl IntelligentIndexedStorage {
                 let _ = std::fs::remove_file(&path);
                 let _ =
                     std::fs::remove_file(crate::storage::vector_file::VectorFile::rows_path(&path));
+                let rec = Self::record_file_path(wal_dir, name);
+                let _ = std::fs::remove_file(&rec);
+                let mut log = rec.as_os_str().to_owned();
+                log.push(".log");
+                let _ = std::fs::remove_file(PathBuf::from(log));
             }
             data.table.id.to_string()
         };
@@ -4562,9 +4609,13 @@ impl IntelligentIndexedStorage {
                     .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
                 table_data
                     .records
-                    .iter()
-                    .filter(|(id, _)| !indexed.contains(*id))
-                    .map(|(id, r)| (id.clone(), table_data.vector_for(r)))
+                    .ids()
+                    .into_iter()
+                    .filter(|id| !indexed.contains(id))
+                    .filter_map(|id| {
+                        let r = table_data.records.get(&id)?;
+                        Some((id, table_data.vector_for(&r)))
+                    })
                     .collect()
             };
             if missing.is_empty() {
@@ -4590,10 +4641,13 @@ impl IntelligentIndexedStorage {
             // Whatever arrived since the last pass. No write can slip between this and the swap
             // because both happen under the same lock acquisition.
             let mut final_delta = 0usize;
-            for (id, record) in table_data.records.iter() {
-                if !indexed.contains(id) {
+            for id in table_data.records.ids() {
+                if !indexed.contains(&id) {
+                    let Some(record) = table_data.records.get(&id) else {
+                        continue;
+                    };
                     new_wrapper
-                        .insert(id.clone(), table_data.vector_for(record))
+                        .insert(id.clone(), table_data.vector_for(&record))
                         .await?;
                     final_delta += 1;
                 }
@@ -4681,7 +4735,8 @@ impl IntelligentIndexedStorage {
 
             let records: Vec<CreateRecordRequest> = src
                 .records
-                .values()
+                .values_cloned()
+                .iter()
                 .map(|r| CreateRecordRequest {
                     id: r.id.clone(),
                     vector: src.vector_for(r),
@@ -4708,7 +4763,7 @@ impl IntelligentIndexedStorage {
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-        Ok(table_data.records.keys().cloned().collect())
+        Ok(table_data.records.ids())
     }
 
     /// 获取向量索引中的记录数（用于一致性检查）
@@ -4744,15 +4799,15 @@ impl IntelligentIndexedStorage {
 
         // 记录本身的内存：向量 + payload 的 JSON 文本长度。payload 是 serde_json::Value，
         // 没有便宜的精确大小，序列化后的字节数是最接近的可得近似。
-        let payload_bytes: usize = data
-            .records
-            .values()
-            .map(|r| {
-                serde_json::to_string(&r.payload)
+        // Records on disk cost the map nothing; this counts only what is resident.
+        let mut payload_bytes: usize = 0;
+        if !data.records.is_on_disk() {
+            data.records.for_each(|r| {
+                payload_bytes += serde_json::to_string(&r.payload)
                     .map(|s| s.len())
                     .unwrap_or(0)
-            })
-            .sum();
+            });
+        }
         let vector_bytes = record_count * dimension * std::mem::size_of::<f32>();
 
         Ok(serde_json::json!({
@@ -5288,9 +5343,9 @@ impl IntelligentIndexedStorage {
             .records
             .get(record_id)
             .map(|r| {
-                let mut record = (**r).clone();
+                let mut record = (*r).clone();
                 if record.vector.is_empty() {
-                    record.vector = table.vector_for(r);
+                    record.vector = table.vector_for(&r);
                 }
                 record
             })
@@ -5353,9 +5408,7 @@ impl IntelligentIndexedStorage {
                 status: crate::types::RecordStatus::Active,
             };
 
-            table_data
-                .records
-                .insert(record_id.clone(), Arc::new(record.clone()));
+            table_data.records.insert(Arc::new(record.clone()))?;
 
             if let Some(old_payload_val) = old_payload.as_ref() {
                 table_data
@@ -5493,7 +5546,7 @@ impl IntelligentIndexedStorage {
             for id in &record_ids {
                 let old_payload = table_data.records.get(id).map(|r| r.payload.clone());
 
-                table_data.records.remove(id);
+                table_data.records.remove(id)?;
                 table_data.vector_rows.remove(id);
 
                 if let Some(payload) = old_payload {
@@ -5795,7 +5848,7 @@ impl IntelligentIndexedStorage {
 
                 let similarity_score = Self::similarity_from_distance(metric, score);
 
-                records_with_scores.push(((**record).clone(), similarity_score));
+                records_with_scores.push(((*record).clone(), similarity_score));
 
                 // 只保留limit个结果
                 if records_with_scores.len() >= limit {
@@ -5838,10 +5891,10 @@ impl IntelligentIndexedStorage {
             let matching_ids = table_data.payload_index.get_matching_ids(filter);
             matching_ids
                 .iter()
-                .filter_map(|id| table_data.records.get(id).map(|r| (**r).clone()))
+                .filter_map(|id| table_data.records.get(id).map(|r| (*r).clone()))
                 .collect()
         } else {
-            table_data.records.values().map(|r| (**r).clone()).collect()
+            table_data.records.values_cloned()
         };
 
         // Sort by created_at (newest first)
@@ -6022,7 +6075,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(table_name.to_string()))?;
             Snapshot {
                 table: data.table.clone(),
-                records: data.records.values().map(|r| (**r).clone()).collect(),
+                records: data.records.values_cloned(),
             }
         };
         let json =
