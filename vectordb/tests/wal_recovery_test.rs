@@ -696,6 +696,62 @@ async fn writes_after_a_snapshot_are_replayed_on_top_of_it() {
     assert_eq!(ids, vec!["keep", "late"]);
 }
 
+/// Session one snapshots, which compacts the log to nothing. Session two writes. Session
+/// three must see that write.
+///
+/// It did not: an empty log opens with its sequence counter at 0, the write in session two
+/// was numbered 0, and session three replayed from the snapshot's sequence and skipped it.
+/// The record was gone from the index, and from the record map too unless a row file held it.
+#[tokio::test]
+async fn a_write_in_the_session_after_a_snapshot_survives_the_next_restart() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("b", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+    }
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .insert_records("t", vec![record("c", vec![0.0, 0.0, 1.0, 0.0])])
+            .await
+            .unwrap();
+        let hits = storage
+            .search("t", query(vec![0.0, 0.0, 1.0, 0.0], 1))
+            .await
+            .unwrap();
+        assert_eq!(hits.hits[0].id, "c", "in the writing session");
+    }
+
+    let storage = open(&wal_dir).await;
+    assert_eq!(
+        storage.get_table("t").await.unwrap().record_count,
+        3,
+        "the write after the snapshot did not survive a second restart"
+    );
+    let hits = storage
+        .search("t", query(vec![0.0, 0.0, 1.0, 0.0], 1))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits[0].id, "c", "after the second restart");
+}
+
 #[tokio::test]
 async fn a_corrupt_snapshot_is_refused_rather_than_silently_ignored() {
     let tmp = TempDir::new().unwrap();

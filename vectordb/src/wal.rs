@@ -250,6 +250,18 @@ impl WalManager {
         self.sequence_number
     }
 
+    /// Never hand out a sequence number below `next` again.
+    ///
+    /// Opening a log derives the next number by scanning the file, and a log that a snapshot
+    /// has compacted to nothing scans as "start at 0". The snapshot manifest still says
+    /// where the log left off, and recovery replays from there -- so a write numbered from
+    /// 0 in the session after a restart is below the replay point, and the restart after
+    /// that skips it. The storage layer passes the manifest's sequence here before it
+    /// writes anything.
+    pub fn advance_sequence_to(&mut self, next: u64) {
+        self.sequence_number = self.sequence_number.max(next);
+    }
+
     /// Replay WAL entries from a given sequence number (supports compression)
     pub fn replay_from(&self, from_seq: u64) -> Result<Vec<(u64, WalEntry)>> {
         let wal_file_path = self.wal_path.join("wal.log");

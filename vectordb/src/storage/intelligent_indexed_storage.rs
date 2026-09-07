@@ -1135,12 +1135,18 @@ impl IntelligentIndexedStorage {
             let from_seq = storage.load_snapshot(&dir).await?;
 
             let mut pending = {
-                let guard = storage
+                let mut guard = storage
                     .wal
                     .as_ref()
                     .unwrap()
                     .lock()
                     .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
+                // The snapshot compacted the log, possibly to nothing, and an empty log
+                // opens with its counter at 0. Writes from here on must be numbered after
+                // the snapshot's replay point, or the next restart replays past them: a
+                // record inserted in the session after a snapshot, and gone at the restart
+                // after that, measured before this line existed.
+                guard.advance_sequence_to(from_seq);
                 guard.replay_from(from_seq)?
             };
 
