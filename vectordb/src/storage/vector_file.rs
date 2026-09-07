@@ -47,8 +47,7 @@ pub enum IoMode {
     Adaptive,
 }
 
-/// In adaptive mode, how many warm queries pass between probes of the mapping. While cold
-/// every query probes: the probe is eight rows, and it is the only way back to the mapping.
+/// In adaptive mode, how many parallel-read queries pass between probes of the mapping.
 const PROBE_EVERY: u32 = 32;
 
 /// Rows a probe touches through the mapping. A probe that mapped the whole query paid up to
@@ -70,6 +69,23 @@ fn io_mode() -> IoMode {
 
 /// Major page faults taken by the calling thread so far, or `None` where that is not
 /// available (adaptive mode then behaves as `Mmap`).
+/// Whether mapping a file of `bytes` can pay for itself, which needs it to fit in the page
+/// cache with room to spare for everything else the process holds.
+///
+/// Half of the memory the process may use (the host's, or a cgroup limit). The measured gap
+/// is wide enough that the exact fraction does not matter: at 10M the rows are 15.4 GB
+/// against 121 GB of RAM and mapping is the faster path; at 100M they are 153.6 GB against
+/// the same 121 GB, and mapping is 7x the cold tail of parallel reads and still worse warm.
+/// Anything between a fifth and the whole of memory separates those two.
+///
+/// Unknown memory (not Linux) keeps the previous behaviour rather than guessing.
+fn mapping_can_pay(bytes: u64) -> bool {
+    match crate::storage::memory_guard::total_bytes() {
+        Some(total) => bytes <= total / 2,
+        None => true,
+    }
+}
+
 fn major_faults() -> Option<i64> {
     #[cfg(target_os = "linux")]
     {
@@ -204,6 +220,13 @@ pub struct VectorFile {
     cold: AtomicBool,
     /// Adaptive mode: parallel queries since the mapping was last probed.
     since_probe: AtomicU32,
+    /// Whether the mapping can pay for itself: false once the rows are too big to be held
+    /// in the page cache, which makes adaptive mode plain parallel reads. Re-evaluated on
+    /// every remap, because a table crosses the line by growing. Measured on the 100M table
+    /// (153.6 GB of rows, 121 GB of RAM), cold p99 / warm p99 over 1,000 accurate queries:
+    /// parallel 99 / 11 ms, mmap 697 / 158 ms. The mapping loses in every state there, warm
+    /// included, so nothing about it is worth probing for.
+    mappable: AtomicBool,
 }
 
 struct Writer {
@@ -306,6 +329,7 @@ impl VectorFile {
             // Cold until a probe says otherwise: a fresh process has nothing mapped.
             cold: AtomicBool::new(true),
             since_probe: AtomicU32::new(0),
+            mappable: AtomicBool::new(true),
         };
         this.remap(rows)?;
         Ok((this, ids))
@@ -370,6 +394,12 @@ impl VectorFile {
     }
 
     fn remap(&self, rows: u64) -> crate::Result<()> {
+        // A table crosses the line by growing, so this is decided here rather than at open,
+        // where the file is usually empty.
+        self.mappable.store(
+            mapping_can_pay(rows.saturating_mul(self.row_bytes as u64)),
+            Ordering::Relaxed,
+        );
         let mut m = self.map.write();
         if rows == 0 {
             m.mmap = None;
@@ -436,52 +466,54 @@ impl VectorFile {
         }
     }
 
-    /// Both directions start with the same [`PROBE_ROWS`]-row probe through the mapping, and
-    /// the answer decides how the rest of the query is read: mapped while the pages are
-    /// resident, parallel `pread` once one of them is not. Warm queries skip the probe
-    /// entirely -- it is only paid when the last one faulted, or every [`PROBE_EVERY`]
-    /// queries while cold to see whether the file has come back into cache.
+    /// Warm: the whole query through the mapping, and it stays warm until a mapped query
+    /// takes a major fault. Cold: parallel reads, and every [`PROBE_EVERY`] queries the first
+    /// [`PROBE_ROWS`] rows go through the mapping to see whether the disk still answers.
     ///
-    /// The warm path used to commit the whole query to the mapping and check the fault
-    /// count afterwards, which made the *detector* the expensive part: on a file bigger
-    /// than the page cache, one query in a few dozen would map 500 rows and serialise a
-    /// major fault for each of them. Measured on the 100M table (154 GB of rows, ~70 GB of
-    /// cache), that is a cold p99 of 282 ms and a worst query of 736 ms against 99 ms and
-    /// 175 ms for plain parallel reads -- while the warm percentiles of the two are
-    /// identical to within noise. Nothing about the mapping is worth a 500-fault query, so
-    /// the probe now bounds what a wrong guess costs in either direction.
+    /// Neither, on a file too big to be cached: see [`Self::mappable`]. That check is what
+    /// makes the fault-driven part safe, because the state here is one bit for the whole
+    /// file and a probe only ever samples eight rows of it. On a file that fits, those eight
+    /// rows are representative -- the whole thing is either in cache or not. On a file twice
+    /// the size of memory they are not, and every clean probe buys a query that maps 500
+    /// rows and serialises a major fault for most of them.
     fn with_rows_adaptive(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
-        let cold = self.cold.load(Ordering::Relaxed);
-        // Warm and staying warm: no probe, no split, exactly the mapped path.
-        if !cold && !self.probe_due() {
-            self.with_rows_mapped(rows, &mut f);
+        if !self.mappable.load(Ordering::Relaxed) {
+            self.with_rows_parallel(rows, f);
             return;
         }
+        if !self.cold.load(Ordering::Relaxed) {
+            let before = major_faults();
+            self.with_rows_mapped(rows, &mut f);
+            if let (Some(before), Some(after)) = (before, major_faults()) {
+                if after > before {
+                    self.cold.store(true, Ordering::Relaxed);
+                    self.since_probe.store(0, Ordering::Relaxed);
+                }
+            }
+            return;
+        }
+        let probe = self
+            .since_probe
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(PROBE_EVERY);
+        if !probe {
+            self.with_rows_parallel(rows, f);
+            return;
+        }
+        // The probe reads its eight rows through the mapping and the rest in parallel,
+        // whichever way it comes out: eight rows are enough to tell whether the disk is
+        // being touched, and nowhere near enough to bet the other 492 on.
         let (head, tail) = rows.split_at(PROBE_ROWS.min(rows.len()));
         let before = major_faults();
         self.with_rows_mapped(head, &mut f);
         let faulted = match (before, major_faults()) {
             (Some(b), Some(a)) => a > b,
-            // No fault counter (not Linux): believe the state we already had.
-            _ => cold,
+            _ => false,
         };
-        if faulted {
-            self.cold.store(true, Ordering::Relaxed);
-            self.since_probe.store(0, Ordering::Relaxed);
-            self.with_rows_parallel(tail, |i, r| f(i + head.len(), r));
-        } else {
+        self.with_rows_parallel(tail, |i, r| f(i + head.len(), r));
+        if !faulted {
             self.cold.store(false, Ordering::Relaxed);
-            self.with_rows_mapped(tail, |i, r| f(i + head.len(), r));
         }
-    }
-
-    /// Whether this query pays the probe: always while cold, and once every
-    /// [`PROBE_EVERY`] queries while warm, so a file that falls out of cache is noticed
-    /// without every warm query paying for the check.
-    fn probe_due(&self) -> bool {
-        self.since_probe
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(PROBE_EVERY)
     }
 
     /// Whether adaptive mode currently reads in parallel. For tests and diagnostics.
@@ -740,14 +772,38 @@ mod tests {
             assert_eq!(got, want_short, "short query, start_cold={start_cold}");
         }
 
-        // A file this small is entirely in cache after the writes above, so no probe can
-        // fault and adaptive must settle warm rather than flapping.
+        // A file this small is entirely in cache after the writes above, so the next probe
+        // cannot fault and adaptive must settle warm rather than flapping. `since_probe` is
+        // reset because only every PROBE_EVERY-th cold query probes at all.
         file.cold.store(true, Ordering::Relaxed);
+        file.since_probe.store(0, Ordering::Relaxed);
         file.with_rows_adaptive(&rows, |_, _| {});
         #[cfg(target_os = "linux")]
         assert!(
             !file.is_cold(),
             "a fully cached file stayed on the cold path"
+        );
+
+        // Rows too big for the page cache are read in parallel whatever the fault counter
+        // says, and the mapped/cold state is not consulted or written.
+        assert!(
+            file.mappable.load(Ordering::Relaxed),
+            "100 rows of 8 floats fit in any machine's cache"
+        );
+        file.mappable.store(false, Ordering::Relaxed);
+        file.cold.store(false, Ordering::Relaxed);
+        let mut got = Vec::new();
+        file.with_rows_adaptive(&rows, |i, r| got.push((i, r.map(|r| r.to_vec()))));
+        got.sort_by_key(|(i, _)| *i);
+        assert_eq!(got, want, "unmappable file");
+        assert!(
+            !file.is_cold(),
+            "an unmappable file must not touch the mapped/cold state"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            !mapping_can_pay(u64::MAX / 4),
+            "no machine has u64::MAX/2 bytes of memory"
         );
     }
 

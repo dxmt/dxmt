@@ -124,7 +124,10 @@ fn available_bytes() -> Option<u64> {
     }
 }
 
-fn total_bytes() -> Option<u64> {
+/// Total memory the process may use: the host's, capped by a cgroup limit when there is one.
+///
+/// `None` where neither is readable (not Linux).
+pub fn total_bytes() -> Option<u64> {
     let host = meminfo_field("MemTotal:");
     match cgroup_limit() {
         Some(limit) => Some(host.map_or(limit, |h| h.min(limit))),
