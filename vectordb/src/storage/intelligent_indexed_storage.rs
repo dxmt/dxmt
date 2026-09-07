@@ -3598,13 +3598,21 @@ impl IntelligentIndexedStorage {
             let mut in_memory: Vec<(RecordId, Vec<f32>)> = Vec::new();
             let mut on_disk: Vec<(RecordId, u64)> = Vec::new();
             for (id, _) in approximate {
+                // The row map answers first: with the records on disk, `records.get`
+                // would decode a msgpack row per candidate -- 500 decodes a query, which
+                // cost 10-13% of QPS on the 1M acceptance run -- only to learn what the
+                // map already says.
+                if let Some(&row) = table_data.vector_rows.get(&id) {
+                    if table_data.records.contains(&id) {
+                        on_disk.push((id, row));
+                    }
+                    continue;
+                }
                 let Some(record) = table_data.records.get(&id) else {
                     continue;
                 };
                 if !record.vector.is_empty() {
                     in_memory.push((id, record.vector.clone()));
-                } else if let Some(&row) = table_data.vector_rows.get(&id) {
-                    on_disk.push((id, row));
                 }
             }
             (in_memory, on_disk, table_data.vector_file.clone())
