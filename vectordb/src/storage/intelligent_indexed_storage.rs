@@ -5079,19 +5079,13 @@ impl IntelligentIndexedStorage {
                 use crate::search::hnsw::HnswConfig;
                 use crate::search::hnsw_pq::{HnswPqConfig, HnswPqIndex};
 
+                // The same graph parameters plain HNSW gets. This used to set `ml` to
+                // 1/ln(2) -- four times the HNSW paper's 1/ln(m) -- so three quarters of
+                // the nodes had an upper layer instead of one in sixteen; the graph the
+                // 10M acceptance run built that way reached recall@100 0.9267 where the
+                // probe's graph with 1/ln(16) reached 0.9787 on the same codes.
                 let config = HnswPqConfig {
-                    hnsw_config: HnswConfig {
-                        m: *m,
-                        max_m: *m,
-                        max_m0: m * 2,
-                        ef_construction: *ef_construction,
-                        ef_search: *ef_search,
-                        max_connections: *m,
-                        level_multiplier: 1.0 / (2.0_f64.ln()),
-                        max_level: 16,
-                        ml: 1.0 / (2.0_f64.ln()),
-                        seed: 42,
-                    },
+                    hnsw_config: HnswConfig::from_params(*m, *ef_construction, *ef_search),
                     num_subvectors: *num_subvectors,
                     num_centroids: *num_centroids,
                     // Reranking is not optional any more: the graph holds codes, not
