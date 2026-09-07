@@ -11,10 +11,12 @@ W7 给 WAL 加了截断——快照校验通过后，它所覆盖的那段日志
 
 | 路径 | 内容 | 必须备份 |
 |---|---|---|
-| `$DB_WAL_DIR/snapshot/` | 表元数据、记录、索引段 | **是** |
+| `$DB_WAL_DIR/snapshot/` | 表元数据、索引段;内存表的记录 | **是** |
+| `$DB_WAL_DIR/records/` | 盘表的记录(`<表>.rec` + `.rec.log`),默认每张表都是盘表 | **是** |
+| `$DB_WAL_DIR/vectors/` | 盘表的全量向量(`<表>.f32` 或 `.f16` + `.rows`) | **是** |
 | `$DB_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
 | `$DB_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
-| 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**（等价于上面两项） |
+| 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**(等价于上面几项:配了对象存储时,盘表的快照会把记录连同向量一起带上,所以一台没有行文件的新机器也能从它恢复;代价是快照又回到按记录数计时) |
 
 `DB_WAL_DIR` 默认 `./data/wal`。
 
@@ -37,7 +39,9 @@ curl -sX POST http://localhost:9999/api/v1/backup \
 {
   "created_at": "2026-08-15T03:14:07.123456789+00:00",
   "tables": 3,
-  "files": ["snapshot/manifest", "snapshot/t0.meta", "snapshot/t0.idx", "wal.log"],
+  "files": ["snapshot/manifest", "snapshot/t0.meta", "snapshot/t0.idx",
+            "records/docs.rec.log", "records/docs.rec",
+            "vectors/docs.f32.rows", "vectors/docs.f32", "wal.log"],
   "bytes": 5387421,
   "restore": "Stop the server, replace the contents of DB_WAL_DIR with this directory, and start it again."
 }
@@ -60,6 +64,8 @@ systemctl stop dxmt-vectordb          # 或 kill -TERM
 rm -rf   /var/lib/dxmt/wal
 mkdir -p /var/lib/dxmt/wal
 cp -a /backups/dxmt-2026-08-15/snapshot /var/lib/dxmt/wal/
+cp -a /backups/dxmt-2026-08-15/records  /var/lib/dxmt/wal/   # 盘表的记录
+cp -a /backups/dxmt-2026-08-15/vectors  /var/lib/dxmt/wal/   # 盘表的向量
 cp -a /backups/dxmt-2026-08-15/wal.log  /var/lib/dxmt/wal/   # 如果备份里有
 
 DB_WAL_DIR=/var/lib/dxmt/wal systemctl start dxmt-vectordb

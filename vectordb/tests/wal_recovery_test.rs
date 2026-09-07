@@ -1218,6 +1218,24 @@ async fn a_backup_directory_is_enough_to_restore_from() {
     if backup_dir.join("wal.log").exists() {
         std::fs::copy(backup_dir.join("wal.log"), wal_dir.join("wal.log")).unwrap();
     }
+    // The row files, which hold the records and vectors of every table since those left
+    // the snapshot.
+    for sub in ["records", "vectors"] {
+        let src = backup_dir.join(sub);
+        if !src.exists() {
+            continue;
+        }
+        let dst = wal_dir.join(sub);
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        }
+    }
+    assert!(
+        manifest_lists_row_files(&backup_dir),
+        "the backup manifest does not list the row files"
+    );
 
     let restored = open(&wal_dir).await;
     let tables = restored.list_tables().await.unwrap();
@@ -1329,10 +1347,12 @@ async fn queries_keep_running_while_an_index_is_rebuilt() {
             .unwrap(),
     );
 
-    storage
-        .create_table(table("t", 8, DistanceMetric::Euclidean))
-        .await
-        .unwrap();
+    // The size-based selector: at 3,000 rows it wants BruteForce where CREATE TABLE installed
+    // HNSW, so the rebuild below has work to do. Under the HNSW-PQ default a 3,000-row table
+    // is already what a rebuild would produce and `rebuild_index` returns at once.
+    let mut sized = table("t", 8, DistanceMetric::Euclidean);
+    sized.memory_optimization = Some(false);
+    storage.create_table(sized).await.unwrap();
 
     // Enough vectors that the rebuild takes long enough to overlap with the query loop.
     const N: usize = 3000;
@@ -1410,10 +1430,11 @@ async fn an_index_is_rebuilt_once_the_table_outgrows_it() {
             .await
             .unwrap();
 
-    storage
-        .create_table(table("t", 8, DistanceMetric::Euclidean))
-        .await
-        .unwrap();
+    // The size-based selector, explicitly: the memory-optimized default answers HNSW-PQ at
+    // every size, so it has no boundary for a table to outgrow.
+    let mut sized = table("t", 8, DistanceMetric::Euclidean);
+    sized.memory_optimization = Some(false);
+    storage.create_table(sized).await.unwrap();
 
     // A handful of rows. CREATE TABLE picks from a fixed estimate of 10,000 regardless, so the
     // table starts out with an index chosen for a size it does not have.
@@ -1931,6 +1952,17 @@ async fn dropping_a_partitioned_table_removes_its_segments() {
     );
 }
 
+fn manifest_lists_row_files(backup_dir: &Path) -> bool {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(backup_dir.join("BACKUP.json")).unwrap()).unwrap();
+    let files = manifest["files"].as_array().unwrap();
+    let has = |suffix: &str| files.iter().any(|f| f.as_str().unwrap().ends_with(suffix));
+    has("records/t.rec")
+        && has("records/t.rec.log")
+        && has("vectors/t.f32")
+        && has("vectors/t.f32.rows")
+}
+
 fn walk_files(dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -2196,10 +2228,11 @@ async fn a_snapshot_of_an_hnsw_table_contains_the_index() {
     let wal_dir = tmp.path().join("wal");
     let storage = open(&wal_dir).await;
 
-    storage
-        .create_table(table("t", 8, DistanceMetric::Euclidean))
-        .await
-        .unwrap();
+    // The size-based selector: this test is about plain HNSW's on-disk form. (The default,
+    // HNSW-PQ, writes its graph too; that is covered by the disk-index tests.)
+    let mut hnsw = table("t", 8, DistanceMetric::Euclidean);
+    hnsw.memory_optimization = Some(false);
+    storage.create_table(hnsw).await.unwrap();
     assert_eq!(
         storage.get_table("t").await.unwrap().index_type.to_string(),
         "hnsw",
@@ -2317,10 +2350,11 @@ async fn a_table_with_no_index_file_is_restored_with_the_index_it_had() {
 
     {
         let storage = open(&wal_dir).await;
-        storage
-            .create_table(table("t", 8, DistanceMetric::Euclidean))
-            .await
-            .unwrap();
+        // The size-based selector: only it answers BruteForce, which is the index without a
+        // file that this test is about.
+        let mut sized = table("t", 8, DistanceMetric::Euclidean);
+        sized.memory_optimization = Some(false);
+        storage.create_table(sized).await.unwrap();
         let rows: Vec<_> = (0..20)
             .map(|i| {
                 let v: Vec<f32> = (0..8).map(|d| i as f32 * 0.1 + d as f32 * 0.7).collect();

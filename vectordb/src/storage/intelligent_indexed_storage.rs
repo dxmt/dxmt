@@ -259,7 +259,21 @@ struct TableTemplate {
     algorithm: IndexAlgorithm,
     /// Shared with the live map rather than copied out of it; see `records` there.
     records: Vec<Arc<Record>>,
+    /// A disk table's rows when the snapshot is mirrored to object storage: the records
+    /// (without vectors) and where each vector is, so the vectors can be read in after the
+    /// lock is released. The row files are the durable copy on this machine, but a machine
+    /// recovering from the object store alone has no row files, and a snapshot that carries
+    /// no records would give it an empty table. Read from the row file rather than copied
+    /// out of memory, so this is the slow snapshot again -- only in that configuration.
+    mirrored_rows: Option<MirroredRows>,
 }
+
+/// A disk table's rows as a mirrored snapshot copies them out: the vector file, and each
+/// record with the row its vector is at.
+type MirroredRows = (
+    Option<Arc<crate::storage::vector_file::VectorFile>>,
+    Vec<(Arc<Record>, Option<u64>)>,
+);
 
 /// 一条待写入索引的记录：id、稠密向量，以及可选的命名向量。
 ///
@@ -1577,6 +1591,16 @@ impl IntelligentIndexedStorage {
                             table: data.table.clone(),
                             algorithm: data.selected_algorithm.clone(),
                             records: data.records.snapshot_records(),
+                            mirrored_rows: (self.object_storage_enabled
+                                && data.records.is_on_disk())
+                            .then(|| {
+                                let mut rows = Vec::with_capacity(data.records.len());
+                                data.records.for_each(|r| {
+                                    let row = data.vector_row(&r.id);
+                                    rows.push((r, row));
+                                });
+                                (data.vector_file.clone(), rows)
+                            }),
                         },
                     )
                 })
@@ -1606,10 +1630,28 @@ impl IntelligentIndexedStorage {
                 ))
             })?;
 
+            let records = match template.mirrored_rows {
+                None => template.records,
+                Some((file, rows)) => rows
+                    .into_iter()
+                    .map(|(record, row)| {
+                        if !record.vector.is_empty() {
+                            return record;
+                        }
+                        let Some(vector) = file.as_ref().zip(row).and_then(|(f, r)| f.read(r))
+                        else {
+                            return record;
+                        };
+                        let mut with_vector = (*record).clone();
+                        with_vector.vector = vector;
+                        Arc::new(with_vector)
+                    })
+                    .collect(),
+            };
             let meta = TableSnapshot {
                 table: template.table,
                 algorithm: template.algorithm,
-                records: template.records,
+                records,
                 has_index,
             };
             crate::search::index_persistence::write_index(
@@ -2005,6 +2047,35 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        // The row files: a table's records (`records/<t>.rec` + `.rec.log`) and full
+        // vectors (`vectors/<t>.f32|f16` + `.rows`). Since these went to disk the snapshot
+        // carries neither, so a backup without them restores every table empty. The log and
+        // row list are copied before their data file: each store refuses a data file that
+        // is behind its log, and a copy taken data-first while an insert lands would be.
+        for sub in ["records", "vectors"] {
+            let src = wal_dir.join(sub);
+            if !src.exists() {
+                continue;
+            }
+            let dst = dest.join(sub);
+            std::fs::create_dir_all(&dst)?;
+            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_file())
+                .collect();
+            let is_sidecar = |p: &std::path::Path| {
+                let n = p.to_string_lossy();
+                n.ends_with(".log") || n.ends_with(".rows")
+            };
+            files.sort_by_key(|p| (!is_sidecar(p), p.clone()));
+            for path in files {
+                let name = path.file_name().unwrap_or_default().to_owned();
+                let n = std::fs::copy(&path, dst.join(&name))?;
+                bytes += n;
+                copied.push(format!("{sub}/{}", name.to_string_lossy()));
+            }
+        }
+
         // 快照点之后的日志尾巴。刚做完快照通常很短，但不能不带——恢复要靠它补上
         // 快照与备份完成之间的那几条写入。
         let wal_log = wal_dir.join("wal.log");
@@ -2049,11 +2120,18 @@ impl IntelligentIndexedStorage {
     /// **只能有这一处。** 分区的判断原本只写在 `rebuild_index` 里，而 `reevaluate_indexes`
     /// 直接比较选择器的输出——于是一张已经分区的表每次扫描都被判为"不对"，重建一次又拿回
     /// 分区索引，下次扫描再来一遍。O(n) 的无限循环，有测试专门盯着。
+    /// One decision function for `rebuild_index` and `reevaluate_indexes`.
+    ///
+    /// `memory_optimization` is the table's own setting (or the global default), the same
+    /// switch `create_table` decides by. Until it was passed in, creation chose from the
+    /// memory-optimized selector and every later re-evaluation from the size-based one, so
+    /// the sweep saw a mismatch on a table that was built exactly as configured.
     async fn decide_algorithm(
         &self,
         record_count: usize,
         dimension: usize,
         distance_metric: DistanceMetric,
+        memory_optimization: bool,
     ) -> crate::Result<IndexDecision> {
         let config = IndexConfig {
             dataset_size: record_count,
@@ -2067,9 +2145,13 @@ impl IntelligentIndexedStorage {
             hardware_capabilities: self.hardware_capabilities.clone(),
         };
 
-        let mut decision = IntelligentIndexSelector::new()
-            .select_optimal_index(&config)
-            .await?;
+        let mut decision = if memory_optimization {
+            self.select_memory_optimized_index(&config).await?
+        } else {
+            IntelligentIndexSelector::new()
+                .select_optimal_index(&config)
+                .await?
+        };
 
         // Threshold on bytes of vector data, not row count. Row count says nothing about
         // memory: a million 1536-dimension vectors is 6 GB, a million 64-dimension vectors is
@@ -2117,28 +2199,53 @@ impl IntelligentIndexedStorage {
         wal_dir.join("records").join(format!("{table_name}.rec"))
     }
 
-    /// `DB_RECORD_STORE=disk` keeps every table's records in a row file under the WAL
-    /// directory instead of in memory (phase 3). Like the vector file: keyed by table name,
-    /// wiped by a fresh `CREATE TABLE`, reused by a restore or replay.
+    /// Where a store lives, from `DB_RECORD_STORE` / `DB_VECTOR_STORE`: `disk` unless the
+    /// variable says `memory`. Anything else is reported and treated as the default.
+    fn store_on_disk_wanted(var: &str) -> bool {
+        match std::env::var(var).ok().as_deref() {
+            None | Some("disk") => true,
+            Some("memory") => false,
+            Some(other) => {
+                warn!("{var}={other} is neither disk nor memory; using disk");
+                true
+            }
+        }
+    }
+
+    /// Records live in a row file under the WAL directory (`DB_RECORD_STORE=disk`, the
+    /// default since design/DISK_INDEX.md phase 3 was accepted) or in memory
+    /// (`DB_RECORD_STORE=memory`, and always when there is no WAL directory to put a file
+    /// in). Like the vector file: keyed by table name, wiped by a fresh `CREATE TABLE`,
+    /// reused by a restore or replay. A reopened table keeps the store it already has: a
+    /// row file on disk is that table's data, whatever the environment says today.
     fn open_record_store(
         &self,
         table: &Table,
         fresh: bool,
     ) -> crate::Result<crate::storage::record_store::RecordStore> {
         use crate::storage::record_store::{RecordStore, RowStore};
-        let wanted = std::env::var("DB_RECORD_STORE").ok().as_deref() == Some("disk");
-        let Some(wal_dir) = self.wal_dir.as_ref().filter(|_| wanted) else {
-            if wanted {
-                warn!("DB_RECORD_STORE=disk needs a WAL directory; keeping records in memory");
-            }
+        let wanted = Self::store_on_disk_wanted("DB_RECORD_STORE");
+        let Some(wal_dir) = self.wal_dir.as_ref() else {
             return Ok(RecordStore::memory());
         };
         let path = Self::record_file_path(wal_dir, &table.name);
+        let mut log = path.as_os_str().to_owned();
+        log.push(".log");
+        let log = PathBuf::from(log);
         if fresh {
+            // Whatever a same-named table left behind is not this table's.
             let _ = std::fs::remove_file(&path);
-            let mut log = path.as_os_str().to_owned();
-            log.push(".log");
-            let _ = std::fs::remove_file(PathBuf::from(log));
+            let _ = std::fs::remove_file(&log);
+        }
+        if !wanted {
+            if !path.exists() && !log.exists() {
+                return Ok(RecordStore::memory());
+            }
+            info!(
+                "table '{}': DB_RECORD_STORE=memory, but its records are on disk at {}; keeping them there",
+                table.name,
+                path.display()
+            );
         }
         let store = RowStore::open(&path)?;
         info!(
@@ -2160,21 +2267,39 @@ impl IntelligentIndexedStorage {
             .join(format!("{table_name}.{}", format.extension()))
     }
 
-    /// `DB_VECTOR_STORE=disk` keeps every table's full vectors in a row file under the WAL
-    /// directory instead of in the record map. Off by default until phase 2 of
-    /// design/DISK_INDEX.md is accepted; needs a WAL directory to put the file in.
+    /// Full vectors live in a row file under the WAL directory (`DB_VECTOR_STORE=disk`, the
+    /// default since design/DISK_INDEX.md phase 2 was accepted) or inside the records
+    /// (`DB_VECTOR_STORE=memory`, and always without a WAL directory). As with the record
+    /// store, a reopened table keeps the file it already has.
     fn open_vector_file(&self, table: &Table, fresh: bool) -> crate::Result<OpenedVectorFile> {
-        let wanted = std::env::var("DB_VECTOR_STORE").ok().as_deref() == Some("disk");
-        let Some(wal_dir) = self.wal_dir.as_ref().filter(|_| wanted) else {
-            if wanted {
-                warn!("DB_VECTOR_STORE=disk needs a WAL directory; keeping vectors in memory");
-            }
+        use crate::storage::vector_file::{VectorFile, VectorFormat};
+        let wanted = Self::store_on_disk_wanted("DB_VECTOR_STORE");
+        let Some(wal_dir) = self.wal_dir.as_ref() else {
             return Ok((None, HashMap::new()));
         };
         // Keyed by name, not id: a restore recreates the table with a new id and must find
         // the same file. A fresh `CREATE TABLE` (logged, not replayed or restored) starts
         // from an empty file -- whatever a same-named table left behind is not this table's.
-        use crate::storage::vector_file::{VectorFile, VectorFormat};
+        if fresh {
+            for f in [VectorFormat::F32, VectorFormat::F16] {
+                let p = Self::vector_file_path_for(wal_dir, &table.name, f);
+                let _ = std::fs::remove_file(&p);
+                let _ = std::fs::remove_file(VectorFile::rows_path(&p));
+            }
+        }
+        let existing = [VectorFormat::F16, VectorFormat::F32]
+            .into_iter()
+            .find(|f| Self::vector_file_path_for(wal_dir, &table.name, *f).exists());
+        if !wanted {
+            let Some(found) = existing else {
+                return Ok((None, HashMap::new()));
+            };
+            info!(
+                "table '{}': DB_VECTOR_STORE=memory, but its vectors are on disk at {}; keeping them there",
+                table.name,
+                Self::vector_file_path_for(wal_dir, &table.name, found).display()
+            );
+        }
         // A fresh table takes the format the environment asks for (`DB_VECTOR_F16=1` for
         // half precision); a reopened one keeps whichever file it already has.
         let wanted_format = if std::env::var("DB_VECTOR_F16").ok().as_deref() == Some("1") {
@@ -2182,19 +2307,7 @@ impl IntelligentIndexedStorage {
         } else {
             VectorFormat::F32
         };
-        let format = if fresh {
-            for f in [VectorFormat::F32, VectorFormat::F16] {
-                let p = Self::vector_file_path_for(wal_dir, &table.name, f);
-                let _ = std::fs::remove_file(&p);
-                let _ = std::fs::remove_file(VectorFile::rows_path(&p));
-            }
-            wanted_format
-        } else {
-            [VectorFormat::F16, VectorFormat::F32]
-                .into_iter()
-                .find(|f| Self::vector_file_path_for(wal_dir, &table.name, *f).exists())
-                .unwrap_or(wanted_format)
-        };
+        let format = existing.unwrap_or(wanted_format);
         let path = Self::vector_file_path_for(wal_dir, &table.name, format);
         let (file, ids) = VectorFile::open_with(&path, table.dimension, format)?;
         // Later rows win: an update appends a new row for the same id.
@@ -2206,6 +2319,14 @@ impl IntelligentIndexedStorage {
             file.rows()
         );
         Ok((Some(Arc::new(file)), rows))
+    }
+
+    /// The table's own memory-optimization setting, else the global default
+    /// (`DB_MEMORY_OPTIMIZATION`, on unless set to `false`).
+    fn memory_optimization_of(&self, table: &Table) -> bool {
+        table
+            .memory_optimization
+            .unwrap_or(self.default_memory_optimization)
     }
 
     /// `DB_INDEX_ALGORITHM=hnsw|hnsw-pq` pins the index family for every table, at creation
@@ -2269,17 +2390,21 @@ impl IntelligentIndexedStorage {
                 continue;
             }
 
-            let (dimension, metric) = {
+            let (dimension, metric, memory_optimization) = {
                 let tables = self.read_tables("reevaluate_indexes").await;
                 match tables.get(&name) {
-                    Some(d) => (d.table.dimension, d.table.distance_metric),
+                    Some(d) => (
+                        d.table.dimension,
+                        d.table.distance_metric,
+                        self.memory_optimization_of(&d.table),
+                    ),
                     // Evicted or dropped while we were iterating; nothing to do.
                     None => continue,
                 }
             };
 
             let want = self
-                .decide_algorithm(count, dimension, metric)
+                .decide_algorithm(count, dimension, metric, memory_optimization)
                 .await?
                 .selected_algorithm;
 
@@ -2626,8 +2751,15 @@ impl IntelligentIndexedStorage {
         data.table.index_type = index_type_of(&meta.algorithm);
         data.selected_algorithm = meta.algorithm.clone();
 
-        data.records
-            .insert_batch(meta.records.iter().map(|r| (Arc::clone(r), None)).collect())?;
+        // A table whose row file already holds rows is restored from that file: it was
+        // written at insert time, so it is at least as new as any snapshot. The snapshot's
+        // records matter when there is no such file -- a table that was in memory, or a
+        // machine recovering from object storage alone, where the snapshot of a disk table
+        // carries its rows for exactly this case.
+        if !(data.records.is_on_disk() && !data.records.is_empty()) {
+            data.records
+                .insert_batch(meta.records.iter().map(|r| (Arc::clone(r), None)).collect())?;
+        }
         data.table.record_count = data.records.len() as u64;
 
         let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
@@ -3009,10 +3141,8 @@ impl IntelligentIndexedStorage {
         // 创建表元数据
         let mut table = Table::new(config.clone())?;
 
-        // ✨ 配置层级决策：表级配置覆盖全局配置
-        let memory_optimization = config
-            .memory_optimization
-            .unwrap_or(self.default_memory_optimization);
+        // 配置层级决策：表级配置覆盖全局配置
+        let memory_optimization = self.memory_optimization_of(&table);
 
         info!(
             "Table '{}' memory_optimization: {} (table_level: {:?}, global: {})",
@@ -4619,7 +4749,12 @@ impl IntelligentIndexedStorage {
             // partitioning rule here made a partitioned table look wrong to every re-evaluation
             // sweep, which rebuilt it, got a partitioned index back, and repeated — forever.
             let decision = self
-                .decide_algorithm(record_count, dimension, distance_metric)
+                .decide_algorithm(
+                    record_count,
+                    dimension,
+                    distance_metric,
+                    self.memory_optimization_of(&table_data.table),
+                )
                 .await?;
 
             let algorithm = decision.selected_algorithm.clone();
@@ -5054,84 +5189,55 @@ impl IntelligentIndexedStorage {
             .unwrap_or(Self::IN_GRAPH_FILTER_MAX_IDS)
     }
 
+    /// The memory-optimized choice, which is the default: HNSW-PQ at every size.
+    ///
+    /// This used to pick plain HNSW below 100,000 rows and HNSW-PQ above, which combined
+    /// badly with the fixed 10,000-row estimate `create_table` selects against: every table
+    /// started as HNSW, and one that grew past the boundary was rebuilt from scratch by the
+    /// next re-evaluation sweep -- O(n), on a table that by then held a million rows. The
+    /// index does not need the selector to know the size. An `HnswPqIndex` is an exact HNSW
+    /// graph until it holds `quantize_at_rows` (65,536) vectors and quantizes itself in
+    /// place from there (design/DISK_INDEX.md section 4), so choosing it up front gives a
+    /// small table exactly what HNSW gave it and a large one the graph-on-codes layout
+    /// without a rebuild in between.
     async fn select_memory_optimized_index(
         &self,
         config: &IndexConfig,
     ) -> crate::Result<IndexDecision> {
         info!(
-            "Selecting memory-optimized index for dataset size: {}",
-            config.dataset_size
+            "Selecting memory-optimized index for dataset size: {} -> HNSW-PQ (exact below {} rows)",
+            config.dataset_size,
+            crate::search::hnsw_pq::HnswPqConfig::DEFAULT_QUANTIZE_AT_ROWS
         );
-
-        // NOTE: the recall/latency/QPS figures attached to each branch below are estimates
-        // written alongside the thresholds, not measurements. Measured recall@10 for the first
-        // two branches on 10K x 768 random unit vectors is 0.900, and 0.886 at 50K x 128 — see
-        // `DEFAULT_EF_SEARCH` and ROADMAP §7 W9. Random hyperspherical data is the hardest
-        // synthetic case and real embeddings score higher, but do not read these constants as
-        // anything the engine has been shown to deliver.
-        // 根据数据集大小选择内存优化索引
-        let (selected_algorithm, recall, latency_p95_ms, throughput_qps, memory_usage_mb) =
-            if config.dataset_size < 10_000 {
-                // 小数据集 (<10K): 使用 HNSW（高精度，速度快）
-                info!("Small dataset (<10K): HNSW");
-                (
-                    IndexAlgorithm::HNSW {
-                        m: 16,
-                        ef_construction: Self::default_ef_construction(),
-                        ef_search: Self::DEFAULT_EF_SEARCH,
-                    },
-                    0.98,   // 98% recall
-                    5.0,    // 5ms latency
-                    2000.0, // 2K QPS
-                    (config.dimension * config.dataset_size * 4 * 120 / 100) / 1024 / 1024, // HNSW memory
-                )
-            } else if config.dataset_size < 100_000 {
-                // 中数据集 (10K-100K): 使用 Hierarchical Clustering (Phase 3)
-                info!(
-                    "Medium dataset (10K-100K): HNSW (HierarchicalClustering is not implemented)"
-                );
-                (
-                    IndexAlgorithm::HNSW {
-                        // HierarchicalClustering not yet available; using HNSW
-                        m: 16,
-                        ef_construction: Self::default_ef_construction(),
-                        ef_search: Self::DEFAULT_EF_SEARCH,
-                    },
-                    0.95,   // 95% recall
-                    2.0,    // 2ms latency
-                    3000.0, // 3K QPS
-                    (config.dimension * config.dataset_size * 4 * 105 / 100) / 1024 / 1024, // Clustering memory
-                )
-            } else {
-                // 大数据集 (>100K): 使用 Hybrid RaBitQ + Clustering (Phase 4)
-                info!("Large dataset (>100K): HNSW-PQ (HybridRaBitQClustering is not implemented)");
-                (
-                    IndexAlgorithm::HnswPQ {
-                        // HybridRaBitQClustering not yet available; using HnswPQ
-                        m: 16,
-                        ef_construction: Self::default_ef_construction(),
-                        ef_search: Self::DEFAULT_EF_SEARCH,
-                        // 4 dimensions per subspace (192 bytes at 768): the code size that
-                        // kept recall@100 at 1M and 10M (design/DISK_INDEX.md section 2.7).
-                        num_subvectors: config.dimension / 4,
-                        num_centroids: 256,
-                        enable_reranking: true,
-                    },
-                    0.90,   // 90% recall (Phase 4 tradeoff)
-                    1.0,    // 1ms latency
-                    5000.0, // 5K QPS
-                    (config.dimension * config.dataset_size * 4 * 10 / 100) / 1024 / 1024, // 90% memory savings
-                )
-            };
-
+        let selected_algorithm = IndexAlgorithm::HnswPQ {
+            m: 16,
+            ef_construction: Self::default_ef_construction(),
+            ef_search: Self::DEFAULT_EF_SEARCH,
+            // 4 dimensions per subspace (192 bytes at 768): the code size that kept
+            // recall@100 at 1M and 10M (design/DISK_INDEX.md section 2.7). `HnswPqIndex::new`
+            // rounds it to a divisor of the dimension.
+            num_subvectors: config.dimension / 4,
+            num_centroids: 256,
+            enable_reranking: true,
+        };
+        // Measured, not estimated: 1M x 768 Cohere, records and vectors on disk, HNSW-PQ192
+        // with a 500-candidate rerank (design/DISK_INDEX.md section 4, phase 3 / fp16).
+        let quantized =
+            config.dataset_size >= crate::search::hnsw_pq::HnswPqConfig::DEFAULT_QUANTIZE_AT_ROWS;
+        let bytes_per_row = if quantized {
+            // graph + codes + id map, the full vectors being on disk
+            config.dimension / 4 + 256
+        } else {
+            config.dimension * 4 + 256
+        };
         Ok(IndexDecision {
             selected_algorithm,
             confidence: 0.95,
             expected_performance: ExpectedPerformance {
-                recall,
-                latency_p95_ms,
-                throughput_qps,
-                memory_usage_mb,
+                recall: 0.99,
+                latency_p95_ms: 1.0,
+                throughput_qps: 3000.0,
+                memory_usage_mb: config.dataset_size * bytes_per_row / 1024 / 1024,
             },
         })
     }
@@ -6315,9 +6421,13 @@ mod tests {
             named_vectors: None,
         };
         // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
-        // and would make this test vacuous.
+        // and would make this test vacuous. The size-based selector, explicitly: the
+        // memory-optimized default answers HNSW-PQ at every size, and the stale algorithm
+        // planted below is HNSW, which would make this a rebuild rather than a retune.
         const ROWS: usize = 6_000;
-        storage.create_table(table("stale")).await?;
+        let mut stale = table("stale");
+        stale.memory_optimization = Some(false);
+        storage.create_table(stale).await?;
         let records: Vec<CreateRecordRequest> = (0..ROWS)
             .map(|i| CreateRecordRequest {
                 id: format!("{}", i),
@@ -6336,7 +6446,7 @@ mod tests {
         // built for the purpose: the assertion is about the selector's answer, and a second
         // 6,000-row graph build is a minute of the unit suite for nothing.
         let wanted = storage
-            .decide_algorithm(ROWS, 16, DistanceMetric::Cosine)
+            .decide_algorithm(ROWS, 16, DistanceMetric::Cosine, false)
             .await?
             .selected_algorithm
             .configured_ef_search()
@@ -6543,6 +6653,9 @@ mod tests {
         };
         let storage = IntelligentIndexedStorage::new(&config).await?;
 
+        // The size-based selector, explicitly. Under the memory-optimized default the table
+        // is HNSW-PQ, and for a 6,000-row exact graph a rebuild is not a no-op: it is what
+        // trains the codebooks and quantizes it (`wants_rebuild`), so it must not be skipped.
         let table_config = TableConfig {
             name: "skip_rebuild".to_string(),
             dimension: 4,
@@ -6551,7 +6664,7 @@ mod tests {
             index_type: None,
             text_fields: None,
             enable_full_text_search: false,
-            memory_optimization: None,
+            memory_optimization: Some(false),
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
