@@ -6632,6 +6632,57 @@ mod tests {
         Ok(())
     }
 
+    /// The periodic sweep must not move a default table onto EnhancedDiskANN.
+    ///
+    /// `decide_algorithm` ran the size-based selector for every table, whatever the table was
+    /// created with. That selector answers `EnhancedDiskANN` once a table passes a million rows
+    /// and its notional all-in-memory HNSW would exceed half the machine's RAM -- about 18M rows
+    /// at 768 dimensions on a 121 GB box, about 2M on a 16 GB one. So a default table growing
+    /// past that line was rebuilt, O(n), onto an index with no delete support and no test of its
+    /// own, and the only reason the 100M acceptance run did not hit it is that
+    /// `DB_INDEX_ALGORITHM=hnsw-pq` was pinned; the server log still carries the sweep's
+    /// "Selecting Enhanced DiskANN: dataset_size=21115700". The sweep now asks with the table's
+    /// own setting, so a memory-optimized table stays HNSW-PQ at every size.
+    #[tokio::test]
+    async fn the_sweep_leaves_a_default_table_on_hnsw_pq_however_large_it_grows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+
+        // Row counts, not rows: this asks the decision function directly, the way the sweep
+        // does. Building a 25M-row table to assert a branch would cost hours.
+        for rows in [1_000_000usize, 25_000_000, 100_000_000] {
+            let want = storage
+                .decide_algorithm(rows, 768, DistanceMetric::Cosine, true)
+                .await?
+                .selected_algorithm;
+            assert!(
+                matches!(want, IndexAlgorithm::HnswPQ { .. }),
+                "a memory-optimized table at {rows} rows would be rebuilt as {want:?}"
+            );
+        }
+
+        // And the size-based selector still answers what it always did, so the assertion above
+        // is about the routing rather than about a selector that stopped choosing DiskANN.
+        let sized = storage
+            .decide_algorithm(25_000_000, 768, DistanceMetric::Cosine, false)
+            .await?
+            .selected_algorithm;
+        assert!(
+            matches!(sized, IndexAlgorithm::EnhancedDiskANN { .. }),
+            "expected the size-based selector to still choose DiskANN, got {sized:?}"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn a_rebuild_that_would_change_nothing_is_skipped(
