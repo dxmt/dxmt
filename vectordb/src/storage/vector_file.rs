@@ -179,6 +179,62 @@ pub fn f32_to_f16_bits(x: f32) -> u16 {
 }
 
 /// f32 from IEEE 754 binary16 bits.
+/// Half-precision rows to `f32`, eight values per instruction where the CPU has `f16c`.
+///
+/// A rerank decodes 500 rows of 768 values per query and this was 16.2% of the server's CPU
+/// at 1M under load (perf, `design/route_probe_logs/phase3/1m_profile/`), all of it in the
+/// scalar bit-twiddling below -- which also carries a loop for subnormals that a real
+/// embedding never contains. `vcvtph2ps` does the same conversion, correctly for every
+/// input including subnormals and NaN, eight at a time.
+fn decode_f16_into(bytes: &[u8], out: &mut Vec<f32>) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if f16c_available() {
+            // SAFETY: the feature was detected, and the function only reads `bytes` and
+            // writes into `out`'s reserved capacity.
+            unsafe { decode_f16_f16c(bytes, out) };
+            return;
+        }
+    }
+    out.extend(
+        bytes
+            .chunks_exact(2)
+            .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]))),
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+fn f16c_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("f16c") && std::arch::is_x86_feature_detected!("avx")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx,f16c")]
+unsafe fn decode_f16_f16c(bytes: &[u8], out: &mut Vec<f32>) {
+    use std::arch::x86_64::*;
+    let n = bytes.len() / 2;
+    let base = out.len();
+    out.reserve(n);
+    let dst = out.as_mut_ptr().add(base);
+    let src = bytes.as_ptr();
+    let mut i = 0;
+    while i + 8 <= n {
+        // Unaligned loads: rows are packed back to back in the file, not padded.
+        let half = _mm_loadu_si128(src.add(i * 2) as *const __m128i);
+        _mm256_storeu_ps(dst.add(i), _mm256_cvtph_ps(half));
+        i += 8;
+    }
+    while i < n {
+        let bits = u16::from_le_bytes([*src.add(i * 2), *src.add(i * 2 + 1)]);
+        *dst.add(i) = f16_bits_to_f32(bits);
+        i += 1;
+    }
+    out.set_len(base + n);
+}
+
 pub fn f16_bits_to_f32(h: u16) -> f32 {
     let sign = ((h & 0x8000) as u32) << 16;
     let exp = ((h >> 10) & 0x1f) as u32;
@@ -629,11 +685,7 @@ impl VectorFile {
                     .chunks_exact(4)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
             ),
-            VectorFormat::F16 => out.extend(
-                bytes
-                    .chunks_exact(2)
-                    .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]))),
-            ),
+            VectorFormat::F16 => decode_f16_into(bytes, out),
         }
     }
 }
@@ -805,6 +857,43 @@ mod tests {
             !mapping_can_pay(u64::MAX / 4),
             "no machine has u64::MAX/2 bytes of memory"
         );
+    }
+
+    /// The vectorized decode must agree with the scalar one on every bit pattern, not just
+    /// on the values an embedding contains: zeroes, subnormals, infinities and NaNs all go
+    /// through the same file format.
+    #[test]
+    fn the_vector_decode_agrees_with_the_scalar_one_on_every_bit_pattern() {
+        let mut bytes = Vec::with_capacity(65_536 * 2);
+        for h in 0..=u16::MAX {
+            bytes.extend_from_slice(&h.to_le_bytes());
+        }
+        let mut fast = Vec::new();
+        decode_f16_into(&bytes, &mut fast);
+        assert_eq!(fast.len(), 65_536);
+        for (h, got) in fast.iter().enumerate() {
+            let want = f16_bits_to_f32(h as u16);
+            if want.is_nan() {
+                assert!(got.is_nan(), "{h:#06x}");
+            } else {
+                assert_eq!(got.to_bits(), want.to_bits(), "{h:#06x}");
+            }
+        }
+        // Lengths that are not a multiple of eight take the tail path.
+        for n in [0usize, 1, 7, 8, 9, 15, 768, 769] {
+            let mut fast = Vec::new();
+            decode_f16_into(&bytes[..n * 2], &mut fast);
+            assert_eq!(fast.len(), n, "n={n}");
+            for (h, got) in fast.iter().enumerate() {
+                let want = f16_bits_to_f32(h as u16);
+                assert_eq!(got.to_bits(), want.to_bits(), "n={n} {h:#06x}");
+            }
+        }
+        // Appending to a non-empty buffer must not disturb what is already there.
+        let mut out = vec![1.0f32, 2.0];
+        decode_f16_into(&bytes[..16], &mut out);
+        assert_eq!(out.len(), 10);
+        assert_eq!(&out[..2], &[1.0, 2.0]);
     }
 
     #[test]

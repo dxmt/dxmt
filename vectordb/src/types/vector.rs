@@ -60,36 +60,201 @@ impl DistanceMetric {
                 actual: b.len(),
             });
         }
+        Ok(ExactScorer::new(*self, a).score(b))
+    }
+}
 
-        match self {
-            DistanceMetric::Cosine => {
-                let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+/// A query prepared once, then scored against many stored vectors.
+///
+/// Two things this exists for, both from a profile of the 1M benchmark under load, where
+/// `DistanceMetric::calculate` was 11.5% of the server's CPU:
+///
+/// 1. **The query's norm is a constant.** Cosine recomputed it for every candidate, so a
+///    500-candidate rerank took 500 passes over the query to produce the same number.
+/// 2. **`.sum()` over `f32` does not vectorize.** Float addition is not associative, so the
+///    compiler must keep the source order and emits scalar adds. The kernels below use four
+///    accumulators of eight lanes and say so explicitly; the result differs from a strictly
+///    sequential sum in the last bits, which is what any parallel reduction does.
+///
+/// Cosine and Euclidean have AVX2 kernels because they are the metrics the benchmarks use.
+pub struct ExactScorer<'q> {
+    metric: DistanceMetric,
+    query: &'q [f32],
+    /// `|query|` for cosine, so it is computed once rather than once per candidate.
+    query_norm: f32,
+}
 
-                if norm_a == 0.0 || norm_b == 0.0 {
-                    return Ok(0.0);
-                }
-
-                // 返回余弦距离 (1 - 余弦相似度)
-                Ok(1.0 - (dot_product / (norm_a * norm_b)))
-            }
-            DistanceMetric::Euclidean => {
-                let sum_squared_diff: f32 =
-                    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum();
-                Ok(sum_squared_diff.sqrt())
-            }
-            DistanceMetric::Dot => {
-                // 点积相似度，返回负值作为距离（越大越相似）
-                let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                Ok(-dot_product)
-            }
-            DistanceMetric::Manhattan => {
-                let sum_abs_diff: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum();
-                Ok(sum_abs_diff)
-            }
+impl<'q> ExactScorer<'q> {
+    pub fn new(metric: DistanceMetric, query: &'q [f32]) -> Self {
+        let query_norm = match metric {
+            DistanceMetric::Cosine => dot_and_normsq(query, query).1.sqrt(),
+            _ => 0.0,
+        };
+        Self {
+            metric,
+            query,
+            query_norm,
         }
     }
+
+    /// The distance from the query to `v`, which must have the query's length.
+    pub fn score(&self, v: &[f32]) -> f32 {
+        match self.metric {
+            DistanceMetric::Cosine => {
+                let (dot, norm_sq) = dot_and_normsq(self.query, v);
+                let norm_v = norm_sq.sqrt();
+                if self.query_norm == 0.0 || norm_v == 0.0 {
+                    return 0.0;
+                }
+                1.0 - dot / (self.query_norm * norm_v)
+            }
+            DistanceMetric::Euclidean => l2_squared(self.query, v).sqrt(),
+            DistanceMetric::Dot => -dot_and_normsq(self.query, v).0,
+            DistanceMetric::Manhattan => self
+                .query
+                .iter()
+                .zip(v.iter())
+                .map(|(x, y)| (x - y).abs())
+                .sum(),
+        }
+    }
+
+    /// `None` rather than a wrong answer when the lengths disagree.
+    pub fn try_score(&self, v: &[f32]) -> Option<f32> {
+        (v.len() == self.query.len()).then(|| self.score(v))
+    }
+}
+
+/// `(a·b, b·b)` in one pass.
+fn dot_and_normsq(a: &[f32], b: &[f32]) -> (f32, f32) {
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if simd_available() {
+            // SAFETY: the features were detected and both slices hold `n` floats.
+            return unsafe { dot_and_normsq_avx2(&a[..n], &b[..n]) };
+        }
+    }
+    let mut dot = 0.0f32;
+    let mut nrm = 0.0f32;
+    for i in 0..n {
+        dot += a[i] * b[i];
+        nrm += b[i] * b[i];
+    }
+    (dot, nrm)
+}
+
+/// `|a - b|²`.
+fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if simd_available() {
+            // SAFETY: the features were detected and both slices hold `n` floats.
+            return unsafe { l2_squared_avx2(&a[..n], &b[..n]) };
+        }
+    }
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        let d = a[i] - b[i];
+        sum += d * d;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+fn simd_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn hsum256(v: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let lo = _mm256_castps256_ps128(v);
+    let hi = _mm256_extractf128_ps(v, 1);
+    let s = _mm_add_ps(lo, hi);
+    let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 0x55));
+    _mm_cvtss_f32(s)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_and_normsq_avx2(a: &[f32], b: &[f32]) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    let mut d0 = _mm256_setzero_ps();
+    let mut d1 = _mm256_setzero_ps();
+    let mut n0 = _mm256_setzero_ps();
+    let mut n1 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 16 <= n {
+        let a0 = _mm256_loadu_ps(pa.add(i));
+        let b0 = _mm256_loadu_ps(pb.add(i));
+        let a1 = _mm256_loadu_ps(pa.add(i + 8));
+        let b1 = _mm256_loadu_ps(pb.add(i + 8));
+        d0 = _mm256_fmadd_ps(a0, b0, d0);
+        n0 = _mm256_fmadd_ps(b0, b0, n0);
+        d1 = _mm256_fmadd_ps(a1, b1, d1);
+        n1 = _mm256_fmadd_ps(b1, b1, n1);
+        i += 16;
+    }
+    while i + 8 <= n {
+        let a0 = _mm256_loadu_ps(pa.add(i));
+        let b0 = _mm256_loadu_ps(pb.add(i));
+        d0 = _mm256_fmadd_ps(a0, b0, d0);
+        n0 = _mm256_fmadd_ps(b0, b0, n0);
+        i += 8;
+    }
+    let mut dot = hsum256(_mm256_add_ps(d0, d1));
+    let mut nrm = hsum256(_mm256_add_ps(n0, n1));
+    while i < n {
+        dot += *pa.add(i) * *pb.add(i);
+        nrm += *pb.add(i) * *pb.add(i);
+        i += 1;
+    }
+    (dot, nrm)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn l2_squared_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    let mut s0 = _mm256_setzero_ps();
+    let mut s1 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 16 <= n {
+        let d0 = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
+        let d1 = _mm256_sub_ps(
+            _mm256_loadu_ps(pa.add(i + 8)),
+            _mm256_loadu_ps(pb.add(i + 8)),
+        );
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        s1 = _mm256_fmadd_ps(d1, d1, s1);
+        i += 16;
+    }
+    while i + 8 <= n {
+        let d0 = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        i += 8;
+    }
+    let mut sum = hsum256(_mm256_add_ps(s0, s1));
+    while i < n {
+        let d = *pa.add(i) - *pb.add(i);
+        sum += d * d;
+        i += 1;
+    }
+    sum
 }
 
 impl std::str::FromStr for DistanceMetric {
@@ -234,6 +399,110 @@ impl VectorValidator {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scorer_tests {
+    use super::*;
+
+    fn vecs(dim: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut st = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            (st >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        (
+            (0..dim).map(|_| next()).collect(),
+            (0..dim).map(|_| next()).collect(),
+        )
+    }
+
+    /// The vectorized kernels must agree with a plain sequential sum to within the error a
+    /// reordered float reduction can introduce, at every length around the 8- and 16-lane
+    /// boundaries. Exact equality is the wrong assertion: four accumulators add in a
+    /// different order on purpose.
+    #[test]
+    fn the_kernels_agree_with_a_sequential_sum() {
+        for dim in [1usize, 3, 7, 8, 9, 15, 16, 17, 31, 64, 127, 768, 1536] {
+            let (a, b) = vecs(dim);
+            let dot_seq: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let nrm_seq: f64 = b.iter().map(|y| *y as f64 * *y as f64).sum();
+            let (dot, nrm) = dot_and_normsq(&a, &b);
+            let tol = (dim as f32) * 1e-6;
+            assert!(
+                (dot - dot_seq as f32).abs() <= tol.max(dot_seq.abs() as f32 * 1e-5),
+                "dim {dim}: dot {dot} vs {dot_seq}"
+            );
+            assert!(
+                (nrm - nrm_seq as f32).abs() <= tol.max(nrm_seq.abs() as f32 * 1e-5),
+                "dim {dim}: normsq {nrm} vs {nrm_seq}"
+            );
+
+            let l2_seq: f64 = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| {
+                    let d = *x as f64 - *y as f64;
+                    d * d
+                })
+                .sum();
+            let l2 = l2_squared(&a, &b);
+            assert!(
+                (l2 - l2_seq as f32).abs() <= tol.max(l2_seq.abs() as f32 * 1e-5),
+                "dim {dim}: l2 {l2} vs {l2_seq}"
+            );
+        }
+    }
+
+    /// Scoring many candidates with one scorer must give what `calculate` gives one at a
+    /// time, for every metric -- that is the contract the rerank relies on.
+    #[test]
+    fn a_hoisted_query_scores_the_same_as_a_pairwise_call() {
+        let dim = 768;
+        let (query, _) = vecs(dim);
+        let candidates: Vec<Vec<f32>> = (0..8).map(|_| vecs(dim).1).collect();
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::Dot,
+            DistanceMetric::Manhattan,
+        ] {
+            let scorer = ExactScorer::new(metric, &query);
+            for c in &candidates {
+                let hoisted = scorer.score(c);
+                let pairwise = metric.calculate(&query, c).unwrap();
+                assert!(
+                    (hoisted - pairwise).abs() <= 1e-5,
+                    "{metric:?}: {hoisted} vs {pairwise}"
+                );
+            }
+        }
+    }
+
+    /// A zero vector has no direction, and a length mismatch is not a distance.
+    #[test]
+    fn degenerate_inputs_do_not_produce_garbage() {
+        let zero = vec![0.0f32; 8];
+        let (v, _) = vecs(8);
+        assert_eq!(
+            ExactScorer::new(DistanceMetric::Cosine, &zero).score(&v),
+            0.0
+        );
+        assert_eq!(
+            ExactScorer::new(DistanceMetric::Cosine, &v).score(&zero),
+            0.0
+        );
+        assert_eq!(
+            ExactScorer::new(DistanceMetric::Cosine, &v).try_score(&zero[..4]),
+            None
+        );
+        assert!(DistanceMetric::Cosine.calculate(&v, &zero[..4]).is_err());
+        // A vector against itself is distance zero under cosine and euclidean.
+        assert!(ExactScorer::new(DistanceMetric::Cosine, &v).score(&v).abs() <= 1e-6);
+        assert!(ExactScorer::new(DistanceMetric::Euclidean, &v).score(&v) <= 1e-6);
     }
 }
 

@@ -3853,12 +3853,13 @@ impl IntelligentIndexedStorage {
             }
             (in_memory, on_disk, table_data.vector_file.clone())
         };
+        // One scorer for the whole rerank. Cosine's `|query|` does not depend on the
+        // candidate, and `calculate` recomputed it for each of the 500 -- 11.5% of the
+        // server's CPU at 1M went into this function.
+        let scorer = crate::types::vector::ExactScorer::new(metric, query);
         let mut exact: Vec<(RecordId, f32)> = vectors
             .into_iter()
-            .filter_map(|(id, vector)| {
-                let dist = metric.calculate(query, &vector).ok()?;
-                Some((id, dist))
-            })
+            .filter_map(|(id, vector)| Some((id, scorer.try_score(&vector)?)))
             .collect();
         if let (Some(file), false) = (file, file_rows.is_empty()) {
             // Scored straight off the mapping: no copy, no allocation per candidate.
@@ -3867,7 +3868,7 @@ impl IntelligentIndexedStorage {
                 file_rows.into_iter().map(|(id, _)| Some(id)).collect();
             file.with_rows(&rows, |i, vector| {
                 if let (Some(vector), Some(id)) = (vector, ids[i].take()) {
-                    if let Ok(dist) = metric.calculate(query, vector) {
+                    if let Some(dist) = scorer.try_score(vector) {
                         exact.push((id, dist));
                     }
                 }
