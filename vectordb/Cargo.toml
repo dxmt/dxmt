@@ -29,6 +29,10 @@ required-features = ["benchmarks"]
 name = "route_probe"
 path = "src/bin/route_probe.rs"
 
+[[bin]]
+name = "loadgen"
+path = "src/bin/loadgen.rs"
+
 
 
 [[example]]
