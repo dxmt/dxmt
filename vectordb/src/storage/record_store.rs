@@ -15,6 +15,7 @@
 
 use crate::types::record::Record;
 use crate::types::RecordId;
+use crate::utils::id_hash::{bytes_eq, id_hash, IdHashMap};
 use memmap2::{Mmap, MmapOptions};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -22,16 +23,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-/// Stable 64-bit hash of an id, the same FNV-1a the HNSW graph uses for its own table.
-fn id_hash(id: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in id.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
 
 /// Ids kept once, in a byte arena, addressed by row; a hash table finds a row by id.
 ///
@@ -43,7 +34,7 @@ struct IdTable {
     bytes: Vec<u8>,
     /// `rows() + 1` entries.
     offsets: Vec<u32>,
-    by_hash: HashMap<u64, u32>,
+    by_hash: IdHashMap<u32>,
     /// Ids whose hash collided with a live different id. Empty in practice.
     overflow: HashMap<String, u32>,
 }
@@ -61,11 +52,20 @@ impl IdTable {
     }
 
     fn id(&self, row: u32) -> &str {
+        // Only ever filled from `&str`, so this is valid UTF-8.
+        std::str::from_utf8(self.id_bytes(row)).unwrap_or("")
+    }
+
+    /// The stored id as bytes, for comparison. `id` runs a UTF-8 validation pass that
+    /// equality does not need, and every row lookup confirms its hash hit this way -- 4.0%
+    /// of the server's CPU at 1M was in `core::str::from_utf8` because of it.
+    #[inline]
+    fn id_bytes(&self, row: u32) -> &[u8] {
         let (a, b) = (
             self.offsets[row as usize] as usize,
             self.offsets[row as usize + 1] as usize,
         );
-        std::str::from_utf8(&self.bytes[a..b]).unwrap_or("")
+        &self.bytes[a..b]
     }
 
     /// Append a row for `id` and make it the id's current row.
@@ -83,7 +83,7 @@ impl IdTable {
             None => {
                 self.by_hash.insert(h, row);
             }
-            Some(existing) if self.id(existing) == id => {
+            Some(existing) if bytes_eq(self.id_bytes(existing), id) => {
                 self.by_hash.insert(h, row);
             }
             Some(_) => {
@@ -94,7 +94,7 @@ impl IdTable {
 
     fn row_of(&self, id: &str) -> Option<u32> {
         if let Some(&row) = self.by_hash.get(&id_hash(id)) {
-            if self.id(row) == id {
+            if bytes_eq(self.id_bytes(row), id) {
                 return Some(row);
             }
         }
@@ -103,7 +103,11 @@ impl IdTable {
 
     fn forget(&mut self, id: &str) -> Option<u32> {
         let h = id_hash(id);
-        if self.by_hash.get(&h).is_some_and(|&row| self.id(row) == id) {
+        if self
+            .by_hash
+            .get(&h)
+            .is_some_and(|&row| bytes_eq(self.id_bytes(row), id))
+        {
             return self.by_hash.remove(&h);
         }
         self.overflow.remove(id)

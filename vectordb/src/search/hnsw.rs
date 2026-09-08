@@ -413,6 +413,17 @@ impl Nodes {
         std::str::from_utf8(&self.id_bytes[a..b]).unwrap_or("")
     }
 
+    /// The stored id as bytes, for comparison. See `utils::id_hash::bytes_eq`: confirming a
+    /// hash hit does not need the UTF-8 validation that reading it back as `&str` runs.
+    #[inline]
+    fn id_raw(&self, idx: usize) -> &[u8] {
+        let (a, b) = (
+            self.id_offsets[idx] as usize,
+            self.id_offsets[idx + 1] as usize,
+        );
+        &self.id_bytes[a..b]
+    }
+
     fn vector(&self, idx: usize) -> &[f32] {
         &self.vectors[idx * self.dim..(idx + 1) * self.dim]
     }
@@ -548,16 +559,7 @@ impl Nodes {
     }
 }
 
-/// Stable 64-bit hash of an id for `id_to_idx`. FNV-1a, spelled out, because the map is
-/// persisted with these keys and `std`'s hasher makes no promise across versions.
-fn id_hash(id: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in id.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
+use crate::utils::id_hash::{bytes_eq, id_hash, IdHashMap};
 
 // For the candidate priority queue (min-heap, closer is better)
 #[derive(Clone)]
@@ -716,7 +718,7 @@ pub struct HnswIndex {
     /// Hash of the id to node index. A hash rather than the string: the string lives once,
     /// in the arena inside `nodes`, and this table costs about 24 bytes a node instead of
     /// a second copy of every id plus a `String` header.
-    id_to_idx: HashMap<u64, u32>,
+    id_to_idx: IdHashMap<u32>,
     /// Ids whose hash collided with a different id's. Consulted after `id_to_idx` disagrees
     /// with the arena; in practice empty.
     id_overflow: HashMap<String, u32>,
@@ -1015,7 +1017,7 @@ impl HnswIndex {
             config,
             distance_metric,
             nodes: Nodes::new(),
-            id_to_idx: HashMap::new(),
+            id_to_idx: Default::default(),
             id_overflow: HashMap::new(),
             entry_point: None,
             quantized: None,
@@ -1025,7 +1027,7 @@ impl HnswIndex {
     /// Node index of `id`, if present and live.
     fn idx_of(&self, id: &str) -> Option<usize> {
         if let Some(&idx) = self.id_to_idx.get(&id_hash(id)) {
-            if self.nodes.id(idx as usize) == id {
+            if bytes_eq(self.nodes.id_raw(idx as usize), id) {
                 return Some(idx as usize);
             }
         }
@@ -1048,7 +1050,7 @@ impl HnswIndex {
         if self
             .id_to_idx
             .get(&h)
-            .is_some_and(|&i| self.nodes.id(i as usize) == id)
+            .is_some_and(|&i| bytes_eq(self.nodes.id_raw(i as usize), id))
         {
             self.id_to_idx.remove(&h);
         } else {
@@ -1070,7 +1072,7 @@ impl HnswIndex {
             config,
             distance_metric,
             nodes,
-            id_to_idx: HashMap::new(),
+            id_to_idx: Default::default(),
             id_overflow: HashMap::new(),
             entry_point,
             quantized,

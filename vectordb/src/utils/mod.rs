@@ -1,5 +1,6 @@
 pub mod cpu_affinity;
 pub mod cpu_detection;
+pub mod id_hash;
 pub mod memory_tracking;
 pub mod safety_checks;
 
