@@ -49,6 +49,35 @@ pub struct HnswPqConfig {
 
 impl HnswPqConfig {
     pub const DEFAULT_QUANTIZE_AT_ROWS: usize = 65_536;
+    pub const DEFAULT_RERANK_FACTOR: usize = 5;
+    pub const DEFAULT_RERANK_MIN: usize = 100;
+
+    /// `DB_RERANK_FACTOR` and `DB_RERANK_MIN` override how many candidates a search reranks.
+    ///
+    /// This is the one knob that trades recall against single-query latency, and it was a
+    /// constant, so measuring the trade meant recompiling. Milvus at a matched recall of
+    /// 0.982 answers a serial query in 2.4 ms against our 3.6 ms while refining a tenth as
+    /// many candidates, which makes the size of our rerank the first thing to measure rather
+    /// than the last. Out of range or unparsable values are reported and ignored.
+    fn env_usize(var: &str, default: usize, min: usize) -> usize {
+        Self::parse_override(var, std::env::var(var).ok().as_deref(), default, min)
+    }
+
+    /// The parsing half, separated from the environment so it can be tested without
+    /// mutating process-wide state: a unit test that sets a variable races every other test
+    /// that reads it, and `serial_test` only orders tests that opt in.
+    fn parse_override(var: &str, raw: Option<&str>, default: usize, min: usize) -> usize {
+        match raw {
+            None => default,
+            Some(v) => match v.parse::<usize>() {
+                Ok(n) if n >= min => n,
+                _ => {
+                    tracing::warn!("{var}={v} is not a number >= {min}; using {default}");
+                    default
+                }
+            },
+        }
+    }
 }
 
 impl Default for HnswPqConfig {
@@ -57,8 +86,8 @@ impl Default for HnswPqConfig {
             hnsw_config: HnswConfig::default(),
             num_subvectors: 192,
             num_centroids: 256,
-            rerank_factor: 5,
-            rerank_min: 100,
+            rerank_factor: Self::env_usize("DB_RERANK_FACTOR", Self::DEFAULT_RERANK_FACTOR, 1),
+            rerank_min: Self::env_usize("DB_RERANK_MIN", Self::DEFAULT_RERANK_MIN, 1),
             quantize_at_rows: Self::DEFAULT_QUANTIZE_AT_ROWS,
         }
     }
@@ -408,6 +437,49 @@ mod tests {
             num_centroids: 32,
             ..HnswPqConfig::default()
         }
+    }
+
+    /// The rerank size is the one knob that trades recall against single-query latency, so
+    /// it has to be settable without a rebuild -- and a bad value must not silently become a
+    /// different search. The parsing is tested directly rather than through the environment:
+    /// a test that sets a process-wide variable races every other test that reads one, which
+    /// is how the first version of this broke `a_phased_batch_insert_lets_hnsw_pq_quantize`.
+    #[test]
+    fn a_rerank_override_is_parsed_or_refused() {
+        let p = |raw: Option<&str>| HnswPqConfig::parse_override("DB_RERANK_FACTOR", raw, 5, 1);
+        assert_eq!(p(None), 5, "unset keeps the default");
+        assert_eq!(p(Some("2")), 2);
+        assert_eq!(p(Some("20")), 20);
+        for bad in ["0", "-1", "many", "", " 2", "2.5"] {
+            assert_eq!(p(Some(bad)), 5, "{bad:?} should have been refused");
+        }
+        assert_eq!(
+            HnswPqConfig::parse_override("DB_RERANK_MIN", Some("50"), 100, 1),
+            50
+        );
+    }
+
+    /// And the number reaches the search: a config asking for 2x hands back 2k candidates.
+    #[tokio::test]
+    async fn the_rerank_size_reaches_the_search() {
+        let config = HnswPqConfig {
+            rerank_factor: 2,
+            rerank_min: 50,
+            ..small_config()
+        };
+        let mut index = HnswPqIndex::new(64, DistanceMetric::Cosine, Some(config)).unwrap();
+        assert_eq!(
+            index.rerank_candidates(100),
+            None,
+            "an exact graph reranks nothing"
+        );
+        index
+            .bulk_build(corpus(3000, 64, 0x2545_F491_4F6C_DD1D))
+            .await
+            .unwrap();
+        assert!(index.is_quantized());
+        assert_eq!(index.rerank_candidates(100), Some(200), "2 x k");
+        assert_eq!(index.rerank_candidates(10), Some(50), "the floor");
     }
 
     #[tokio::test]
