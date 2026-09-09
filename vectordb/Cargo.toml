@@ -35,6 +35,18 @@ path = "src/bin/loadgen.rs"
 
 
 
+# The one example that shows the whole basic loop: create, insert, search, filter, list,
+# delete, drop. It runs correctly and was never declared here, so nothing built it and
+# nothing would have said if it stopped working -- which is the only reason an example
+# earns its place in the tree.
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "mcp_demo"
+path = "examples/mcp_demo.rs"
+
 [[example]]
 name = "hnsw_build_scaling"
 path = "examples/hnsw_build_scaling.rs"
