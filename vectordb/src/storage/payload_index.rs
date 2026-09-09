@@ -461,12 +461,22 @@ impl PayloadIndex {
         let field_index = match self.field_indices.get(&condition.key) {
             Some(idx) => idx,
             None => {
-                // 字段不存在，返回保守估计（假设50%匹配）
+                // No record carries this field, so nothing can match it. The comment here
+                // used to call 0.5 a conservative estimate; it is the opposite. The index
+                // holds every field any record has written, so a missing key is not missing
+                // information -- it is the answer.
+                //
+                // What the old estimate cost: a filter on an absent field reported half the
+                // table as matching, the search took that for a broad filter and ran post
+                // filtering over 600 fetched candidates, and one such query on a 5M x 1536
+                // table took 16.6 s to return nothing while holding the table read lock for
+                // 4.6 s. The same query without a filter takes 3.6 ms
+                // (design/DISK_INDEX.md 5.5.1).
                 return CardinalityEstimate {
                     min: 0,
-                    max: self.total_records,
-                    exp: self.total_records / 2,
-                    selectivity: 0.5,
+                    max: 0,
+                    exp: 0,
+                    selectivity: 0.0,
                 };
             }
         };
@@ -842,6 +852,85 @@ pub struct PayloadIndexStats {
 impl Default for PayloadIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod estimator_repro {
+    use super::*;
+    use crate::types::record::{Condition, Filter, FilterOperation};
+
+    fn index_with_ids(n: usize) -> PayloadIndex {
+        let mut idx = PayloadIndex::new();
+        for i in 0..n {
+            idx.insert_record(&i.to_string(), &serde_json::json!({ "id_num": i }));
+        }
+        idx
+    }
+
+    fn ge(value: usize) -> Filter {
+        Filter {
+            must: Some(vec![Condition {
+                key: "id_num".to_string(),
+                operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(value)),
+            }]),
+            must_not: None,
+            should: None,
+        }
+    }
+
+    /// The state production was actually in: records loaded, but none carrying the field the
+    /// filter selects on, because the harness only writes it when asked to. The server logged
+    /// `selectivity=50.00%` there, and a query that could not match anything took 16.6 s.
+    #[test]
+    fn an_absent_field_estimates_zero_not_half_the_table() {
+        let mut idx = PayloadIndex::new();
+        for i in 0..100_000usize {
+            // Exactly what the unfiltered load writes: an empty payload.
+            idx.insert_record(&i.to_string(), &serde_json::json!({}));
+        }
+        let est = idx.estimate_cardinality(&ge(50_000));
+        let matched = idx.get_matching_ids(&ge(50_000)).len();
+        println!(
+            "\n  field absent: estimate {:.2}%  exp {}  actual matches {}",
+            est.selectivity * 100.0,
+            est.exp,
+            matched
+        );
+        assert_eq!(matched, 0, "no record carries the field");
+        // The estimate is the guard, not the result. A search on an absent field returns an
+        // empty page whatever the estimate says -- post-filtering 600 candidates that all
+        // fail is still correct -- so correctness tests cannot catch this. What the estimate
+        // decides is the *route*: 0 sends the search to the precomputed-empty-set path,
+        // while 0.5 sent it to post-filtering, which on a 5M x 1536 table took 16.6 s to
+        // return nothing while holding the table read lock for 4.6 s.
+        assert_eq!(est.exp, 0, "an absent field cannot match any row");
+        assert_eq!(
+            est.selectivity, 0.0,
+            "an absent field must estimate zero, not half the table"
+        );
+    }
+
+    /// What the estimator says about `id_num >= t` over a uniform 0..n, which is the shape
+    /// every VectorDBBench filtered case uses. Printed rather than asserted: this is the
+    /// measurement that decides what to fix.
+    #[test]
+    fn what_the_estimator_says_about_a_uniform_field() {
+        let n = 100_000usize;
+        let idx = index_with_ids(n);
+        println!("\n  n = {n}");
+        for pct in [1usize, 10, 50, 90, 99] {
+            let t = n * pct / 100;
+            let truth = (n - t) as f64 / n as f64;
+            let est = idx.estimate_cardinality(&ge(t));
+            let matched = idx.get_matching_ids(&ge(t)).len();
+            println!(
+                "  id_num >= {t:>6}: truth {:>6.2}%  estimate {:>6.2}%  (exp {:>7})  actual matches {matched:>6}",
+                truth * 100.0,
+                est.selectivity * 100.0,
+                est.exp,
+            );
+        }
     }
 }
 
