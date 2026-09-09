@@ -19,23 +19,36 @@
 //! `what_the_estimator_says_about_a_uniform_field` -- so the payloads here are deliberately
 //! skewed: every value is 0 or 1000, and the filter asks for the empty middle.
 //!
-//! Measured on this test, release, 20,000 rows x 16 dims, min of five runs:
+//! There are three layers to the answer now, and this file holds one test per layer.
 //!
-//!     before   empty 35,378 us   matching 1,556 us   22.7x
-//!     after    empty  7,704 us   matching   818 us    9.4x
+//! 1. The index proves the filter empty, from its fields' distinct values, before anything is
+//!    searched. `400 <= bucket <= 600` over values that are only ever 0 or 1000 is empty
+//!    because no value is between them -- though neither half is empty on its own, which is
+//!    why conditions on one key have to be tested against one value together.
+//! 2. The index cannot prove it, so the search runs and comes back short, and the exhaustive
+//!    step enumerates by the predicate rather than by the graph. `bucket >= 400 AND
+//!    parity >= 1` is this shape: each half matches plenty, no row carries both, and the two
+//!    conditions are on different keys so no single field's values contradict.
+//! 3. The filter matches, and nothing above it runs.
 //!
-//! The bound below is 15x. What is left of the gap is the payload scan itself (about 345 ns a
-//! row), not the graph -- the graph is out of this path entirely now. Making the empty answer
-//! genuinely cheap means letting the payload index answer instead of scanning, which is safe
-//! for the conditions whose semantics already require a scalar (ranges, `Equal`, `In`) because
-//! a record that could match one necessarily has an indexed value. That is a separate change.
+//! Measured on this test, 20,000 rows x 16 dims, min of five runs, against a filtered query
+//! that does match as the control -- both over-fetch the same candidates, only one escalates:
 //!
-//! The control is a filtered query that *does* match, not an unfiltered one. Both post-filter,
-//! both over-fetch the same 600 candidates to have something to filter, and both pay the
-//! rerank factor that turns 600 into 3,000; the only difference between them is whether the
-//! escalation fires. Measuring against an unfiltered query instead compares a top-10 fetch
-//! against a top-600 one and charges the difference to the defect. Times are the smallest of
-//! several runs, which is the stable statistic for a latency this small.
+//!                                    release              debug
+//!     provably empty, before        47,839 us           49,014 us
+//!     provably empty, after              1 us                10 us
+//!     cannot prove, after            6,371 us (5.3x)    17,056 us (2.9x)
+//!
+//! Before any of this the empty answer went through the graph: the escalation asked a
+//! 20,000-row index for every record, the rerank factor multiplied that by five, and the
+//! measurement was 35,378 us against 1,556 us for the control, 22.7x. The bound below is 15x,
+//! which the broken path clears and the current one does not come near.
+//!
+//! The control is a filtered query that *does* match, not an unfiltered one.//! The control is a filtered query that *does* match, not an unfiltered one. Both post-filter
+//! and both over-fetch the same candidates; the only difference is whether the escalation
+//! fires. Measuring against an unfiltered query instead compares a top-10 fetch against a
+//! post-filter's amplified one and charges the difference to the defect. Times are the
+//! smallest of several runs, the stable statistic for a latency this small.
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
@@ -136,7 +149,14 @@ async fn storage() -> IntelligentIndexedStorage {
             named_vectors: None,
             // Skewed on purpose: nine tenths at one end, one tenth at the other, nothing
             // between. A uniform field would be estimated correctly and never post-filter.
-            payload: Some(serde_json::json!({ "bucket": if i % 10 == 0 { HIGH } else { LOW } })),
+            // `bucket` is skewed so a range can ask for a gap. `parity` is its exact
+            // complement, so a filter naming both is empty without either half being empty
+            // and without the two conditions sharing a key -- the shape the index cannot
+            // prove, which is what keeps the escalation path under test.
+            payload: Some(serde_json::json!({
+                "bucket": if i % 10 == 0 { HIGH } else { LOW },
+                "parity": if i % 10 == 0 { 0 } else { 1 },
+            })),
         })
         .collect();
     storage.insert_records("t", rows).await.unwrap();
@@ -172,11 +192,29 @@ async fn fastest_of(
     best
 }
 
-#[tokio::test]
-async fn a_post_filter_that_matches_nothing_does_not_walk_the_whole_graph() {
-    let storage = storage().await;
+/// `bucket` high and `parity` high: no row carries both, and no single field's values
+/// contradict, so the index cannot prove this empty and the search has to discover it.
+fn contradictory_across_two_fields() -> Filter {
+    Filter {
+        must: Some(vec![
+            Condition {
+                key: "bucket".to_string(),
+                operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(400)),
+            },
+            Condition {
+                key: "parity".to_string(),
+                operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(1)),
+            },
+        ]),
+        must_not: None,
+        should: None,
+    }
+}
 
-    // Warm whatever is lazy before either measurement.
+/// A filter the index proves empty never reaches the graph at all.
+#[tokio::test]
+async fn a_provably_empty_filter_costs_nothing() {
+    let storage = storage().await;
     let _ = storage.search("t", query(None)).await.unwrap();
 
     let matching_us = fastest_of(&storage, Some(only_high()), 5).await;
@@ -186,9 +224,34 @@ async fn a_post_filter_that_matches_nothing_does_not_walk_the_whole_graph() {
         .search("t", query(Some(the_empty_middle())))
         .await
         .unwrap();
+    assert!(empty.hits.is_empty(), "no row has 400 <= bucket <= 600");
+
+    eprintln!("provably empty {empty_us} us / matching {matching_us} us");
+    assert!(
+        empty_us * 10 < matching_us,
+        "a filter no indexed value satisfies took {empty_us} us against {matching_us} us for \
+         a filtered search that runs: the proof is not being used, and the query is paying \
+         for a walk, a rerank and an escalation to learn what the index already knows"
+    );
+}
+
+#[tokio::test]
+async fn a_post_filter_that_matches_nothing_does_not_walk_the_whole_graph() {
+    let storage = storage().await;
+
+    // Warm whatever is lazy before either measurement.
+    let _ = storage.search("t", query(None)).await.unwrap();
+
+    let matching_us = fastest_of(&storage, Some(only_high()), 5).await;
+    let empty_us = fastest_of(&storage, Some(contradictory_across_two_fields()), 5).await;
+
+    let empty = storage
+        .search("t", query(Some(contradictory_across_two_fields())))
+        .await
+        .unwrap();
     assert!(
         empty.hits.is_empty(),
-        "no row has 400 <= bucket <= 600, but {} came back",
+        "no row has both bucket >= 400 and parity >= 1, but {} came back",
         empty.hits.len()
     );
 

@@ -344,6 +344,136 @@ impl PayloadIndex {
     }
 
     /// 获取满足filter的记录ID集合（用于PRE-FILTERING）
+    /// `true` when no record can satisfy this filter, decided from the index alone and
+    /// without building an id set.
+    ///
+    /// A `must` condition matching none of its field's indexed values matches no record, and
+    /// one failing `must` empties the whole filter whatever else it carries: `should` only
+    /// adds a requirement, `must_not` only removes rows. Walking the distinct values costs the
+    /// field's cardinality and clones nothing, where [`Self::get_matching_ids`] materialises
+    /// every id of every condition before intersecting -- on a 20,000-row table a `<= 600`
+    /// accepting 18,000 of them built an 18,000-string set to answer a filter whose result is
+    /// empty, which is how the first version of this shortcut came out slower than the scan it
+    /// replaced.
+    ///
+    /// Only conditions whose matches are all indexed can prove anything here; see
+    /// [`Self::condition_is_exact`]. `id` is refused because
+    /// [`crate::types::record::Record::matches_filter`] reads the record's own id, while this
+    /// index only ever knows a payload field of that name.
+    pub fn cannot_match_anything(&self, filter: &Filter) -> bool {
+        let Some(must) = &filter.must else {
+            return false;
+        };
+        // Grouped by key, because conditions on the same key all judge the same value and so
+        // have to be tested together. `bucket >= 400` and `bucket <= 600` each accept plenty
+        // of rows on their own; what is empty is their intersection, and it is empty exactly
+        // when no indexed value falls between them.
+        let mut by_key: HashMap<&str, Vec<&Condition>> = HashMap::new();
+        for condition in must {
+            // A condition that cannot prove anything is left out rather than refusing the
+            // whole filter: proving that a subset of the `must` is unsatisfiable proves the
+            // whole `must` is.
+            if condition.key == "id" || !Self::condition_is_exact(condition) {
+                continue;
+            }
+            by_key
+                .entry(condition.key.as_str())
+                .or_default()
+                .push(condition);
+        }
+        by_key.into_iter().any(|(key, conditions)| {
+            match self.field_indices.get(key) {
+                // No record carries a scalar under this key, so none can match a condition
+                // that needs one.
+                None => true,
+                Some(field) => !field.value_to_ids.iter().any(|(value_key, ids)| {
+                    !ids.is_empty()
+                        && conditions
+                            .iter()
+                            .all(|c| Self::value_key_matches(value_key, &c.operation))
+                }),
+            }
+        })
+    }
+
+    /// Whether every record this condition accepts carries a value the index holds.
+    ///
+    /// This index keys the scalars [`Self::to_value_key`] can encode, so a record whose value
+    /// for the key is an array or an object is absent from it. That only matters for a
+    /// condition such a record could satisfy -- and most cannot: a range needs `as_f64`, a
+    /// substring test needs `as_str`, an equality against a scalar needs a scalar. `NotEqual`
+    /// and `NotIn` are the two that can, because an array is not equal to 3, and they are what
+    /// makes this index an approximation of `matches_filter` rather than a restatement of it.
+    fn condition_is_exact(condition: &Condition) -> bool {
+        match &condition.operation {
+            FilterOperation::Equal(value) => Self::to_value_key(value).is_some(),
+            FilterOperation::In(values) => values.iter().all(|v| Self::to_value_key(v).is_some()),
+            FilterOperation::GreaterThan(target)
+            | FilterOperation::GreaterThanOrEqual(target)
+            | FilterOperation::LessThan(target)
+            | FilterOperation::LessThanOrEqual(target) => target.as_f64().is_some(),
+            FilterOperation::Contains(_)
+            | FilterOperation::StartsWith(_)
+            | FilterOperation::EndsWith(_) => true,
+            FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => false,
+        }
+    }
+
+    /// Whether one indexed value satisfies the condition.
+    ///
+    /// The single place the comparison lives, so that asking "does anything match?" and asking
+    /// "which records match?" cannot drift apart.
+    fn value_key_matches(value_key: &ValueKey, operation: &FilterOperation) -> bool {
+        match operation {
+            FilterOperation::Equal(value) => {
+                Self::to_value_key(value).is_some_and(|k| &k == value_key)
+            }
+            FilterOperation::NotEqual(value) => {
+                Self::to_value_key(value).is_some_and(|k| &k != value_key)
+            }
+            FilterOperation::In(values) => values
+                .iter()
+                .filter_map(Self::to_value_key)
+                .any(|k| &k == value_key),
+            // An unencodable target is dropped from the exclusion set rather than excluding
+            // everything, which is what the id-building version does too.
+            FilterOperation::NotIn(values) => !values
+                .iter()
+                .filter_map(Self::to_value_key)
+                .any(|k| &k == value_key),
+            FilterOperation::GreaterThan(target) => Self::as_number(value_key)
+                .zip(target.as_f64())
+                .is_some_and(|(v, t)| v > t),
+            FilterOperation::GreaterThanOrEqual(target) => Self::as_number(value_key)
+                .zip(target.as_f64())
+                .is_some_and(|(v, t)| v >= t),
+            FilterOperation::LessThan(target) => Self::as_number(value_key)
+                .zip(target.as_f64())
+                .is_some_and(|(v, t)| v < t),
+            FilterOperation::LessThanOrEqual(target) => Self::as_number(value_key)
+                .zip(target.as_f64())
+                .is_some_and(|(v, t)| v <= t),
+            FilterOperation::Contains(substr) => {
+                matches!(value_key, ValueKey::String(s) if s.contains(substr.as_str()))
+            }
+            FilterOperation::StartsWith(prefix) => {
+                matches!(value_key, ValueKey::String(s) if s.starts_with(prefix.as_str()))
+            }
+            FilterOperation::EndsWith(suffix) => {
+                matches!(value_key, ValueKey::String(s) if s.ends_with(suffix.as_str()))
+            }
+        }
+    }
+
+    /// The number an indexed value compares as, for the range operations.
+    fn as_number(value_key: &ValueKey) -> Option<f64> {
+        match value_key {
+            ValueKey::Number(v) => Some(*v as f64),
+            ValueKey::Float(f) => Some((*f).into()),
+            _ => None,
+        }
+    }
+
     pub fn get_matching_ids(&self, filter: &Filter) -> HashSet<RecordId> {
         let mut result = HashSet::new();
 
@@ -592,173 +722,39 @@ impl PayloadIndex {
             None => return HashSet::new(),
         };
 
+        // `Equal` and `In` name the values they want, so they are lookups. Everything else has
+        // to be asked of each value in turn, through the one predicate in
+        // [`Self::value_key_matches`] -- this used to be nine near-identical loops, and nine
+        // copies of a comparison is nine chances for the "what matches" answer to disagree
+        // with the "does anything match" answer.
         match &condition.operation {
             FilterOperation::Equal(value) => {
-                if let Some(value_key) = Self::to_value_key(value) {
-                    field_index
-                        .value_to_ids
-                        .get(&value_key)
-                        .cloned()
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                }
-            }
-            FilterOperation::NotEqual(value) => {
-                // NotEqual: 收集所有不等于该值的记录ID
-                let mut result = HashSet::new();
-                if let Some(exclude_key) = Self::to_value_key(value) {
-                    for (value_key, ids) in &field_index.value_to_ids {
-                        if value_key != &exclude_key {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
+                return Self::to_value_key(value)
+                    .and_then(|key| field_index.value_to_ids.get(&key))
+                    .cloned()
+                    .unwrap_or_default();
             }
             FilterOperation::In(values) => {
                 let mut result = HashSet::new();
                 for value in values {
-                    if let Some(value_key) = Self::to_value_key(value) {
-                        if let Some(ids) = field_index.value_to_ids.get(&value_key) {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::NotIn(values) => {
-                // NotIn: 收集所有不在列表中的记录ID
-                let exclude_keys: HashSet<_> =
-                    values.iter().filter_map(Self::to_value_key).collect();
-
-                let mut result = HashSet::new();
-                for (value_key, ids) in &field_index.value_to_ids {
-                    if !exclude_keys.contains(value_key) {
+                    if let Some(ids) =
+                        Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
+                    {
                         result.extend(ids.iter().cloned());
                     }
                 }
-                result
+                return result;
             }
-            FilterOperation::GreaterThan(target) => {
-                // 遍历所有值，找出大于target的值对应的记录ID
-                let mut result = HashSet::new();
-                if let Some(target_f64) = target.as_f64() {
-                    for (value_key, ids) in &field_index.value_to_ids {
-                        // 从ValueKey还原为数值进行比较
-                        let value_matches = match value_key {
-                            ValueKey::Number(v) => (*v as f64) > target_f64,
-                            ValueKey::Float(ordered_f) => {
-                                let v: f64 = (*ordered_f).into();
-                                v > target_f64
-                            }
-                            _ => false,
-                        };
-                        if value_matches {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::GreaterThanOrEqual(target) => {
-                // 遍历所有值，找出大于等于target的值对应的记录ID
-                let mut result = HashSet::new();
-                if let Some(target_f64) = target.as_f64() {
-                    for (value_key, ids) in &field_index.value_to_ids {
-                        // 从ValueKey还原为数值进行比较
-                        let value_matches = match value_key {
-                            ValueKey::Number(v) => (*v as f64) >= target_f64,
-                            ValueKey::Float(ordered_f) => {
-                                let v: f64 = (*ordered_f).into();
-                                v >= target_f64
-                            }
-                            _ => false,
-                        };
-                        if value_matches {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::LessThan(target) => {
-                // 遍历所有值，找出小于target的值对应的记录ID
-                let mut result = HashSet::new();
-                if let Some(target_f64) = target.as_f64() {
-                    for (value_key, ids) in &field_index.value_to_ids {
-                        let value_matches = match value_key {
-                            ValueKey::Number(v) => (*v as f64) < target_f64,
-                            ValueKey::Float(ordered_f) => {
-                                let v: f64 = (*ordered_f).into();
-                                v < target_f64
-                            }
-                            _ => false,
-                        };
-                        if value_matches {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::LessThanOrEqual(target) => {
-                // 遍历所有值，找出小于等于target的值对应的记录ID
-                let mut result = HashSet::new();
-                if let Some(target_f64) = target.as_f64() {
-                    for (value_key, ids) in &field_index.value_to_ids {
-                        let value_matches = match value_key {
-                            ValueKey::Number(v) => (*v as f64) <= target_f64,
-                            ValueKey::Float(ordered_f) => {
-                                let v: f64 = (*ordered_f).into();
-                                v <= target_f64
-                            }
-                            _ => false,
-                        };
-                        if value_matches {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::Contains(substr) => {
-                // 字符串包含：遍历所有字符串值
-                let mut result = HashSet::new();
-                for (value_key, ids) in &field_index.value_to_ids {
-                    if let ValueKey::String(s) = value_key {
-                        if s.contains(substr) {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::StartsWith(prefix) => {
-                // 字符串前缀：遍历所有字符串值
-                let mut result = HashSet::new();
-                for (value_key, ids) in &field_index.value_to_ids {
-                    if let ValueKey::String(s) = value_key {
-                        if s.starts_with(prefix) {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
-            }
-            FilterOperation::EndsWith(suffix) => {
-                // 字符串后缀：遍历所有字符串值
-                let mut result = HashSet::new();
-                for (value_key, ids) in &field_index.value_to_ids {
-                    if let ValueKey::String(s) = value_key {
-                        if s.ends_with(suffix) {
-                            result.extend(ids.iter().cloned());
-                        }
-                    }
-                }
-                result
+            _ => {}
+        }
+
+        let mut result = HashSet::new();
+        for (value_key, ids) in &field_index.value_to_ids {
+            if Self::value_key_matches(value_key, &condition.operation) {
+                result.extend(ids.iter().cloned());
             }
         }
+        result
     }
 
     /// 为字段建立索引
@@ -859,6 +855,72 @@ impl Default for PayloadIndex {
 mod estimator_repro {
     use super::*;
     use crate::types::record::{Condition, Filter, FilterOperation};
+
+    /// A range pair with nothing between it is provably empty, and provable without touching
+    /// a single record id.
+    ///
+    /// Neither half is empty on its own -- `>= 400` accepts the 1000s and `<= 600` accepts
+    /// the 0s -- so this only works because conditions on one key are tested against one
+    /// value together. The first version grouped nothing and proved nothing here.
+    #[test]
+    fn a_range_with_no_value_between_it_is_provably_empty() {
+        let mut index = PayloadIndex::new();
+        for i in 0..1_000u32 {
+            let bucket = if i % 10 == 0 { 1000 } else { 0 };
+            index.insert_record(&i.to_string(), &serde_json::json!({ "bucket": bucket }));
+        }
+
+        let between = |lo, hi| Filter {
+            must: Some(vec![
+                Condition {
+                    key: "bucket".to_string(),
+                    operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(lo)),
+                },
+                Condition {
+                    key: "bucket".to_string(),
+                    operation: FilterOperation::LessThanOrEqual(serde_json::json!(hi)),
+                },
+            ]),
+            must_not: None,
+            should: None,
+        };
+
+        assert!(
+            index.cannot_match_anything(&between(400, 600)),
+            "no bucket is between 400 and 600"
+        );
+        // And the ranges that do contain a value are not claimed empty.
+        assert!(!index.cannot_match_anything(&between(0, 600)));
+        assert!(!index.cannot_match_anything(&between(600, 2000)));
+        assert!(!index.cannot_match_anything(&between(0, 2000)));
+
+        // The claim agrees with what the ids say, which is the property that matters.
+        assert!(index.get_matching_ids(&between(400, 600)).is_empty());
+        assert_eq!(index.get_matching_ids(&between(600, 2000)).len(), 100);
+
+        // A negation proves nothing: an array-valued record satisfies it without being
+        // indexed, so the shortcut has to decline however empty the index looks.
+        let not_equal = Filter {
+            must: Some(vec![Condition {
+                key: "absent".to_string(),
+                operation: FilterOperation::NotEqual(serde_json::json!(1)),
+            }]),
+            must_not: None,
+            should: None,
+        };
+        assert!(!index.cannot_match_anything(&not_equal));
+
+        // But a range on a field no record carries is empty, and that one is provable.
+        let absent_range = Filter {
+            must: Some(vec![Condition {
+                key: "absent".to_string(),
+                operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(1)),
+            }]),
+            must_not: None,
+            should: None,
+        };
+        assert!(index.cannot_match_anything(&absent_range));
+    }
 
     fn index_with_ids(n: usize) -> PayloadIndex {
         let mut idx = PayloadIndex::new();

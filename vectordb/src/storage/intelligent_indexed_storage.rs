@@ -3440,7 +3440,16 @@ impl IntelligentIndexedStorage {
                 // them to drop non-matching candidates *before* the exact rerank. Without
                 // that, a 1%-selectivity query fetched 30,000 candidates and reranked all of
                 // them -- 30,000 vector reads per query, 480 ms p99 with the vectors on disk.
-                if *selectivity < 0.05 {
+                // Before anything is searched: the index can often prove the filter matches
+                // no record at all, by walking its fields' distinct values rather than the
+                // table's rows. Answering that here rather than in the post-filter fallback
+                // is the difference between skipping the whole query and skipping only its
+                // last step -- the fallback is reached after an initial fetch and at least
+                // one escalating refetch, and each of those reranks thousands of candidates
+                // against their stored vectors to discover what this already knows.
+                if table_data.payload_index.cannot_match_anything(filter) {
+                    exact_scored = Some(Vec::new());
+                } else if *selectivity < 0.05 {
                     let filter_ids = table_data.payload_index.get_matching_ids(filter);
                     // Exact scoring over the candidate set, when the set is small enough that
                     // doing so beats walking the graph. `result_limit * 4` alone made that
@@ -3824,16 +3833,19 @@ impl IntelligentIndexedStorage {
         metric: DistanceMetric,
         result_limit: usize,
     ) -> crate::Result<Vec<SearchHit>> {
+        // The distances here are placeholders: `rerank_exact` replaces every one of them with
+        // the exact distance from the row's own vector.
         let matching: Vec<(RecordId, f32)> = {
             let tables = self.read_tables("search-exhaustive").await;
             let table_data = tables
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            // A provably empty filter never reaches here -- `cannot_match_anything` answers
+            // that before the first search. What is left is a filter that matches something,
+            // too little of it for the walk to find, so the predicate is the enumerator.
             let mut ids = Vec::new();
             table_data.records.for_each(|record| {
                 if record.matches_filter(filter) {
-                    // The distance is a placeholder: `rerank_exact` replaces every one of
-                    // them with the exact distance from the row's own vector.
                     ids.push((record.id.clone(), 0.0));
                 }
             });
