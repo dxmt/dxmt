@@ -162,38 +162,13 @@ pub enum SearchMode {
 
 impl SearchMode {
     /// Compute the effective ef_search value given the configured default and top_k.
-    /// Candidates the traversal keeps per requested result, for `Normal`.
-    ///
-    /// `ef` is the length of the candidate list, so recall depends on `ef / k`, not on `ef`.
-    /// This used to be `configured_ef.max(top_k)`, which is not a ratio at all: the budget
-    /// did not move when `k` went from 10 to 100, and the default 256 that reads as 25x for
-    /// a top-10 query is 2.56x for a top-100 one.
-    ///
-    /// That default was chosen from a recall@10 curve (see `DEFAULT_EF_SEARCH`), while every
-    /// benchmark reports recall@100. The recall@100 curves say something different --
-    /// measured on Cohere at k=100, exact traversal (design/DISK_INDEX.md 2.10):
-    ///
-    /// | ef        | 256    | 512    | 1024   |
-    /// |-----------|--------|--------|--------|
-    /// | 1M        | 0.9551 | 0.9787 | 0.9896 |
-    /// | 10M       | 0.9551 | 0.9785 | 0.9909 |
-    ///
-    /// Five candidates per result puts a top-100 query at ef 500, which is where recall@100
-    /// reaches about 0.978; ten would reach 0.99 and cost roughly twice the traversal. Below
-    /// `configured_ef` this changes nothing, so small-k queries keep the budget they had.
-    ///
-    /// The filtered path already scaled with `k` (`ef_search_adaptive`); the unfiltered one
-    /// did not, which is why the 5M x 1536 case with a 99% filter reached 0.9949 while
-    /// unfiltered runs of the same size sat at 0.96-0.97.
-    pub const NORMAL_EF_PER_K: usize = 5;
-
     pub fn ef_search(&self, configured_ef: usize, top_k: usize) -> usize {
         match self {
             SearchMode::Fast => top_k.max(1),
-            SearchMode::Normal => configured_ef.max(top_k * Self::NORMAL_EF_PER_K),
-            SearchMode::Accurate => (configured_ef * 4).max(top_k * Self::NORMAL_EF_PER_K),
+            SearchMode::Normal => configured_ef.max(top_k),
+            SearchMode::Accurate => (configured_ef * 4).max(top_k),
             // Auto without selectivity: fall back to Accurate for safety
-            SearchMode::Auto => (configured_ef * 4).max(top_k * Self::NORMAL_EF_PER_K),
+            SearchMode::Auto => (configured_ef * 4).max(top_k),
         }
     }
 
@@ -870,32 +845,13 @@ mod tests {
         assert_eq!(SearchMode::Fast.ef_search(configured_ef, 10), 10);
         assert_eq!(SearchMode::Fast.ef_search(configured_ef, 50), 50);
 
-        // Normal: ef = max(configured_ef, 5 * top_k). Small k keeps the configured budget;
-        // a top-100 query gets 500 rather than the 100 it used to get, because recall
-        // follows ef/k and 1x is not a working ratio.
+        // Normal: ef = max(configured_ef, top_k)
         assert_eq!(SearchMode::Normal.ef_search(configured_ef, 10), 100);
-        assert_eq!(SearchMode::Normal.ef_search(configured_ef, 20), 100);
-        assert_eq!(SearchMode::Normal.ef_search(configured_ef, 100), 500);
-        assert_eq!(SearchMode::Normal.ef_search(configured_ef, 200), 1000);
+        assert_eq!(SearchMode::Normal.ef_search(configured_ef, 200), 200);
 
-        // Accurate: 4x the configured budget, and never below what Normal would give.
+        // Accurate: ef = max(4 * configured_ef, top_k)
         assert_eq!(SearchMode::Accurate.ef_search(configured_ef, 10), 400);
-        assert_eq!(SearchMode::Accurate.ef_search(configured_ef, 100), 500);
-        assert_eq!(SearchMode::Accurate.ef_search(configured_ef, 500), 2500);
-
-        // The property that matters: every mode gives at least k candidates, and Normal is
-        // never below Fast nor above Accurate.
-        for k in [1usize, 5, 10, 99, 100, 101, 1000] {
-            let fast = SearchMode::Fast.ef_search(configured_ef, k);
-            let normal = SearchMode::Normal.ef_search(configured_ef, k);
-            let accurate = SearchMode::Accurate.ef_search(configured_ef, k);
-            assert!(fast >= k, "fast gave {fast} for k={k}");
-            assert!(normal >= k, "normal gave {normal} for k={k}");
-            assert!(
-                normal >= fast && accurate >= normal,
-                "k={k}: {fast} {normal} {accurate}"
-            );
-        }
+        assert_eq!(SearchMode::Accurate.ef_search(configured_ef, 500), 500);
     }
 
     #[test]
