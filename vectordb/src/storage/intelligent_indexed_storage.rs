@@ -3497,7 +3497,11 @@ impl IntelligentIndexedStorage {
         // selector's `ef_search` inert — it reached `HnswConfig` at build time and was then
         // ignored on every query, so tuning it moved nothing. 100 remains the fallback for
         // indexes that have no such parameter (brute force, DiskANN).
-        let default_ef = configured_ef.unwrap_or(100);
+        // Scaled by the table's size, because `ef` is a budget against a graph whose diameter
+        // grows with it; see `ef_for_rows`. Read here rather than at create time because the
+        // size a table is created with (10,000 rows, an estimate) is not the size it is
+        // searched at.
+        let default_ef = Self::ef_for_rows(configured_ef.unwrap_or(100), total_records);
         // Use adaptive EF when SearchMode::Auto and a filter is present
         let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
             query
@@ -5114,7 +5118,52 @@ impl IntelligentIndexedStorage {
     /// 256 is where the benchmark's recall clears 0.95; past 512 the extra work buys nothing.
     /// `SearchMode::Accurate` is 4x this per query and `SearchMode::Fast` 1x; neither needs a
     /// rebuild -- `ef_search` is a per-query budget, not part of the graph.
-    const DEFAULT_EF_SEARCH: usize = 256;
+    ///
+    /// 512 rather than 256 because 256 was never what ran. `search_reranked` floors the walk
+    /// at the rerank pool, `ef.max(fetch)` with `fetch = rerank_candidates(k) = max(5k, 100)`,
+    /// so every recall@100 measurement this repo has ever taken walked at 500, not 256. The
+    /// constant said one thing and the code did another; this makes them agree, and 512 is
+    /// close enough to 500 that no measured number moves.
+    const DEFAULT_EF_SEARCH: usize = 512;
+
+    /// Rows per decade of `ef_search` growth, and the ceiling on that growth.
+    ///
+    /// A fixed `ef` does not hold recall as the graph grows: measured on Cohere 768d
+    /// (`design/DISK_INDEX.md` 5.5, `probe_10m_streambuild.log`), one graph reaches
+    /// recall@100 0.9800 at 1M with ef 500, but only 0.9638 at 10M with the same budget --
+    /// it needs 1024 there for 0.9800 and 2048 for 0.9887.
+    ///
+    /// Segmented engines get this growth without naming it. Qdrant splits 10M into 8 segments
+    /// and walks each at ef 256, a 2,048-candidate budget in total, which is why its recall
+    /// held at 10M (0.9828) where a single graph at 500 fell to 0.9626 -- and why it paid 594
+    /// QPS for it against our 4,698. At a matched total budget the single graph is the better
+    /// of the two (0.9887 at ef 2048 against its 0.9828), so the fix is to spend the budget,
+    /// not to shard.
+    ///
+    /// One doubling per decade of rows: 1M keeps 512, 10M gets 1024, 100M gets 2048.
+    const EF_SCALE_BASE_ROWS: usize = 1_000_000;
+    const EF_SCALE_MAX: usize = 8;
+
+    /// The traversal budget for a table of `rows`, from the budget it was configured with.
+    ///
+    /// Below `EF_SCALE_BASE_ROWS` this is the configured value unchanged -- a small table's
+    /// graph is short and a bigger `ef` only costs.
+    fn ef_for_rows(configured: usize, rows: usize) -> usize {
+        let mut scale = 1usize;
+        let mut rows_at_scale = Self::EF_SCALE_BASE_ROWS;
+        while scale < Self::EF_SCALE_MAX {
+            let next = match rows_at_scale.checked_mul(10) {
+                Some(n) => n,
+                None => break,
+            };
+            if rows < next {
+                break;
+            }
+            scale *= 2;
+            rows_at_scale = next;
+        }
+        configured.saturating_mul(scale)
+    }
 
     /// Graph build effort for the index a table gets when it is created.
     ///
@@ -6384,6 +6433,40 @@ mod tests {
     use crate::CreateRecordRequest;
     use crate::RecordId;
     use crate::SearchQuery;
+
+    /// The traversal budget doubles per decade of rows, and only above a million.
+    ///
+    /// The numbers on the right are the measured operating points, not a formula's output:
+    /// on Cohere 768d one graph reaches recall@100 0.9800 at 1M with a 500-candidate walk
+    /// and 0.9638 at 10M with the same walk, needing 1024 there to get back to 0.9800
+    /// (`design/DISK_INDEX.md` 5.5). A table below the base row count keeps what it was
+    /// configured with -- growing `ef` on a short graph buys nothing and costs latency.
+    #[test]
+    fn the_traversal_budget_doubles_per_decade_of_rows() {
+        type S = IntelligentIndexedStorage;
+        let ef = S::DEFAULT_EF_SEARCH;
+
+        // Below and at the base: unchanged.
+        assert_eq!(S::ef_for_rows(ef, 0), ef);
+        assert_eq!(S::ef_for_rows(ef, 10_000), ef);
+        assert_eq!(S::ef_for_rows(ef, 1_000_000), ef);
+        assert_eq!(S::ef_for_rows(ef, 9_999_999), ef);
+
+        // One doubling per decade, at the decade boundary exactly.
+        assert_eq!(S::ef_for_rows(ef, 10_000_000), ef * 2);
+        assert_eq!(S::ef_for_rows(ef, 99_999_999), ef * 2);
+        assert_eq!(S::ef_for_rows(ef, 100_000_000), ef * 4);
+        assert_eq!(S::ef_for_rows(ef, 1_000_000_000), ef * 8);
+
+        // Capped, so a table that outgrows the measurements does not walk unboundedly.
+        assert_eq!(S::ef_for_rows(ef, 10_000_000_000), ef * S::EF_SCALE_MAX);
+        assert_eq!(S::ef_for_rows(ef, usize::MAX), ef * S::EF_SCALE_MAX);
+
+        // The measured operating points, spelled out.
+        assert_eq!(S::ef_for_rows(512, 1_000_000), 512);
+        assert_eq!(S::ef_for_rows(512, 10_000_000), 1024);
+        assert_eq!(S::ef_for_rows(512, 100_000_000), 2048);
+    }
 
     /// A changed `ef_search` reaches an existing table without rebuilding its graph.
     ///
