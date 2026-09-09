@@ -18,10 +18,8 @@ mod full_text_search_test {
     include!("integration/full_text_search_test.rs");
 }
 
-#[cfg(feature = "index-management")]
-mod phase3_integration_tests {
-    include!("integration/phase3_integration_tests.rs");
-}
+// phase3_integration_tests moved to planning/tests/: it exercised index_management and
+// adaptive_index, neither of which any binary can reach.
 
 // WAL recovery now lives in tests/wal_recovery_test.rs, rewritten against the current API.
 // The files that used to be included here targeted a StorageConfig with enable_wal / wal_dir /

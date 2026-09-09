@@ -1,49 +1,34 @@
 // Core storage module - simplified and clean
 
 pub mod atomic_ops;
-pub mod background_demotion; // New: Background demotion task
-pub mod backup;
 pub mod compression;
-pub mod consistency;
 pub mod consistency_check; // New: Index consistency verification
-pub mod encryption;
 pub mod factory;
-#[cfg(feature = "storage-lmdb")]
-pub mod hybrid_engine;
 pub mod index_selector;
 pub mod intelligent_indexed_storage;
 #[cfg(feature = "storage-lmdb")]
 pub mod lmdb;
 pub mod memory;
 pub(crate) mod memory_guard;
-pub mod mmap_index;
 pub mod object;
 pub mod payload_index;
 pub mod record_store;
 pub mod tier_promotion;
 pub mod tiered;
-pub mod tombstone_tracker;
 pub mod traits;
 pub mod vector_file;
 pub mod wal_entry; // New: WAL entry definitions
                    // Removed
 
 // Re-export main types
-pub use background_demotion::{
-    start_background_demotion_task, BackgroundDemotionConfig, BackgroundDemotionTask,
-};
-pub use backup::{BackupConfig, BackupManager, RestoreOptions};
 pub use factory::{
     OptimizedCostConstraints, OptimizedStorageConfig, PerformanceTargets, StorageBackend,
     StorageFactory, StorageIntegration,
 };
-#[cfg(feature = "storage-lmdb")]
-pub use hybrid_engine::{HybridConfig, HybridStats, HybridStorageEngine, ReadPreference};
 pub use intelligent_indexed_storage::IntelligentIndexedStorage;
 #[cfg(feature = "storage-lmdb")]
 pub use lmdb::{GraphEdge, GraphNode, LmdbStorage, TableMetadata, VectorRecord};
 pub use memory::MemoryStorage;
-pub use mmap_index::{IndexMetadata, MmapHnswIndex, MmapIndexStorage};
 pub use tier_promotion::{
     AccessPattern, Tier, TierPromotionConfig, TierPromotionPolicy, TierStats,
 };
