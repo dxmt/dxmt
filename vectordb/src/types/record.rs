@@ -581,64 +581,59 @@ impl Record {
 
     /// 检查是否满足单个条件
     fn matches_condition(&self, condition: &Condition) -> bool {
-        let value = self.get_field_value(&condition.key);
+        let owned = self.get_field_value(&condition.key);
+        let value = owned.as_deref();
+        // `as_f64` on the field once, not once per branch: every numeric comparison below
+        // wants the same number.
+        let number = || value.and_then(serde_json::Value::as_f64);
+        let text = || value.and_then(serde_json::Value::as_str);
 
         match &condition.operation {
-            FilterOperation::Equal(target) => value.as_ref() == Some(target),
-            FilterOperation::NotEqual(target) => value.as_ref() != Some(target),
+            FilterOperation::Equal(target) => value == Some(target),
+            FilterOperation::NotEqual(target) => value != Some(target),
             FilterOperation::GreaterThan(target) => {
-                if let (Some(v), Some(t)) = (value.and_then(|v| v.as_f64()), target.as_f64()) {
-                    v > t
-                } else {
-                    false
-                }
+                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v > t)
             }
             FilterOperation::GreaterThanOrEqual(target) => {
-                if let (Some(v), Some(t)) = (value.and_then(|v| v.as_f64()), target.as_f64()) {
-                    v >= t
-                } else {
-                    false
-                }
+                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v >= t)
             }
             FilterOperation::LessThan(target) => {
-                if let (Some(v), Some(t)) = (value.and_then(|v| v.as_f64()), target.as_f64()) {
-                    v < t
-                } else {
-                    false
-                }
+                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v < t)
             }
             FilterOperation::LessThanOrEqual(target) => {
-                if let (Some(v), Some(t)) = (value.and_then(|v| v.as_f64()), target.as_f64()) {
-                    v <= t
-                } else {
-                    false
-                }
+                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v <= t)
             }
-            FilterOperation::In(targets) => value.is_some_and(|v| targets.contains(&v)),
-            FilterOperation::NotIn(targets) => value.is_some_and(|v| !targets.contains(&v)),
-            FilterOperation::Contains(substr) => value
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .is_some_and(|s| s.contains(substr)),
-            FilterOperation::StartsWith(prefix) => value
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .is_some_and(|s| s.starts_with(prefix)),
-            FilterOperation::EndsWith(suffix) => value
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .is_some_and(|s| s.ends_with(suffix)),
+            FilterOperation::In(targets) => value.is_some_and(|v| targets.contains(v)),
+            FilterOperation::NotIn(targets) => value.is_some_and(|v| !targets.contains(v)),
+            FilterOperation::Contains(substr) => {
+                text().is_some_and(|s| s.contains(substr.as_str()))
+            }
+            FilterOperation::StartsWith(prefix) => {
+                text().is_some_and(|s| s.starts_with(prefix.as_str()))
+            }
+            FilterOperation::EndsWith(suffix) => {
+                text().is_some_and(|s| s.ends_with(suffix.as_str()))
+            }
         }
     }
 
     /// 获取字段值
-    fn get_field_value(&self, key: &str) -> Option<serde_json::Value> {
+    ///
+    /// Borrowed, not cloned. Post-filtering calls this once per condition per record, and a
+    /// filtered search that has to fall back to scanning the table calls it for every row it
+    /// holds: the clone that used to be here allocated a `Value` (and, for a string field, its
+    /// bytes) tens of thousands of times to answer a comparison that never needed to own
+    /// anything. `id` is the one key with no `Value` to borrow, so it is the one that still
+    /// builds one.
+    fn get_field_value(&self, key: &str) -> Option<std::borrow::Cow<'_, serde_json::Value>> {
         match key {
-            "id" => Some(serde_json::Value::String(self.id.clone())),
-            _ => {
-                if let serde_json::Value::Object(map) = &self.payload {
-                    map.get(key).cloned()
-                } else {
-                    None
-                }
-            }
+            "id" => Some(std::borrow::Cow::Owned(serde_json::Value::String(
+                self.id.clone(),
+            ))),
+            _ => match &self.payload {
+                serde_json::Value::Object(map) => map.get(key).map(std::borrow::Cow::Borrowed),
+                _ => None,
+            },
         }
     }
 }

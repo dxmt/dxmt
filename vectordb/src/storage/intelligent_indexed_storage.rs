@@ -3705,11 +3705,50 @@ impl IntelligentIndexedStorage {
             && attempts < Self::POST_FILTER_REFETCH_ATTEMPTS
         {
             attempts += 1;
-            fetched = if attempts == Self::POST_FILTER_REFETCH_ATTEMPTS {
-                total_records
-            } else {
-                fetched.saturating_mul(8).min(total_records)
-            };
+            // The last attempt, or the first one that would already span the table.
+            //
+            // What decides that is the fetch the index will actually make, not the number
+            // asked for: `search_reranked` widens `k` to the rerank pool, so a 4,800-candidate
+            // refetch reaches for 24,000 and covers a 20,000-row table completely. A graph
+            // walk that visits everything cannot find a matching row the scan below would
+            // miss, so there is no reason to pay for it first.
+            let next = fetched.saturating_mul(8);
+            let widened = active_index
+                .rerank_candidates(next)
+                .await
+                .unwrap_or(next)
+                .max(next);
+            if attempts == Self::POST_FILTER_REFETCH_ATTEMPTS || widened >= total_records {
+                // The exhaustive answer, enumerated by the predicate instead of by the graph.
+                //
+                // This step used to set `fetched = total_records` and go back through
+                // `search_reranked`, which multiplies whatever `k` it is handed by the rerank
+                // factor: a 5M-row table was asked for 25M results at ef 25M, and every
+                // candidate that came back was reranked against its stored vector. That is
+                // where the 16.6 s empty answer in `design/DISK_INDEX.md` 5.5.1 came from,
+                // 4.6 s of it holding the table read lock, against 3.6 ms for the same query
+                // unfiltered. At `ef = n` the graph has stopped being an index -- the walk
+                // reaches every node and carries an n-sized heap -- so it is strictly more
+                // work than the scan it is imitating.
+                //
+                // The condition that brings us here bounds what the scan then costs: three
+                // escalating fetches failed to find `result_limit` matching rows, so the
+                // filter is highly selective and few rows survive it. A filter that matches
+                // nothing reads no vectors at all.
+                if let Some(filter) = &query.filter {
+                    debug!(
+                        "POST-FILTER exhausted the graph ({} < {}), scanning {} records by                          the predicate instead",
+                        hits.len(),
+                        result_limit,
+                        total_records
+                    );
+                    hits = self
+                        .exhaustive_post_filter(tablename, &query, filter, metric, result_limit)
+                        .await?;
+                }
+                break;
+            }
+            fetched = next.min(total_records);
             debug!(
                 "POST-FILTER short ({} < {}), refetching {} of {} records (attempt {})",
                 hits.len(),
@@ -3765,6 +3804,55 @@ impl IntelligentIndexedStorage {
         })
     }
 
+    /// Every record the filter accepts, scored exactly against the query.
+    ///
+    /// The fallback a post-filtered search takes when the graph keeps handing back candidates
+    /// that all fail the predicate. Two passes, both bounded by the table: one over the
+    /// payloads to find what matches, one over those rows' vectors to order them. The payload
+    /// pass is what makes an empty filter cheap -- it reads no vectors at all -- and it runs
+    /// under the read lock only for as long as it takes to collect ids.
+    ///
+    /// The predicate stays `Record::matches_filter`, the same one `assemble_hits` applies, and
+    /// deliberately not `payload_index.get_matching_ids`: the index keys on scalar values that
+    /// `to_value_key` can encode, so an array- or object-valued field never enters it. Reading
+    /// the answer out of the index would be faster and would quietly change which rows match.
+    async fn exhaustive_post_filter(
+        &self,
+        tablename: &str,
+        query: &SearchQuery,
+        filter: &crate::types::record::Filter,
+        metric: DistanceMetric,
+        result_limit: usize,
+    ) -> crate::Result<Vec<SearchHit>> {
+        let matching: Vec<(RecordId, f32)> = {
+            let tables = self.read_tables("search-exhaustive").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            let mut ids = Vec::new();
+            table_data.records.for_each(|record| {
+                if record.matches_filter(filter) {
+                    // The distance is a placeholder: `rerank_exact` replaces every one of
+                    // them with the exact distance from the row's own vector.
+                    ids.push((record.id.clone(), 0.0));
+                }
+            });
+            ids
+        };
+
+        let scored = if matching.is_empty() {
+            Vec::new()
+        } else {
+            self.rerank_exact(tablename, metric, &query.vector, matching, result_limit)
+                .await?
+        };
+
+        // `post_filter` is false: these ids are the ones that passed the filter, so applying
+        // it again would only re-read the payloads.
+        self.assemble_hits(tablename, query, scored, false, metric, result_limit)
+            .await
+    }
+
     /// Number of escalating refetches a short post-filtered search is allowed.
     ///
     /// The last attempt asks for every record, so three is not a heuristic budget: it is one
@@ -3793,13 +3881,23 @@ impl IntelligentIndexedStorage {
         filter_ids: Option<&std::collections::HashSet<String>>,
         keep: Option<&std::collections::HashSet<String>>,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
+        // A `k` larger than the index cannot be answered by asking for more: past that point
+        // every extra candidate is a slot the walk keeps open and a node the heap carries, and
+        // there is nothing left to put in them. The post-filter escalation used to hand this
+        // `k = total_records`, which the rerank factor below then multiplied by five.
+        let rows = index.len().await;
+        let k = if rows > 0 { k.min(rows) } else { k };
         let Some(candidates) = index.rerank_candidates(k).await else {
             return match filter_ids {
                 Some(ids) => index.search_with_filter(query, k, ef, ids).await,
                 None => index.search_with_ef_hint(query, k, ef).await,
             };
         };
-        let fetch = candidates.max(k);
+        let fetch = if rows > 0 {
+            candidates.max(k).min(rows)
+        } else {
+            candidates.max(k)
+        };
         let mut approximate = match filter_ids {
             Some(ids) => {
                 index
