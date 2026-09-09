@@ -91,6 +91,37 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// The work this index wants done before it can quantize itself: a training sample and an
+    /// untrained quantizer configured for it, or `None` if it does not want quantizing now.
+    ///
+    /// Both are returned by value so the caller can train with no lock held. That is the whole
+    /// point of splitting this out of [`Self::after_batch`]: fitting 192 subspaces to 65,536
+    /// vectors takes about a minute, and doing it inside the index's write lock froze every
+    /// read and every write on the table for that minute. Measured on
+    /// `StreamingPerformanceCase`, which inserts and searches at the same time: search p99
+    /// 47.7 s and 200+ insertions backed up, against a table that answers in milliseconds
+    /// either side of the stall.
+    fn quantization_job(
+        &self,
+    ) -> Option<(
+        Vec<crate::types::vector::DenseVector>,
+        crate::search::quantization::product_quantization::ProductQuantizer,
+    )> {
+        None
+    }
+
+    /// Adopt a quantizer trained by [`Self::quantization_job`]'s output.
+    ///
+    /// Must be a no-op if the index quantized itself in the meantime: the sample was taken
+    /// under a read lock that was then released, so two callers can arrive here with two
+    /// separately trained quantizers and only the first may be installed.
+    fn install_quantizer(
+        &mut self,
+        _pq: crate::search::quantization::product_quantization::ProductQuantizer,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
     fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {
         None
     }

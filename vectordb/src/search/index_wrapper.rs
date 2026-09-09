@@ -47,9 +47,14 @@ impl IndexWrapper {
 
     /// Insert a vector - requires write lock
     pub async fn insert(&self, id: RecordId, vector: DenseVector) -> Result<()> {
-        let mut index = self.index.write().await;
-        // Convert RecordId to String for trait compatibility
-        index.add(id.to_string(), vector).await
+        {
+            let mut index = self.index.write().await;
+            // Convert RecordId to String for trait compatibility
+            index.add(id.to_string(), vector).await?;
+        }
+        // A table fed one row at a time crosses the quantization threshold too, and the row
+        // that crosses it must not be the one that pays a minute of exclusive lock.
+        self.quantize_if_wanted().await
     }
 
     /// Insert several vectors under one write lock.
@@ -84,7 +89,9 @@ impl IndexWrapper {
         let prepared = {
             let mut index = self.index.write().await;
             if index.as_hnsw().is_none() {
-                return index.add_batch(items).await;
+                index.add_batch(items).await?;
+                drop(index);
+                return self.quantize_if_wanted().await;
             }
             index
                 .as_hnsw_mut()
@@ -95,7 +102,8 @@ impl IndexWrapper {
         let Some(prepared) = prepared else {
             // The graph took the batch one row at a time (too small, or the graph too
             // young to plan in parallel); the wrapper index still gets its turn.
-            return self.index.write().await.after_batch();
+            self.index.write().await.after_batch()?;
+            return self.quantize_if_wanted().await;
         };
 
         // A. Planning: shared, and every core.
@@ -128,7 +136,38 @@ impl IndexWrapper {
         // never saw the batch; this is its chance. HNSW-PQ quantizes itself here at its
         // row threshold -- the 1M acceptance run streamed a million rows through this path
         // as an exact graph and only quantized in the rebuild afterwards.
-        self.index.write().await.after_batch()
+        self.index.write().await.after_batch()?;
+        self.quantize_if_wanted().await
+    }
+
+    /// Quantize the index if it has grown into wanting it, training outside every lock.
+    ///
+    /// Three phases, the same shape as the batch insert above: read the sample, work, write
+    /// the result. Training 192 subspaces on 65,536 vectors takes about a minute, and it used
+    /// to run inside the index write lock, from `after_batch`. Nothing else could touch the
+    /// table for that minute. `StreamingPerformanceCase` -- the one standard case that
+    /// inserts and searches at the same time -- measured search p99 47.7 s and over 200
+    /// insertions backed up behind it, and had never once produced a valid result.
+    ///
+    /// Only the install is exclusive, and it is a re-encode of rows that are already in the
+    /// graph. Rows inserted while the training ran are in the graph too and get encoded with
+    /// the rest, so nothing has to be replayed.
+    pub async fn quantize_if_wanted(&self) -> Result<()> {
+        let Some((sample, mut pq)) = self.index.read().await.quantization_job() else {
+            return Ok(());
+        };
+        let started = std::time::Instant::now();
+        // No lock held. This is the minute.
+        pq.train(&sample, 25)?;
+        let trained = started.elapsed();
+        let installing = std::time::Instant::now();
+        self.index.write().await.install_quantizer(pq)?;
+        tracing::info!(
+            "HNSW-PQ: quantizer trained in {:.1}s with no lock held, installed in {:.1}s",
+            trained.as_secs_f64(),
+            installing.elapsed().as_secs_f64()
+        );
+        Ok(())
     }
 
     /// Search for nearest neighbors - requires read lock

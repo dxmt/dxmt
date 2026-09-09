@@ -189,13 +189,24 @@ impl HnswPqIndex {
         self.maybe_quantize()
     }
 
-    /// A streaming build quantizes itself at `quantize_at_rows`; below that it waits for a
-    /// rebuild (`wants_rebuild`) or stays exact.
-    fn maybe_quantize(&mut self) -> crate::Result<()> {
-        if !self.hnsw.is_quantized()
+    /// Whether a streaming build has reached the row count at which it quantizes itself.
+    ///
+    /// Below `quantize_at_rows` it waits for a rebuild (`wants_rebuild`) or stays exact.
+    fn wants_quantizing(&self) -> bool {
+        !self.hnsw.is_quantized()
             && crate::search::index_traits::VectorIndex::len(&self.hnsw)
                 >= self.config.quantize_at_rows
-        {
+            && crate::search::index_traits::VectorIndex::len(&self.hnsw) >= self.training_minimum()
+    }
+
+    /// Quantize in one go, holding whatever lock the caller holds.
+    ///
+    /// The embedded path, where there is no wrapper to split the work across locks and no
+    /// concurrent reader to starve. `IndexWrapper` uses `quantization_job` and
+    /// `install_quantizer` instead, because on a server this takes about a minute and nothing
+    /// else may touch the table while it runs.
+    fn maybe_quantize(&mut self) -> crate::Result<()> {
+        if self.wants_quantizing() {
             self.quantize_from_graph()?;
         }
         Ok(())
@@ -333,8 +344,54 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         Some(self.hnsw.scan_ids(&query.to_vec(), ids, k))
     }
 
+    /// Deliberately not `maybe_quantize`. `IndexWrapper` calls `quantization_job` and
+    /// `install_quantizer` around this, so the training happens with no lock held; leaving
+    /// the inline path here as well would train twice, the second time for nothing.
     fn after_batch(&mut self) -> crate::Result<()> {
-        self.maybe_quantize()
+        Ok(())
+    }
+
+    fn quantization_job(
+        &self,
+    ) -> Option<(
+        Vec<DenseVector>,
+        crate::search::quantization::product_quantization::ProductQuantizer,
+    )> {
+        if !self.wants_quantizing() {
+            return None;
+        }
+        let sample = self.hnsw.sample_vectors(Self::MAX_TRAINING_VECTORS);
+        if sample.len() < self.training_minimum() {
+            return None;
+        }
+        // Graph vectors are already metric-prepared, and `prepare` is idempotent for unit
+        // vectors, so the sample goes to the caller as it is.
+        let pq = crate::search::quantization::product_quantization::ProductQuantizer::new(
+            self.dimension,
+            self.config.num_subvectors,
+            self.config.num_centroids,
+            DistanceMetric::Euclidean,
+        )
+        .ok()?;
+        tracing::info!(
+            "HNSW-PQ: {}-row graph wants quantizing; training {} subspaces on {} vectors              outside the index lock",
+            crate::search::index_traits::VectorIndex::len(&self.hnsw),
+            self.config.num_subvectors,
+            sample.len()
+        );
+        Some((sample, pq))
+    }
+
+    fn install_quantizer(
+        &mut self,
+        pq: crate::search::quantization::product_quantization::ProductQuantizer,
+    ) -> crate::Result<()> {
+        // Someone else got there while this quantizer was training. Theirs is as good as
+        // this one -- both were fitted to a stride sample of the same graph -- so drop this.
+        if self.hnsw.is_quantized() {
+            return Ok(());
+        }
+        self.hnsw.quantize(pq)
     }
 
     fn wants_rebuild(&self) -> bool {
