@@ -181,6 +181,10 @@ impl ProductQuantizer {
         // Initialize centroids randomly (k-means++)
         let mut centroids = Vec::with_capacity(k);
 
+        // Set when the data runs out of distinct points before `k` is reached; the empty
+        // clusters that necessarily follow must then be left alone rather than reseeded.
+        let mut saturated = false;
+
         // First centroid: random data point
         centroids.push(subvectors.choose(&mut rng).unwrap().clone());
 
@@ -199,7 +203,18 @@ impl ProductQuantizer {
 
             let sum: f32 = distances.iter().sum();
             if sum == 0.0 {
-                // All points are already centroids
+                // Every point coincides with a centroid: the data holds fewer distinct
+                // points than `k`, so there is nothing left to seed. Leaving the vector
+                // short is what made a 128-dimension dataset abort the server -- 32
+                // subspaces of 4 dimensions over SIFT's small integers gave one subspace 86
+                // distinct points, and Lloyd's step below indexes `centroids[c_idx]` for
+                // `c_idx` in `0..k`. Pad to `k` so that loop is always in bounds; the
+                // duplicates are inert, since a point assigns to the first centroid it ties
+                // with and the rest stay empty.
+                saturated = true;
+                while centroids.len() < k {
+                    centroids.push(subvectors[centroids.len() % n].clone());
+                }
                 break;
             }
 
@@ -224,7 +239,10 @@ impl ProductQuantizer {
             }
             centroids.push(subvectors[chosen].clone());
         }
-        debug_assert_eq!(
+        // Guaranteed by construction above, both on the normal path and on the padded one.
+        // It was a `debug_assert!` and release builds compile those out, so the invariant it
+        // documented was not the invariant that shipped.
+        assert_eq!(
             centroids.len(),
             k,
             "k-means++ must seed exactly k centroids"
@@ -272,11 +290,17 @@ impl ProductQuantizer {
                         changed = true;
                     }
                     centroids[c_idx] = new_centroids[c_idx].clone();
-                } else {
-                    // Empty cluster: reinitialize with random point
+                } else if !saturated {
+                    // Empty cluster: reinitialize with random point. Worth doing while the
+                    // data has more distinct points than centroids, because it escapes a
+                    // poor seeding.
                     centroids[c_idx] = subvectors.choose(&mut rng).unwrap().clone();
                     changed = true;
                 }
+                // When the data has fewer distinct points than `k`, empty clusters are
+                // unavoidable and reseeding them only churns: every replacement duplicates
+                // a point that already has a centroid, `changed` never settles, and the
+                // loop runs every iteration for nothing. Leave them.
             }
 
             // Early stopping if converged
@@ -474,6 +498,58 @@ impl ProductQuantizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Training data with fewer distinct points per subspace than there are centroids.
+    ///
+    /// This is not a corner case invented for a test: SIFT is 128 dimensions of small
+    /// integers, our default splits it into 32 subspaces of 4 dimensions, and one of those
+    /// subspaces held 86 distinct points against 256 centroids. Seeding stopped at 86 while
+    /// Lloyd's step indexed `centroids[c_idx]` for `c_idx` in `0..k`, and the server aborted
+    /// -- in release, where the `debug_assert!` that documented the invariant was compiled
+    /// out. The benchmark case that found it is CapacityDim128, which we had never run.
+    #[test]
+    fn training_survives_fewer_distinct_points_than_centroids() {
+        const DIM: usize = 128;
+        const SUBS: usize = 32;
+        const K: usize = 256;
+        // Small integers, exactly the shape that collapses a 4-dimension subspace.
+        let training: Vec<DenseVector> = (0..4096)
+            .map(|i: usize| (0..DIM).map(|d| ((i * 31 + d * 7) % 11) as f32).collect())
+            .collect();
+
+        let mut pq = ProductQuantizer::new(DIM, SUBS, K, DistanceMetric::Euclidean).unwrap();
+        pq.train(&training, 10)
+            .expect("training must not panic or fail");
+
+        // Every subspace must offer the full codebook, or the ADC table and the one-byte
+        // codes disagree about how many centroids a subspace has.
+        assert_eq!(pq.codebooks.len(), SUBS);
+        for (sub, book) in pq.codebooks.iter().enumerate() {
+            assert_eq!(book.len(), K, "subspace {sub} has {} centroids", book.len());
+        }
+
+        // And it still encodes and decodes every vector it was trained on.
+        for v in training.iter().take(64) {
+            let code = pq.encode(v).expect("encode");
+            assert_eq!(code.codes.len(), SUBS);
+            let back = pq.decode(&code).expect("decode");
+            assert_eq!(back.len(), DIM);
+        }
+    }
+
+    /// The degenerate extreme: one distinct point, many centroids.
+    #[test]
+    fn training_survives_a_single_distinct_point() {
+        let training: Vec<DenseVector> = (0..512).map(|_| vec![1.0f32; 32]).collect();
+        let mut pq = ProductQuantizer::new(32, 8, 64, DistanceMetric::Euclidean).unwrap();
+        pq.train(&training, 5)
+            .expect("training must not panic or fail");
+        for book in &pq.codebooks {
+            assert_eq!(book.len(), 64);
+        }
+        let code = pq.encode(&training[0]).expect("encode");
+        assert_eq!(code.codes.len(), 8);
+    }
 
     #[test]
     fn test_pq_creation() {
