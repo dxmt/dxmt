@@ -8,7 +8,7 @@ CARGO_INCREMENTAL ?= 0
 CARGO_PROFILE_DEV_DEBUG ?= 0
 export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
 
-.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall
+.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live
 
 # Default target - show help
 help:
@@ -25,6 +25,8 @@ help:
 	@echo "  test       - Run all tests"
 	@echo "  test-unit  - Run unit tests only"
 	@echo "  test-integ - Run integration tests"
+	@echo "  test-api   - Run the HTTP functional suite in both storage modes (needs python3+pytest+httpx)"
+	@echo "  test-api-quick - Same, skipping the property suite"
 	@echo "  bench      - Run the criterion benchmarks"
 	@echo "  bench-recall - Measure ANN recall against exact ground truth"
 	@echo "  coverage   - Generate test coverage report"
@@ -47,6 +49,7 @@ help:
 	@echo "Utilities:"
 	@echo "  clean      - Clean build artifacts"
 	@echo "  verify     - Run all checks (fmt, lint, test)"
+	@echo "  verify-live - verify plus the live HTTP suite"
 
 # Setup development environment
 setup:
@@ -93,6 +96,21 @@ test-recovery:
 test-contract:
 	@echo "Running server/API contract tests..."
 	@cargo test --test api_contract_test
+
+# The HTTP surface, against a server this starts itself -- once with records and vectors in
+# memory and once with them in row files. Needs python3 with pytest and httpx; deliberately
+# NOT part of `verify`, which stays pure cargo so it runs on a checkout with no Python, and
+# because CI runs this in `sdk-live` where the server and the interpreter already live.
+test-api:
+	@echo "Running functional API tests in both storage modes..."
+	@scripts/api_tests.sh
+
+test-api-quick:
+	@echo "Running functional API tests (skipping the property suite)..."
+	@scripts/api_tests.sh -m "not slow"
+
+verify-live: verify test-api
+	@echo "All checks passed, including the live API suite."
 
 # `filter_performance_bench` declares `required-features = ["text-bm25"]`, and text-bm25
 # left the default set. Without naming it here, cargo silently skips the only bench target

@@ -152,6 +152,17 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Starts its own servers on ephemeral ports, one per storage mode, so it does not touch
+      # the :19999 server the SDK tests below use. `pytest httpx` explicitly rather than
+      # relying on the SDK's `[dev]` extra installed by the next step: two small wheels are
+      # cheaper than an ordering dependency between steps.
+      - name: Functional API tests (memory and disk)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest httpx
+          DXMT_SKIP_BUILD=1 scripts/api_tests.sh -q
+        working-directory: vectordb
+
       - name: Python SDK live tests
         run: |
           python -m pip install --upgrade pip
