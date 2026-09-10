@@ -64,10 +64,7 @@ async fn quantizing_at_the_threshold_does_not_block_searches() {
     let below: Vec<(String, Vec<f32>)> = (0..THRESHOLD - 500)
         .map(|i| (i.to_string(), vector(i)))
         .collect();
-    wrapper
-        .insert_batch(below.into_iter().map(|(id, v)| (id, v)).collect())
-        .await
-        .unwrap();
+    wrapper.insert_batch(below).await.unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
     let searcher = {
@@ -93,10 +90,7 @@ async fn quantizing_at_the_threshold_does_not_block_searches() {
         .map(|i| (i.to_string(), vector(i)))
         .collect();
     let training = Instant::now();
-    wrapper
-        .insert_batch(crossing.into_iter().map(|(id, v)| (id, v)).collect())
-        .await
-        .unwrap();
+    wrapper.insert_batch(crossing).await.unwrap();
     let insert_took = training.elapsed();
 
     stop.store(true, Ordering::Relaxed);

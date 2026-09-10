@@ -24,8 +24,13 @@ pub struct PayloadIndex {
 /// 单个字段的索引
 #[derive(Debug, Clone)]
 struct FieldIndex {
-    /// 值 -> 包含该值的记录ID集合
+    /// 值 -> 包含该值的记录ID集合。
+    ///
+    /// Strings, bools and nulls only. Numbers go to `numeric` instead -- see [`NumericIndex`]
+    /// for what one set per distinct number costs on a field with a value per row.
     value_to_ids: HashMap<ValueKey, HashSet<RecordId>>,
+    /// Numeric values, sorted. A field can hold both: the value decides, not the field.
+    numeric: NumericIndex,
     /// 字段类型（推断）
     #[allow(dead_code)]
     field_type: FieldType,
@@ -33,6 +38,116 @@ struct FieldIndex {
     distinct_count: usize,
     /// 字段统计信息（用于更准确的基数估计）
     stats: FieldStats,
+}
+
+/// A field's numeric values, one entry per record, kept sorted so a range is a binary search.
+///
+/// `value_to_ids` keys one inverted set per *distinct* value. That is the right shape for a
+/// field with a few dozen values and the wrong one for a field with a value per row. The
+/// benchmark filters on the primary key, so at 10M rows it built ten million single-element
+/// `HashSet`s: 2.5 GB resident to store one `i64` a row (7,149 MB against 4,659 MB with no
+/// payload at all), and every range condition walked all ten million entries. Measured cost,
+/// 2026-09-09: 10M rows at 1% selectivity answered at 108.8 QPS with a 236 ms serial p99,
+/// against 3,682 QPS unfiltered, and the four filtered cases line up with the *distinct
+/// count* rather than with the number of rows that match.
+///
+/// Sorted, the same range is two binary searches over a contiguous slice.
+///
+/// Inserts append to `pending` instead of sorting, because a read takes `&self` and cannot
+/// sort, while `insert_record` takes `&mut self` and can. A query binary-searches `sorted`
+/// and scans `pending`, which the merge below keeps small enough that the scan does not
+/// matter.
+#[derive(Debug, Clone, Default)]
+struct NumericIndex {
+    /// Sorted by value. Ties keep insertion order, which nothing depends on.
+    sorted: Vec<(OrderedFloat, RecordId)>,
+    /// Appended since the last merge, unsorted.
+    pending: Vec<(OrderedFloat, RecordId)>,
+    /// Distinct values across both halves, recomputed at each merge.
+    distinct: usize,
+}
+
+impl NumericIndex {
+    /// Merge when `pending` could make a scan of it cost as much as the binary search saved.
+    /// A flat floor as well as a fraction, so a small index does not merge on every insert.
+    const MERGE_AT: usize = 4_096;
+
+    fn insert(&mut self, value: OrderedFloat, id: &RecordId) {
+        self.pending.push((value, id.clone()));
+        if self.pending.len() >= Self::MERGE_AT
+            || self.pending.len().saturating_mul(64) > self.sorted.len()
+        {
+            self.merge();
+        }
+    }
+
+    fn remove(&mut self, value: OrderedFloat, id: &RecordId) {
+        if let Some(at) = self
+            .pending
+            .iter()
+            .position(|(v, i)| *v == value && i == id)
+        {
+            self.pending.swap_remove(at);
+            return;
+        }
+        // In the sorted half the value locates the run and the id picks the entry out of it.
+        let lo = self.sorted.partition_point(|(v, _)| *v < value);
+        let mut at = lo;
+        while at < self.sorted.len() && self.sorted[at].0 == value {
+            if self.sorted[at].1 == *id {
+                self.sorted.remove(at);
+                return;
+            }
+            at += 1;
+        }
+    }
+
+    fn merge(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.sorted.append(&mut self.pending);
+        self.sorted.sort_unstable_by_key(|(value, _)| *value);
+        self.distinct = self.sorted.windows(2).filter(|w| w[0].0 != w[1].0).count()
+            + usize::from(!self.sorted.is_empty());
+    }
+
+    /// Distinct values, exact after a merge and an over-estimate before one.
+    fn distinct_count(&self) -> usize {
+        self.distinct + self.pending.len()
+    }
+
+    /// Every id whose value satisfies `matches`, without visiting values that cannot.
+    ///
+    /// `lo`/`hi` bound the sorted half; `matches` filters within it and decides the whole of
+    /// `pending`. A caller that cannot express its condition as bounds passes the full range
+    /// and pays a scan, which is still no worse than the map it replaced.
+    fn select(
+        &self,
+        lo: Option<OrderedFloat>,
+        hi: Option<OrderedFloat>,
+        matches: impl Fn(OrderedFloat) -> bool,
+        mut visit: impl FnMut(&RecordId),
+    ) {
+        let start = match lo {
+            Some(v) => self.sorted.partition_point(|(k, _)| *k < v),
+            None => 0,
+        };
+        let end = match hi {
+            Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
+            None => self.sorted.len(),
+        };
+        for (value, id) in &self.sorted[start..end] {
+            if matches(*value) {
+                visit(id);
+            }
+        }
+        for (value, id) in &self.pending {
+            if matches(*value) {
+                visit(id);
+            }
+        }
+    }
 }
 
 /// 字段统计信息
@@ -59,7 +174,10 @@ enum ValueKey {
 }
 
 /// 可排序的浮点数包装器
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// `Ord` as well as `Eq`: the type is named for an ordering it could not perform, and the
+/// sorted numeric index needs it. The representation is already a scaled `i64`, so the
+/// derived order is the numeric one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct OrderedFloat(i64); // 将f64转为i64存储（乘以1000000保留6位小数）
 
 impl From<f64> for OrderedFloat {
@@ -259,13 +377,19 @@ impl PayloadIndex {
             for (key, value) in obj {
                 if let Some(field_index) = self.field_indices.get_mut(key) {
                     if let Some(value_key) = Self::to_value_key(value) {
-                        if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
-                            ids.remove(record_id);
-                            if ids.is_empty() {
-                                field_index.value_to_ids.remove(&value_key);
-                                field_index.distinct_count = field_index.value_to_ids.len();
+                        match Self::as_ordered(&value_key) {
+                            Some(number) => field_index.numeric.remove(number, record_id),
+                            None => {
+                                if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
+                                    ids.remove(record_id);
+                                    if ids.is_empty() {
+                                        field_index.value_to_ids.remove(&value_key);
+                                    }
+                                }
                             }
                         }
+                        field_index.distinct_count =
+                            field_index.value_to_ids.len() + field_index.numeric.distinct_count();
                     }
                 }
             }
@@ -386,14 +510,53 @@ impl PayloadIndex {
                 // No record carries a scalar under this key, so none can match a condition
                 // that needs one.
                 None => true,
-                Some(field) => !field.value_to_ids.iter().any(|(value_key, ids)| {
-                    !ids.is_empty()
-                        && conditions
+                Some(field) => {
+                    let satisfied = |value_key: &ValueKey| {
+                        conditions
                             .iter()
                             .all(|c| Self::value_key_matches(value_key, &c.operation))
-                }),
+                    };
+                    // Both halves have to be asked. Numbers live in the sorted index and
+                    // strings in the map, and a field can hold both; asking only the map is
+                    // how the first version of this decided a satisfiable numeric filter was
+                    // empty, which returns no rows rather than an error.
+                    let in_map = field
+                        .value_to_ids
+                        .iter()
+                        .any(|(value_key, ids)| !ids.is_empty() && satisfied(value_key));
+                    if in_map {
+                        return false;
+                    }
+                    let mut found = false;
+                    let (lo, hi) = conditions
+                        .iter()
+                        .map(|c| Self::numeric_bounds(&c.operation))
+                        .fold((None, None), |(lo, hi), (l, h)| {
+                            (Self::tighter(lo, l, true), Self::tighter(hi, h, false))
+                        });
+                    field.numeric.select(
+                        lo,
+                        hi,
+                        |value| satisfied(&Self::from_ordered(value)),
+                        |_| found = true,
+                    );
+                    !found
+                }
             }
         })
+    }
+
+    /// The tighter of two optional bounds: the larger for a lower bound, the smaller for an
+    /// upper one. Conditions on one key all have to hold at once, so their bounds intersect.
+    fn tighter(
+        a: Option<OrderedFloat>,
+        b: Option<OrderedFloat>,
+        lower: bool,
+    ) -> Option<OrderedFloat> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(if lower { x.max(y) } else { x.min(y) }),
+            (some, None) | (None, some) => some,
+        }
     }
 
     /// Whether every record this condition accepts carries a value the index holds.
@@ -426,21 +589,21 @@ impl PayloadIndex {
     fn value_key_matches(value_key: &ValueKey, operation: &FilterOperation) -> bool {
         match operation {
             FilterOperation::Equal(value) => {
-                Self::to_value_key(value).is_some_and(|k| &k == value_key)
+                Self::to_value_key(value).is_some_and(|k| Self::same_value(&k, value_key))
             }
             FilterOperation::NotEqual(value) => {
-                Self::to_value_key(value).is_some_and(|k| &k != value_key)
+                Self::to_value_key(value).is_some_and(|k| !Self::same_value(&k, value_key))
             }
             FilterOperation::In(values) => values
                 .iter()
                 .filter_map(Self::to_value_key)
-                .any(|k| &k == value_key),
+                .any(|k| Self::same_value(&k, value_key)),
             // An unencodable target is dropped from the exclusion set rather than excluding
             // everything, which is what the id-building version does too.
             FilterOperation::NotIn(values) => !values
                 .iter()
                 .filter_map(Self::to_value_key)
-                .any(|k| &k == value_key),
+                .any(|k| Self::same_value(&k, value_key)),
             FilterOperation::GreaterThan(target) => Self::as_number(value_key)
                 .zip(target.as_f64())
                 .is_some_and(|(v, t)| v > t),
@@ -462,6 +625,31 @@ impl PayloadIndex {
             FilterOperation::EndsWith(suffix) => {
                 matches!(value_key, ValueKey::String(s) if s.ends_with(suffix.as_str()))
             }
+        }
+    }
+
+    /// Equality between two indexed values, numerically where both are numbers.
+    ///
+    /// `ValueKey` splits integers and floats into different variants, so deriving equality
+    /// makes `Number(5)` differ from `Float(5.0)`. That never mattered while every lookup was
+    /// a hash of the exact variant the value was stored under. It matters now: the sorted
+    /// numeric index stores one scaled key for both, so an `Equal` on an integer arrives here
+    /// as a `Float` and would match nothing at all.
+    fn same_value(a: &ValueKey, b: &ValueKey) -> bool {
+        match (Self::as_ordered(a), Self::as_ordered(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => a == b,
+        }
+    }
+
+    /// The sort key a numeric value is stored under, or `None` for anything that is not a
+    /// number. This is what decides whether a value lands in `numeric` or in `value_to_ids`,
+    /// on insert and on removal alike, so both paths ask exactly this question.
+    fn as_ordered(value_key: &ValueKey) -> Option<OrderedFloat> {
+        match value_key {
+            ValueKey::Number(v) => Some(OrderedFloat::from(*v as f64)),
+            ValueKey::Float(f) => Some(*f),
+            _ => None,
         }
     }
 
@@ -614,8 +802,27 @@ impl PayloadIndex {
         match &condition.operation {
             FilterOperation::Equal(value) => {
                 if let Some(value_key) = Self::to_value_key(value) {
-                    if let Some(ids) = field_index.value_to_ids.get(&value_key) {
-                        let count = ids.len();
+                    // Both halves: a number is in the sorted index and everything else in the
+                    // map. Counting only the map reads every numeric equality as "no such
+                    // value", which is a selectivity of zero and the wrong branch downstream.
+                    let count = match Self::as_ordered(&value_key) {
+                        Some(number) => {
+                            let mut n = 0usize;
+                            field_index.numeric.select(
+                                Some(number),
+                                Some(number),
+                                |v| v == number,
+                                |_| n += 1,
+                            );
+                            n
+                        }
+                        None => field_index
+                            .value_to_ids
+                            .get(&value_key)
+                            .map(|ids| ids.len())
+                            .unwrap_or(0),
+                    };
+                    if count > 0 {
                         return CardinalityEstimate {
                             min: count,
                             max: count,
@@ -648,8 +855,18 @@ impl PayloadIndex {
                 let mut total_count = 0;
                 for value in values {
                     if let Some(value_key) = Self::to_value_key(value) {
-                        if let Some(ids) = field_index.value_to_ids.get(&value_key) {
-                            total_count += ids.len();
+                        match Self::as_ordered(&value_key) {
+                            Some(number) => field_index.numeric.select(
+                                Some(number),
+                                Some(number),
+                                |v| v == number,
+                                |_| total_count += 1,
+                            ),
+                            None => {
+                                if let Some(ids) = field_index.value_to_ids.get(&value_key) {
+                                    total_count += ids.len();
+                                }
+                            }
                         }
                     }
                 }
@@ -722,20 +939,41 @@ impl PayloadIndex {
             None => return HashSet::new(),
         };
 
-        // `Equal` and `In` name the values they want, so they are lookups. Everything else has
-        // to be asked of each value in turn, through the one predicate in
-        // [`Self::value_key_matches`] -- this used to be nine near-identical loops, and nine
-        // copies of a comparison is nine chances for the "what matches" answer to disagree
-        // with the "does anything match" answer.
+        let mut result = HashSet::new();
+
+        // The numeric half. A range names bounds, so the walk visits the rows that can match
+        // instead of every distinct value of the field -- which is the whole point of the
+        // sorted index. `Contains` and the other string tests name no number at all and skip
+        // it entirely.
+        if Self::touches_numbers(&condition.operation) {
+            let (lo, hi) = Self::numeric_bounds(&condition.operation);
+            field_index.numeric.select(
+                lo,
+                hi,
+                |value| Self::value_key_matches(&Self::from_ordered(value), &condition.operation),
+                |id| {
+                    result.insert(id.clone());
+                },
+            );
+        }
+
+        // The map half: strings, bools, nulls. `Equal` and `In` name the values they want, so
+        // they are hash lookups; everything else has to be asked of each value in turn,
+        // through the one predicate in [`Self::value_key_matches`] -- this used to be nine
+        // near-identical loops, and nine copies of a comparison is nine chances for the "what
+        // matches" answer to disagree with the "does anything match" answer.
+        //
+        // Neither lookup may return early. They did, and an `Equal` on an integer then never
+        // reached the numeric half above and matched nothing at all.
         match &condition.operation {
             FilterOperation::Equal(value) => {
-                return Self::to_value_key(value)
-                    .and_then(|key| field_index.value_to_ids.get(&key))
-                    .cloned()
-                    .unwrap_or_default();
+                if let Some(ids) =
+                    Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
+                {
+                    result.extend(ids.iter().cloned());
+                }
             }
             FilterOperation::In(values) => {
-                let mut result = HashSet::new();
                 for value in values {
                     if let Some(ids) =
                         Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
@@ -743,18 +981,49 @@ impl PayloadIndex {
                         result.extend(ids.iter().cloned());
                     }
                 }
-                return result;
             }
-            _ => {}
-        }
-
-        let mut result = HashSet::new();
-        for (value_key, ids) in &field_index.value_to_ids {
-            if Self::value_key_matches(value_key, &condition.operation) {
-                result.extend(ids.iter().cloned());
+            _ => {
+                for (value_key, ids) in &field_index.value_to_ids {
+                    if Self::value_key_matches(value_key, &condition.operation) {
+                        result.extend(ids.iter().cloned());
+                    }
+                }
             }
         }
         result
+    }
+
+    /// The bounds a condition puts on a numeric value, when it puts any.
+    ///
+    /// Only the comparisons narrow the sorted range. `Equal` narrows it to a point, and the
+    /// negations narrow nothing -- every value except one satisfies `NotEqual`, so the scan
+    /// is the whole index either way.
+    fn numeric_bounds(operation: &FilterOperation) -> (Option<OrderedFloat>, Option<OrderedFloat>) {
+        let at = |v: &serde_json::Value| v.as_f64().map(OrderedFloat::from);
+        match operation {
+            FilterOperation::Equal(v) => (at(v), at(v)),
+            FilterOperation::GreaterThan(v) | FilterOperation::GreaterThanOrEqual(v) => {
+                (at(v), None)
+            }
+            FilterOperation::LessThan(v) | FilterOperation::LessThanOrEqual(v) => (None, at(v)),
+            _ => (None, None),
+        }
+    }
+
+    /// Whether a numeric value could satisfy this condition at all. `Contains` and the other
+    /// string tests never can, so the sorted half is skipped for them entirely.
+    fn touches_numbers(operation: &FilterOperation) -> bool {
+        !matches!(
+            operation,
+            FilterOperation::Contains(_)
+                | FilterOperation::StartsWith(_)
+                | FilterOperation::EndsWith(_)
+        )
+    }
+
+    /// A sort key back as the value key the comparison predicate expects.
+    fn from_ordered(value: OrderedFloat) -> ValueKey {
+        ValueKey::Float(value)
     }
 
     /// 为字段建立索引
@@ -769,18 +1038,25 @@ impl PayloadIndex {
             .entry(key.to_string())
             .or_insert_with(|| FieldIndex {
                 value_to_ids: HashMap::new(),
+                numeric: NumericIndex::default(),
                 field_type: Self::infer_field_type(value),
                 distinct_count: 0,
                 stats: FieldStats::new(),
             });
 
-        field_index
-            .value_to_ids
-            .entry(value_key)
-            .or_default()
-            .insert(record_id.clone());
+        match Self::as_ordered(&value_key) {
+            Some(number) => field_index.numeric.insert(number, record_id),
+            None => {
+                field_index
+                    .value_to_ids
+                    .entry(value_key)
+                    .or_default()
+                    .insert(record_id.clone());
+            }
+        }
 
-        field_index.distinct_count = field_index.value_to_ids.len();
+        field_index.distinct_count =
+            field_index.value_to_ids.len() + field_index.numeric.distinct_count();
 
         // 更新字段统计信息
         match value {
@@ -855,6 +1131,88 @@ impl Default for PayloadIndex {
 mod estimator_repro {
     use super::*;
     use crate::types::record::{Condition, Filter, FilterOperation};
+
+    /// A numeric field answers counts, ranges and equality from the sorted half.
+    ///
+    /// Every one of these went through `value_to_ids` until numbers moved out of it, and none
+    /// of the 225 unit tests noticed the move: they were read out of the code, not caught.
+    /// Each assertion here is one place that returned an empty answer instead of an error.
+    #[test]
+    fn a_numeric_field_is_answered_from_the_sorted_half() {
+        let mut index = PayloadIndex::new();
+        for i in 0..1_000u32 {
+            index.insert_record(&i.to_string(), &serde_json::json!({ "n": i }));
+        }
+
+        let cond = |op| Condition {
+            key: "n".to_string(),
+            operation: op,
+        };
+        let must = |op| Filter {
+            must: Some(vec![cond(op)]),
+            must_not: None,
+            should: None,
+        };
+
+        // Equality on an integer. The sorted index stores one scaled key for integers and
+        // floats alike, so a comparison by `ValueKey` variant would find nothing here.
+        assert_eq!(
+            index.get_matching_ids(&must(FilterOperation::Equal(serde_json::json!(7)))),
+            ["7".to_string()].into_iter().collect()
+        );
+        let est = index.estimate_cardinality(&must(FilterOperation::Equal(serde_json::json!(7))));
+        assert_eq!(est.exp, 1, "one row has n = 7");
+
+        // A range returns exactly its rows.
+        let ge = index.get_matching_ids(&must(FilterOperation::GreaterThanOrEqual(
+            serde_json::json!(990),
+        )));
+        assert_eq!(ge.len(), 10, "n >= 990 is 990..=999");
+        assert!(ge.contains("990") && ge.contains("999") && !ge.contains("989"));
+
+        // `In` counts through the sorted half too.
+        let in_est = index.estimate_cardinality(&must(FilterOperation::In(vec![
+            serde_json::json!(1),
+            serde_json::json!(2),
+            serde_json::json!(3),
+        ])));
+        assert_eq!(in_est.exp, 3);
+
+        // And the emptiness proof asks both halves: this one is satisfiable, so it must not
+        // be claimed empty just because the string half holds nothing.
+        assert!(
+            !index.cannot_match_anything(&must(FilterOperation::GreaterThanOrEqual(
+                serde_json::json!(500)
+            )))
+        );
+        assert!(
+            index.cannot_match_anything(&must(FilterOperation::GreaterThanOrEqual(
+                serde_json::json!(5_000)
+            )))
+        );
+
+        // Removal reaches the sorted half.
+        index.remove_record(&"7".to_string(), &serde_json::json!({ "n": 7 }));
+        assert!(index
+            .get_matching_ids(&must(FilterOperation::Equal(serde_json::json!(7))))
+            .is_empty());
+
+        // A field holding both numbers and strings serves each from its own half.
+        index.insert_record(&"tag".to_string(), &serde_json::json!({ "n": "seven" }));
+        assert_eq!(
+            index.get_matching_ids(&must(FilterOperation::Equal(serde_json::json!("seven")))),
+            ["tag".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            index
+                .get_matching_ids(&must(FilterOperation::GreaterThanOrEqual(
+                    serde_json::json!(990)
+                )))
+                .len(),
+            10,
+            "the string value must not join a numeric range"
+        );
+    }
 
     /// A range pair with nothing between it is provably empty, and provable without touching
     /// a single record id.
