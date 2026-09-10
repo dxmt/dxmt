@@ -4015,6 +4015,21 @@ impl IntelligentIndexedStorage {
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 应用filter并构建搜索结果
+        // A total order before anything is truncated. Distances tie -- three records the same
+        // step either side of the probe tie exactly -- and until now the tie was broken by
+        // whatever order the ids happened to arrive in, which for a filtered search is the
+        // iteration order of a `HashSet`. That is not stable across index types, and not even
+        // across runs of the same one: `a_selective_filter_works_on_a_partitioned_table`
+        // compares an HNSW answer against a partitioned one and saw the same five records in
+        // two different orders. Because `take` happens below, it also decided *which* records
+        // survived, not only how they were arranged.
+        let mut results = results;
+        results.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
         let hits: Vec<SearchHit> = results
             .into_iter()
             .filter_map(|(id, score)| {
