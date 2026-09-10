@@ -14,6 +14,7 @@ All of them need a running server:
 
 | example | pip | OpenAI key | other |
 | --- | --- | --- | --- |
+| `rag_minimal.py` | `httpx`, optionally `sentence-transformers` | — | works offline; see below |
 | `standard_dataset_recall.py` | `pyarrow httpx` | — | a VectorDBBench dataset on disk |
 | `full_text_search_example.py` | — | — | server built `--features text-bm25` |
 | `query_pdf_docs.py` | `sentence-transformers` | — | run `pdf_rag_simple.py` first |
@@ -30,6 +31,30 @@ All of them need a running server:
 
 `OPENAI_API_KEY` comes from the environment. Never put a key in a file here -- keys have had to
 be scrubbed from this tree once already.
+
+## RAG without a key
+
+`rag_minimal.py` runs the retrieval half of RAG end to end -- chunk, embed, store, retrieve,
+ground the answer in what came back -- with no API key and no network. It embeds locally with
+`all-MiniLM-L6-v2` and answers by quoting the passage it retrieved.
+
+    pip install sentence-transformers
+    python3 examples/rag_minimal.py
+    python3 examples/rag_minimal.py "how does the graph get built"
+
+Without `sentence-transformers` it falls back to deterministic hash vectors and **says so
+loudly**: the plumbing runs, the retrieval is meaningless, and the scores drop from about 0.5 to
+about 0.05 so the difference is visible rather than merely stated. A RAG demo that silently
+retrieves nonsense under a confident answer is worse than one that refuses.
+
+Generation is deliberately absent. An LLM would need a key and would put the interesting
+failure -- did retrieval find the right passage? -- behind a model's ability to paper over it.
+
+Two things learned writing it, both in the file's comments. The first corpus had a passage
+mentioning disk, memory *and* the WAL, and it won two questions it should have lost by touching
+every topic a little; the retrieval was fine, the corpus was not. And a question phrased with
+words no passage uses still retrieves the wrong thing -- which is why the example ends by asking
+the reader to check the passage against the question rather than telling them it worked.
 
 ## Recall on a standard dataset
 
