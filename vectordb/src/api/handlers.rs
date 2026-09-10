@@ -863,9 +863,12 @@ pub async fn delete_records(
 ) -> impl IntoResponse {
     let requested_count = request.ids.len();
     match state.storage.delete_records(&table_name, request.ids).await {
-        Ok(()) => {
+        // `deleted` is what was actually there, not what was asked about. These were the same
+        // number until the storage layer started counting: deleting three ids that do not
+        // exist answered `deleted_count: 3`.
+        Ok(deleted) => {
             let response = serde_json::json!({
-                "deleted_count": requested_count,
+                "deleted_count": deleted,
                 "requested_count": requested_count
             });
             ApiResponse::success(response).into_response()

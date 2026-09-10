@@ -1420,9 +1420,10 @@ impl IntelligentIndexedStorage {
                 WalEntry::AlterTable { table, request } => {
                     self.alter_table(&table, request).await.map(|_| ())
                 }
-                WalEntry::Delete { table, record_id } => {
-                    self.delete_records(&table, vec![record_id]).await
-                }
+                WalEntry::Delete { table, record_id } => self
+                    .delete_records(&table, vec![record_id])
+                    .await
+                    .map(|_| ()),
                 WalEntry::DeleteTable { table } => self.delete_table(&table).await,
                 WalEntry::Checkpoint { .. } => Ok(()),
             };
@@ -5939,14 +5940,22 @@ impl IntelligentIndexedStorage {
     }
 
     /// Delete multiple records
+    /// Delete records, returning how many of the requested ids were actually there.
+    ///
+    /// The count is the point. `DELETE /records` reported `deleted_count` as the number of ids
+    /// the caller *asked* about, because this returned `()` and the handler had nothing else to
+    /// put there -- so deleting three ids that do not exist answered `deleted_count: 3`. A
+    /// caller checking that number to find out whether anything was removed was told yes every
+    /// time.
     pub async fn delete_records(
         &self,
         tablename: &str,
         record_ids: Vec<RecordId>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<usize> {
         self.ensure_writable()?;
         self.ensure_resident(tablename).await?;
 
+        let mut deleted = 0usize;
         let artifacts = {
             let mut tables = self.write_tables("delete_records").await;
             let table_data = tables
@@ -5954,7 +5963,11 @@ impl IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
             for id in &record_ids {
-                let old_payload = table_data.records.get(id).map(|r| r.payload.clone());
+                let existing = table_data.records.get(id);
+                let old_payload = existing.as_ref().map(|r| r.payload.clone());
+                if existing.is_some() {
+                    deleted += 1;
+                }
 
                 table_data.records.remove(id)?;
                 table_data.vector_rows.remove(id);
@@ -6011,7 +6024,7 @@ impl IntelligentIndexedStorage {
         )
         .await?;
 
-        Ok(())
+        Ok(deleted)
     }
 
     /// Get statistics
@@ -6447,6 +6460,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
     async fn delete_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<()> {
         self.delete_records(tablename, vec![record_id.clone()])
             .await
+            .map(|_| ())
     }
 
     async fn insert_records(
@@ -6462,7 +6476,9 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         tablename: &str,
         record_ids: Vec<RecordId>,
     ) -> crate::Result<()> {
-        self.delete_records(tablename, record_ids).await
+        // The trait says nothing about how many were there; the inherent method now does, and
+        // `delete_records` in `api/handlers.rs` is the caller that wants it.
+        self.delete_records(tablename, record_ids).await.map(|_| ())
     }
 
     async fn list_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
