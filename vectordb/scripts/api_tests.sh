@@ -93,8 +93,11 @@ for mode in $MODES; do
       summary="$summary\n  $mode: PASS"
     else
       summary="$summary\n  $mode: FAIL (pytest exit $rc)"
-      echo "--- server log, last 30 lines ---"
-      tail -30 "$log"
+      # Only on failure, and only the lines that are not routine chatter: a debug server logs
+      # an info line per table created, which on a failing run buries the pytest output that
+      # says which test failed.
+      echo "--- $mode: server warnings and errors ---"
+      grep -iE "warn|error|panic" "$log" | tail -20
       failed=1
     fi
   fi
