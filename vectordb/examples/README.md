@@ -14,6 +14,7 @@ All of them need a running server:
 
 | example | pip | OpenAI key | other |
 | --- | --- | --- | --- |
+| `standard_dataset_recall.py` | `pyarrow httpx` | — | a VectorDBBench dataset on disk |
 | `full_text_search_example.py` | — | — | server built `--features text-bm25` |
 | `query_pdf_docs.py` | `sentence-transformers` | — | run `pdf_rag_simple.py` first |
 | `pdf_rag_simple.py` | `sentence-transformers PyPDF2` | — | a PDF, see below |
@@ -29,6 +30,24 @@ All of them need a running server:
 
 `OPENAI_API_KEY` comes from the environment. Never put a key in a file here -- keys have had to
 be scrubbed from this tree once already.
+
+## Recall on a standard dataset
+
+`standard_dataset_recall.py` loads a VectorDBBench dataset -- Cohere 100k x 768 by default --
+and measures recall against the ground truth that ships with it. No key, no model, no network:
+the embeddings are in the file.
+
+    DXMT_DATASET_DIR=/path/to/vectordb_bench/dataset python3 examples/standard_dataset_recall.py
+    DXMT_ROWS=20000 ... # a quicker look
+
+Measured on 20,000 rows: loaded at 2,347 records/s, **recall@10 1.0000** over 90 queries,
+serial p50 1.4 ms and p99 5.2 ms. Recall of 1.0 is expected at that size -- 65,536 rows is where
+a table quantizes itself, so this is an exact graph. The point of this example is the *real
+distribution and published ground truth*, which the generated corpus in `tests/api/property/`
+cannot offer; the point of that one is that it runs in CI on every change, which this cannot.
+
+If the dataset is not on disk it says so and names how to get it, rather than failing inside
+parquet.
 
 ## The PDF ones
 
