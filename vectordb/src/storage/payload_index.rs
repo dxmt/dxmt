@@ -117,6 +117,32 @@ impl NumericIndex {
         self.distinct + self.pending.len()
     }
 
+    /// Whether any value in the bounded range satisfies `matches`, stopping at the first one.
+    ///
+    /// [`Self::select`] visits the whole range because its caller wants every id. This caller
+    /// wants one bit, and the difference is not small: a `>= threshold` that 99% of rows pass
+    /// bounds a slice of 9.9 million entries, and walking it to answer "yes" cost a filtered
+    /// search 52.9 ms a query where the short-circuiting version it replaced cost 10.5 ms.
+    fn any_matches(
+        &self,
+        lo: Option<OrderedFloat>,
+        hi: Option<OrderedFloat>,
+        matches: impl Fn(OrderedFloat) -> bool,
+    ) -> bool {
+        let start = match lo {
+            Some(v) => self.sorted.partition_point(|(k, _)| *k < v),
+            None => 0,
+        };
+        let end = match hi {
+            Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
+            None => self.sorted.len(),
+        };
+        self.sorted[start..end]
+            .iter()
+            .any(|(value, _)| matches(*value))
+            || self.pending.iter().any(|(value, _)| matches(*value))
+    }
+
     /// Every id whose value satisfies `matches`, without visiting values that cannot.
     ///
     /// `lo`/`hi` bound the sorted half; `matches` filters within it and decides the whole of
@@ -527,20 +553,19 @@ impl PayloadIndex {
                     if in_map {
                         return false;
                     }
-                    let mut found = false;
                     let (lo, hi) = conditions
                         .iter()
                         .map(|c| Self::numeric_bounds(&c.operation))
                         .fold((None, None), |(lo, hi), (l, h)| {
                             (Self::tighter(lo, l, true), Self::tighter(hi, h, false))
                         });
-                    field.numeric.select(
-                        lo,
-                        hi,
-                        |value| satisfied(&Self::from_ordered(value)),
-                        |_| found = true,
-                    );
-                    !found
+                    // `any_matches`, not `select`: this asks whether anything matches, and
+                    // every filtered query asks it. Collecting the answer instead of
+                    // short-circuiting it walks the whole matching range, which for a filter
+                    // most rows pass is most of the table.
+                    !field
+                        .numeric
+                        .any_matches(lo, hi, |value| satisfied(&Self::from_ordered(value)))
                 }
             }
         })
@@ -1211,6 +1236,61 @@ mod estimator_repro {
                 .len(),
             10,
             "the string value must not join a numeric range"
+        );
+    }
+
+    /// Deciding that a filter *can* match must not cost more when more rows match.
+    ///
+    /// `cannot_match_anything` runs on every filtered query. The first version of the sorted
+    /// index answered it by collecting matches instead of short-circuiting, so a `>= threshold`
+    /// that most rows pass walked most of the table to conclude "yes, something matches". On
+    /// 10M rows at 99% selectivity that took a filtered search from 10.5 ms a query to 52.9 ms
+    /// -- caught by a benchmark control case, which is far too late for something a test can
+    /// state directly.
+    #[test]
+    fn proving_a_filter_satisfiable_does_not_scale_with_how_many_rows_satisfy_it() {
+        let build = |n: u32| {
+            let mut index = PayloadIndex::new();
+            for i in 0..n {
+                index.insert_record(&i.to_string(), &serde_json::json!({ "n": i }));
+            }
+            index
+        };
+        let satisfiable = Filter {
+            must: Some(vec![Condition {
+                key: "n".to_string(),
+                operation: FilterOperation::GreaterThanOrEqual(serde_json::json!(0)),
+            }]),
+            must_not: None,
+            should: None,
+        };
+
+        // Everything matches in both, so a short-circuit stops at the first entry either way
+        // and the work is the same; a collecting implementation does twenty times more in the
+        // larger index.
+        let small = build(5_000);
+        let large = build(100_000);
+        assert!(!small.cannot_match_anything(&satisfiable));
+        assert!(!large.cannot_match_anything(&satisfiable));
+
+        let time = |index: &PayloadIndex| {
+            let start = std::time::Instant::now();
+            for _ in 0..200 {
+                std::hint::black_box(index.cannot_match_anything(&satisfiable));
+            }
+            start.elapsed()
+        };
+        // Warm both, then take the smaller of two runs each: this is a shape assertion, not a
+        // latency one, and the bound is loose enough to survive a busy machine while still
+        // failing a walk that is twenty times longer.
+        let _ = (time(&small), time(&large));
+        let small_us = time(&small).min(time(&small)).as_micros().max(1);
+        let large_us = time(&large).min(time(&large)).as_micros().max(1);
+        assert!(
+            large_us < small_us * 5,
+            "proving a 100,000-row filter satisfiable took {large_us} us against {small_us} us \
+             for the same filter over 5,000 rows: the proof is walking the matches instead of \
+             stopping at the first one"
         );
     }
 
