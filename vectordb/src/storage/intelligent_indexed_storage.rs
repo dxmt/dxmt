@@ -3536,9 +3536,12 @@ impl IntelligentIndexedStorage {
                     // them exactly. No walk. The 30,000-wide walk this replaces measured
                     // 43 QPS at 480 ms p99 on the 1%-selectivity 1M case with the vectors
                     // on disk; 10,000 code scores take a few milliseconds.
-                    let ids: Vec<String> = precomputed_filter_ids
+                    // Borrowed. `precomputed_filter_ids` already owns them, and cloning a
+                    // second copy to hand to the scan was 100,000 heap allocations a query on
+                    // the 10M case -- for strings the scan only ever reads.
+                    let ids: Vec<&str> = precomputed_filter_ids
                         .as_ref()
-                        .map(|s| s.iter().cloned().collect())
+                        .map(|s| s.iter().map(String::as_str).collect())
                         .unwrap_or_default();
                     let want = active_index
                         .rerank_candidates(result_limit)

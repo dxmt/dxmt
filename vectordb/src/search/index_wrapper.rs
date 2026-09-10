@@ -219,10 +219,13 @@ impl IndexWrapper {
     }
 
     /// See `VectorIndex::scan_ids`.
+    ///
+    /// Borrowed, not owned: a selective filter hands this every matching id, and at 100,000
+    /// matches copying them into a `Vec<String>` first was 100,000 heap allocations a query.
     pub async fn scan_ids(
         &self,
         query: &DenseVector,
-        ids: &[String],
+        ids: &[&str],
         k: usize,
     ) -> Option<Vec<(RecordId, f32)>> {
         self.index.read().await.scan_ids(query, ids, k)

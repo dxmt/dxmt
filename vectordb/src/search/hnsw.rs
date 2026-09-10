@@ -1772,7 +1772,7 @@ impl HnswIndex {
     /// Score the nodes of `ids` against `query` -- no walk -- and return the best `k`
     /// nearest first. Ids the graph does not hold are skipped. Exact on an exact graph, ADC
     /// on a quantized one; either way it is one distance per id from memory.
-    pub fn scan_ids(&self, query: &DenseVector, ids: &[String], k: usize) -> Vec<(RecordId, f32)> {
+    pub fn scan_ids(&self, query: &DenseVector, ids: &[&str], k: usize) -> Vec<(RecordId, f32)> {
         let query = self.prepare(query.clone());
         let scorer = self.scorer(&query);
         let mut heap: BinaryHeap<Result> = BinaryHeap::with_capacity(k + 1);

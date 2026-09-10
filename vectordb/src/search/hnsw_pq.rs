@@ -340,7 +340,7 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
 
     /// ADC over the codes of `ids`, once the graph is quantized; before that the graph
     /// scores exactly, which is still one distance per id from memory.
-    fn scan_ids(&self, query: &[f32], ids: &[String], k: usize) -> Option<Vec<(String, f32)>> {
+    fn scan_ids(&self, query: &[f32], ids: &[&str], k: usize) -> Option<Vec<(String, f32)>> {
         Some(self.hnsw.scan_ids(&query.to_vec(), ids, k))
     }
 
