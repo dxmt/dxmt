@@ -308,6 +308,7 @@ class DXMTClient:
         description: Optional[str] = None,
         enable_full_text_search: bool = False,
         text_fields: Optional[list[dict[str, Any]]] = None,
+        memory_optimization: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Async create a new table."""
         payload = {
@@ -318,6 +319,7 @@ class DXMTClient:
             "description": description,
             "enable_full_text_search": enable_full_text_search,
             "text_fields": text_fields,
+            "memory_optimization": memory_optimization,
         }
         try:
             response = await self.async_client.post("/tables", json=payload)
@@ -741,6 +743,29 @@ class DXMTClient:
             msg = f"Connection error while listing records: {e}"
             raise DXMTConnectionError(msg) from e
 
+    async def alist_records(
+        self,
+        table_name: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Async twin of :meth:`list_records`."""
+        try:
+            response = await self.async_client.post(
+                f"/tables/{table_name}/records/list",
+                json={"limit": limit, "offset": offset},
+            )
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            records = data.get("records") or []
+            return [self._normalize_record(r) for r in records]
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to list records in '{table_name}': {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error while listing records: {e}"
+            raise DXMTConnectionError(msg) from e
+
     def get_records(
         self,
         table_name: str,
@@ -883,6 +908,7 @@ class DXMTClient:
         k: Optional[int] = None,
         limit: Optional[int] = None,
         filter: Optional[dict[str, Any]] = None,
+        search_mode: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
@@ -908,6 +934,8 @@ class DXMTClient:
             "limit": k,
             "filter": convert_simple_filter_to_dxmt(filter),
         }
+        if search_mode is not None:
+            payload["search_mode"] = search_mode
         try:
             response = await self.async_client.post(
                 f"/tables/{table_name}/search",

@@ -407,3 +407,36 @@ def test_every_search_method_converts_the_filter_it_is_given(mock_client_class: 
         # exists because insert bodies are mostly floats, and the text path simply never got it.
         sent = kwargs["json"] if "json" in kwargs else json.loads(kwargs["content"])
         assert sent["filter"] == expected, f"sent {sent['filter']!r} instead of the converted form"
+
+
+def test_no_async_method_has_drifted_from_its_sync_twin() -> None:
+    """Every `a`-prefixed method must take the parameters its sync twin takes.
+
+    Not a style rule: `acreate_table` had lost `memory_optimization` and `asearch` had lost
+    `search_mode`, so async callers silently could not reach two options the sync API
+    documents. A drift like that is invisible until someone passes the argument and gets a
+    TypeError, which is the wrong moment to find out.
+
+    Asserted over every pair rather than the two that had drifted, so the next method added in
+    one flavour and not the other fails here.
+    """
+    import inspect
+
+    from dxmt.client import DXMTClient
+
+    pairs = [
+        (name, "a" + name)
+        for name in dir(DXMTClient)
+        if not name.startswith("_") and callable(getattr(DXMTClient, name, None))
+        and hasattr(DXMTClient, "a" + name)
+    ]
+    assert pairs, "no sync/async pairs found; this test would pass vacuously"
+
+    drifted = {}
+    for sync, asyn in pairs:
+        s = set(inspect.signature(getattr(DXMTClient, sync)).parameters)
+        a = set(inspect.signature(getattr(DXMTClient, asyn)).parameters)
+        if s != a:
+            drifted[f"{sync}/{asyn}"] = {"sync only": sorted(s - a), "async only": sorted(a - s)}
+
+    assert not drifted, f"async methods have drifted from their sync twins: {drifted}"
