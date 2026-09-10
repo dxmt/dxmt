@@ -1059,7 +1059,10 @@ class DXMTClient:
             "limit": k,
             "fields": fields,
             "highlight": highlight,
-            "filter": filter,
+            # Converted, like every other search method. This was passed through raw, so a
+            # filter written the documented way -- {"year": {"$gte": 2022}} -- worked on
+            # `search` and `hybrid_search` and reached the server unconverted here.
+            "filter": convert_simple_filter_to_dxmt(filter),
         }
         try:
             response = self._client.post(
@@ -1172,7 +1175,10 @@ class DXMTClient:
             "limit": k,
             "fields": fields,
             "highlight": highlight,
-            "filter": filter,
+            # Converted, like every other search method. This was passed through raw, so a
+            # filter written the documented way -- {"year": {"$gte": 2022}} -- worked on
+            # `search` and `hybrid_search` and reached the server unconverted here.
+            "filter": convert_simple_filter_to_dxmt(filter),
         }
         try:
             response = await self.async_client.post(

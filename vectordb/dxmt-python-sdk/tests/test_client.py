@@ -364,3 +364,46 @@ def test_connection_error(mock_client_class: Mock) -> None:
     client = Client()
     with pytest.raises(DXMTConnectionError, match="Connection refused"):
         client.create_table(name="test", dimension=128)
+
+
+@patch("dxmt.client.httpx.Client")
+def test_every_search_method_converts_the_filter_it_is_given(mock_client_class: Mock) -> None:
+    """The MongoDB-style filter is a client-side convenience; the server reads a different
+    shape. `full_text_search` passed it through raw while `search` and `hybrid_search`
+    converted, so the same filter worked on two methods out of three and silently matched
+    nothing on the third.
+
+    Asserted for every method rather than only the one that was broken, so the next method
+    added has to answer for itself.
+    """
+    mock_instance = Mock()
+    mock_client_class.return_value = mock_instance
+    response = Mock(spec=Response)
+    response.status_code = 200
+    response.raise_for_status = Mock()
+    response.json.return_value = {"data": {"hits": []}}
+    mock_instance.post.return_value = response
+
+    client = Client()
+    written = {"year": {"$gte": 2022}}
+    expected = {
+        "must": [
+            {"key": "year", "operation": {"type": "GreaterThanOrEqual", "value": 2022}}
+        ]
+    }
+
+    calls = [
+        lambda: client.search(table_name="t", vector=[0.1, 0.2], filter=written),
+        lambda: client.hybrid_search(table_name="t", vector=[0.1, 0.2], filter=written),
+        lambda: client.full_text_search(table_name="t", query="x", filter=written),
+    ]
+    for call in calls:
+        mock_instance.post.reset_mock()
+        call()
+        kwargs = mock_instance.post.call_args.kwargs
+        # Two send shapes in one client: `search` and `hybrid_search` serialise through
+        # `_encode_json` into `content=` (the orjson fast path), `full_text_search` hands the
+        # dict to httpx as `json=`. Worth noticing rather than smoothing over -- the fast path
+        # exists because insert bodies are mostly floats, and the text path simply never got it.
+        sent = kwargs["json"] if "json" in kwargs else json.loads(kwargs["content"])
+        assert sent["filter"] == expected, f"sent {sent['filter']!r} instead of the converted form"
