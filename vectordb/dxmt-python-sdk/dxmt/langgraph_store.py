@@ -30,7 +30,7 @@ from langgraph.store.base import (
 
 from .client import DXMTClient
 from .exceptions import DXMTError, DXMTTableError
-from .filters import convert_simple_filter_to_dxmt
+from .filters import convert_simple_filter_to_dxmt, matches_filter
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,34 @@ class DXMTLangGraphStore(BaseStore):
             logger.warning(f"Failed to get item {op.namespace}/{op.key}: {e}")
             return None
 
+    def _list_matching(
+        self,
+        table_name: str,
+        dxmt_filter: dict[str, Any] | None,
+        wanted: int,
+    ) -> list[dict[str, Any]]:
+        """Records from `table_name`, filtered client-side, up to `wanted`.
+
+        The listing endpoint takes no filter, so a metadata-only search pages through the table
+        and applies the conditions here. That is linear in the table, which is why a query
+        vector is the better path when there is one -- but a slow right answer beats the fast
+        empty one this replaced.
+        """
+        page_size = 1000
+        offset = 0
+        out: list[dict[str, Any]] = []
+        while len(out) < wanted:
+            page = self.client.list_records(table_name, limit=page_size, offset=offset)
+            if not page:
+                break
+            for record in page:
+                if matches_filter(record, dxmt_filter):
+                    out.append(record)
+                    if len(out) >= wanted:
+                        break
+            offset += len(page)
+        return out
+
     def _handle_search(self, op: SearchOp) -> list[SearchItem]:
         """Handle SearchOp synchronously."""
         # Determine which tables to search based on namespace prefix
@@ -235,15 +263,17 @@ class DXMTLangGraphStore(BaseStore):
                         filter=dxmt_filter,
                     )
                 else:
-                    # Metadata-only search (no vector query)
-                    # For now, we need to fetch all records and filter
-                    # TODO: Implement list_records API in DXMT for better performance
-                    logger.warning(
-                        "Metadata-only search not fully optimized. "
-                        "Consider using query parameter for better performance."
+                    # A search with no query vector: list the table instead of pretending
+                    # there is nothing in it. This used to log a warning and `continue`, so a
+                    # metadata-only search returned zero results and looked like an empty
+                    # table -- the caller got a wrong answer rather than an error, which is
+                    # the worst of the three possible behaviours.
+                    #
+                    # `list_records` pages at the server's 1,000 cap. The filter is applied by
+                    # the search path but not by the listing one, so it is applied here.
+                    hits = self._list_matching(
+                        table_name, dxmt_filter, op.limit + op.offset
                     )
-                    # Return empty for now if no semantic search
-                    continue
 
                 # Convert hits to SearchItems
                 for hit in hits[op.offset : op.offset + op.limit]:

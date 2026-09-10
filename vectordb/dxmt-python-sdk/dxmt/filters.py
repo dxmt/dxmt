@@ -160,3 +160,98 @@ def convert_simple_filter_to_dxmt(
     # Convert simple dict or operator-based dict to DXMT format
     must_conditions = _parse_condition(filter_dict)
     return {"must": must_conditions} if must_conditions else None
+
+
+def _field_value(record: dict, key: str):
+    """The value a filter condition tests, from a normalised record.
+
+    `_normalize_record` puts the payload under both `payload` and `metadata`, and a record read
+    from `GET /records/{id}` carries `payload_json` as a string; all three are checked so this
+    works whichever endpoint produced the record.
+    """
+    for holder in ("payload", "metadata"):
+        container = record.get(holder)
+        if isinstance(container, dict) and key in container:
+            return container[key]
+    raw = record.get("payload_json")
+    if isinstance(raw, str):
+        import json
+
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            return None
+        if isinstance(decoded, dict) and key in decoded:
+            return decoded[key]
+    return record.get(key)
+
+
+def _condition_holds(record: dict, condition: dict) -> bool:
+    """Whether one DXMT condition holds for a record, client-side.
+
+    The server is the authority on filtering; this exists only for the paths that have to list
+    records and filter them here, because the listing endpoint takes no filter. Kept beside
+    `convert_simple_filter_to_dxmt` so the two readings of a condition live in one file and are
+    hard to let drift.
+    """
+    key = condition.get("key")
+    operation = condition.get("operation") or {}
+    op_type = operation.get("type")
+    target = operation.get("value")
+    value = _field_value(record, key)
+
+    def numeric(pair):
+        left, right = pair
+        try:
+            return float(left), float(right)
+        except (TypeError, ValueError):
+            return None
+
+    if op_type == "Equal":
+        return value == target
+    if op_type == "NotEqual":
+        return value != target
+    if op_type in ("GreaterThan", "GreaterThanOrEqual", "LessThan", "LessThanOrEqual"):
+        pair = numeric((value, target))
+        if pair is None:
+            return False
+        left, right = pair
+        return {
+            "GreaterThan": left > right,
+            "GreaterThanOrEqual": left >= right,
+            "LessThan": left < right,
+            "LessThanOrEqual": left <= right,
+        }[op_type]
+    if op_type == "In":
+        return isinstance(target, list) and value in target
+    if op_type == "NotIn":
+        return isinstance(target, list) and value not in target
+    if op_type in ("Contains", "StartsWith", "EndsWith"):
+        if not isinstance(value, str) or not isinstance(target, str):
+            return False
+        return {
+            "Contains": target in value,
+            "StartsWith": value.startswith(target),
+            "EndsWith": value.endswith(target),
+        }[op_type]
+    return False
+
+
+def matches_filter(record: dict, dxmt_filter: dict | None) -> bool:
+    """Whether a record satisfies a filter in DXMT's own shape.
+
+    `must` all hold, `must_not` none hold, `should` at least one holds when there is a `should`
+    at all -- the same reading `Record::matches_filter` uses on the server.
+    """
+    if not dxmt_filter:
+        return True
+    for condition in dxmt_filter.get("must") or []:
+        if not _condition_holds(record, condition):
+            return False
+    for condition in dxmt_filter.get("must_not") or []:
+        if _condition_holds(record, condition):
+            return False
+    should = dxmt_filter.get("should") or []
+    if should and not any(_condition_holds(record, c) for c in should):
+        return False
+    return True

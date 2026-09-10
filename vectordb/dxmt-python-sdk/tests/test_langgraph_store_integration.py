@@ -7,6 +7,7 @@ ensuring compatibility and consistent behavior.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -15,6 +16,15 @@ from typing import Any
 import pytest
 
 pytest.importorskip("langgraph", reason="optional LangGraph integration dependency is not installed")
+
+# Needs a running server, so it must carry the marker that says so. It did not, and every test
+# in this file connects to one -- `pytest -m "not integration"` therefore failed on any machine
+# with langgraph installed, which made the unit gate depend on a server being up. It passed
+# here only because langgraph is absent and `importorskip` skipped the file first.
+pytestmark = pytest.mark.integration
+
+TEST_HOST = os.environ.get("DXMT_TEST_HOST", "localhost")
+TEST_PORT = int(os.environ.get("DXMT_TEST_PORT", "9999"))
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -62,8 +72,9 @@ class MockEmbeddings:
 
 @pytest.fixture
 def client():
-    """Create DXMT client connected to localhost."""
-    return DXMTClient(host="localhost", port=9999)
+    """The server under test, `DXMT_TEST_HOST`/`DXMT_TEST_PORT` as everywhere else. Hard-coded
+    to localhost:9999 before, so it could not be pointed at the server CI actually starts."""
+    return DXMTClient(host=TEST_HOST, port=TEST_PORT)
 
 
 @pytest.fixture

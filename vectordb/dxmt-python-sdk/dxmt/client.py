@@ -15,6 +15,7 @@ import httpx
 from .exceptions import (
     DXMTConnectionError,
     DXMTError,
+    DXMTRecordError,
     DXMTSearchError,
     DXMTTableError,
 )
@@ -695,6 +696,49 @@ class DXMTClient:
             raise DXMTError(msg) from e
         except httpx.RequestError as e:
             msg = f"Connection error deleting records: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    def list_records(
+        self,
+        table_name: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List a table's records, without a query vector.
+
+        The server has had `POST /tables/{t}/records/list` all along; this client did not
+        expose it, and three call sites worked around the gap in ways that are worse than the
+        round trip: `mem0.py` and `metagpt_vector_store.py` search with a zero vector and a
+        large `k` to mean "everything", and `langgraph_store.py` logged a warning and returned
+        nothing at all for a metadata-only search.
+
+        `limit` is capped at 1,000 by the server. Page with `offset`.
+
+        Args:
+            table_name: Name of the table.
+            limit: Records per page, at most 1,000.
+            offset: Records to skip.
+
+        Returns:
+            The page, normalised the way search hits and single-record reads are.
+
+        Raises:
+            DXMTError: If the listing fails.
+        """
+        try:
+            response = self._client.post(
+                f"/tables/{table_name}/records/list",
+                json={"limit": limit, "offset": offset},
+            )
+            response.raise_for_status()
+            data = self._response_data(response.json())
+            records = data.get("records") or []
+            return [self._normalize_record(r) for r in records]
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to list records in '{table_name}': {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error while listing records: {e}"
             raise DXMTConnectionError(msg) from e
 
     def get_records(

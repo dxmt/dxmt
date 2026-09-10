@@ -257,3 +257,85 @@ class TestRealWorldScenarios:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMatchesFilter:
+    """Client-side evaluation of a filter in DXMT's own shape.
+
+    This exists only for the paths that must list records and filter them here, because the
+    listing endpoint takes no filter. **The server is the authority**; this is a second reading
+    of the same conditions and therefore a second chance to drift, which is why every operator
+    is pinned rather than the handful the current callers happen to use.
+    """
+
+    from dxmt.filters import matches_filter
+
+    RECORD = {"payload": {"year": 2023, "title": "vector search", "tag": "ai"}}
+
+    def check(self, op_type, key, value):
+        from dxmt.filters import matches_filter
+
+        return matches_filter(
+            self.RECORD, {"must": [{"key": key, "operation": {"type": op_type, "value": value}}]}
+        )
+
+    def test_no_filter_matches_everything(self):
+        from dxmt.filters import matches_filter
+
+        assert matches_filter(self.RECORD, None)
+        assert matches_filter(self.RECORD, {})
+
+    def test_equality(self):
+        assert self.check("Equal", "year", 2023)
+        assert not self.check("Equal", "year", 2022)
+        assert self.check("NotEqual", "year", 2022)
+
+    def test_comparisons(self):
+        assert self.check("GreaterThanOrEqual", "year", 2023)
+        assert self.check("GreaterThan", "year", 2022)
+        assert not self.check("GreaterThan", "year", 2023)
+        assert self.check("LessThanOrEqual", "year", 2023)
+        assert not self.check("LessThan", "year", 2023)
+
+    def test_a_comparison_against_a_non_number_is_false_not_an_error(self):
+        assert not self.check("GreaterThan", "title", 5)
+
+    def test_membership(self):
+        assert self.check("In", "tag", ["ai", "ml"])
+        assert not self.check("In", "tag", ["ml"])
+        assert self.check("NotIn", "tag", ["ml"])
+        assert not self.check("NotIn", "tag", ["ai"])
+
+    def test_string_tests(self):
+        assert self.check("Contains", "title", "search")
+        assert not self.check("Contains", "title", "audio")
+        assert self.check("StartsWith", "title", "vector")
+        assert self.check("EndsWith", "title", "search")
+        # A string test against a number matches nothing, the same way the server reads it.
+        assert not self.check("StartsWith", "year", "20")
+
+    def test_a_missing_field_matches_nothing(self):
+        assert not self.check("Equal", "absent", 1)
+        assert not self.check("GreaterThan", "absent", 0)
+
+    def test_must_not_and_should(self):
+        from dxmt.filters import matches_filter
+
+        year_is = {"key": "year", "operation": {"type": "Equal", "value": 2023}}
+        tag_is_ml = {"key": "tag", "operation": {"type": "Equal", "value": "ml"}}
+
+        assert not matches_filter(self.RECORD, {"must_not": [year_is]})
+        assert matches_filter(self.RECORD, {"must_not": [tag_is_ml]})
+        assert matches_filter(self.RECORD, {"should": [year_is, tag_is_ml]})
+        assert not matches_filter(self.RECORD, {"should": [tag_is_ml]})
+
+    def test_a_record_from_a_single_read_is_understood_too(self):
+        """`GET /records/{id}` returns `payload_json` as a string, not `payload` as an object.
+        A filter evaluator that only knew one shape would silently match nothing on records
+        that came from the other endpoint."""
+        from dxmt.filters import matches_filter
+
+        record = {"payload_json": '{"year": 2023}'}
+        assert matches_filter(
+            record, {"must": [{"key": "year", "operation": {"type": "Equal", "value": 2023}}]}
+        )
