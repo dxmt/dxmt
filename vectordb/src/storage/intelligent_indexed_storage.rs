@@ -4842,6 +4842,17 @@ impl IntelligentIndexedStorage {
             // Swap in the new (empty) brute-force index
             table_data.index = new_wrapper.clone();
 
+            // Say what the table now searches with. Leaving the old algorithm in place made the
+            // table report an index it no longer had, and made `rebuild_index` see a brute-force
+            // index holding every row as up to date and skip the rebuild that `DELETE /index`
+            // tells the caller to run -- measured: `test_rebuild_index` failed with "the rebuild
+            // after a drop was skipped" before this. A snapshot taken now records brute force, so
+            // the drop also survives a restart instead of being silently undone by it.
+            table_data.selected_algorithm = IndexAlgorithm::BruteForce {
+                enable_parallel: true,
+            };
+            table_data.table.index_type = crate::types::table::IndexType::BruteForce;
+
             (new_wrapper, records_snapshot)
         };
 
@@ -5186,18 +5197,39 @@ impl IntelligentIndexedStorage {
         let dimension = data.table.dimension;
         let record_count = data.records.len();
 
-        // 记录本身的内存：向量 + payload 的 JSON 文本长度。payload 是 serde_json::Value，
-        // 没有便宜的精确大小，序列化后的字节数是最接近的可得近似。
-        // Records on disk cost the map nothing; this counts only what is resident.
-        let mut payload_bytes: usize = 0;
-        if !data.records.is_on_disk() {
-            data.records.for_each(|r| {
-                payload_bytes += serde_json::to_string(&r.payload)
-                    .map(|s| s.len())
-                    .unwrap_or(0)
-            });
-        }
-        let vector_bytes = record_count * dimension * std::mem::size_of::<f32>();
+        // Resident memory, counted where it is. Records in the map carry their payloads (the
+        // serialized length is the nearest size to hand) and, unless the table keeps vectors in
+        // a row file, their vectors; a disk store holds only its id table, offsets and
+        // tombstones. This used to add `record_count * dimension * 4` whatever the table was,
+        // counting as memory the vectors that live in a row file.
+        let record_bytes = match data.records.disk_store_resident_bytes() {
+            Some(resident) => resident,
+            None => {
+                let mut bytes = 0usize;
+                data.records.for_each(|r| {
+                    bytes += r.id.len()
+                        + r.vector.len() * std::mem::size_of::<f32>()
+                        + serde_json::to_string(&r.payload)
+                            .map(|s| s.len())
+                            .unwrap_or(0)
+                });
+                bytes
+            }
+        };
+        let vector_row_bytes: usize = data
+            .vector_rows
+            .keys()
+            .map(|id| std::mem::size_of::<(RecordId, u64)>() + id.len())
+            .sum();
+
+        // The row files are this table's own. The WAL and snapshots are shared by every table
+        // and are not attributed to one. This was a literal 0, including in disk mode, where
+        // the records and vectors are nowhere but in those files.
+        let disk_bytes = data.records.disk_bytes()
+            + data
+                .vector_file
+                .as_ref()
+                .map_or(0, |file| file.disk_bytes());
 
         Ok(serde_json::json!({
             "name": data.table.name,
@@ -5211,11 +5243,8 @@ impl IntelligentIndexedStorage {
             "dimension": dimension,
             "index_type": data.table.index_type.to_string(),
             "index_size_bytes": index_stats.index_size_bytes,
-            "memory_usage_bytes": vector_bytes + payload_bytes + index_stats.index_size_bytes,
-            // Records live in memory; only snapshots and WAL are on disk, and those are
-            // per-instance rather than per-table, so reporting a per-table figure would be
-            // inventing one.
-            "disk_usage_bytes": 0,
+            "memory_usage_bytes": record_bytes + vector_row_bytes + index_stats.index_size_bytes,
+            "disk_usage_bytes": disk_bytes,
         }))
     }
 
@@ -7057,7 +7086,38 @@ mod tests {
 
         // Drop the index (leaves BruteForce in place) then rebuild
         storage.drop_index("rebuild_test").await?;
+        let (dropped, reported_brute_force_after_drop) = {
+            let tables = storage.read_tables("test").await;
+            let data = &tables["rebuild_test"];
+            (
+                data.index.clone_arc(),
+                matches!(
+                    data.table.index_type,
+                    crate::types::table::IndexType::BruteForce
+                ),
+            )
+        };
         storage.rebuild_index("rebuild_test").await?;
+        // The rebuild has to run. While the dropped table still claimed its old algorithm, a
+        // brute-force index holding every row looked up to date, the rebuild was skipped, and
+        // brute force stayed in place. `dropped` is held across the rebuild so its address
+        // cannot be reused by the index that replaces it.
+        {
+            let tables = storage.read_tables("test").await;
+            let data = &tables["rebuild_test"];
+            assert!(
+                !std::sync::Arc::ptr_eq(&data.index.clone_arc(), &dropped),
+                "the rebuild after a drop was skipped"
+            );
+            assert!(!matches!(
+                data.table.index_type,
+                crate::types::table::IndexType::BruteForce
+            ));
+        }
+        assert!(
+            reported_brute_force_after_drop,
+            "after a drop the table must report what it now searches with"
+        );
 
         // After rebuild, search should still return all 5 records
         let query = crate::types::record::SearchQuery {

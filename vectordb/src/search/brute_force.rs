@@ -47,6 +47,81 @@ impl Clone for BruteForceIndex {
     }
 }
 
+/// Nearest first; among equal distances, the smaller id first.
+///
+/// The storage layer orders results the same way (`5c89817`), but it can only reorder what an
+/// index hands back, so the order has to hold here too, before anything is cut to `k`.
+/// Selecting the top `k` by distance alone -- a heap or `select_nth_unstable` -- kept an
+/// arbitrary member of a tie at the cutoff, chosen by insertion order: after
+/// `DELETE /tables/{name}/index` the same query returned `r8` from one table and `r7` from the
+/// next. A NaN distance sorts after every number.
+fn nearest_first(a_id: &str, a: f32, b_id: &str, b: f32) -> Ordering {
+    match a.partial_cmp(&b) {
+        Some(Ordering::Equal) => a_id.cmp(b_id),
+        Some(ordering) => ordering,
+        None => a.is_nan().cmp(&b.is_nan()).then_with(|| a_id.cmp(b_id)),
+    }
+}
+
+fn by_nearest(a: &(RecordId, f32), b: &(RecordId, f32)) -> Ordering {
+    nearest_first(&a.0, a.1, &b.0, b.1)
+}
+
+/// A candidate in a bounded max-heap. The top is the one to evict: the farthest, and among
+/// equally far ones the largest id.
+struct Candidate(RecordId, f32);
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Candidate {}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        nearest_first(&self.0, self.1, &other.0, other.1)
+    }
+}
+
+/// The `k` nearest of `results`, nearest first.
+fn top_k_sorted(mut results: Vec<(RecordId, f32)>, k: usize) -> Vec<(RecordId, f32)> {
+    if k < results.len() {
+        results.select_nth_unstable_by(k, by_nearest);
+        results.truncate(k);
+    }
+    results.sort_by(by_nearest);
+    results
+}
+
+/// The `k` nearest of a stream of candidates, nearest first, holding at most `k + 1`.
+fn top_k_streaming(
+    candidates: impl Iterator<Item = (RecordId, f32)>,
+    k: usize,
+) -> Vec<(RecordId, f32)> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut heap = BinaryHeap::with_capacity(k + 1);
+    for (id, distance) in candidates {
+        heap.push(Candidate(id, distance));
+        if heap.len() > k {
+            heap.pop();
+        }
+    }
+    heap.into_sorted_vec()
+        .into_iter()
+        .map(|Candidate(id, distance)| (id, distance))
+        .collect()
+}
+
 impl BruteForceIndex {
     pub fn new(distance_metric: DistanceMetric) -> Self {
         Self {
@@ -97,6 +172,18 @@ impl BruteForceIndex {
         }
     }
 
+    fn distance(&self, query: &DenseVector, vector: &DenseVector, use_simd: bool) -> f32 {
+        if use_simd {
+            self.distance_metric
+                .calculate_simd(query, vector)
+                .unwrap_or(f32::MAX)
+        } else {
+            self.distance_metric
+                .calculate(query, vector)
+                .unwrap_or(f32::MAX)
+        }
+    }
+
     /// 搜索 - Vec 的顺序遍历比 HashMap 更快（缓存友好）
     /// 对于大数据集 (>1000 vectors)，自动使用并行搜索
     pub fn search_sync(
@@ -112,107 +199,19 @@ impl BruteForceIndex {
             return self.search_parallel(query, k);
         }
 
-        // Use SIMD-optimized distance calculation if available
         let use_simd = self.distance_metric.supports_simd();
+        let distances = self
+            .vectors
+            .iter()
+            .map(|(id, vector)| (id.clone(), self.distance(query, vector, use_simd)));
 
-        // For small k values or small datasets, use heap-based selection
-        // For large k values close to dataset size, use full sort
+        // Every result, sorted, when `k` covers the table; a bounded heap otherwise.
         if k >= self.vectors.len() {
-            // Return all results, sorted
-            // Vec 的迭代器遍历利用了缓存预取，比 HashMap 快
-            let mut results: Vec<(RecordId, f32)> = self
-                .vectors
-                .iter()
-                .map(|(id, vector)| {
-                    let distance = if use_simd {
-                        self.distance_metric
-                            .calculate_simd(query, vector)
-                            .unwrap_or(f32::MAX)
-                    } else {
-                        self.distance_metric
-                            .calculate(query, vector)
-                            .unwrap_or(f32::MAX)
-                    };
-                    (id.clone(), distance)
-                })
-                .collect();
-
-            results.sort_by(|a, b| {
-                match a.1.partial_cmp(&b.1) {
-                    Some(ord) => ord,
-                    None => std::cmp::Ordering::Equal, // NaN values are treated as equal
-                }
-            });
+            let mut results: Vec<(RecordId, f32)> = distances.collect();
+            results.sort_by(by_nearest);
             Ok(results)
         } else {
-            // Use max-heap to efficiently maintain top-k results
-            // The heap stores (negative distance, id) to simulate min-heap behavior
-            #[derive(Debug)]
-            struct HeapItem {
-                distance: f32,
-                id: RecordId,
-            }
-
-            impl PartialEq for HeapItem {
-                fn eq(&self, other: &Self) -> bool {
-                    self.distance == other.distance
-                }
-            }
-
-            impl Eq for HeapItem {}
-
-            #[allow(clippy::non_canonical_partial_ord_impl)]
-            impl PartialOrd for HeapItem {
-                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                    // Normal order for max-heap: pop the LARGEST distance (worst match)
-                    // so we retain the k SMALLEST distances (nearest neighbors)
-                    self.distance.partial_cmp(&other.distance)
-                }
-            }
-
-            impl Ord for HeapItem {
-                fn cmp(&self, other: &Self) -> Ordering {
-                    self.partial_cmp(other).unwrap_or(Ordering::Equal)
-                }
-            }
-
-            let mut heap = BinaryHeap::with_capacity(k + 1);
-
-            for (id, vector) in self.vectors.iter() {
-                let distance = if use_simd {
-                    self.distance_metric
-                        .calculate_simd(query, vector)
-                        .unwrap_or(f32::MAX)
-                } else {
-                    self.distance_metric
-                        .calculate(query, vector)
-                        .unwrap_or(f32::MAX)
-                };
-
-                heap.push(HeapItem {
-                    distance,
-                    id: id.clone(),
-                });
-
-                // Keep only top-k elements
-                if heap.len() > k {
-                    heap.pop();
-                }
-            }
-
-            // Convert heap to sorted vector
-            let mut results: Vec<(RecordId, f32)> = heap
-                .into_iter()
-                .map(|item| (item.id, item.distance))
-                .collect();
-
-            results.sort_by(|a, b| {
-                match a.1.partial_cmp(&b.1) {
-                    Some(ord) => ord,
-                    None => std::cmp::Ordering::Equal, // NaN values are treated as equal
-                }
-            });
-            Ok(results)
+            Ok(top_k_streaming(distances, k))
         }
     }
 
@@ -224,35 +223,12 @@ impl BruteForceIndex {
         k: usize,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
         let use_simd = self.distance_metric.supports_simd();
-        let metric = &self.distance_metric;
-
-        // Parallel distance calculation using Rayon
-        // Each thread processes a chunk of vectors independently
-        let mut results: Vec<(RecordId, f32)> = self
+        let results: Vec<(RecordId, f32)> = self
             .vectors
-            .par_iter() // Parallel iterator - distributes work across CPU cores
-            .map(|(id, vector)| {
-                let distance = if use_simd {
-                    metric.calculate_simd(query, vector).unwrap_or(f32::MAX)
-                } else {
-                    metric.calculate(query, vector).unwrap_or(f32::MAX)
-                };
-                (id.clone(), distance)
-            })
+            .par_iter()
+            .map(|(id, vector)| (id.clone(), self.distance(query, vector, use_simd)))
             .collect();
-
-        // Efficient top-k selection using partial sort
-        // Only sorts the first k elements, rest remain unsorted
-        if k < results.len() {
-            results
-                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-            results.truncate(k);
-        }
-
-        // Final sort of top-k results
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-
-        Ok(results)
+        Ok(top_k_sorted(results, k))
     }
 
     /// GPU-accelerated search: compute all distances on GPU in one batch,
@@ -270,24 +246,13 @@ impl BruteForceIndex {
         // Compute all distances on GPU in one batch
         let distances = gpu.single_query_distances(&self.distance_metric, query, &db_vectors)?;
 
-        // Pair distances with IDs and find top-k
-        let mut results: Vec<(RecordId, f32)> = self
+        let results: Vec<(RecordId, f32)> = self
             .vectors
             .iter()
             .zip(distances.iter())
             .map(|((id, _), &dist)| (id.clone(), dist))
             .collect();
-
-        // Efficient top-k selection
-        if k < results.len() {
-            results
-                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-            results.truncate(k);
-        }
-
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-
-        Ok(results)
+        Ok(top_k_sorted(results, k))
     }
 
     /// 使用预计算查询进行搜索 - 避免重复计算查询向量属性 (+10-15% 性能)
@@ -307,70 +272,16 @@ impl BruteForceIndex {
             return self.search_parallel_precomputed(query, k);
         }
 
-        // Serial search for small datasets
+        let distances = self
+            .vectors
+            .iter()
+            .map(|(id, vector)| (id.clone(), query.distance_to(vector).unwrap_or(f32::MAX)));
         if k >= self.vectors.len() {
-            let mut results: Vec<(RecordId, f32)> = self
-                .vectors
-                .iter()
-                .map(|(id, vector)| {
-                    let distance = query.distance_to(vector).unwrap_or(f32::MAX);
-                    (id.clone(), distance)
-                })
-                .collect();
-
-            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            let mut results: Vec<(RecordId, f32)> = distances.collect();
+            results.sort_by(by_nearest);
             Ok(results)
         } else {
-            // Heap-based selection for small k
-            #[derive(Debug)]
-            struct HeapItem {
-                distance: f32,
-                id: RecordId,
-            }
-
-            impl PartialEq for HeapItem {
-                fn eq(&self, other: &Self) -> bool {
-                    self.distance == other.distance
-                }
-            }
-
-            impl Eq for HeapItem {}
-
-            #[allow(clippy::non_canonical_partial_ord_impl)]
-            impl PartialOrd for HeapItem {
-                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                    self.distance.partial_cmp(&other.distance)
-                }
-            }
-
-            impl Ord for HeapItem {
-                fn cmp(&self, other: &Self) -> Ordering {
-                    self.partial_cmp(other).unwrap_or(Ordering::Equal)
-                }
-            }
-
-            let mut heap = BinaryHeap::with_capacity(k + 1);
-
-            for (id, vector) in self.vectors.iter() {
-                let distance = query.distance_to(vector).unwrap_or(f32::MAX);
-
-                heap.push(HeapItem {
-                    distance,
-                    id: id.clone(),
-                });
-
-                if heap.len() > k {
-                    heap.pop();
-                }
-            }
-
-            let mut results: Vec<(RecordId, f32)> = heap
-                .into_iter()
-                .map(|item| (item.id, item.distance))
-                .collect();
-
-            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-            Ok(results)
+            Ok(top_k_streaming(distances, k))
         }
     }
 
@@ -380,24 +291,12 @@ impl BruteForceIndex {
         query: &PrecomputedQuery,
         k: usize,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
-        let mut results: Vec<(RecordId, f32)> = self
+        let results: Vec<(RecordId, f32)> = self
             .vectors
             .par_iter()
-            .map(|(id, vector)| {
-                let distance = query.distance_to(vector).unwrap_or(f32::MAX);
-                (id.clone(), distance)
-            })
+            .map(|(id, vector)| (id.clone(), query.distance_to(vector).unwrap_or(f32::MAX)))
             .collect();
-
-        if k < results.len() {
-            results
-                .select_nth_unstable_by(k, |a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-            results.truncate(k);
-        }
-
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-
-        Ok(results)
+        Ok(top_k_sorted(results, k))
     }
 
     /// 删除向量 - Vec 的 swap_remove 是 O(1)
@@ -423,10 +322,24 @@ impl BruteForceIndex {
     pub fn is_empty(&self) -> bool {
         self.vectors.is_empty()
     }
+
+    /// Bytes held: the id and vector of every entry, and the vector of entries itself.
+    pub fn memory_bytes(&self) -> usize {
+        self.vectors.capacity() * std::mem::size_of::<(RecordId, DenseVector)>()
+            + self
+                .vectors
+                .iter()
+                .map(|(id, vector)| id.capacity() + vector.capacity() * std::mem::size_of::<f32>())
+                .sum::<usize>()
+    }
 }
 
 #[async_trait]
 impl VectorIndex for BruteForceIndex {
+    async fn memory_bytes(&self) -> usize {
+        BruteForceIndex::memory_bytes(self)
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
     }
@@ -462,4 +375,90 @@ impl VectorIndex for BruteForceIndex {
 
 pub fn calculate_distance(metric: &DistanceMetric, a: &[f32], b: &[f32]) -> f32 {
     metric.calculate(a, b).unwrap_or(f32::INFINITY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(results: &[(RecordId, f32)]) -> Vec<&str> {
+        results.iter().map(|(id, _)| id.as_str()).collect()
+    }
+
+    /// One record at the query and every id in `tied` at the same distance from it, inserted
+    /// in the order given.
+    fn index_with_ties<I: IntoIterator<Item = String>>(tied: I) -> BruteForceIndex {
+        let mut index = BruteForceIndex::new(DistanceMetric::Euclidean);
+        index.insert("exact".to_string(), vec![1.0, 0.0]).unwrap();
+        for id in tied {
+            index.insert(id, vec![0.0, 1.0]).unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn a_tie_at_the_cutoff_keeps_the_smallest_ids_whatever_the_insertion_order() {
+        let query = vec![1.0, 0.0];
+        for order in [
+            ["t1", "t2", "t3", "t4"],
+            ["t4", "t3", "t2", "t1"],
+            ["t3", "t1", "t4", "t2"],
+        ] {
+            let index = index_with_ties(order.iter().map(|s| s.to_string()));
+            // The heap path (k below the table size) and the full sort (k covering it).
+            assert_eq!(
+                ids(&index.search_sync(&query, 3).unwrap()),
+                ["exact", "t1", "t2"],
+                "inserted as {order:?}"
+            );
+            assert_eq!(
+                ids(&index.search_sync(&query, 10).unwrap()),
+                ["exact", "t1", "t2", "t3", "t4"],
+                "inserted as {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parallel_path_breaks_ties_the_same_way() {
+        // Past 1,000 vectors the search goes through `search_parallel`, whose
+        // `select_nth_unstable` used to keep an arbitrary member of the tie.
+        let tied = (0..1_200).rev().map(|i| format!("t{i:04}"));
+        let index = index_with_ties(tied);
+        let query = vec![1.0, 0.0];
+        assert_eq!(
+            ids(&index.search_sync(&query, 4).unwrap()),
+            ["exact", "t0000", "t0001", "t0002"]
+        );
+    }
+
+    #[test]
+    fn a_nan_distance_sorts_after_every_number() {
+        let mut results = vec![
+            ("b".to_string(), f32::NAN),
+            ("a".to_string(), 1.0),
+            ("c".to_string(), 0.5),
+            ("d".to_string(), f32::NAN),
+        ];
+        results.sort_by(by_nearest);
+        assert_eq!(ids(&results), ["c", "a", "b", "d"]);
+        assert_eq!(ids(&top_k_sorted(results.clone(), 2)), ["c", "a"]);
+        assert_eq!(
+            ids(&top_k_streaming(results.into_iter(), 3)),
+            ["c", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn memory_grows_with_what_is_stored() {
+        let mut index = BruteForceIndex::new(DistanceMetric::Euclidean);
+        let empty = index.memory_bytes();
+        for i in 0..100 {
+            index.insert(format!("id{i}"), vec![0.0; 64]).unwrap();
+        }
+        assert!(
+            index.memory_bytes() >= empty + 100 * 64 * std::mem::size_of::<f32>(),
+            "100 vectors of 64 floats are at least 25,600 bytes"
+        );
+    }
 }

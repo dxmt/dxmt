@@ -398,6 +398,15 @@ impl VectorFile {
         PathBuf::from(p)
     }
 
+    /// Bytes of the vector file and its row index on disk.
+    pub fn disk_bytes(&self) -> u64 {
+        [self.path.clone(), Self::rows_path(&self.path)]
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum()
+    }
+
     pub fn dim(&self) -> usize {
         self.dim
     }

@@ -401,6 +401,28 @@ impl RecordStore {
         matches!(self, RecordStore::Disk(_))
     }
 
+    /// Bytes this table's records occupy on disk -- the row file and its log -- or 0 for the
+    /// in-memory map.
+    pub fn disk_bytes(&self) -> u64 {
+        match self {
+            RecordStore::Memory(_) => 0,
+            RecordStore::Disk(s) => [s.file.path.clone(), RecordFile::log_path(&s.file.path)]
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|meta| meta.len())
+                .sum(),
+        }
+    }
+
+    /// Bytes a disk store keeps resident (ids, offsets, tombstones), or `None` for the map,
+    /// whose records a caller has to measure itself.
+    pub fn disk_store_resident_bytes(&self) -> Option<usize> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.resident_bytes()),
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self {
             RecordStore::Memory(m) => m.len(),

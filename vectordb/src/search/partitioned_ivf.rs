@@ -533,6 +533,42 @@ impl PartitionedIvfIndex {
 
 #[async_trait]
 impl VectorIndex for PartitionedIvfIndex {
+    /// Partition metadata, the write buffer, the deletion set and whichever partitions are
+    /// resident. Partitions left in object storage cost nothing here.
+    async fn memory_bytes(&self) -> usize {
+        use std::mem::size_of;
+        fn entries(vectors: &[(RecordId, DenseVector)]) -> usize {
+            vectors
+                .iter()
+                .map(|(id, v)| {
+                    size_of::<(RecordId, DenseVector)>()
+                        + id.capacity()
+                        + v.capacity() * size_of::<f32>()
+                })
+                .sum()
+        }
+        let resident: usize = self
+            .resident
+            .read()
+            .await
+            .values()
+            .map(|partition| entries(&partition.vectors))
+            .sum();
+        self.state
+            .partitions
+            .iter()
+            .map(|p| size_of::<PartitionMeta>() + p.centroid.capacity() * size_of::<f32>())
+            .sum::<usize>()
+            + entries(&self.state.overflow)
+            + self
+                .state
+                .deleted
+                .iter()
+                .map(|id| size_of::<RecordId>() + id.capacity())
+                .sum::<usize>()
+            + resident
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         if self.state.dimension.is_none() {
             self.state.dimension = Some(vector.len());

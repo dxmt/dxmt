@@ -272,6 +272,10 @@ impl MemoryStats {
 
 #[async_trait::async_trait]
 impl crate::search::index_traits::VectorIndex for HnswPqIndex {
+    async fn memory_bytes(&self) -> usize {
+        crate::search::index_traits::VectorIndex::memory_bytes(&self.hnsw).await
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
     }

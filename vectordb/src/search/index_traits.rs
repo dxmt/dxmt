@@ -126,6 +126,11 @@ pub trait VectorIndex: Send + Sync {
         None
     }
 
+    /// Bytes this index holds in memory -- vectors, links, codes, codebooks -- counted from its
+    /// containers. Required rather than defaulted: the default would be 0, which is what
+    /// `GET /tables/{name}/stats` reported as `index_size_bytes` for every index until this
+    /// existed.
+    async fn memory_bytes(&self) -> usize;
     async fn delete(&mut self, id: &str) -> crate::Result<()>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;

@@ -326,10 +326,11 @@ impl IndexWrapper {
     /// Get index statistics - requires read lock
     pub async fn get_stats(&self) -> IndexStats {
         let index = self.index.read().await;
-        // Create default stats - SerializableIndex trait methods not directly accessible
         IndexStats {
             total_vectors: index.len(),
-            index_size_bytes: 0,
+            // A literal 0 for every index until `VectorIndex::memory_bytes` existed, so table
+            // stats reported an index of no size and left it out of `memory_usage_bytes`.
+            index_size_bytes: index.memory_bytes().await,
             build_time_ms: 0,
         }
     }
@@ -502,6 +503,13 @@ mod tests {
                 .take(k)
                 .map(|id| (id.clone(), 0.9))
                 .collect())
+        }
+
+        async fn memory_bytes(&self) -> usize {
+            self.vectors
+                .iter()
+                .map(|(id, v)| id.len() + v.len() * std::mem::size_of::<f32>())
+                .sum()
         }
 
         async fn delete(&mut self, id: &str) -> Result<()> {

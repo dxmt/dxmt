@@ -306,6 +306,24 @@ impl SerializableIndex for IvfIndex {
 
 #[async_trait]
 impl VectorIndex for IvfIndex {
+    async fn memory_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.centroids.capacity() * size_of::<Centroid>()
+            + self
+                .centroids
+                .iter()
+                .map(|centroid| {
+                    centroid.vector.capacity() * size_of::<f32>()
+                        + centroid.vectors.capacity() * size_of::<(RecordId, DenseVector)>()
+                        + centroid
+                            .vectors
+                            .iter()
+                            .map(|(id, v)| id.capacity() + v.capacity() * size_of::<f32>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         if !self.is_trained {
             return Err(crate::Error::InvalidInput(

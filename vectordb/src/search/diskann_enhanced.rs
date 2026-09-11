@@ -661,6 +661,53 @@ pub struct EnhancedDiskANNStats {
 // Implement VectorIndex trait for EnhancedDiskANN
 #[async_trait::async_trait]
 impl crate::search::index_traits::VectorIndex for EnhancedDiskANNIndex {
+    /// The adjacency lists, the vector cache and offset table, entry points and codebooks.
+    /// Vectors that are only on disk cost nothing here.
+    async fn memory_bytes(&self) -> usize {
+        use std::mem::size_of;
+        fn id_bytes(id: &RecordId) -> usize {
+            size_of::<RecordId>() + id.capacity()
+        }
+        let graph = self
+            .graph
+            .read()
+            .map(|graph| {
+                graph
+                    .iter()
+                    .map(|(id, edges)| id_bytes(id) + edges.iter().map(id_bytes).sum::<usize>())
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        let storage = self
+            .vector_storage
+            .read()
+            .map(|storage| {
+                storage
+                    .cache
+                    .iter()
+                    .map(|(id, cached)| {
+                        id_bytes(id)
+                            + match cached {
+                                CachedVector::Dense(v) => v.capacity() * size_of::<f32>(),
+                                CachedVector::Compressed(code) => code.codes.capacity(),
+                            }
+                    })
+                    .sum::<usize>()
+                    + storage
+                        .index
+                        .keys()
+                        .map(|id| id_bytes(id) + size_of::<u64>())
+                        .sum::<usize>()
+            })
+            .unwrap_or(0);
+        let entry_points = self
+            .entry_points
+            .read()
+            .map(|points| points.iter().map(id_bytes).sum::<usize>())
+            .unwrap_or(0);
+        graph + storage + entry_points + self.pq.as_ref().map_or(0, |pq| pq.memory_usage())
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
     }

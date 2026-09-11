@@ -2218,6 +2218,13 @@ impl std::fmt::Debug for HnswIndex {
 // Adapter to implement index_traits::VectorIndex for HnswIndex
 #[async_trait::async_trait]
 impl crate::search::index_traits::VectorIndex for HnswIndex {
+    /// Links, ids, and codes once quantized (`resident_bytes_without_vectors`), plus the vector
+    /// arena, which a quantized graph has emptied.
+    async fn memory_bytes(&self) -> usize {
+        self.resident_bytes_without_vectors()
+            + self.nodes.vectors.capacity() * std::mem::size_of::<f32>()
+    }
+
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()> {
         self.insert(id, vector)
     }

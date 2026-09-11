@@ -498,9 +498,11 @@ pub async fn rebuild_index(
     match state.storage.rebuild_index(&table_name).await {
         Ok(_) => {
             let response = serde_json::json!({
+                // This used to read "rebuilt from {} persisted records" with an empty string in
+                // the placeholder; `rebuild_index` returns no count to put there.
                 "message": format!(
-                    "Vector index for table '{}' has been rebuilt from {} persisted records.",
-                    table_name, ""
+                    "Vector index for table '{}' has been rebuilt from its persisted records.",
+                    table_name
                 ),
                 "table": table_name,
             });
