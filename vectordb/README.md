@@ -172,9 +172,8 @@ export DB_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 
 Default: `tokio-runtime`, `basic-storage`.
 
-Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `s3-storage`, `storage-lmdb`,
-`storage-rocksdb`, `gpu` (CUDA), `cluster`, `multimodal`, `embeddings`, `python` (PyO3
-bindings), `metrics`, `hf-datasets`.
+Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `s3-storage`, `gpu` (CUDA),
+`cluster`, `multimodal`, `embeddings`, `python` (PyO3 bindings), `metrics`, `hf-datasets`.
 
 ## Client SDKs
 

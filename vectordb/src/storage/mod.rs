@@ -1,13 +1,10 @@
 // Core storage module - simplified and clean
 
-pub mod atomic_ops;
 pub mod compression;
 pub mod consistency_check; // New: Index consistency verification
 pub mod factory;
 pub mod index_selector;
 pub mod intelligent_indexed_storage;
-#[cfg(feature = "storage-lmdb")]
-pub mod lmdb;
 pub mod memory;
 pub(crate) mod memory_guard;
 pub mod object;
@@ -26,8 +23,6 @@ pub use factory::{
     StorageFactory, StorageIntegration,
 };
 pub use intelligent_indexed_storage::IntelligentIndexedStorage;
-#[cfg(feature = "storage-lmdb")]
-pub use lmdb::{GraphEdge, GraphNode, LmdbStorage, TableMetadata, VectorRecord};
 pub use memory::MemoryStorage;
 pub use tier_promotion::{
     AccessPattern, Tier, TierPromotionConfig, TierPromotionPolicy, TierStats,

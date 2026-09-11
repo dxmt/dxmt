@@ -177,12 +177,6 @@ hash_ring = { version = "0.2", optional = true }
 tantivy = { version = "0.25", optional = true }
 jieba-rs = { version = "0.8", optional = true }
 
-# LMDB storage backend
-heed = { version = "0.20", optional = true }
-
-# RocksDB storage backend
-rocksdb = { version = "0.22", features = ["multi-threaded-cf"], optional = true }
-
 # Graph processing (already exists, no need to add again)
 
 # Query language parsing
@@ -298,8 +292,8 @@ incremental = true
 # Feature flags for conditional compilation
 [features]
 # The default build is the supported single-node Alpha surface. Heavy or experimental
-# integrations must be opted into explicitly so a normal build does not require AWS, LMDB,
-# GraphQL, ONNX, or GPU toolchains.
+# integrations must be opted into explicitly so a normal build does not require AWS, GraphQL,
+# ONNX, or GPU toolchains.
 default = ["tokio-runtime", "basic-storage", "jemalloc"]
 experimental = [
     "benchmarks",
@@ -314,8 +308,6 @@ adaptive-index = ["experimental-indexes"]
 experimental-indexes = []
 test-failpoints = []
 s3-storage = ["aws-config", "aws-sdk-s3", "aws-smithy-async", "reqwest"]
-storage-lmdb = ["heed"]
-storage-rocksdb = ["rocksdb"]
 text-bm25 = ["tantivy", "jieba-rs"]
 hybrid-search = ["text-bm25"]
 api-graphql = ["async-graphql", "async-graphql-axum"]

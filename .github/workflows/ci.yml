@@ -98,27 +98,27 @@ jobs:
       - name: API and text integrations
         run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,metrics -- -D warnings
 
-      - name: Object store and embedded backends
-        run: cargo check --features s3-storage,storage-lmdb
+      - name: Object store backend
+        run: cargo check --features s3-storage
 
-      # The feature-gated test files (benchmarks, dataset, phase 3, LMDB persistence, the
-      # failpoint suite) compile to nothing in the default build. Without this step they are
-      # not merely unrun, they are unbuilt, and they rot against the code they test.
+      # The feature-gated test files (benchmarks, dataset, phase 3, the failpoint suite) compile
+      # to nothing in the default build. Without this step they are not merely unrun, they are
+      # unbuilt, and they rot against the code they test.
       - name: Feature-gated test targets
         run: >
           cargo clippy --all-targets
-          --features benchmarks,adaptive-index,experimental-indexes,storage-lmdb,test-failpoints
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints
           -- -D warnings
 
-      # Compiling a test is not running it. Before this step the dataset, recall-metric, LMDB
-      # persistence and hierarchical-clustering suites had never executed anywhere -- the default
-      # build compiles them to nothing -- and two of their tests went on importing types that had
-      # moved to planning/, unnoticed, because the clippy step above was itself naming a feature
-      # that no longer existed. Same feature list as the clippy step, so the two cannot drift.
+      # Compiling a test is not running it. Before this step the dataset, recall-metric and
+      # hierarchical-clustering suites had never executed anywhere -- the default build compiles
+      # them to nothing -- and two of their tests went on importing types that had moved to
+      # planning/, unnoticed, because the clippy step above was itself naming a feature that no
+      # longer existed. Same feature list as the clippy step, so the two cannot drift.
       - name: Feature-gated tests
         run: >
           cargo test --tests
-          --features benchmarks,adaptive-index,experimental-indexes,storage-lmdb,test-failpoints
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints
 
   build:
     name: release build
