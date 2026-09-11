@@ -149,6 +149,7 @@ impl MutationRoot {
     /// Create a new table
     async fn create_table(&self, ctx: &Context<'_>, input: CreateTableInput) -> Result<TableType> {
         let state = ctx.data::<Arc<AppState>>()?;
+        crate::utils::validate_table_name(&input.name)?;
 
         // Create table config - this would need to be adapted based on actual TableConfig structure
         let config = crate::types::table::TableConfig {

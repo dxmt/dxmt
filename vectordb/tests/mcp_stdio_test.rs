@@ -168,3 +168,34 @@ fn tools_reach_the_storage_layer_and_persist() {
         text
     );
 }
+
+#[test]
+fn a_table_name_cannot_put_files_outside_the_data_directory() {
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+
+    // Row files are `<wal>/records/<table>.rec` and `<wal>/vectors/<table>.f32`, joined with no
+    // sanitising, and this tool used to accept any string as the table name.
+    let replies = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_table","arguments":{"name":"../../escape","dimension":4}}}"#,
+        ],
+    );
+    let reply = &replies[1];
+    let refused =
+        reply.get("error").is_some() || reply["result"]["isError"] == serde_json::json!(true);
+    assert!(refused, "a table named ../../escape was created: {}", reply);
+
+    let stray: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|name| name != "wal")
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "files written beside the WAL directory: {:?}",
+        stray
+    );
+}

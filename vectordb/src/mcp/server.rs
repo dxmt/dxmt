@@ -656,6 +656,9 @@ impl<S: Storage + 'static> McpServer<S> {
             .and_then(|i| i.as_str())
             .unwrap_or("hnsw");
 
+        // The rules `POST /tables` applies. The name becomes a file name in disk mode, and this
+        // tool accepted any string.
+        crate::utils::validate_table_name(name)?;
         // Create table
         let table_config = crate::types::table::TableConfig {
             name: name.to_string(),

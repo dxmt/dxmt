@@ -572,6 +572,13 @@ pub async fn branch_table(
         }
     };
 
+    // A branch is a table, and gets the rules `POST /tables` has always applied. Without this,
+    // `"bad name!"` and `""` became tables that survived a restart, and a 300-character name was a
+    // 500 in disk mode ("File name too long") and a table in memory mode.
+    if let Err(e) = validate_table_name(&branch_name) {
+        let error = ApiError::new("INVALID_TABLE_NAME", &e.to_string());
+        return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
+    }
     match state.storage.branch_table(&table_name, &branch_name).await {
         Ok(branch) => {
             let response = serde_json::json!({

@@ -319,6 +319,15 @@ async fn create_collection(
     State(state): State<Arc<SimpleModeState>>,
     Json(req): Json<CreateCollectionRequest>,
 ) -> impl IntoResponse {
+    // A collection is a table, and its name follows the rules `POST /tables` applies. It becomes
+    // a file name in disk mode, and this route accepted any string.
+    if let Err(e) = crate::utils::validate_table_name(&req.name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
     info!("Creating collection '{}' (dim={})", req.name, req.dimension);
 
     let distance_metric = match req.distance_metric.as_str() {
@@ -871,5 +880,55 @@ mod tests {
             top_id
         );
         drop(router); // ensure it compiled
+    }
+
+    #[tokio::test]
+    async fn a_collection_name_follows_the_rules_for_a_table_name() {
+        use tower::ServiceExt;
+
+        // Memory only, no WAL: the names below are the ones that must never reach a file path.
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(MemoryConfig {
+                max_size_mb: 64,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = Arc::new(IntelligentIndexedStorage::new(&config).await.unwrap());
+        let state = Arc::new(SimpleModeState {
+            app: Arc::new(AppState {
+                storage: storage.clone(),
+                server_health: Arc::new(crate::api::server_health::ServerHealth::default()),
+            }),
+            bm25: Arc::new(RwLock::new(HashMap::new())),
+        });
+        let app = Router::new()
+            .route("/collections", post(create_collection))
+            .with_state(state);
+        let create = |name: &str| {
+            axum::http::Request::post("/collections")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "name": name, "dimension": 4 }).to_string(),
+                ))
+                .unwrap()
+        };
+
+        // This route accepted any string; in disk mode `../../escape` wrote row files outside
+        // the data directory. Hyphenated names worked here too, and no longer do.
+        for name in ["../../escape", "has-hyphen", "", "9lives"] {
+            let response = app.clone().oneshot(create(name)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{name:?} was accepted"
+            );
+        }
+        assert!(storage.list_tables().await.unwrap().is_empty());
+
+        let response = app.clone().oneshot(create("docs_v2")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 }

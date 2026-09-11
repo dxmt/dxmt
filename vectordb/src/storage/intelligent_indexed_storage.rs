@@ -5157,11 +5157,13 @@ impl IntelligentIndexedStorage {
         };
 
         // Create the branch table (reuses existing create_table + insert_records)
-        let branch = self.create_table(source_config).await?;
+        self.create_table(source_config).await?;
         if !records_snapshot.is_empty() {
             self.insert_records(branch_name, records_snapshot).await?;
         }
-        Ok(branch)
+        // Described after the copy. Returning what `create_table` handed back reported a branch
+        // of eight records as `record_count: 0`.
+        self.get_table(branch_name).await
     }
 
     /// 列出表中所有记录 ID（用于一致性检查和数据迁移）

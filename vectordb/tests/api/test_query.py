@@ -251,6 +251,9 @@ def test_malformed_dxql_is_a_400(sql):
         "INSERT INTO {t} (id) VALUES ('no-vector')",
         "UPDATE {t} SET id = 'x' WHERE id = 'r1'",
         "CREATE TABLE {t}_new (id TEXT)",
+        # Valid identifiers to the grammar, not valid table names to `POST /tables`.
+        "CREATE TABLE `bad name` (embedding VECTOR(4))",
+        "CREATE TABLE _hidden (embedding VECTOR(4))",
     ],
 )
 def test_well_formed_dxql_that_cannot_be_carried_out_as_written_is_a_400(table, template):

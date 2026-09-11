@@ -244,6 +244,10 @@ fn compile_delete(delete: DeleteStatement) -> Result<QueryPlan, DxqlError> {
 fn compile_create(create: CreateStatement) -> Result<QueryPlan, DxqlError> {
     match create {
         CreateStatement::Table { name, columns } => {
+            // The grammar accepts any backtick-quoted identifier; a table name has the rules
+            // `POST /tables` applies, or DXQL creates tables the REST API cannot address.
+            crate::utils::validate_table_name(&name)
+                .map_err(|e| DxqlError::CompilationError(e.to_string()))?;
             let dimensions: Vec<usize> = columns
                 .iter()
                 .filter_map(|column| match column.data_type {
