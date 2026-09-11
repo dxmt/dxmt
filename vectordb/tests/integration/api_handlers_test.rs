@@ -146,7 +146,6 @@ async fn test_insert_records_basic() {
 }
 
 #[tokio::test]
-#[ignore = "Dimension validation not yet implemented"]
 async fn test_insert_records_wrong_dimension() {
     let state = create_test_app_state().await;
 

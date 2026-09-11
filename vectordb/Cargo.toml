@@ -61,11 +61,6 @@ name = "dxql_demo"
 path = "examples/dxql_demo.rs"
 
 [[example]]
-name = "adaptive_index_demo"
-path = "examples/adaptive_index_demo.rs"
-required-features = ["adaptive-index"]
-
-[[example]]
 name = "chinese_tokenizer_demo"
 path = "examples/chinese_tokenizer_demo.rs"
 required-features = ["text-bm25"]

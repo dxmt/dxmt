@@ -2,15 +2,16 @@
 
 //! Phase 3 Integration Test - Hierarchical Clustering
 //!
-//! This test validates all Phase 3 components working together:
+//! This test validates the Phase 3 components that are still in `src/`:
 //! - Hierarchical clustering index
-//! - Cluster-aware search strategies
 //! - Adaptive sizing recommendations
+//!
+//! The cluster-aware search tests moved to `planning/tests/phase3_cluster_aware_test.rs` with the
+//! module they test.
 
 use dxmt_vectordb::search::{
-    AdaptiveClusterAnalyzer, AdaptiveClusterConfig, ClusterAwareSearchConfig,
-    ClusterAwareSearchIndex, HierarchicalClusteringConfig, HierarchicalClusteringIndex,
-    SearchStrategy,
+    AdaptiveClusterAnalyzer, AdaptiveClusterConfig, HierarchicalClusteringConfig,
+    HierarchicalClusteringIndex,
 };
 use dxmt_vectordb::types::vector::DenseVector;
 use dxmt_vectordb::types::DistanceMetric;
@@ -80,86 +81,6 @@ fn test_phase3_hierarchical_clustering_basic() {
     );
 
     println!("✅ Test 1 PASSED\n");
-}
-
-#[test]
-fn test_phase3_cluster_aware_strategies() {
-    println!("\n=== Test 2: Cluster-Aware Search Strategies ===");
-
-    let dataset = create_test_dataset(300, 32);
-    let query = &dataset[0].1;
-
-    // Test each strategy
-    let strategies = vec![
-        SearchStrategy::HierarchicalFirst,
-        SearchStrategy::Hybrid,
-        SearchStrategy::Adaptive,
-    ];
-
-    for strategy in strategies {
-        println!("Testing strategy: {:?}", strategy);
-
-        let config = ClusterAwareSearchConfig {
-            clustering_config: HierarchicalClusteringConfig {
-                num_coarse_clusters: 5,
-                num_fine_clusters_per_coarse: 5,
-                num_coarse_probes: 2,
-                num_fine_probes: 3,
-                max_iterations: 10,
-                tolerance: 1e-4,
-                enable_parallel: false,
-            },
-            search_strategy: strategy.clone(),
-            adaptive_probing: false,
-            min_recall_threshold: 0.95,
-            max_clusters_to_probe: 10,
-        };
-
-        let mut index = ClusterAwareSearchIndex::new(config, DistanceMetric::Cosine);
-        index.train(&dataset).expect("Training failed");
-
-        let results = index.search(query, 5).expect("Search failed");
-        println!("  ✓ Results: {}", results.len());
-        assert!(!results.is_empty(), "Should find at least some results");
-    }
-
-    println!("✅ Test 2 PASSED\n");
-}
-
-#[test]
-fn test_phase3_adaptive_probing() {
-    println!("\n=== Test 3: Adaptive Probing ===");
-
-    let config = ClusterAwareSearchConfig {
-        clustering_config: HierarchicalClusteringConfig {
-            num_coarse_clusters: 10,
-            num_fine_clusters_per_coarse: 10,
-            num_coarse_probes: 2,
-            num_fine_probes: 2,
-            max_iterations: 10,
-            tolerance: 1e-4,
-            enable_parallel: false,
-        },
-        search_strategy: SearchStrategy::HierarchicalFirst,
-        adaptive_probing: true,
-        min_recall_threshold: 0.95,
-        max_clusters_to_probe: 20,
-    };
-
-    let dataset = create_test_dataset(500, 64);
-    let mut index = ClusterAwareSearchIndex::new(config, DistanceMetric::Euclidean);
-
-    index.train(&dataset).expect("Training failed");
-
-    let query = &dataset[0].1;
-    let results = index
-        .adaptive_probe_search(query, 10)
-        .expect("Adaptive search failed");
-
-    println!("✓ Adaptive probing found {} results", results.len());
-    assert!(!results.is_empty(), "Should find at least some results");
-
-    println!("✅ Test 3 PASSED\n");
 }
 
 #[test]

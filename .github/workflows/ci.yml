@@ -79,7 +79,7 @@ jobs:
         run: cargo check --no-default-features --features tokio-runtime,basic-storage,text-bm25
 
   optional-features:
-    name: optional integration compile
+    name: optional features, compile and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,8 +107,18 @@ jobs:
       - name: Feature-gated test targets
         run: >
           cargo clippy --all-targets
-          --features benchmarks,adaptive-index,index-management,experimental-indexes,storage-lmdb,test-failpoints
+          --features benchmarks,adaptive-index,experimental-indexes,storage-lmdb,test-failpoints
           -- -D warnings
+
+      # Compiling a test is not running it. Before this step the dataset, recall-metric, LMDB
+      # persistence and hierarchical-clustering suites had never executed anywhere -- the default
+      # build compiles them to nothing -- and two of their tests went on importing types that had
+      # moved to planning/, unnoticed, because the clippy step above was itself naming a feature
+      # that no longer existed. Same feature list as the clippy step, so the two cannot drift.
+      - name: Feature-gated tests
+        run: >
+          cargo test --tests
+          --features benchmarks,adaptive-index,experimental-indexes,storage-lmdb,test-failpoints
 
   build:
     name: release build
