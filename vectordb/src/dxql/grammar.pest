@@ -1,272 +1,158 @@
-// DXQL Grammar - DXMT Query Language
-// SQL-like syntax for vector, text, and graph queries
+// DXQL -- the DXMT query language.
+//
+// SQL-shaped. Keywords are case-insensitive (`^"..."`); identifiers are not, because table and
+// payload field names are case-sensitive everywhere else in the API. OR binds more loosely than
+// AND, as in SQL: `a = 1 OR b = 2 AND c = 3` is `a = 1 OR (b = 2 AND c = 3)`.
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
-COMMENT = _{ "--" ~ (!"\n" ~ ANY)* }
+COMMENT    = _{ "--" ~ (!"\n" ~ ANY)* }
 
-// Main query rule
-query = { SOI ~ statement ~ EOI }
+query = { SOI ~ statement ~ ";"? ~ EOI }
 
 statement = {
     select_statement
-    | insert_statement
-    | update_statement
-    | delete_statement
-    | create_statement
-    | drop_statement
+  | insert_statement
+  | update_statement
+  | delete_statement
+  | create_statement
+  | drop_statement
 }
 
-// SELECT statement
+// ---- SELECT ---------------------------------------------------------------------------------
+
 select_statement = {
-    "SELECT" ~ select_list ~
-    "FROM" ~ table_name ~
+    ^"SELECT" ~ select_list ~
+    ^"FROM" ~ table_name ~
     where_clause? ~
     order_by_clause? ~
     limit_clause?
 }
 
-select_list = {
-    "*" | (select_item ~ ("," ~ select_item)*)
-}
+select_list = { star | (select_item ~ ("," ~ select_item)*) }
+star        = { "*" }
+select_item = { field_name ~ (^"AS" ~ alias)? }
 
-select_item = {
-    field_name ~ ("AS" ~ alias)?
-}
+where_clause = { ^"WHERE" ~ condition }
 
-// WHERE clause with vector and text search
-where_clause = {
-    "WHERE" ~ condition
-}
+condition     = { and_condition ~ (^"OR" ~ and_condition)* }
+and_condition = { primary_condition ~ (^"AND" ~ primary_condition)* }
 
-condition = {
-    and_condition
-}
-
-and_condition = {
-    or_condition ~ ("AND" ~ or_condition)*
-}
-
-or_condition = {
-    primary_condition ~ ("OR" ~ primary_condition)*
-}
-
+// The function forms come first so `text_match(...)` is not read as a field named text_match.
 primary_condition = {
     vector_similarity_condition
-    | text_match_condition
-    | graph_distance_condition
-    | comparison_condition
-    | in_condition
-    | between_condition
-    | "(" ~ condition ~ ")"
+  | text_match_condition
+  | graph_distance_condition
+  | between_condition
+  | in_condition
+  | comparison_condition
+  | "(" ~ condition ~ ")"
 }
 
-// Vector similarity search
 vector_similarity_condition = {
-    "vector_similarity" ~ "(" ~ field_name ~ "," ~ vector_value ~ ")" ~ comparison_op ~ number
+    ^"vector_similarity" ~ "(" ~ field_name ~ "," ~ (vector_value | parameter) ~ ")" ~
+    comparison_op ~ number
 }
-
-// Text search
-text_match_condition = {
-    "text_match" ~ "(" ~ field_name ~ "," ~ string_literal ~ ")"
-}
-
-// Graph distance search
+text_match_condition = { ^"text_match" ~ "(" ~ field_name ~ "," ~ string_literal ~ ")" }
 graph_distance_condition = {
-    "graph_distance" ~ "(" ~ field_name ~ "," ~ string_literal ~ ")" ~ comparison_op ~ integer
+    ^"graph_distance" ~ "(" ~ field_name ~ "," ~ string_literal ~ ")" ~ comparison_op ~ integer
 }
+between_condition    = { field_name ~ ^"BETWEEN" ~ value ~ ^"AND" ~ value }
+in_condition         = { field_name ~ ^"IN" ~ "(" ~ value_list ~ ")" }
+comparison_condition = { field_name ~ comparison_op ~ value }
 
-// Standard comparison
-comparison_condition = {
-    field_name ~ comparison_op ~ value
-}
+// Two-character operators first: PEG choice is ordered, and with "<" ahead of "<=" the input
+// `rank <= 2` was read as `rank <` followed by a stray `=`.
+comparison_op = { "<=" | ">=" | "!=" | "<>" | "=" | "<" | ">" | ^"LIKE" }
 
-in_condition = {
-    field_name ~ "IN" ~ "(" ~ value_list ~ ")"
-}
+order_by_clause   = { ^"ORDER" ~ ^"BY" ~ order_item ~ ("," ~ order_item)* }
+order_item        = { hybrid_score_func | (field_name ~ order_direction?) }
+hybrid_score_func = { ^"hybrid_score" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ ")" }
+order_direction   = { ^"ASC" | ^"DESC" }
 
-between_condition = {
-    field_name ~ "BETWEEN" ~ value ~ "AND" ~ value
-}
+limit_clause = { ^"LIMIT" ~ integer ~ (^"OFFSET" ~ integer)? }
 
-// ORDER BY clause with hybrid scoring
-order_by_clause = {
-    "ORDER" ~ "BY" ~ order_item ~ ("," ~ order_item)*
-}
+// ---- INSERT / UPDATE / DELETE ---------------------------------------------------------------
 
-order_item = {
-    hybrid_score_func | (field_name ~ order_direction?)
-}
-
-hybrid_score_func = {
-    "hybrid_score" ~ "(" ~ number ~ "," ~ number ~ "," ~ number ~ ")"
-}
-
-order_direction = {
-    "ASC" | "DESC"
-}
-
-// LIMIT clause
-limit_clause = {
-    "LIMIT" ~ integer ~ ("OFFSET" ~ integer)?
-}
-
-// INSERT statement
 insert_statement = {
-    "INSERT" ~ "INTO" ~ table_name ~
+    ^"INSERT" ~ ^"INTO" ~ table_name ~
     "(" ~ field_list ~ ")" ~
-    "VALUES" ~ "(" ~ value_list ~ ")"
+    ^"VALUES" ~ "(" ~ value_list ~ ")"
 }
 
-// UPDATE statement
-update_statement = {
-    "UPDATE" ~ table_name ~
-    "SET" ~ assignment_list ~
-    where_clause?
-}
+update_statement = { ^"UPDATE" ~ table_name ~ ^"SET" ~ assignment_list ~ where_clause? }
+assignment_list  = { assignment ~ ("," ~ assignment)* }
+assignment       = { field_name ~ "=" ~ value }
 
-assignment_list = {
-    assignment ~ ("," ~ assignment)*
-}
+delete_statement = { ^"DELETE" ~ ^"FROM" ~ table_name ~ where_clause? }
 
-assignment = {
-    field_name ~ "=" ~ value
-}
+// ---- CREATE / DROP --------------------------------------------------------------------------
 
-// DELETE statement
-delete_statement = {
-    "DELETE" ~ "FROM" ~ table_name ~
-    where_clause?
-}
-
-// CREATE statement
-create_statement = {
-    create_table_statement
-    | create_index_statement
-}
+create_statement = { create_table_statement | create_index_statement }
 
 create_table_statement = {
-    "CREATE" ~ "TABLE" ~ table_name ~ "(" ~
-    column_definition ~ ("," ~ column_definition)* ~
-    ")"
+    ^"CREATE" ~ ^"TABLE" ~ table_name ~
+    "(" ~ column_definition ~ ("," ~ column_definition)* ~ ")"
 }
-
-column_definition = {
-    field_name ~ data_type ~ column_constraint*
-}
+column_definition = { field_name ~ data_type ~ column_constraint* }
 
 data_type = {
-    "VECTOR" ~ "(" ~ integer ~ ")"
-    | "TEXT"
-    | "INTEGER"
-    | "FLOAT"
-    | "BOOLEAN"
-    | "JSON"
-    | "TIMESTAMP"
+    vector_type | text_type | integer_type | float_type | boolean_type | json_type | timestamp_type
 }
+vector_type    = { ^"VECTOR" ~ "(" ~ integer ~ ")" }
+text_type      = { ^"TEXT" }
+integer_type   = { ^"INTEGER" }
+float_type     = { ^"FLOAT" }
+boolean_type   = { ^"BOOLEAN" }
+json_type      = { ^"JSON" }
+timestamp_type = { ^"TIMESTAMP" }
 
-column_constraint = {
-    "PRIMARY" ~ "KEY"
-    | "NOT" ~ "NULL"
-    | "UNIQUE"
-    | "DEFAULT" ~ value
-}
+column_constraint = { primary_key | not_null | unique | default_value }
+primary_key       = { ^"PRIMARY" ~ ^"KEY" }
+not_null          = { ^"NOT" ~ ^"NULL" }
+unique            = { ^"UNIQUE" }
+default_value     = { ^"DEFAULT" ~ value }
 
 create_index_statement = {
-    "CREATE" ~ index_type? ~ "INDEX" ~ index_name ~
-    "ON" ~ table_name ~ "(" ~ field_name ~ ")" ~
+    ^"CREATE" ~ index_type? ~ ^"INDEX" ~ index_name ~
+    ^"ON" ~ table_name ~ "(" ~ field_name ~ ")" ~
     index_options?
 }
+index_type    = { ^"HNSW" | ^"IVF" | ^"FLAT" | ^"BM25" | ^"GRAPH" }
+index_options = { ^"WITH" ~ "(" ~ option_list ~ ")" }
+option_list   = { option ~ ("," ~ option)* }
+option        = { identifier ~ "=" ~ value }
 
-index_type = {
-    "HNSW" | "IVF" | "FLAT" | "BM25" | "GRAPH"
-}
+drop_statement = { ^"DROP" ~ drop_kind ~ table_name }
+drop_kind      = { ^"TABLE" | ^"INDEX" }
 
-index_options = {
-    "WITH" ~ "(" ~ option_list ~ ")"
-}
+// ---- Values and names -----------------------------------------------------------------------
 
-option_list = {
-    option ~ ("," ~ option)*
-}
+value        = { vector_value | string_literal | number | boolean | null | parameter }
+vector_value = { "[" ~ (number ~ ("," ~ number)*)? ~ "]" }
+value_list   = { value ~ ("," ~ value)* }
+field_list   = { field_name ~ ("," ~ field_name)* }
 
-option = {
-    identifier ~ "=" ~ value
-}
-
-// DROP statement
-drop_statement = {
-    "DROP" ~ ("TABLE" | "INDEX") ~ identifier
-}
-
-// Values and literals
-value = {
-    vector_value
-    | string_literal
-    | number
-    | boolean
-    | null
-    | parameter
-}
-
-vector_value = {
-    "[" ~ number_list ~ "]"
-    | parameter
-}
-
-number_list = {
-    number ~ ("," ~ number)*
-}
-
-value_list = {
-    value ~ ("," ~ value)*
-}
-
-field_list = {
-    field_name ~ ("," ~ field_name)*
-}
-
-// Comparison operators
-comparison_op = {
-    "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=" | "LIKE"
-}
-
-// Basic tokens
 table_name = @{ identifier }
 field_name = @{ identifier }
 index_name = @{ identifier }
-alias = @{ identifier }
+alias      = @{ identifier }
 
 identifier = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    | "`" ~ (!"`" ~ ANY)+ ~ "`"
+  | "`" ~ (!"`" ~ ANY)+ ~ "`"
 }
 
+// A quote inside a literal is written twice: 'it''s'.
 string_literal = @{
-    "'" ~ (!"'" ~ ANY | "''")* ~ "'"
-    | "\"" ~ (!"\"" ~ ANY | "\"\"")* ~ "\""
+    "'" ~ ("''" | !"'" ~ ANY)* ~ "'"
+  | "\"" ~ ("\"\"" | !"\"" ~ ANY)* ~ "\""
 }
 
-number = @{
-    "-"? ~ (integer | float)
-}
+// One rule for integers and floats. It used to try the integer first and stop there, so `3.0`
+// parsed as `3` and failed on the `.0`.
+number  = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+integer = @{ ASCII_DIGIT+ }
 
-integer = @{
-    ASCII_DIGIT+
-}
-
-float = @{
-    ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)?
-}
-
-boolean = {
-    "TRUE" | "FALSE" | "true" | "false"
-}
-
-null = {
-    "NULL" | "null"
-}
-
-parameter = @{
-    "$" ~ (ASCII_ALPHANUMERIC | "_")+
-    | "?" ~ ASCII_DIGIT*
-}
+boolean   = { ^"TRUE" | ^"FALSE" }
+null      = { ^"NULL" }
+parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ | "?" ~ ASCII_DIGIT* }

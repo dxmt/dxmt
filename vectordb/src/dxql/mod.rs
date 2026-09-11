@@ -62,6 +62,9 @@ pub struct ResultRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryMetadata {
     pub total_results: usize,
+    /// Rows written by INSERT, UPDATE or DELETE, counted from the rows the statement matched
+    /// rather than from what it asked for. Zero for SELECT, CREATE and DROP.
+    pub affected_rows: usize,
     pub execution_time_ms: u64,
     pub plan_type: String,
 }
@@ -91,4 +94,9 @@ pub enum DxqlError {
 
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    /// Valid DXQL that this implementation does not execute. Answered with 501, so a caller can
+    /// tell "you wrote it wrong" (400) from "this is not done here" and is told what to use.
+    #[error("Not supported: {0}")]
+    Unsupported(String),
 }

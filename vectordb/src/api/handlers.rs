@@ -1506,27 +1506,34 @@ pub async fn execute_dxql(
         }
     };
 
-    // Parse → compile → execute
-    use crate::dxql::{compiler::Compiler, executor_impl::StorageAwareExecutor, parser::Parser};
-    let stmt = match Parser::new().parse(&sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("parse error: {}", e)})),
-            )
-                .into_response();
-        }
+    // Parse, compile, execute. Each failure gets the status that says whose problem it is: 400
+    // the statement is wrong, 404 its table does not exist, 501 it is valid DXQL this server
+    // does not execute, 422 it was understood and storage refused it.
+    use crate::dxql::{
+        compiler::Compiler, executor_impl::StorageAwareExecutor, parser::Parser, DxqlError,
     };
-    let plan = match Compiler::new().compile(stmt) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("compile error: {}", e)})),
-            )
-                .into_response();
-        }
+    fn failure(e: DxqlError) -> axum::response::Response {
+        let status = match &e {
+            DxqlError::ParseError(_)
+            | DxqlError::CompilationError(_)
+            | DxqlError::TypeError(_)
+            | DxqlError::UnknownField(_)
+            | DxqlError::InvalidOperation(_) => StatusCode::BAD_REQUEST,
+            DxqlError::UnknownTable(_) => StatusCode::NOT_FOUND,
+            DxqlError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
+            DxqlError::OptimizationError(_) | DxqlError::ExecutionError(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        };
+        (status, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+    }
+
+    let plan = match Parser::new()
+        .parse(&sql)
+        .and_then(|statement| Compiler::new().compile(statement))
+    {
+        Ok(plan) => plan,
+        Err(e) => return failure(e),
     };
     let executor = StorageAwareExecutor::new(
         state.storage.clone() as Arc<dyn crate::storage::traits::_Storage>
@@ -1539,6 +1546,7 @@ pub async fn execute_dxql(
                     "records": result.records,
                     "metadata": {
                         "total_results": result.metadata.total_results,
+                        "affected_rows": result.metadata.affected_rows,
                         "execution_time_ms": result.metadata.execution_time_ms,
                         "plan_type": result.metadata.plan_type,
                     }
@@ -1546,11 +1554,7 @@ pub async fn execute_dxql(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": format!("{}", e)})),
-        )
-            .into_response(),
+        Err(e) => failure(e),
     }
 }
 

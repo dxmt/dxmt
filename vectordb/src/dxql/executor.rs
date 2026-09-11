@@ -54,6 +54,7 @@ impl Executor {
             records,
             metadata: QueryMetadata {
                 total_results,
+                affected_rows: 0,
                 execution_time_ms,
                 plan_type: plan_type.to_string(),
             },
