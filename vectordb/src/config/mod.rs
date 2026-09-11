@@ -645,39 +645,11 @@ mod tests {
         clear_all_env_vars()
     }
 
-    #[test]
-    fn test_config_memory_optimization_false() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        // 清除所有环境变量
-        clear_all_env_vars();
-
-        // 设置为 false
-        std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
-
-        let config = AppConfig::default();
-        assert!(!config.tables.default_memory_optimization);
-
-        // 清理环境变量
-        clear_all_env_vars()
-    }
-
-    #[test]
-    fn test_config_memory_optimization_true() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        // 清除所有环境变量
-        clear_all_env_vars();
-
-        // 显式设置为 true
-        std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
-
-        let config = AppConfig::default();
-        assert!(config.tables.default_memory_optimization);
-
-        // 清理环境变量
-        clear_all_env_vars()
-    }
+    // No unit test here sets DB_MEMORY_OPTIMIZATION. `ENV_LOCK` only orders the tests in this
+    // module, and `IntelligentIndexedStorage::new` reads the same variable: a storage unit test
+    // constructed while one of these held it at "false" would silently get the size-based index
+    // selector. The `true`/`false` cases are covered by tests/memory_optimization_config_test.rs,
+    // which runs in its own process.
 
     // 辅助函数：清除所有测试相关的环境变量
     fn clear_all_env_vars() {
