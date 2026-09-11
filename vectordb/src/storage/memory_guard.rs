@@ -64,6 +64,14 @@ impl MemoryGuard {
                 floor_bytes / 1024 / 1024
             );
         }
+        Self::with_floor(floor_bytes)
+    }
+
+    /// A guard whose floor is already decided. `from_env` is the production path; the split
+    /// lets a test ask for a floor no machine can meet without writing it into the process
+    /// environment, where every other test that constructs a storage in parallel would read it
+    /// too and have its writes refused.
+    pub(crate) fn with_floor(floor_bytes: u64) -> Self {
         // Read once here rather than leaving the cache empty. A guard whose first reading is
         // "plenty" is off for its first CACHE_MILLIS, and the cheapest way to find that out
         // is a test that writes through it -- which is how this was found.
@@ -235,9 +243,13 @@ mod tests {
     fn a_new_guard_is_active_immediately() {
         // The cache starts populated. With it empty, the first CACHE_MILLIS of the guard's
         // life reported u64::MAX and every write in that window sailed through.
-        std::env::set_var("DB_MIN_FREE_MEMORY_MB", "1000000000");
-        let guard = MemoryGuard::from_env();
-        std::env::remove_var("DB_MIN_FREE_MEMORY_MB");
+        //
+        // Not through `from_env` with `DB_MIN_FREE_MEMORY_MB` set. The environment is
+        // process-wide and the unit tests share one process: while this test held the variable
+        // at a billion MB, any test constructing an `IntelligentIndexedStorage` in parallel got
+        // that floor and had its inserts refused -- a different victim each run. Reading the
+        // variable is covered by `tests/memory_backpressure_test.rs`, alone in its binary.
+        let guard = MemoryGuard::with_floor(1_000_000_000 * 1024 * 1024);
         assert!(
             guard.check().is_err(),
             "a floor no machine can meet must refuse from the first call, not after 500 ms"
