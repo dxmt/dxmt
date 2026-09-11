@@ -12,6 +12,7 @@ The entry point starts a server for you, once per storage mode, and reports whic
     scripts/api_tests.sh                  # both modes, whole suite
     scripts/api_tests.sh -m "not slow"    # functional tests only, seconds
     scripts/api_tests.sh -k filter -x     # anything else goes through to pytest
+    DXMT_FEATURES=text-bm25 scripts/api_tests.sh   # full-text search built in; its tests must not skip
 
 To attach to a server you are already running, invoke pytest from `vectordb/` -- the suite is a
 package and uses relative imports, so it has to be `pytest tests/api`, not `cd tests/api`:

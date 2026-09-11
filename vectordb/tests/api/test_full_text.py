@@ -10,18 +10,23 @@ The tests that need the feature skip themselves when it is absent, rather than f
 file is meaningful on both builds. Run the server with `--features text-bm25` to exercise the
 other half:
 
-    cargo run --features text-bm25 -- serve
+    DXMT_FEATURES=text-bm25 scripts/api_tests.sh
+
+`DXMT_FEATURES` also makes the skip a failure. A skipped test and an absent one are the same
+thing, and until CI gained a job that sets it, these four tests had only ever skipped there.
 
 Rewritten from `examples/full_text_e2e_test.py`, a 580-line script with coloured output that
 lived in `examples/` and was run by nothing.
 """
 
+import os
+import re
 import time
 import uuid
 
 import pytest
 
-from .helpers.client import post, succeeded
+from .helpers.client import delete, post, succeeded
 from .helpers.corpus import create_table
 
 DOCS = [
@@ -74,8 +79,6 @@ def text_table():
     # index that is still empty. The working example sleeps here too.
     time.sleep(1.5)
     yield name
-    from .helpers.client import delete
-
     delete(f"/tables/{name}", expect_ok=False)
 
 
@@ -89,6 +92,15 @@ def feature_is_absent(response):
     body = response.json()
     error = body.get("error") or {}
     return error.get("code") == "FEATURE_DISABLED"
+
+
+def absent(feature):
+    """Skip a test whose feature the server lacks -- unless the run declared the server has it,
+    in which case the absence is the failure."""
+    declared = {f for f in re.split(r"[,\s]+", os.environ.get("DXMT_FEATURES", "")) if f}
+    if feature in declared:
+        pytest.fail(f"DXMT_FEATURES says the server has {feature}, but it answered FEATURE_DISABLED")
+    pytest.skip(f"server built without {feature}")
 
 
 def test_an_absent_feature_says_so_rather_than_returning_nothing(text_table):
@@ -106,7 +118,7 @@ def test_an_absent_feature_says_so_rather_than_returning_nothing(text_table):
 def test_a_term_finds_the_document_that_contains_it(text_table):
     response = text_search(text_table, {"query": "quantization", "limit": 5})
     if feature_is_absent(response):
-        pytest.skip("server built without text-bm25")
+        absent("text-bm25")
     assert succeeded(response)
     hits = response.json()["data"]["hits"]
     assert [h["id"] for h in hits] == ["d4"]
@@ -115,7 +127,7 @@ def test_a_term_finds_the_document_that_contains_it(text_table):
 def test_a_term_in_several_documents_returns_all_of_them(text_table):
     response = text_search(text_table, {"query": "search", "limit": 5})
     if feature_is_absent(response):
-        pytest.skip("server built without text-bm25")
+        absent("text-bm25")
     ids = {h["id"] for h in response.json()["data"]["hits"]}
     assert ids == {"d2", "d3"}
 
@@ -123,7 +135,7 @@ def test_a_term_in_several_documents_returns_all_of_them(text_table):
 def test_a_term_in_no_document_returns_nothing(text_table):
     response = text_search(text_table, {"query": "zebra", "limit": 5})
     if feature_is_absent(response):
-        pytest.skip("server built without text-bm25")
+        absent("text-bm25")
     assert response.json()["data"]["hits"] == []
 
 
@@ -136,11 +148,7 @@ def test_enabling_the_feature_without_naming_a_field_indexes_nothing(text_table)
     instead of "nothing is indexed". Pinned so that a decision to make it explicit shows up
     here as a deliberate change rather than a surprise.
     """
-    import uuid as _uuid
-
-    from .helpers.client import delete
-
-    name = f"ftbare_{_uuid.uuid4().hex[:8]}"
+    name = f"ftbare_{uuid.uuid4().hex[:8]}"
     post(
         "/tables",
         {
@@ -158,7 +166,7 @@ def test_enabling_the_feature_without_naming_a_field_indexes_nothing(text_table)
         time.sleep(1.5)
         response = text_search(name, {"query": "quantization", "limit": 5})
         if feature_is_absent(response):
-            pytest.skip("server built without text-bm25")
+            absent("text-bm25")
         assert succeeded(response)
         assert response.json()["data"]["hits"] == [], (
             "a table that named no text field returned matches; if that is now supported, "
@@ -175,5 +183,5 @@ def test_hybrid_search_accepts_both_a_vector_and_text(text_table):
         expect_ok=False,
     )
     if feature_is_absent(response):
-        pytest.skip("server built without text-bm25")
+        absent("text-bm25")
     assert succeeded(response), response.text[:400]

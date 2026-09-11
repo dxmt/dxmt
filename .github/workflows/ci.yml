@@ -131,6 +131,31 @@ jobs:
           workspaces: vectordb
       - run: cargo build --release --bins
 
+  functional-full-text:
+    name: functional API tests with text-bm25
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # The default build has no full-text search, so everywhere else the four tests in
+      # tests/api/test_full_text.py skip themselves -- and a skipped test is an absent one.
+      # This builds the server with the feature and runs the whole suite in both storage
+      # modes. DXMT_FEATURES also turns those skips into failures, so a build that quietly lost
+      # the feature cannot pass. Its own job rather than a step in sdk-live: that job already
+      # has target/debug/vectordb running, and rebuilding over a running binary fails.
+      - name: Functional API tests with text-bm25 (memory and disk)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest httpx
+          DXMT_FEATURES=text-bm25 scripts/api_tests.sh -q
+
   sdk-live:
     name: Python and JavaScript SDK live contract
     runs-on: ubuntu-latest

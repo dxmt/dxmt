@@ -13,9 +13,12 @@
 #   scripts/api_tests.sh -m "not slow"   functional tests only
 #   scripts/api_tests.sh -k filter -x    anything else is passed through to pytest
 #
-#   DXMT_MODES="memory"   one mode only
-#   DXMT_SKIP_BUILD=1     the binary is already built (CI)
-#   PYTEST=...            a specific interpreter's pytest
+#   DXMT_MODES="memory"       one mode only
+#   DXMT_SKIP_BUILD=1         the binary is already built (CI)
+#   DXMT_FEATURES=text-bm25   build with these cargo features, and tell the tests the server has
+#                             them: a test that needs one then fails where it would otherwise
+#                             skip, so a build that lost the feature cannot pass
+#   PYTEST=...                a specific interpreter's pytest
 
 # Deliberately not `set -e`: both modes must run, so the summary can say which one failed.
 set -uo pipefail
@@ -24,9 +27,10 @@ cd "$(dirname "$0")/.."
 MODES=${DXMT_MODES:-"memory disk"}
 PYTEST=${PYTEST:-"python3 -m pytest"}
 BIN=target/debug/vectordb
+export DXMT_FEATURES=${DXMT_FEATURES:-}
 
 if [ "${DXMT_SKIP_BUILD:-0}" != "1" ]; then
-  cargo build --bin vectordb || exit 1
+  cargo build --bin vectordb ${DXMT_FEATURES:+--features "$DXMT_FEATURES"} || exit 1
 fi
 [ -x "$BIN" ] || { echo "no binary at $BIN"; exit 1; }
 
