@@ -173,12 +173,7 @@ impl IndexWrapper {
     /// Search for nearest neighbors - requires read lock
     pub async fn search(&self, query: &DenseVector, k: usize) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;
-        // Call async search and convert String back to RecordId
-        let results = index.search(query, k).await?;
-        Ok(results
-            .into_iter()
-            .map(|(id_str, score)| (RecordId::from(id_str), score))
-            .collect())
+        Self::top_k(&**index, query, k, None, None).await
     }
 
     /// Search with an explicit ef_search hint (HNSW respects this; other indexes fall back to search).
@@ -189,11 +184,7 @@ impl IndexWrapper {
         ef: usize,
     ) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;
-        let results = index.search_with_ef_hint(query, k, ef).await?;
-        Ok(results
-            .into_iter()
-            .map(|(id_str, score)| (RecordId::from(id_str), score))
-            .collect())
+        Self::top_k(&**index, query, k, Some(ef), None).await
     }
 
     /// Filter-in-graph search. HNSW uses Acorn-style in-graph filtering;
@@ -206,11 +197,66 @@ impl IndexWrapper {
         filter_ids: &std::collections::HashSet<String>,
     ) -> Result<Vec<(RecordId, f32)>> {
         let index = self.index.read().await;
-        let results = index.search_with_filter(query, k, ef, filter_ids).await?;
-        Ok(results
-            .into_iter()
-            .map(|(id_str, score)| (RecordId::from(id_str), score))
-            .collect())
+        Self::top_k(&**index, query, k, Some(ef), Some(filter_ids)).await
+    }
+
+    /// The index's best `k`, with a tie at the `k`-th distance broken by id.
+    ///
+    /// An index cuts to `k` itself. When several records sit at exactly the `k`-th distance it
+    /// keeps whichever it met first -- walk order for a graph, insertion order for a scan -- and
+    /// nothing that orders the results afterwards can bring back the ones it dropped. The storage
+    /// layer's tie-break by id (`5c89817`) was therefore decided by build order: over HNSW-PQ a
+    /// query whose tied neighbours were `t00`..`t19` got `["exact", "t11", "t12"]`, and the HTTP
+    /// suite saw r1's fifth neighbour change after a rebuild.
+    ///
+    /// So every search asks for one more than it needs. When that one is farther, the cutoff is
+    /// not tied and the answer stands -- nearly always, and for a graph at no extra cost, since
+    /// the walk keeps `max(ef, k)` candidates either way. When it is not, the question is asked
+    /// again with a wider `k` until the cutoff settles or the index has nothing more to give.
+    async fn top_k(
+        index: &dyn VectorIndex,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        filter_ids: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Vec<(RecordId, f32)>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = index.len();
+        let cap = |want: usize| if rows > 0 { want.min(rows) } else { want };
+        let mut want = cap(k.saturating_add(1));
+        loop {
+            let mut results = match (ef, filter_ids) {
+                (_, Some(ids)) => {
+                    index
+                        .search_with_filter(query, want, ef.unwrap_or(want), ids)
+                        .await?
+                }
+                (Some(ef), None) => index.search_with_ef_hint(query, want, ef).await?,
+                (None, None) => index.search(query, want).await?,
+            };
+            results.sort_by(Self::nearest_first);
+            let settled = results.len() <= k
+                || results.len() < want
+                || want >= rows
+                || results[k].1 > results[k - 1].1;
+            if settled {
+                results.truncate(k);
+                return Ok(results);
+            }
+            want = cap(want.saturating_mul(4));
+        }
+    }
+
+    /// Nearest first; among equal distances the smaller id; a NaN distance after every number.
+    fn nearest_first(a: &(RecordId, f32), b: &(RecordId, f32)) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match a.1.partial_cmp(&b.1) {
+            Some(Ordering::Equal) => a.0.cmp(&b.0),
+            Some(ordering) => ordering,
+            None => a.1.is_nan().cmp(&b.1.is_nan()).then_with(|| a.0.cmp(&b.0)),
+        }
     }
 
     /// See `VectorIndex::rerank_candidates`.
@@ -543,6 +589,46 @@ mod tests {
         // Search
         let results = wrapper.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tie_at_the_cutoff_is_broken_by_id_whatever_order_the_index_returns() {
+        // MockIndex scores every record 0.9 and hands them back in HashMap order, cut to `k`: a
+        // tie across the whole table, the worst case of an index that keeps whichever tied
+        // records it meets first.
+        let wrapper = IndexWrapper::new(Box::new(MockIndex::new()));
+        for i in (0..16).rev() {
+            wrapper
+                .insert(format!("t{i:02}"), vec![0.0; 2])
+                .await
+                .unwrap();
+        }
+        let query = vec![0.0; 2];
+        let expected = ["t00", "t01", "t02"];
+        let ids = |results: Vec<(RecordId, f32)>| {
+            results.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids(wrapper.search(&query, 3).await.unwrap()),
+            expected,
+            "search"
+        );
+        assert_eq!(
+            ids(wrapper.search_with_ef_hint(&query, 3, 64).await.unwrap()),
+            expected,
+            "search_with_ef_hint"
+        );
+        let every_id: std::collections::HashSet<String> =
+            (0..16).map(|i| format!("t{i:02}")).collect();
+        assert_eq!(
+            ids(wrapper
+                .search_with_filter(&query, 3, 64, &every_id)
+                .await
+                .unwrap()),
+            expected,
+            "search_with_filter"
+        );
     }
 
     #[tokio::test]

@@ -3992,7 +3992,14 @@ impl IntelligentIndexedStorage {
                 }
             });
         }
-        exact.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Distance, then id, before the cut to `k`. A tie at the cutoff settled by the order the
+        // candidates happened to be scored in is the defect `IndexWrapper::top_k` closes for the
+        // fetch; it would reopen here.
+        exact.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         exact.truncate(k);
         Ok(exact)
     }
@@ -7131,6 +7138,96 @@ mod tests {
             result.hits.len(),
             5,
             "all records should be reachable after rebuild"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_tie_at_the_cutoff_is_broken_by_id_before_and_after_a_rebuild(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Twenty records at exactly the same distance from the query, inserted in descending id
+        // order, and one at the query itself. An index that cuts to `k` inside keeps whichever
+        // tied records it met first, so the answer followed build order: the HTTP suite saw
+        // r1's fifth neighbour change after a rebuild in memory mode.
+        const TIED: usize = 20;
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+        storage
+            .create_table(TableConfig {
+                name: "ties".to_string(),
+                dimension: 2,
+                distance_metric: DistanceMetric::Euclidean,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+            })
+            .await?;
+        let record = |id: String, vector: Vec<f32>| CreateRecordRequest {
+            id,
+            vector,
+            sparse_vector: None,
+            payload: None,
+            named_vectors: None,
+        };
+        let mut requests = vec![record("exact".to_string(), vec![1.0, 0.0])];
+        requests.extend(
+            (0..TIED)
+                .rev()
+                .map(|i| record(format!("t{i:02}"), vec![0.0, 1.0])),
+        );
+        storage.insert_records("ties", requests).await?;
+        for _ in 0..200 {
+            let indexed = {
+                let tables = storage.read_tables("test").await;
+                tables["ties"].index.len().await
+            };
+            if indexed == TIED + 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        async fn top3(storage: &IntelligentIndexedStorage) -> crate::Result<Vec<String>> {
+            let query = crate::types::record::SearchQuery {
+                vector: vec![1.0, 0.0],
+                top_k: 3,
+                limit: 3,
+                ..Default::default()
+            };
+            Ok(storage
+                .search("ties", query)
+                .await?
+                .hits
+                .into_iter()
+                .map(|hit| hit.id)
+                .collect())
+        }
+
+        assert_eq!(top3(&storage).await?, ["exact", "t00", "t01"]);
+        storage.drop_index("ties").await?;
+        assert_eq!(
+            top3(&storage).await?,
+            ["exact", "t00", "t01"],
+            "after a drop"
+        );
+        storage.rebuild_index("ties").await?;
+        assert_eq!(
+            top3(&storage).await?,
+            ["exact", "t00", "t01"],
+            "after a rebuild"
         );
         Ok(())
     }

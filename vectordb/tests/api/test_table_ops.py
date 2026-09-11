@@ -134,12 +134,11 @@ def test_rebuilding_after_a_drop_really_rebuilds(fresh_table):
     # The rebuild used to be skipped here: the dropped table still claimed its old algorithm,
     # so a brute-force index holding every row looked up to date.
     assert stats(fresh_table)["index_type"] != "brute_force", "the rebuild after a drop was skipped"
-    # Only the part of the answer that has one right order. r1's fifth neighbour is one of four
-    # records at exactly the same distance, and a rebuilt graph chooses among them by walk
-    # order: an index that scores exactly hands back just `k` candidates, so the storage
-    # layer's tie-break by id never sees the rest. Brute force no longer has that problem (see
-    # the drop test above, which asserts the whole order); the graph still does.
-    assert nearest(fresh_table, query_at("r1"), k=4) == ORDER_FROM_R1[:4]
+    # The whole order, fifth neighbour included. r5 is one of four records at exactly the same
+    # distance from r1, and a rebuilt graph used to choose among them by walk order: the index
+    # cut to `k` before the storage layer's tie-break by id could see the others, so in memory
+    # mode the answer changed after a rebuild.
+    assert nearest(fresh_table, query_at("r1")) == ORDER_FROM_R1
     for record in CORPUS:
         assert nearest(fresh_table, record["vector"], k=1) == [record["id"]]
     assert stats(fresh_table)["record_count"] == len(CORPUS)
