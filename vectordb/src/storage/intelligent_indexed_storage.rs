@@ -3494,8 +3494,13 @@ impl IntelligentIndexedStorage {
                                 })
                             })
                             .collect();
+                        // A total order before the truncate below, for the same reason the
+                        // filtered path above sorts by id on ties: equal distances would
+                        // otherwise be cut in whatever order the ids arrived in.
                         scored.sort_by(|a, b| {
-                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            a.1.partial_cmp(&b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.0.cmp(&b.0))
                         });
                         scored.truncate(result_limit);
                         exact_scored = Some(scored);
@@ -4539,8 +4544,13 @@ impl IntelligentIndexedStorage {
                         merged_vec.push((id.clone(), *s));
                     }
                 }
-                merged_vec
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                // This order becomes the rank RRF scores from, so a tie broken arbitrarily here
+                // changes the fused score itself, not just the arrangement.
+                merged_vec.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
                 self.fuse_reciprocal_rank(
                     merged_vec,
                     text_results,
@@ -4569,8 +4579,14 @@ impl IntelligentIndexedStorage {
             })
             .collect();
 
-        // 4. THEN sort by combined score
-        scored_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // 4. THEN sort by combined score, ties by id. RRF builds its scores in a `HashMap`, so
+        // without the tiebreak the order of equally-scored documents -- and, because of the
+        // truncate below, *which* of them survive -- follows hash iteration order.
+        scored_results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
 
         // 5. FINALLY take top-k
         scored_results.truncate(request.limit);

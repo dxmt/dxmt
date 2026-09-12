@@ -1405,3 +1405,71 @@ async fn test_every_filter_operator_returns_a_full_page() {
         );
     }
 }
+
+// ── Test 15: tied scores are cut by id, not by hash order ─────────────────────
+//
+// Six identical vectors score identically, and `limit` is smaller than the number of ties, so
+// the truncate decides *which* records come back rather than only how they are arranged. RRF
+// builds its combined scores in a `HashMap`, and the dense leg's rank list — the one the RRF
+// ranks are read off — was sorted with no tiebreak, so equally-scored documents could survive
+// or be cut according to hash iteration order, differing between calls and between fusion
+// methods. The ids are asserted, not their count: a caller paging through equal-scoring results
+// is what a wrong answer here actually costs.
+
+#[tokio::test]
+async fn test_tied_scores_are_cut_by_id() {
+    let storage = IntelligentIndexedStorage::new(&mem_config()).await.unwrap();
+    storage
+        .create_table(table_cfg("tied_scores", 4, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+    let vectors: Vec<Vec<f32>> = (0..6).map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect();
+    insert_batch(&storage, "tied_scores", &ids, &vectors, None).await;
+
+    for fusion in [
+        FusionMethod::Dbsf,
+        FusionMethod::WeightedSum,
+        FusionMethod::ReciprocalRankFusion,
+    ] {
+        let mut answers = Vec::new();
+        for _ in 0..5 {
+            let result = storage
+                .hybrid_search(
+                    "tied_scores",
+                    HybridSearchRequest {
+                        vector: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                        sparse_vector: None,
+                        text: None,
+                        vector_weight: 0.7,
+                        fusion_method: fusion,
+                        rrf_k: 60.0,
+                        limit: 3,
+                        filter: None,
+                        with_payload: false,
+                        with_vector: false,
+                    },
+                )
+                .await
+                .unwrap();
+            answers.push(
+                result
+                    .hits
+                    .iter()
+                    .map(|h| h.id.clone())
+                    .collect::<Vec<String>>(),
+            );
+        }
+
+        assert_eq!(
+            answers[0],
+            ["t0", "t1", "t2"],
+            "{fusion:?} did not keep the three smallest ids out of six tied records"
+        );
+        assert!(
+            answers.iter().all(|answer| *answer == answers[0]),
+            "{fusion:?} answered differently across calls: {answers:?}"
+        );
+    }
+}

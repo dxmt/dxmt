@@ -225,7 +225,15 @@ impl BM25Index {
         }
 
         let mut results: Vec<(RecordId, f32)> = doc_scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Ties by id, before the truncate. `doc_scores` is a `HashMap`, and documents sharing a
+        // score are common in BM25 -- two documents matching the same term once each score
+        // identically -- so without this the cut keeps whichever the hash order happened to
+        // put first.
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         results.truncate(limit);
 
         results
@@ -314,7 +322,11 @@ impl BM25Index {
             }
         }
 
-        doc_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        doc_scores.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         doc_scores.truncate(limit);
 
         doc_scores
@@ -356,6 +368,38 @@ pub struct BM25Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Documents that score identically are cut by id, so a `limit` keeps the same ones twice.
+    ///
+    /// Each document holds the query term once and is the same length, so BM25 gives all three
+    /// the same score. `doc_scores` is a `HashMap`, so before the tiebreak the two that
+    /// survived a limit of 2 were whichever hash iteration happened to put first — and ties are
+    /// not an edge case in BM25, two documents matching one term each is the ordinary case.
+    #[test]
+    fn tied_scores_are_cut_by_id() {
+        let index = BM25Index::new();
+        for id in ["c", "a", "b"] {
+            index.insert_document(BM25Document {
+                id: id.to_string(),
+                text: format!("apple {id}fruit"),
+                tokens: vec![],
+            });
+        }
+
+        let results = index.search("apple", 2);
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            results[0].1, results[1].1,
+            "the scores were not actually tied, so this proves nothing"
+        );
+    }
 
     #[test]
     fn test_bm25_basic_operations() {
