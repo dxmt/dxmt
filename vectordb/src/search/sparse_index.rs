@@ -168,7 +168,14 @@ impl SparseIndex {
             .filter(|(_, s)| *s > 0.0) // only positive dot products are relevant
             .collect();
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Ties by id, before the truncate. `dot_products` is a `HashMap`, so equally-scoring
+        // documents would otherwise be kept or dropped according to hash iteration order. The
+        // fusion above this re-sorts what it is given, but it is given what survived here.
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         results.truncate(k);
         results
     }
@@ -208,6 +215,36 @@ mod tests {
     fn make_sparse(indices: Vec<u32>, values: Vec<f32>) -> SparseVector {
         let dim = indices.iter().max().copied().unwrap_or(0) as usize + 1;
         SparseVector::new(indices, values, dim).unwrap()
+    }
+
+    /// Equally-scoring documents are cut by id, so the same k come back every time.
+    ///
+    /// `dot_products` is a `HashMap`, so before the tiebreak *which* of several tied documents
+    /// survived `truncate(k)` followed hash iteration order and differed between processes.
+    /// Ties are the ordinary case, not an edge one: any two documents carrying the query's term
+    /// with the same weight score identically.
+    #[test]
+    fn tied_scores_are_cut_by_id() {
+        let mut index = SparseIndex::new();
+        for id in ["c", "a", "b"] {
+            index
+                .insert(id.into(), &make_sparse(vec![0], vec![1.0]))
+                .unwrap();
+        }
+
+        let results = index.search(&make_sparse(vec![0], vec![1.0]), 2);
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            results[0].1, results[1].1,
+            "the scores were not actually tied, so this proves nothing"
+        );
     }
 
     #[test]
