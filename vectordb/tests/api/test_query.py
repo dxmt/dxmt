@@ -170,6 +170,26 @@ def test_an_insert_of_the_wrong_dimension_is_refused_and_leaves_nothing(fresh_ta
     assert not succeeded(get(f"/tables/{fresh_table}/records/bad", expect_ok=False))
 
 
+def test_an_insert_of_a_non_finite_number_is_refused_and_the_table_still_answers(fresh_table):
+    """`1e999` is valid to the grammar and parses to an infinity.
+
+    The record routes reject it (`VectorValidator` runs in the handler), but DXQL reaches
+    storage without passing that validator, so this used to be accepted. An infinite coordinate
+    makes a cosine distance NaN, which panicked the comparator HNSW sorts with: the next search
+    on the table closed the connection with no response at all, and the record was in the WAL,
+    so a restart brought it back.
+    """
+    response = query(
+        f"INSERT INTO {fresh_table} (id, vector) VALUES ('inf', [1e999, 0, 0, 0])",
+        expect_ok=False,
+    )
+    assert response.status_code == 422, response.text
+    assert not succeeded(get(f"/tables/{fresh_table}/records/inf", expect_ok=False))
+
+    answer = post(f"/tables/{fresh_table}/search", {"vector": [1, 0, 0, 0], "top_k": 3})
+    assert answer.status_code == 200, answer.text
+
+
 def test_update_changes_the_named_fields_and_keeps_the_rest(fresh_table):
     answer = data(f"UPDATE {fresh_table} SET city = 'Oslo', note = 'moved' WHERE id = 'r2'")
     assert answer["metadata"]["affected_rows"] == 1

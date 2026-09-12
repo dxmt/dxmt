@@ -854,6 +854,25 @@ async fn process_insert_group(
                     continue;
                 }
 
+                // Non-finite values are refused here and not at the HTTP layer, because DXQL,
+                // MCP and simple mode all reach this processor without passing that validator.
+                // `INSERT ... [1e999, 0]` parses to an infinity, and an infinite coordinate
+                // makes a cosine distance NaN, which panicked the comparator HNSW sorts with:
+                // the next search on the table closed the connection without answering, and the
+                // record was in the WAL, so a restart brought the poisoned table back.
+                if let Some((bad, at)) = batch
+                    .iter()
+                    .find_map(|r| r.vector.iter().position(|v| !v.is_finite()).map(|i| (r, i)))
+                {
+                    if let Some(tx) = senders[slot].take() {
+                        let _ = tx.send(Err(crate::Error::InvalidVector(format!(
+                            "record '{}': {} at index {}",
+                            bad.id, bad.vector[at], at
+                        ))));
+                    }
+                    continue;
+                }
+
                 let mut records = Vec::with_capacity(batch.len());
                 for (i, request) in batch.into_iter().enumerate() {
                     let record_id = request.id.clone();
@@ -7392,6 +7411,87 @@ mod tests {
         assert!(
             storage.get_record("mixed", &"c".to_string()).await.is_err(),
             "the rejected request left nothing behind"
+        );
+        Ok(())
+    }
+
+    /// A non-finite coordinate never reaches the index, whichever entry point sent it.
+    ///
+    /// The record routes validate vectors in the handler, but DXQL, MCP and simple mode reach
+    /// this processor without passing that validator, and `[1e999, 0, 0, 0]` is valid to the
+    /// DXQL grammar and parses to an infinity. Measured before this check existed: the insert
+    /// was accepted, and the next search on the table answered `curl: (52) Empty reply from
+    /// server` with `panicked at src/search/hnsw.rs:1440` in the log -- an infinite coordinate
+    /// makes the cosine distance NaN, and the comparator unwrapped the `None` NaN compares to.
+    /// The record was in the WAL, so a restart brought the unsearchable table back.
+    #[tokio::test]
+    async fn a_non_finite_vector_is_refused_and_leaves_the_table_searchable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+        storage
+            .create_table(TableConfig {
+                name: "finite".to_string(),
+                dimension: 4,
+                distance_metric: DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+            })
+            .await?;
+        let request = |id: &str, vector: Vec<f32>| CreateRecordRequest {
+            id: id.to_string(),
+            vector,
+            sparse_vector: None,
+            named_vectors: None,
+            payload: None,
+        };
+
+        for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let outcome = storage
+                .insert_records("finite", vec![request("bad", vec![bad, 0.0, 0.0, 0.0])])
+                .await;
+            assert!(
+                matches!(outcome, Err(crate::Error::InvalidVector(_))),
+                "{bad} was accepted: {outcome:?}"
+            );
+        }
+
+        storage
+            .insert_records("finite", vec![request("ok", vec![1.0, 0.0, 0.0, 0.0])])
+            .await?;
+        let answer = storage
+            .search(
+                "finite",
+                SearchQuery {
+                    vector: vec![1.0, 0.0, 0.0, 0.0],
+                    top_k: 3,
+                    limit: 3,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            answer
+                .hits
+                .iter()
+                .map(|h| h.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ok"],
+            "the rejected records left nothing behind and search still answers"
         );
         Ok(())
     }

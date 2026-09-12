@@ -1437,7 +1437,7 @@ impl HnswIndex {
             .filter(|r| !self.nodes.is_deleted(r.idx))
             .map(|r| (r.idx, r.distance))
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        results.sort_by(|a, b| a.1.total_cmp(&b.1));
         results
     }
 
@@ -1568,7 +1568,7 @@ impl HnswIndex {
             .filter(|r| !self.nodes.is_deleted(r.idx))
             .map(|r| (r.idx, r.distance))
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        results.sort_by(|a, b| a.1.total_cmp(&b.1));
         results
     }
 
@@ -2123,7 +2123,7 @@ impl HnswIndex {
                 .chain(std::iter::once(new_idx))
                 .map(|n_idx| (n_idx, self.node_distance(neighbor_idx, n_idx)))
                 .collect();
-            neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            neighbors_with_dist.sort_by(|a, b| a.1.total_cmp(&b.1));
             let kept: Vec<u32> = self
                 .select_neighbors_heuristic(&neighbors_with_dist, max_neighbors)
                 .into_iter()
@@ -2373,7 +2373,7 @@ impl HnswIndex {
                         .map(|&n| (n, self.node_distance(neighbor_a, n)))
                         .collect();
 
-                    distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    distances.sort_by(|a, b| a.1.total_cmp(&b.1));
 
                     // Add connections to maintain connectivity (limit to M/2 to avoid over-connection)
                     let max_new_connections = self.config.m / 2;
@@ -2532,7 +2532,7 @@ mod batch_insert_tests {
                         )
                     })
                     .collect();
-                scored.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+                scored.sort_by(|x, y| x.1.total_cmp(&y.1));
                 scored.into_iter().take(k).map(|(id, _)| id).collect()
             };
             let got_a: HashSet<String> = index_a
