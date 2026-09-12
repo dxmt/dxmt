@@ -41,3 +41,26 @@ Borrowed from Qdrant's `tests/openapi` (Apache 2.0 — the shape, not the code):
   from a mapped file in one and from the record in the other -- and until now nothing ran the
   same functional assertions across both. Unset means *disk*, so the mode that had never been
   exercised over HTTP was memory.
+
+## `property/` — invariants over a generated corpus
+
+The files above assert exact answers for a corpus of eight. `property/` asserts what must stay
+true at 2,000 rows, where no expected id can be written down by hand: the count matches, every
+id comes back and none twice, a page is the same page when asked for again, payloads round-trip,
+a record is its own nearest neighbour, and the index returns the neighbours a brute-force scan
+would. The invariant list is borrowed from Chroma's property suite (Apache 2.0 — the list, not
+the code); the corpus is generated from a hash of the row number, so it is identical on every
+run and a failure reproduces without a shrinker.
+
+It is marked `slow`, so `-m "not slow"` skips it; CI runs it, because a recall guardrail that
+only exists on a developer's machine guards nothing.
+
+Recall is measured against a brute-force answer the test computes in plain Python — CI installs
+`pytest httpx` and nothing else. It is a tripwire for wrong neighbours, not a measure of
+quantization quality: at 2,000 rows the HNSW-PQ graph is still exact
+(`DEFAULT_QUANTIZE_AT_ROWS` is 65,536), so recall sits near 1.0 and the threshold is 0.95.
+Raising it to 0.99 would make it grade the graph's parameters instead. Quantization quality is
+`make bench-recall`.
+
+`DXMT_PROPERTY_N` and `DXMT_PROPERTY_DIM` shrink the corpus while iterating on a test; the
+defaults are the sizes the thresholds were chosen for.
