@@ -149,6 +149,7 @@ DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables
 DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
 DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
 DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
+DB_ROW_COMPACTION_INTERVAL_SECS=600 # release the disk behind dead row-file rows; 0 disables
 DB_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
 DB_MEMORY_CACHE_SIZE=512    # MB
 DB_COMPRESSION=zstd         # zstd | lz4 | none

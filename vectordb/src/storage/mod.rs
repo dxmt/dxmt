@@ -9,6 +9,7 @@ pub mod memory;
 pub(crate) mod memory_guard;
 pub mod object;
 pub mod payload_index;
+pub mod punch;
 pub mod record_store;
 pub mod tier_promotion;
 pub mod tiered;

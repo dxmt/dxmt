@@ -71,6 +71,16 @@ releases. Everything below is unreleased work on `main`.
 - **Concurrent snapshots corrupted each other** through a shared staging directory, and an index
   write failure was folded into "this index type has no disk format" — so a snapshot reported
   success with the graph silently dropped.
+- **Row files grew with the number of writes rather than with the amount of data.** Both the
+  vector row file and the record row file are append-only: an update appends a new row and
+  repoints the id, and the row it left behind kept its blocks. Nothing reclaimed them -- the
+  only thing that claimed to was a comment describing a rewrite no code performed, and the
+  sweep that rebuilds an index fires on a change of algorithm, which a table of constant size
+  never has. Measured in a soak at 200 rows/s over a fixed 400,000-row key space: 5.2 GB of
+  vector file holding 1.2 GB of live rows after 2.4 hours, growing at about 52 GB a day
+  whatever the table's size. A new sweep (`DB_ROW_COMPACTION_INTERVAL_SECS`, default 600)
+  releases the blocks behind dead rows. Row numbers are unchanged, so nothing above the file
+  layer moves; the file's apparent length still grows, and its allocated size no longer does.
 - **Quantizing a table stopped every insert in the process for the length of the training.**
   Training the PQ codebooks at 65,536 rows was taken out of the index write lock in an earlier
   change, which fixed what searches saw and left writers where they were: measured in a soak at

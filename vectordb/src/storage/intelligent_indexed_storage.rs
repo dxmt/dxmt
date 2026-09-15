@@ -686,6 +686,21 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
 /// Both caps bound the added latency of the request at the head of the queue, not throughput.
 /// Coalescing only ever consumes requests that are *already* waiting: under a single writer
 /// `try_recv` finds nothing, a group is one request, and the behaviour is what it was before.
+/// Dead vector-file bytes worth a `fallocate` sweep. Below this the syscall costs more than
+/// the space is worth, and a table that has just crossed a few thousand updates does not need
+/// its file walked every ten minutes.
+///
+/// `DB_ROW_RECLAIM_MIN_BYTES` overrides it. That exists for the tests: reaching 64 MB of dead
+/// rows honestly takes tens of thousands of insertions, which is a five-minute test in a debug
+/// build to assert something that has nothing to do with the size of the number.
+fn min_reclaim_bytes() -> u64 {
+    const DEFAULT: u64 = 64 * 1024 * 1024;
+    std::env::var("DB_ROW_RECLAIM_MIN_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
 const MAX_COALESCED_REQUESTS: usize = 32;
 const MAX_COALESCED_RECORDS: usize = 50_000;
 
@@ -2505,6 +2520,95 @@ impl IntelligentIndexedStorage {
     /// **先快照再驱逐**，而且只驱逐这次快照确实覆盖到的表。反过来会丢数据：一张表若有
     /// 快照之后的写入，驱逐就等于把那些写入扔了——WAL 里虽然还有，但驱逐后的表在内存里
     /// 不存在，回填只会读到快照那一份。
+    /// Give back the disk behind row-file rows nothing points at any more.
+    ///
+    /// Both row files are append-only: an update appends a new row and repoints the id, and
+    /// the row it left keeps its blocks. Nothing reclaimed them. The sweep that rebuilds an
+    /// index -- the one thing `vector_file.rs` claimed would rewrite the file -- only fires
+    /// when a table's size calls for a different algorithm, so a table of constant size under
+    /// steady upserts never triggered it and grew forever. Measured at 200 rows/s over a
+    /// 400,000-row key space: 5.2 GB of vector file holding 1.2 GB of live rows after 2.4
+    /// hours, climbing at about 52 GB a day regardless of the table's size.
+    ///
+    /// This runs on its own timer (`DB_ROW_COMPACTION_INTERVAL_SECS`) rather than inside the
+    /// eviction or re-index sweep: it is cheap, it wants to run more often than a rebuild, and
+    /// folding it into a sweep that also snapshots would tie giving back disk to a decision
+    /// about memory.
+    ///
+    /// Reported bytes are measured, not derived: allocated blocks before and after. Punching a
+    /// range that is already a hole succeeds and releases nothing, and deriving the number
+    /// from the dead rows would report the same bytes again on every sweep.
+    pub async fn reclaim_dead_rows(&self) -> crate::Result<Vec<(String, u64)>> {
+        let names: Vec<String> = {
+            let tables = self.read_tables("reclaim_dead_rows").await;
+            tables.keys().cloned().collect()
+        };
+        let floor = min_reclaim_bytes();
+        let mut reclaimed = Vec::new();
+        for name in names {
+            // One table at a time, under a read lock: punching needs no exclusive access --
+            // a dead row stays dead, because rows are never reused -- and holding the map
+            // across all tables would park every writer for the length of the sweep.
+            let tables = self.read_tables("reclaim_dead_rows").await;
+            let Some(data) = tables.get(&name) else {
+                continue; // dropped or evicted between listing and here
+            };
+
+            let mut released = 0u64;
+
+            if let Some(file) = data.vector_file.as_ref() {
+                // Decide in constant time, then walk. Building the live set and scanning for
+                // runs is O(rows), and it runs under the table map's read lock: on a
+                // hundred-million-row table that is a stall on a timer, paid whether or not
+                // there was anything to reclaim. Rows minus live records is an upper bound on
+                // the live rows, so the estimate errs towards not sweeping.
+                let live_upper = data.records.len() as u64 + data.vector_rows.len() as u64;
+                let dead_estimate = file.rows().saturating_sub(live_upper);
+                if dead_estimate.saturating_mul(file.row_bytes() as u64) >= floor {
+                    // A row is live if any live record resolves to it. The two mappings are
+                    // consulted in the same order `vector_row` consults them, and unioned
+                    // rather than picked between: counting a live row as dead is the one
+                    // mistake that loses data, and a row wrongly kept costs only space.
+                    let mut live = data.records.live_vector_rows().unwrap_or_default();
+                    live.extend(data.vector_rows.values().copied());
+                    let before = crate::storage::punch::allocated_bytes(file.path());
+                    // Logged rather than propagated: one table whose filesystem will not punch
+                    // is no reason to stop sweeping the others, and nothing is at risk either
+                    // way -- the rows were already dead.
+                    match file.punch_dead(&live) {
+                        Ok(_) => {
+                            released += before
+                                .saturating_sub(crate::storage::punch::allocated_bytes(file.path()))
+                        }
+                        Err(e) => warn!("table '{}': vector-row reclamation failed: {}", name, e),
+                    }
+                }
+            }
+
+            // Same shape for the records, with a floor on the smallest record worth counting:
+            // `dead_rows` is O(1), the punch is not.
+            const MIN_RECORD_BYTES: u64 = 64;
+            if data.records.dead_rows().saturating_mul(MIN_RECORD_BYTES) >= floor {
+                let before = data.records.disk_bytes();
+                match data.records.punch_dead() {
+                    Ok(_) => released += before.saturating_sub(data.records.disk_bytes()),
+                    Err(e) => warn!("table '{}': record-row reclamation failed: {}", name, e),
+                }
+            }
+
+            drop(tables);
+            if released > 0 {
+                info!(
+                    "table '{}': reclaimed {:.1} MB of dead row-file space",
+                    name,
+                    released as f64 / 1e6
+                );
+                reclaimed.push((name, released));
+            }
+        }
+        Ok(reclaimed)
+    }
+
     pub async fn evict_cold_tables(&self) -> crate::Result<Vec<String>> {
         use crate::storage::tier_promotion::Tier;
 

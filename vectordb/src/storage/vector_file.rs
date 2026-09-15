@@ -13,7 +13,8 @@
 //! Beside it, `<name>.rows` records `(id, row)` for every appended row, in the same order and
 //! flushed with it, so a restart rebuilds the id-to-row map without the snapshot having to
 //! carry it. A row whose id is later re-appended (update) or dropped (delete) becomes dead
-//! space; a rebuild rewrites the file in graph order and reclaims it.
+//! space, and [`VectorFile::punch_dead`] gives the blocks behind it back to the filesystem --
+//! see `storage::punch`, which also records what this comment used to claim instead.
 //!
 //! Durability order per batch: rows appended, `fdatasync`, then the WAL entry is written and
 //! the caller acknowledged -- the same "apply, then log, then ack" the record map uses. The
@@ -399,11 +400,14 @@ impl VectorFile {
     }
 
     /// Bytes of the vector file and its row index on disk.
+    ///
+    /// Blocks allocated, not apparent length: `punch_dead` releases blocks and leaves the
+    /// length alone, so a file that has given back four fifths of itself still measures its
+    /// full length with `metadata().len()`.
     pub fn disk_bytes(&self) -> u64 {
         [self.path.clone(), Self::rows_path(&self.path)]
             .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.len())
+            .map(|path| crate::storage::punch::allocated_bytes(path))
             .sum()
     }
 
@@ -413,6 +417,16 @@ impl VectorFile {
 
     pub fn format(&self) -> VectorFormat {
         self.format
+    }
+
+    /// Bytes one row occupies: the dimension in this file's format.
+    pub fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
+
+    /// The file itself, without its `.rows` sidecar. For measuring what a punch released.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Rows appended so far, dead ones included.
@@ -473,8 +487,10 @@ impl VectorFile {
         }
         let file = File::open(&self.path)?;
         let len = rows as usize * self.row_bytes;
-        // SAFETY: the file is append-only and never truncated while mapped; rows already
-        // written are never modified.
+        // SAFETY: the file is append-only and never truncated while mapped, so the mapping
+        // stays in range. Rows already written are never modified, with one exception that
+        // does not reach a reader: `punch_dead` releases the blocks behind rows no id points
+        // at, which makes that range read as zeros. Nothing resolves an id to a dead row.
         let mmap = unsafe { MmapOptions::new().len(len).map(&file)? };
         m.mmap = Some(mmap);
         m.rows = rows;
@@ -584,6 +600,48 @@ impl VectorFile {
     /// Whether adaptive mode currently reads in parallel. For tests and diagnostics.
     pub fn is_cold(&self) -> bool {
         self.cold.load(Ordering::Relaxed)
+    }
+
+    /// Give back the blocks behind rows no id points at any more, and say how many bytes that
+    /// released. See `storage::punch` for why this punches holes instead of rewriting.
+    ///
+    /// `live_rows` is the set of rows some id still resolves to. A row missing from it is
+    /// dead, and a dead row stays dead: rows are never reused, so the set may be read without
+    /// holding anything against a concurrent writer. Rows appended after it was read are
+    /// numbered past `rows()` as read here and are not considered.
+    pub fn punch_dead(&self, live_rows: &std::collections::HashSet<u64>) -> crate::Result<u64> {
+        // The row count under the lock, the scan without it. Rows only ever grow and a dead
+        // row stays dead, so a scan of `0..rows` is as true when it finishes as when it
+        // started -- and at a hundred million rows the scan is long enough that holding the
+        // writer's lock across it would be a write stall on a timer.
+        let rows = self.writer.lock().rows;
+        let mut dead: Vec<(u64, u64)> = Vec::new();
+        let mut run: Option<(u64, u64)> = None;
+        for row in 0..rows {
+            if live_rows.contains(&row) {
+                if let Some(r) = run.take() {
+                    dead.push(r);
+                }
+            } else {
+                let start = row * self.row_bytes as u64;
+                let end = start + self.row_bytes as u64;
+                match run.as_mut() {
+                    Some(r) => r.1 = end,
+                    None => run = Some((start, end)),
+                }
+            }
+        }
+        if let Some(r) = run.take() {
+            dead.push(r);
+        }
+        let dead = crate::storage::punch::coalesce(dead);
+        let w = self.writer.lock();
+        crate::storage::punch::punch_holes(&w.file, &dead)
+    }
+
+    /// Rows that no id resolves to, given the live set. What `punch_dead` would work on.
+    pub fn dead_rows(&self, live_rows: &std::collections::HashSet<u64>) -> u64 {
+        self.rows().saturating_sub(live_rows.len() as u64)
     }
 
     /// The rows read with positional reads spread over the rayon pool, then handed to `f`

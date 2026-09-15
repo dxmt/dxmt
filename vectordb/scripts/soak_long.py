@@ -41,6 +41,10 @@ writer, two writers), `SOAK_DIM=768`, `SOAK_CPUS=0-7` (the server is pinned ther
 pins nothing), `SOAK_RSS_CAP_MB=12000`, `SOAK_WAL_CAP_MB=20000`, `SOAK_FREE_DISK_MIN_MB=40000`,
 `SOAK_DIR`, `SOAK_PORT=9972`, `SOAK_BIN`.
 
+The WAL-directory cap is on **allocated blocks**, not on the files' apparent length: the server
+punches holes in the dead rows of its row files, so an upsert-heavy table keeps growing in
+length while costing no more disk. Both are recorded.
+
 Exits non-zero on a lost record, a failed request, a watchdog trip, or a restart that does not
 serve within ten minutes.
 """
@@ -76,11 +80,11 @@ WAL = os.path.join(DIR, "wal")
 BIN = os.environ.get("SOAK_BIN", os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target/release/vectordb"))
 
-# Mutually prime, so the three sweeps drift in and out of phase instead of always firing on the
+# Mutually prime, so the four sweeps drift in and out of phase instead of always firing on the
 # same tick. Longer than the short soak's 5/7/11: over a day these still fire hundreds of times
 # each, and a snapshot every five seconds would say more about the snapshot path than about the
 # database living with one.
-SNAPSHOT_SECS, EVICTION_SECS, REINDEX_SECS = 113, 181, 307
+SNAPSHOT_SECS, EVICTION_SECS, REINDEX_SECS, RECLAIM_SECS = 113, 181, 307, 233
 
 
 def log(msg):
@@ -107,7 +111,13 @@ def vec(seed):
 
 
 def dir_size_mb(path, allocated=False):
-    """Megabytes under `path`: apparent length, or blocks actually allocated."""
+    """Megabytes under `path`: apparent length, or blocks actually allocated.
+
+    The two stopped agreeing when the server started punching holes in the dead rows of its
+    row files. An upsert still appends, so the file's length still grows; what it no longer
+    costs is blocks. A watchdog that reads the length would stop a run that is using no disk,
+    and a report that reads only the length would say the leak is still there.
+    """
     total = 0
     for root, _dirs, files in os.walk(path):
         for f in files:
@@ -142,6 +152,10 @@ def start(tag):
         "DB_SNAPSHOT_INTERVAL_SECS": str(SNAPSHOT_SECS),
         "DB_EVICTION_INTERVAL_SECS": str(EVICTION_SECS),
         "DB_REINDEX_INTERVAL_SECS": str(REINDEX_SECS),
+        # The fourth sweep: releases the disk behind row-file rows that updates left behind.
+        # An upsert-heavy soak is the workload that needs it, and interleaving it with the
+        # other three is the combination worth exercising.
+        "DB_ROW_COMPACTION_INTERVAL_SECS": str(RECLAIM_SECS),
         "RUST_LOG": "info",
     })
     cmd = [BIN, "serve", "--host", "127.0.0.1", "--port", str(PORT)]
@@ -405,7 +419,7 @@ def main():
     counts = {}
     with open(run_log, errors="replace") as fh:
         for line in fh:
-            for key in ("Evict", "napshot", "Rebuil", "re-eval", "WARN", "ERROR", "panic"):
+            for key in ("Evict", "napshot", "Rebuil", "re-eval", "eclaim", "WARN", "ERROR", "panic"):
                 if key in line:
                     counts[key] = counts.get(key, 0) + 1
                     if key in ("WARN", "ERROR", "panic") and counts[key] <= 10:

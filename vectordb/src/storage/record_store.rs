@@ -9,7 +9,8 @@
 //! length, and a tombstone bit.
 //!
 //! Rows are appended in insertion order and never reused. An update appends a new row and
-//! points the id at it; a delete drops the id. Both are written to `<name>.rec.log` before
+//! points the id at it; a delete drops the id. The row it left behind is dead space, and
+//! [`RowStore::punch_dead`] gives the blocks back to the filesystem -- see `storage::punch`. Both are written to `<name>.rec.log` before
 //! the caller is acknowledged, in the same order as the data, so a restart replays the log
 //! into the id table without a snapshot having to carry the records at all.
 
@@ -375,6 +376,47 @@ impl RowStore {
         }
     }
 
+    /// Give back the blocks behind rows an update or a delete left behind, and say how many
+    /// bytes that released. See `storage::punch`.
+    ///
+    /// A tombstoned row is dead for good -- rows are never reused -- so this needs no
+    /// agreement with a concurrent writer beyond the borrow it already holds.
+    pub fn punch_dead(&self) -> crate::Result<u64> {
+        let mut dead: Vec<(u64, u64)> = Vec::new();
+        for (row, &gone) in self.tombstone.iter().enumerate() {
+            if gone {
+                if let (Some(&a), Some(&b)) = (self.file.ends.get(row), self.file.ends.get(row + 1))
+                {
+                    dead.push((a, b));
+                }
+            }
+        }
+        let data = self.file.data.lock();
+        crate::storage::punch::punch_holes(&data, &crate::storage::punch::coalesce(dead))
+    }
+
+    /// The vector-file rows the live records point at.
+    pub fn live_vector_rows(&self) -> std::collections::HashSet<u64> {
+        let mut live = std::collections::HashSet::with_capacity(self.ids.live());
+        for row in 0..self.tombstone.len() {
+            if !self.tombstone[row] {
+                let v = self.vector_rows[row];
+                if v != NO_VECTOR_ROW {
+                    live.insert(v);
+                }
+            }
+        }
+        live
+    }
+
+    /// Rows an update or a delete left behind. O(1): every row is either live or dead, and
+    /// the id table counts the live ones. The sweep asks this before deciding whether to walk
+    /// the file, so it must not itself be a walk.
+    pub fn dead_rows(&self) -> u64 {
+        let rows = self.tombstone.len() as u64;
+        rows.saturating_sub(self.ids.live() as u64)
+    }
+
     /// Bytes this store holds in memory, from its containers.
     pub fn resident_bytes(&self) -> usize {
         self.ids.bytes.len()
@@ -406,11 +448,37 @@ impl RecordStore {
     pub fn disk_bytes(&self) -> u64 {
         match self {
             RecordStore::Memory(_) => 0,
+            // Blocks allocated, not apparent length: `punch_dead` releases blocks without
+            // changing the length.
             RecordStore::Disk(s) => [s.file.path.clone(), RecordFile::log_path(&s.file.path)]
                 .iter()
-                .filter_map(|path| std::fs::metadata(path).ok())
-                .map(|meta| meta.len())
+                .map(|path| crate::storage::punch::allocated_bytes(path))
                 .sum(),
+        }
+    }
+
+    /// Release the disk behind dead rows, for a store that has any. Returns bytes released.
+    pub fn punch_dead(&self) -> crate::Result<u64> {
+        match self {
+            RecordStore::Memory(_) => Ok(0),
+            RecordStore::Disk(s) => s.punch_dead(),
+        }
+    }
+
+    /// The vector-file rows a disk store's live records point at; `None` for the in-memory
+    /// map, whose owner keeps that mapping itself.
+    pub fn live_vector_rows(&self) -> Option<std::collections::HashSet<u64>> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.live_vector_rows()),
+        }
+    }
+
+    /// Rows left behind by updates and deletes; 0 for the in-memory map, which has none.
+    pub fn dead_rows(&self) -> u64 {
+        match self {
+            RecordStore::Memory(_) => 0,
+            RecordStore::Disk(s) => s.dead_rows(),
         }
     }
 
