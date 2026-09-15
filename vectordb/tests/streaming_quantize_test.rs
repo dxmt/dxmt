@@ -12,9 +12,20 @@
 //! against a server log showing PQ training from 11:14:30 to 11:15:26.
 //!
 //! `IndexWrapper::quantize_if_wanted` splits it the way the wrapper already splits a batch
-//! insert: read the sample, train with no lock held, take the write lock only to install. This
-//! test crosses the threshold on one task while another searches in a loop, and asserts no
-//! search was blocked for anywhere near the time the training took.
+//! insert: read the sample, train with no lock held, take the write lock only to install.
+//!
+//! That fixed what searches saw and left what writers saw. Training ran on the storage layer's
+//! single insertion task, so releasing the lock did not stop it stopping every insert in the
+//! process -- there is more than one thing serialising writes. A 24-hour soak at 200 rows/s on
+//! eight cores caught it: training took 256 s holding no lock, searches were never slowed, and
+//! eight batches of inserts sat in the queue past the client's 60 s timeout, answered when
+//! their turn came by `Failed to send insert response: insertion result was dropped`. Training
+//! now runs in a spawned task, off the runtime's worker threads, and the crossing insert
+//! returns without waiting for it.
+//!
+//! So this test crosses the threshold and then asserts three things about the window while the
+//! training runs: searches are not blocked, inserts are still acknowledged, and the quantizer
+//! does eventually install.
 
 use dxmt_vectordb::search::{
     hnsw_pq::{HnswPqConfig, HnswPqIndex},
@@ -45,7 +56,7 @@ fn vector(i: usize) -> Vec<f32> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn quantizing_at_the_threshold_does_not_block_searches() {
+async fn quantizing_at_the_threshold_blocks_neither_searches_nor_inserts() {
     let config = HnswPqConfig {
         // 8 subspaces of 8 dimensions, the full 256 centroids: enough k-means to take
         // seconds, which is what makes a stall visible at all.
@@ -93,16 +104,60 @@ async fn quantizing_at_the_threshold_does_not_block_searches() {
     wrapper.insert_batch(crossing).await.unwrap();
     let insert_took = training.elapsed();
 
+    // The crossing insert hands the training to a spawned task and returns. If this is
+    // already false, the training finished before the assertion could be made -- which would
+    // make everything below vacuous rather than passing.
+    assert!(
+        wrapper.is_quantizing(),
+        "the threshold crossing was not followed by a background training job; either the \
+         threshold was never crossed or training finished in under {insert_took:?}"
+    );
+
+    // The window under test. Inserts must keep being accepted while the training runs: this
+    // is the assertion the soak's eight dropped batches would have failed.
+    //
+    // Paced, and capped at `WRITES_DURING_TRAINING`. An unpaced loop put 2.4 million rows into
+    // the graph while the training ran, and then the install -- which re-encodes every row the
+    // graph holds, under the write lock -- took 78 s of the 207 s window. That is a real
+    // property (the install is as big as the table it lands on) but it is not this test's, and
+    // measuring it here only hides whether an insert was blocked.
+    const WRITES_DURING_TRAINING: usize = 200;
+    let mut inserts_during_training = 0usize;
+    let mut worst_insert = Duration::ZERO;
+    let mut next_id = ROWS;
+    let waiting = Instant::now();
+    while wrapper.is_quantizing() {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(300),
+            "training never finished"
+        );
+        if inserts_during_training < WRITES_DURING_TRAINING {
+            let batch: Vec<(String, Vec<f32>)> = (next_id..next_id + 50)
+                .map(|i| (i.to_string(), vector(i)))
+                .collect();
+            next_id += 50;
+            let t = Instant::now();
+            wrapper
+                .insert_batch(batch)
+                .await
+                .expect("an insert during training must still be served");
+            worst_insert = worst_insert.max(t.elapsed());
+            inserts_during_training += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let training_took = waiting.elapsed();
+
     stop.store(true, Ordering::Relaxed);
     let (worst_search, searches) = searcher.await.unwrap();
 
     assert!(
-        wrapper.len().await >= ROWS,
-        "every row should be in the index"
+        wrapper.len().await >= next_id,
+        "every row should be in the index, the ones written during training included"
     );
     // Without this the test can pass for the wrong reason: if the threshold was never
-    // crossed there is no training to be blocked by, and the latency assertion below is
-    // vacuous. `rerank_candidates` answers `Some` only once the graph holds codes.
+    // crossed there is no training to be blocked by, and the assertions are vacuous.
+    // `rerank_candidates` answers `Some` only once the graph holds codes.
     assert!(
         wrapper.rerank_candidates(10).await.is_some(),
         "the index never quantized, so this test measured nothing"
@@ -111,13 +166,34 @@ async fn quantizing_at_the_threshold_does_not_block_searches() {
         searches > 0,
         "the searching task never ran, so this proves nothing"
     );
-
-    // The insert that crosses the threshold pays for the training; a concurrent search must
-    // not. The bound is a fraction of what the insert itself took, so the test scales with
-    // the machine instead of pinning a wall clock.
     assert!(
-        worst_search * 4 < insert_took.max(Duration::from_millis(400)),
-        "a search waited {worst_search:?} while the threshold crossing took {insert_took:?} \
-         over {searches} searches: training is holding the index lock again"
+        inserts_during_training > 0,
+        "no insert landed during {training_took:?} of training, so nothing was proved about \
+         whether one could"
+    );
+
+    // Neither a search nor the crossing insert may pay for the training. Both bounds are a
+    // fraction of the training time rather than a wall clock, so the test scales with the
+    // machine.
+    let floor = Duration::from_millis(400);
+    assert!(
+        worst_search * 4 < training_took.max(floor),
+        "a search waited {worst_search:?} of {training_took:?} of training over {searches} \
+         searches: training is holding the index lock again"
+    );
+    assert!(
+        insert_took * 2 < training_took.max(floor),
+        "the crossing insert took {insert_took:?} against {training_took:?} of training: it \
+         is waiting for the training again"
+    );
+    // Not blocked is stronger than eventually served, and it is the property the soak found
+    // missing: the training held no lock and no runtime worker, and inserts still stopped
+    // dead, because `plan_batch` and the k-means share rayon's global pool and a worker deep
+    // in its chunk of the subspaces does not pick up anything else until it finishes.
+    assert!(
+        worst_insert * 3 < training_took.max(floor),
+        "an insert waited {worst_insert:?} of {training_took:?} of training over \
+         {inserts_during_training} inserts: the training is monopolising the thread pool the \
+         insert path needs"
     );
 }

@@ -355,6 +355,11 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         Ok(())
     }
 
+    fn quantization_pending(&self) -> bool {
+        // The inherent method of the same intent; named apart so this impl cannot call itself.
+        HnswPqIndex::wants_quantizing(self)
+    }
+
     fn quantization_job(
         &self,
     ) -> Option<(

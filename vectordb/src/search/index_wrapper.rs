@@ -29,6 +29,9 @@ pub struct IndexWrapper {
     /// else. Nothing else contends for this -- inserts are already serialised by the storage
     /// layer's single insert task, and a rebuild is rare.
     structural: Arc<tokio::sync::Mutex<()>>,
+    /// True while a quantizer is training in a background task, so the next batch does not
+    /// start a second one. Training is minutes; batches are milliseconds apart.
+    quantizing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IndexWrapper {
@@ -37,6 +40,7 @@ impl IndexWrapper {
         Self {
             index: Arc::new(RwLock::new(index)),
             structural: Arc::new(tokio::sync::Mutex::new(())),
+            quantizing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -140,34 +144,110 @@ impl IndexWrapper {
         self.quantize_if_wanted().await
     }
 
-    /// Quantize the index if it has grown into wanting it, training outside every lock.
+    /// Start quantizing the index, in the background, if it has grown into wanting it.
     ///
-    /// Three phases, the same shape as the batch insert above: read the sample, work, write
-    /// the result. Training 192 subspaces on 65,536 vectors takes about a minute, and it used
-    /// to run inside the index write lock, from `after_batch`. Nothing else could touch the
-    /// table for that minute. `StreamingPerformanceCase` -- the one standard case that
-    /// inserts and searches at the same time -- measured search p99 47.7 s and over 200
-    /// insertions backed up behind it, and had never once produced a valid result.
+    /// Returns as soon as the job is handed off. That is the whole point: this is called at
+    /// the end of every batch insert, on the storage layer's single insertion task, and
+    /// training 192 subspaces on 65,536 vectors takes minutes. Awaiting it here stops that one
+    /// task, so **every** table's inserts stop with it -- the lock is not the only thing that
+    /// serialises writes.
     ///
-    /// Only the install is exclusive, and it is a re-encode of rows that are already in the
-    /// graph. Rows inserted while the training ran are in the graph too and get encoded with
-    /// the rest, so nothing has to be replayed.
+    /// Measured in a soak at 200 rows/s on eight cores: training took 256 s, held no index
+    /// lock the whole time (searches were never slowed), and still cost eight batches -- 800
+    /// rows -- which sat in the queue past the client's 60 s timeout and were answered by
+    /// `Failed to send insert response: insertion result was dropped` when their turn finally
+    /// came. Releasing the lock in `7623f7f` fixed what searches saw; this is the other half.
+    ///
+    /// Three properties the background task has to keep:
+    ///
+    /// * **One at a time.** `quantization_pending` stays true for the whole of training, so
+    ///   without the flag every batch would start another job.
+    /// * **Off the async pool.** `train` is CPU-bound and synchronous; on a tokio worker it
+    ///   blocks that worker for the duration. It goes to `spawn_blocking`.
+    /// * **Installed like a structural change.** The install takes the same `structural` lock
+    ///   a phased insert and a `replace` take, so it cannot land between an insert's planning
+    ///   and its application.
+    ///
+    /// Rows inserted while the training ran are in the graph by then and get encoded with the
+    /// rest, so nothing has to be replayed.
     pub async fn quantize_if_wanted(&self) -> Result<()> {
-        let Some((sample, mut pq)) = self.index.read().await.quantization_job() else {
+        use std::sync::atomic::Ordering;
+
+        // The cheap question first: `quantization_job` copies the sample out, which is 200 MB
+        // at 768 dimensions, and the answer is no on all but one batch in a table's life.
+        if !self.index.read().await.quantization_pending() {
+            return Ok(());
+        }
+        if self.quantizing.swap(true, Ordering::SeqCst) {
+            return Ok(()); // one is already training
+        }
+
+        let index = Arc::clone(&self.index);
+        let structural = Arc::clone(&self.structural);
+        let flag = Arc::clone(&self.quantizing);
+        tokio::spawn(async move {
+            let result = Self::quantize_now(&index, &structural).await;
+            flag.store(false, Ordering::SeqCst);
+            if let Err(e) = result {
+                tracing::warn!("HNSW-PQ: quantization failed, graph stays exact: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    /// Sample, train, install. Split out so the spawned task and the tests share it.
+    async fn quantize_now(
+        index: &Arc<RwLock<Box<dyn VectorIndex>>>,
+        structural: &Arc<tokio::sync::Mutex<()>>,
+    ) -> Result<()> {
+        let Some((sample, mut pq)) = index.read().await.quantization_job() else {
             return Ok(());
         };
         let started = std::time::Instant::now();
-        // No lock held. This is the minute.
-        pq.train(&sample, 25)?;
+        // No lock held, not on a runtime worker, and -- the part that took two attempts -- not
+        // on the rayon pool the insert path needs.
+        //
+        // `ProductQuantizer::train` is `(0..num_subvectors).into_par_iter()`, which rayon
+        // splits across the workers of the *global* pool and then runs without a yield point:
+        // 192 subspaces over eight threads is 24 k-means runs per worker, back to back, and a
+        // job submitted from outside is only picked up when a worker finishes its whole chunk.
+        // `HnswIndex::plan_batch` submits exactly such a job above `PARALLEL_PLAN_MIN_NODES`,
+        // so every insert queued behind the training even though the training held no lock and
+        // no runtime worker. Measured in a soak on eight cores: acknowledged writes stopped
+        // dead for the 256 s the training ran, and the WAL sequence did not move.
+        //
+        // Half the cores, so serving keeps the rest. Training takes correspondingly longer;
+        // it happens once in a table's life, and the alternative is a table that accepts
+        // nothing while it runs.
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(1);
+        let pq = tokio::task::spawn_blocking(move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("pq-train-{i}"))
+                .build()
+                .map_err(|e| crate::Error::Internal(format!("PQ training pool: {e}")))?;
+            pool.install(|| pq.train(&sample, 25))?;
+            Ok::<_, crate::Error>(pq)
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(format!("PQ training task failed: {e}")))??;
         let trained = started.elapsed();
         let installing = std::time::Instant::now();
-        self.index.write().await.install_quantizer(pq)?;
+        let _structural = structural.lock().await;
+        index.write().await.install_quantizer(pq)?;
         tracing::info!(
-            "HNSW-PQ: quantizer trained in {:.1}s with no lock held, installed in {:.1}s",
+            "HNSW-PQ: quantizer trained in {:.1}s in the background, installed in {:.1}s",
             trained.as_secs_f64(),
             installing.elapsed().as_secs_f64()
         );
         Ok(())
+    }
+
+    /// Whether a background quantization is in flight. For tests and diagnostics.
+    pub fn is_quantizing(&self) -> bool {
+        self.quantizing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Search for nearest neighbors - requires read lock
@@ -387,6 +467,9 @@ impl Clone for IndexWrapper {
         Self {
             index: Arc::clone(&self.index),
             structural: Arc::clone(&self.structural),
+            // Shared, not reset: a clone of the wrapper is another handle on the same index,
+            // and two handles must not each start a training job for it.
+            quantizing: Arc::clone(&self.quantizing),
         }
     }
 }
@@ -716,6 +799,18 @@ mod after_batch_tests {
             .insert_batch(batch(1000, 2000, &mut next))
             .await
             .unwrap();
+        // The crossing insert hands the training to a background task and returns, so the
+        // index is not quantized the instant it comes back -- that is the point of the
+        // handoff, and asserting otherwise is asserting that writers wait for k-means. What
+        // must still hold is that the quantizing happens.
+        let waited = std::time::Instant::now();
+        while wrapper.is_quantizing() {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(60),
+                "the background quantization never finished"
+            );
+            tokio::task::yield_now().await;
+        }
         assert!(
             !wrapper.wants_rebuild().await,
             "crossing the threshold through the phased path must quantize"

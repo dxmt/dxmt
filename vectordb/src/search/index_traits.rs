@@ -91,6 +91,16 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// Whether [`Self::quantization_job`] would return work, without paying for the sample.
+    ///
+    /// `quantization_job` copies up to 65,536 vectors out of the graph -- 200 MB at 768
+    /// dimensions -- so the caller needs a way to ask the cheap question on the common path
+    /// where the answer is no. Kept separate for that reason alone; an index that answers
+    /// `true` here must return `Some` there, barring a race.
+    fn quantization_pending(&self) -> bool {
+        false
+    }
+
     /// The work this index wants done before it can quantize itself: a training sample and an
     /// untrained quantizer configured for it, or `None` if it does not want quantizing now.
     ///

@@ -71,6 +71,18 @@ releases. Everything below is unreleased work on `main`.
 - **Concurrent snapshots corrupted each other** through a shared staging directory, and an index
   write failure was folded into "this index type has no disk format" — so a snapshot reported
   success with the graph silently dropped.
+- **Quantizing a table stopped every insert in the process for the length of the training.**
+  Training the PQ codebooks at 65,536 rows was taken out of the index write lock in an earlier
+  change, which fixed what searches saw and left writers where they were: measured in a soak at
+  200 rows/s on eight cores, acknowledged writes stopped dead for the 256 s the training ran,
+  the WAL sequence did not move, and eight batches timed out at the client and were answered on
+  arrival by `Failed to send insert response: insertion result was dropped`. Two things
+  serialised them, and removing either alone was not enough. Training ran on the storage layer's
+  single insertion task, so inserts queued behind the `await`; it now runs in a spawned blocking
+  task. And it ran on rayon's global pool as one unyielding chunk per worker, which is the same
+  pool `HnswIndex::plan_batch` submits to above `PARALLEL_PLAN_MIN_NODES`, so an insert could
+  not be picked up until a worker finished its whole share of the subspaces; it now trains in a
+  pool of its own, sized to half the cores.
 - **A restored table could come back as the wrong index.** Recovery ignored the algorithm the
   snapshot recorded, rebuilding a 94,000-row brute-force table as HNSW before binding the port.
 - `update_record` never wrote to the WAL, so updates did not survive a restart. Upserts left
