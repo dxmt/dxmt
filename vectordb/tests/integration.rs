@@ -18,7 +18,7 @@ mod full_text_search_test {
     include!("integration/full_text_search_test.rs");
 }
 
-// phase3_integration_tests moved to planning/tests/: it exercised index_management and
+// phase3_integration_tests was taken out of the test tree: it exercised index_management and
 // adaptive_index, neither of which any binary can reach.
 
 // WAL recovery now lives in tests/wal_recovery_test.rs, rewritten against the current API.

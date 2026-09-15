@@ -6,8 +6,8 @@
 //! - Hierarchical clustering index
 //! - Adaptive sizing recommendations
 //!
-//! The cluster-aware search tests moved to `planning/tests/phase3_cluster_aware_test.rs` with the
-//! module they test.
+//! The cluster-aware search tests were taken out of the test tree along with the module they
+//! test, which no binary reaches.
 
 use dxmt_vectordb::search::{
     AdaptiveClusterAnalyzer, AdaptiveClusterConfig, HierarchicalClusteringConfig,

@@ -31,6 +31,18 @@ reference/
 # a path says "this is not shared", a `*.md` rule only says "this is markdown".
 design/
 
+# Not part of the distributed source, for two different reasons.
+#
+# `planning/` is code no binary can reach -- 31 modules and the examples that went with them.
+# It is kept because the ideas are worth keeping, but shipping 30,000 lines of unreachable
+# code invites a reader to judge the product by it. Its own README explains the rule, and
+# that README is what stays behind in this working copy.
+#
+# `TODO.md` is the competitive algorithm roadmap: what is not built yet, ranked, with the
+# systems it is aimed at named. That is a plan, not a description of the software.
+vectordb/planning/
+vectordb/TODO.md
+
 # Agent working instructions. They stay at their paths so Claude Code still loads them
 # in this checkout, but they are candid about what is not wired up yet and are not shared.
 CLAUDE.md

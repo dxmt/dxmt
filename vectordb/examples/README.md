@@ -124,6 +124,7 @@ refers to it.
 
 ## What is not here
 
-`planning/examples/` holds what was moved out and why: four AutoGen examples importing a module
-that exists in no package, and a multimodal example calling routes the server does not serve.
-Read the READMEs there before assuming either was abandoned by accident.
+Examples that did not run were removed rather than left to rot: four AutoGen examples importing
+a module that exists in no package, and a multimodal example calling routes the server does not
+serve. They were not abandoned by accident -- each one needs work this repository has not done,
+and an example that cannot run is a promise the code does not keep.
