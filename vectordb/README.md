@@ -212,6 +212,45 @@ The examples in `examples/` that process PDFs do not ship with a corpus. Supply 
 DEMO_PDF_PATH=/path/to/your.pdf python3 examples/pdf_rag_simple.py
 ```
 
+## Measured performance
+
+One machine — 32 vCPU, 121 GB, local NVMe — one binary per run, ingested over REST with
+parallel writers. Cohere for the 1M and 10M rows, LAION for 100M.
+
+| Corpus | Ingest | Resident | recall@100 | QPS | Serial p99 |
+| --- | --- | --- | --- | --- | --- |
+| 768d × 1M | 166 s (~6,000 rows/s) | 610 MB | 0.9798 | 6,465 | 3.6 ms |
+| 768d × 10M | 1,396 s (~7,200 rows/s) | 4.68 GB | 0.9628 | 5,645 | 4.4 ms |
+| 768d × 100M, fp16 vectors | 3.75 h (~7,400 rows/s) | 44.7 GB | 0.9735 | 4,886 | 5.7 ms |
+
+`SearchMode::Accurate` buys recall back without a rebuild: 0.9912 at 4,351 QPS on 1M, 0.9803 at
+3,720 on 10M, 0.9825 at 3,546 on 100M.
+
+Four things the table does not say on its own:
+
+- **The client is inside the measurement.** Those QPS figures come from VectorDBBench's Python
+  client, which costs about 70x more CPU per query than the server does. Driven instead by
+  `src/bin/loadgen.rs` — one keep-alive connection per thread, request bodies serialised once at
+  startup — the same 1M table on the same machine answers **8,822 QPS at 32 connections with a
+  4.56 ms p99**, and a single connection sees a 3.07 ms p99. The Python figures are kept above
+  because they are the ones comparable with published numbers.
+- **`ef_search` now scales with table size.** A fixed traversal budget loses recall as the graph
+  grows, so it doubles per decade of rows above a million. On the coverage run after that change:
+  768d/1M 0.9806 at 6,310 QPS, 768d/10M 0.9793 at 3,682 QPS. Wider vectors on the same run:
+  1536d/50K 0.9962, 1536d/500K 0.9897, 1536d/5M 0.9816; 1024d/1M 0.9488, 1024d/10M 0.9640 — the
+  1024d figures are lower because that corpus needs more traversal than Cohere at the same
+  scale, not because the codes lose more.
+- **Reading and writing at once was measured too**, with periodic snapshots and the eviction
+  sweep left on rather than turned off for the run: against a 2,000 rows/s ingest target the
+  server sustained 1,987 rows/s while serving 1,161–1,819 QPS at concurrency 10, p95
+  10.3–11.4 ms and p99 17.8–24.4 ms. Once ingest stops, p99 returns to 4.5 ms.
+- **Memory is the reason 100M fits.** The graph walks on PQ codes with an exact rerank from the
+  row file, so a row costs about 0.45 KB resident rather than the 8.3 KB it costs with vectors
+  and records in the process.
+
+These are single-machine numbers on two corpora. They say what this build did on that hardware,
+not what it will do on yours, and nothing at all about other systems.
+
 ## Known Limitations
 
 These are real gaps, not roadmap aspirations:
@@ -244,15 +283,13 @@ These are real gaps, not roadmap aspirations:
   removed.
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
-- **Bulk loading is slow, and gets slower as the table grows.** Measured here at 768
-  dimensions over the REST API: about 1,270 rows/s into a 20,000-row table and about 240
-  rows/s into a 1,000,000-row one. Loading the million-row Cohere set took roughly 68 minutes,
-  followed by roughly 58 minutes of index building. The two knobs that look like they should
-  help do not: request size makes almost no difference (50 to 5,000 records per request spans
-  1,050-1,270 rows/s), and writer concurrency peaks at two (1,270 -> 1,860 rows/s, then
-  declines). The time goes into building the HNSW graph, not into the wire or the request
-  overhead, so a denser insert format would not change it either. Building the graph in
-  parallel is what would, and is not done.
+- **The graph is built inside the write request.** There is no compaction or optimizer stage
+  behind it: a table finishes ingest already holding its index, which is why a load is not
+  followed by a minutes-long build step. The other side of that is contention — with ingest
+  running at 2,000 rows/s against a million-row table, query p95 roughly doubles compared with
+  the same table idle — and that when a rebuild is needed it rebuilds the whole table rather
+  than merging a segment. Ingest throughput is also a parallel-writer number: one connection
+  feeding one table is several times slower than eight.
 
 ## License
 
