@@ -205,6 +205,27 @@ jobs:
           DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q tests/test_integration.py
         working-directory: vectordb/dxmt-python-sdk
 
+      # The two adapter packages had no CI at all, and both had gone red without anyone
+      # noticing: a test importing a class name this package never exported, and one asserting
+      # a single filter unwrapped -- which the server does not reject, it reads as a filter
+      # with no conditions and returns everything. They run here rather than in a job of their
+      # own because the payload round trip is only worth asserting against a real server, and
+      # this job has one. Order matters: the step above installed `dxmt-python-sdk` editable
+      # from this checkout, which is what satisfies both packages' dependency on it -- there is
+      # no such distribution on PyPI, and a non-editable resolution would test the adapters
+      # against an SDK this commit does not contain.
+      - name: LangChain adapter tests
+        run: |
+          python -m pip install -e .
+          DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
+        working-directory: vectordb/langchain-dxmt
+
+      - name: LlamaIndex adapter tests
+        run: |
+          python -m pip install -e .
+          DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
+        working-directory: vectordb/llama-index-vector-stores-dxmt
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20

@@ -89,14 +89,18 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# Coverage is not in the default options: `pytest-cov` is a dev extra, and requiring a plugin
+# to run the tests at all means a checkout without it fails at startup rather than running.
+# Ask for it explicitly: `pytest --cov=langchain_dxmt --cov-report=term-missing`.
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=langchain_dxmt",
-    "--cov-report=term-missing",
-    "--cov-report=html",
 ]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs a running DXMT server (deselect with '-m \"not integration\"')",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.mypy]
 python_version = "3.9"

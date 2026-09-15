@@ -168,13 +168,20 @@ class TestComplexFilterConversion:
 
         result = convert_llamaindex_filters_to_dxmt(filters)
 
-        # Single filter should be returned directly
+        # Even one filter is wrapped. The server's `Filter` is `{must?, must_not?, should?}`
+        # (`src/types/record.rs`), and serde ignores unknown fields -- so an unwrapped
+        # `{"key": ..., "operation": ...}` does not fail, it deserializes to a filter with
+        # every list empty and silently returns unfiltered results.
         assert result == {
-            "key": "category",
-            "operation": {
-                "type": "Equal",
-                "value": "AI"
-            }
+            "must": [
+                {
+                    "key": "category",
+                    "operation": {
+                        "type": "Equal",
+                        "value": "AI"
+                    }
+                }
+            ]
         }
 
     def test_and_filters(self):
@@ -325,11 +332,19 @@ class TestFilterEdgeCases:
         assert result["operation"]["value"] is None
 
     def test_filter_with_boolean_value(self):
-        """Test filter with boolean value."""
-        filter = MetadataFilter(key="is_active", value=True, operator=FilterOperator.EQ)
+        """Test filter with boolean value.
+
+        `MetadataFilter.value` is a pydantic union that does not admit `bool`, so the filter
+        is built with `model_construct` to skip validation. What is under test is our
+        converter, which passes the value through untouched -- and a payload really can hold
+        a boolean, so the conversion has to survive one.
+        """
+        filter = MetadataFilter.model_construct(
+            key="is_active", value=True, operator=FilterOperator.EQ
+        )
         result = _convert_single_filter(filter)
 
-        assert result["operation"]["value"] == True
+        assert result["operation"]["value"] is True
 
     def test_filter_with_numeric_string(self):
         """Test filter with numeric string value."""

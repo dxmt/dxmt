@@ -17,7 +17,12 @@ from typing import Any, Generator
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_openai import OpenAIEmbeddings
+# `langchain-openai` is an optional dev extra, not a dependency of this package. Imported at
+# module scope it turns "the extra is not installed" into a collection error that fails the
+# whole run, unit tests included.
+OpenAIEmbeddings = pytest.importorskip(
+    "langchain_openai", reason="langchain-openai is not installed"
+).OpenAIEmbeddings
 
 from langchain_dxmt import DXMTVectorDB
 

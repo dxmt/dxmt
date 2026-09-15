@@ -17,8 +17,16 @@ from llama_index.core.vector_stores.types import (
     MetadataFilter,
     FilterOperator,
 )
-from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.dxmt import DXMTVectorStore
+
+# `llama-index-embeddings-openai` is a separate distribution and is not a dependency of this
+# package. Importing it at module scope turned "the optional integration extra is not
+# installed" into a collection error that failed the whole run, including the unit tests that
+# need neither the extra nor a server.
+OpenAIEmbedding = pytest.importorskip(
+    "llama_index.embeddings.openai",
+    reason="llama-index-embeddings-openai is not installed",
+).OpenAIEmbedding
 
 
 # Skip all tests if DXMT server is not available or if integration tests are disabled

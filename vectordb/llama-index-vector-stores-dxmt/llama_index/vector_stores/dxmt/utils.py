@@ -33,7 +33,7 @@ def convert_llamaindex_filters_to_dxmt(
         ...     MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ)
         ... ])
         >>> convert_llamaindex_filters_to_dxmt(filters)
-        {'key': 'category', 'operation': {'type': 'Equal', 'value': 'AI'}}
+        {'must': [{'key': 'category', 'operation': {'type': 'Equal', 'value': 'AI'}}]}
 
         Multiple filters with AND:
         >>> filters = MetadataFilters(filters=[
