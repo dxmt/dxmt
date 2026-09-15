@@ -710,6 +710,10 @@ fn worth_compacting(live: usize, slots: usize) -> bool {
     slots >= min_compaction_slots() && live.saturating_mul(2) <= slots
 }
 
+/// Sidecar bytes worth rewriting the `(id, row)` list for. It is rewritten whole, so the
+/// floor keeps a sweep from copying a small file every few minutes for nothing.
+const MIN_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Dead vector-file bytes worth a `fallocate` sweep. Below this the syscall costs more than
 /// the space is worth, and a table that has just crossed a few thousand updates does not need
 /// its file walked every ten minutes.
@@ -2627,6 +2631,21 @@ impl IntelligentIndexedStorage {
                     // mistake that loses data, and a row wrongly kept costs only space.
                     let mut live = data.records.live_vector_rows().unwrap_or_default();
                     live.extend(data.vector_rows.values().copied());
+                    // The `(id, row)` sidecar beside the data file takes a line per append,
+                    // so an upsert-heavy table writes the same ids over and over: 214 MB for
+                    // 400,000 ids after seventeen hours at 200 rows/s. Every line in it is
+                    // valid, merely superseded, so there is nothing to punch -- it has to be
+                    // written again. Folded in here because the condition is the same one:
+                    // many more rows than live ids.
+                    if file.rows_sidecar_bytes() >= MIN_SIDECAR_BYTES {
+                        match file.compact_rows() {
+                            Ok((was, now)) => released += was.saturating_sub(now),
+                            Err(e) => {
+                                warn!("table '{}': row-list compaction failed: {}", name, e)
+                            }
+                        }
+                    }
+
                     let before = crate::storage::punch::allocated_bytes(file.path());
                     // Logged rather than propagated: one table whose filesystem will not punch
                     // is no reason to stop sweeping the others, and nothing is at risk either
@@ -2649,6 +2668,15 @@ impl IntelligentIndexedStorage {
                 match data.records.punch_dead() {
                     Ok(_) => released += before.saturating_sub(data.records.disk_bytes()),
                     Err(e) => warn!("table '{}': record-row reclamation failed: {}", name, e),
+                }
+            }
+
+            // And the record log, for the same reason as the vector file's row list: a line
+            // per append, all of them valid, most of them superseded.
+            if data.records.log_bytes() >= MIN_SIDECAR_BYTES {
+                match data.records.compact_log() {
+                    Ok((was, now)) => released += was.saturating_sub(now),
+                    Err(e) => warn!("table '{}': record-log compaction failed: {}", name, e),
                 }
             }
 

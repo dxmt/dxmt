@@ -78,6 +78,15 @@ impl IdTable {
         row
     }
 
+    /// A slot that holds no id: the bytes of rows a compaction dropped. It takes a row number
+    /// so the rows after it keep theirs, and it is deliberately not registered in the hash
+    /// table -- nothing may ever resolve to it.
+    fn push_gap(&mut self) -> u32 {
+        let row = self.rows() as u32;
+        self.offsets.push(self.bytes.len() as u32);
+        row
+    }
+
     fn point(&mut self, id: &str, row: u32) {
         let h = id_hash(id);
         match self.by_hash.get(&h).copied() {
@@ -244,6 +253,33 @@ impl RowStore {
                         tombstone[row as usize] = true;
                     }
                 }
+                // `gap <bytes>`: bytes of `<path>` that no row owns any more, skipped without
+                // a row being created. Written only by `compact_log`, which drops the dead
+                // rows' lines and leaves a gap in their place so the offsets of the rows that
+                // remain still land on their own bytes. See that method for why the data file
+                // is not rewritten with them.
+                (Some("gap"), Some(bytes), _, _) => {
+                    let bytes: u64 = bytes.parse().map_err(|_| {
+                        crate::Error::Serialization(format!(
+                            "{}: bad gap in {line:?}",
+                            log_path.display()
+                        ))
+                    })?;
+                    let end = ends.last().unwrap() + bytes;
+                    if end > data_len {
+                        return Err(crate::Error::Serialization(format!(
+                            "{}: gap ends at {end} but {} holds {data_len} bytes",
+                            log_path.display(),
+                            path.display()
+                        )));
+                    }
+                    ends.push(end);
+                    // A gap owns its slot in `ends` but is not a row: nothing may resolve to
+                    // it, so it is born tombstoned and with no vector.
+                    ids.push_gap();
+                    tombstone.push(true);
+                    vector_rows.push(NO_VECTOR_ROW);
+                }
                 _ => {}
             }
         }
@@ -395,6 +431,112 @@ impl RowStore {
         crate::storage::punch::punch_holes(&data, &crate::storage::punch::coalesce(dead))
     }
 
+    /// Rewrite the log with only the live rows, and a `gap` in place of each run of dead ones.
+    /// Returns the bytes it held before and after.
+    ///
+    /// The log takes a line per append, and an upsert appends: 303 MB of it for 400,000 live
+    /// records after seventeen hours at 200 rows/s, growing without bound. Unlike the data file
+    /// it has no dead regions to punch -- every line is well-formed, merely superseded.
+    ///
+    /// **Why the data file is not rewritten with it.** The log's `len` fields are accumulated
+    /// at startup into the byte offset of each row, so dropping a line moves every row after it
+    /// unless something takes its place. A `gap` line is that something: it advances the
+    /// accumulator by the dead bytes without creating a row, which leaves the surviving rows
+    /// pointing at their own bytes in a data file nothing has touched. So this commits with one
+    /// `rename` of one file -- a crash leaves either the old log or the new one, both of which
+    /// describe the same data file correctly -- where rewriting the pair would need a commit
+    /// atomic across two files, and a crash between them would leave a log whose offsets name
+    /// the wrong bytes.
+    ///
+    /// The dead bytes themselves are given back by [`Self::punch_dead`], which is the same
+    /// division of labour the vector file uses: the blocks go back to the filesystem, the
+    /// file's length stays.
+    ///
+    /// Compaction does renumber rows -- the survivors close up -- but only in the file. The
+    /// in-memory state keeps the numbering it has and stays correct; the new numbering applies
+    /// from the next restart, when everything that reads it is rebuilt from this log together.
+    pub fn compact_log(&self) -> crate::Result<(u64, u64)> {
+        use std::io::BufWriter;
+
+        let path = RecordFile::log_path(&self.file.path);
+        let before = crate::storage::punch::allocated_bytes(&path);
+
+        let mut out = String::new();
+        let mut gap = 0u64;
+        for row in 0..self.tombstone.len() {
+            let (Some(&start), Some(&end)) = (self.file.ends.get(row), self.file.ends.get(row + 1))
+            else {
+                break;
+            };
+            if self.tombstone[row] {
+                gap += end - start;
+                continue;
+            }
+            if gap > 0 {
+                out.push_str(&format!(
+                    "gap	{gap}
+"
+                ));
+                gap = 0;
+            }
+            let id = self.ids.id(row as u32);
+            match self.vector_rows[row] {
+                NO_VECTOR_ROW => out.push_str(&format!(
+                    "add	{}	-	{}
+",
+                    end - start,
+                    id
+                )),
+                v => out.push_str(&format!(
+                    "add	{}	{}	{}
+",
+                    end - start,
+                    v,
+                    id
+                )),
+            }
+        }
+        if gap > 0 {
+            out.push_str(&format!(
+                "gap	{gap}
+"
+            ));
+        }
+
+        // Written, synced and renamed while the log lock is held, so no append can land
+        // between the last line read above and the swap and be lost.
+        let mut log = self.file.log.lock();
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".compacting");
+        let tmp = PathBuf::from(tmp);
+        {
+            let f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)?;
+            let mut w = BufWriter::new(f);
+            w.write_all(out.as_bytes())?;
+            w.flush()?;
+            w.into_inner()
+                .map_err(|e| crate::Error::Serialization(format!("{}: {e}", tmp.display())))?
+                .sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        *log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)?;
+
+        Ok((before, crate::storage::punch::allocated_bytes(&path)))
+    }
+
+    /// Bytes the append log holds. One line per append, so an upsert adds another.
+    pub fn log_bytes(&self) -> u64 {
+        crate::storage::punch::allocated_bytes(&RecordFile::log_path(&self.file.path))
+    }
+
     /// The vector-file rows the live records point at.
     pub fn live_vector_rows(&self) -> std::collections::HashSet<u64> {
         let mut live = std::collections::HashSet::with_capacity(self.ids.live());
@@ -462,6 +604,22 @@ impl RecordStore {
         match self {
             RecordStore::Memory(_) => Ok(0),
             RecordStore::Disk(s) => s.punch_dead(),
+        }
+    }
+
+    /// Rewrite the append log without the superseded lines. Returns bytes before and after.
+    pub fn compact_log(&self) -> crate::Result<(u64, u64)> {
+        match self {
+            RecordStore::Memory(_) => Ok((0, 0)),
+            RecordStore::Disk(s) => s.compact_log(),
+        }
+    }
+
+    /// Bytes the append log holds; 0 for the in-memory map, which has none.
+    pub fn log_bytes(&self) -> u64 {
+        match self {
+            RecordStore::Memory(_) => 0,
+            RecordStore::Disk(s) => s.log_bytes(),
         }
     }
 
@@ -610,6 +768,79 @@ mod tests {
             version: 1,
             status: RecordStatus::Active,
         })
+    }
+
+    #[test]
+    fn compacting_the_log_keeps_every_live_row_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.rec");
+        let mut store = RowStore::open(&path).unwrap();
+
+        // Ten passes over four ids, plus one delete: a line per append, four live rows, and a
+        // run of dead ones in between each -- the shape an upsert workload leaves behind.
+        for pass in 0..10u32 {
+            store
+                .append(&[
+                    (record("a", pass as f32), Some(pass as u64)),
+                    (record("b", pass as f32 + 0.5), None),
+                    (record("c", pass as f32 + 0.25), Some(100 + pass as u64)),
+                    (record("gone", 0.0), Some(7)),
+                ])
+                .unwrap();
+        }
+        store.remove("gone").unwrap();
+        assert_eq!(store.len(), 3);
+
+        let before: Vec<(String, Option<u64>, f32)> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                let r = store.get(id).expect("live");
+                (
+                    id.to_string(),
+                    store.vector_row(id),
+                    r.payload["v"].as_f64().unwrap() as f32,
+                )
+            })
+            .collect();
+        let log = RecordFile::log_path(&path);
+        let lines_before = std::fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(lines_before, 41, "forty appends and a delete");
+
+        let (was, now) = store.compact_log().unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        let adds = text.lines().filter(|l| l.starts_with("add\t")).count();
+        assert_eq!(
+            adds, 3,
+            "one line per live row, whatever it took to get there"
+        );
+        assert!(
+            text.lines().any(|l| l.starts_with("gap\t")),
+            "dead runs became gaps"
+        );
+        assert!(now <= was, "{was} -> {now} bytes");
+
+        // An append after the rewrite has to reach the file that was renamed into place.
+        store.append(&[(record("d", 9.0), Some(42))]).unwrap();
+
+        // The point of the gaps: a reopened store finds the same records, with the same
+        // payloads and the same vector rows, in a data file nothing rewrote.
+        drop(store);
+        let reopened = RowStore::open(&path).unwrap();
+        assert_eq!(reopened.len(), 4, "three survivors and the one added after");
+        for (id, vrow, v) in &before {
+            let r = reopened
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} lost by the compaction"));
+            assert_eq!(
+                r.payload["v"].as_f64().unwrap() as f32,
+                *v,
+                "{id} decoded from the wrong bytes"
+            );
+            assert_eq!(reopened.vector_row(id), *vrow, "{id} lost its vector row");
+        }
+        assert_eq!(reopened.get("d").unwrap().payload["v"], 9.0);
+        assert_eq!(reopened.vector_row("d"), Some(42));
+        assert!(reopened.get("gone").is_none(), "a deleted id stays deleted");
     }
 
     #[test]

@@ -639,6 +639,79 @@ impl VectorFile {
         crate::storage::punch::punch_holes(&w.file, &dead)
     }
 
+    /// Rewrite the `(id, row)` sidecar keeping only each id's latest row, and return the
+    /// bytes it held before and after.
+    ///
+    /// The sidecar takes a line per *append*, so an upsert-heavy table writes the same id over
+    /// and over: 214 MB of it for 400,000 ids after seventeen hours at 200 rows/s. Unlike the
+    /// data file it has no dead regions to punch -- every line is well-formed, they are merely
+    /// superseded -- so the only way to shrink it is to write it again.
+    ///
+    /// Safe to fold this way because the consumer already does: `open_with` returns the pairs
+    /// oldest first and the storage layer collects them into a map, so the last line for an id
+    /// is the only one that decides anything. Keeping just that line reconstructs the identical
+    /// map.
+    ///
+    /// Committed by `rename`, so a crash leaves either the old file or the new one and never a
+    /// half-written one. The writer lock is held throughout, which pauses appends for the
+    /// rewrite -- a few hundred milliseconds for a file this size, on a sweep that runs every
+    /// few minutes.
+    pub fn compact_rows(&self) -> crate::Result<(u64, u64)> {
+        use std::collections::HashMap;
+        use std::io::BufWriter;
+
+        let mut w = self.writer.lock();
+        let path = Self::rows_path(&self.path);
+        let before = crate::storage::punch::allocated_bytes(&path);
+
+        let mut latest: HashMap<String, u64> = HashMap::new();
+        for line in BufReader::new(File::open(&path)?).lines() {
+            let line = line?;
+            let Some((row, id)) = line.split_once('\t') else {
+                continue;
+            };
+            let Ok(row) = row.parse::<u64>() else {
+                continue;
+            };
+            latest.insert(id.to_string(), row);
+        }
+
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".compacting");
+        let tmp = PathBuf::from(tmp);
+        {
+            let out = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)?;
+            let mut out = BufWriter::new(out);
+            for (id, row) in &latest {
+                writeln!(out, "{row}\t{id}")?;
+            }
+            out.flush()?;
+            out.into_inner()
+                .map_err(|e| crate::Error::Serialization(format!("{}: {e}", tmp.display())))?
+                .sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+
+        // The old handle still points at the file that was renamed away; appends through it
+        // would land somewhere nothing reads.
+        w.rows_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)?;
+
+        Ok((before, crate::storage::punch::allocated_bytes(&path)))
+    }
+
+    /// Lines in the `(id, row)` sidecar: one per append, so an upsert writes another.
+    pub fn rows_sidecar_bytes(&self) -> u64 {
+        crate::storage::punch::allocated_bytes(&Self::rows_path(&self.path))
+    }
+
     /// Rows that no id resolves to, given the live set. What `punch_dead` would work on.
     pub fn dead_rows(&self, live_rows: &std::collections::HashSet<u64>) -> u64 {
         self.rows().saturating_sub(live_rows.len() as u64)
@@ -765,6 +838,52 @@ mod tests {
         (0..dim)
             .map(|d| (seed * 31 + d as u64) as f32 * 0.5)
             .collect()
+    }
+
+    #[test]
+    fn compacting_the_row_list_keeps_the_map_it_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.f32");
+        let (file, _) = VectorFile::open(&path, 8).unwrap();
+
+        // Ten passes over the same four ids: forty lines in the sidecar for four live rows,
+        // which is the shape an upsert workload writes.
+        let mut expected: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for pass in 0..10u64 {
+            for id in ["a", "b", "c", "d"] {
+                let seed = pass * 10 + id.as_bytes()[0] as u64;
+                let rows = file.append(&[(id, &v(seed, 8))]).unwrap();
+                expected.insert(id.to_string(), rows[0]);
+            }
+        }
+        let lines_before = std::fs::read_to_string(VectorFile::rows_path(&path))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(lines_before, 40, "a line per append");
+
+        let (was, now) = file.compact_rows().unwrap();
+        let lines_after = std::fs::read_to_string(VectorFile::rows_path(&path))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(lines_after, 4, "one line per live id");
+        assert!(now <= was, "{was} -> {now} bytes");
+
+        // An append after the rewrite has to land in the file that was renamed into place,
+        // not in the handle the writer held before it.
+        let rows = file.append(&[("e", &v(99, 8))]).unwrap();
+        expected.insert("e".to_string(), rows[0]);
+
+        // The whole point: reopening rebuilds the same id-to-row map.
+        drop(file);
+        let (reopened, ids) = VectorFile::open(&path, 8).unwrap();
+        let got: std::collections::HashMap<String, u64> = ids.into_iter().collect();
+        assert_eq!(got, expected, "the map is unchanged by the rewrite");
+        for (id, row) in &expected {
+            let want = reopened.read(*row).expect("row still readable");
+            assert_eq!(want.len(), 8, "id {id} reads back a whole row");
+        }
     }
 
     #[test]

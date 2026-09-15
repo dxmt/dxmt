@@ -103,6 +103,14 @@ releases. Everything below is unreleased work on `main`.
   come back from `kill -9`. The re-evaluation sweep now compares live entries against slots and
   rebuilds when the graph carries twice the slots it needs; `rebuild_index` no longer counts
   such a graph as equivalent to the one it would build.
+- **The two append-only sidecars grew for ever as well**, for the same reason and with no dead
+  regions to release: the vector file's `(id, row)` list and the record file's append log take
+  a line per write, and an upsert writes. 214 MB and 303 MB respectively over the same 17
+  hours. Both are now rewritten by the reclamation sweep -- the row list keeping each id's
+  latest row, the record log keeping the live rows and replacing each run of dead ones with a
+  `gap` that advances the offset accumulator without creating a row, so the surviving rows
+  still name their own bytes and the data file needs no rewrite. Each commits with a single
+  `rename`.
 - **A restored table could come back as the wrong index.** Recovery ignored the algorithm the
   snapshot recorded, rebuilding a 94,000-row brute-force table as HNSW before binding the port.
 - `update_record` never wrote to the WAL, so updates did not survive a restart. Upserts left
