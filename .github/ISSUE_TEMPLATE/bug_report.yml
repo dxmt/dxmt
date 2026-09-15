@@ -1,0 +1,90 @@
+name: Bug report
+description: Something behaves differently from what the documentation says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security issues here. `SECURITY.md` in the repository root says where
+        they go: privately, through a GitHub security advisory.
+
+        Most confusing behaviour reported so far has turned out to be a feature that was not
+        compiled in. The default build is deliberately minimal: no full-text search, no Swagger,
+        no GraphQL, no WebSocket, no S3. The two fields below about your build are the ones that
+        most often answer the question, so please fill them in even if they seem irrelevant.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >
+        The smallest sequence that shows it. `curl` against a running server is ideal —
+        it separates the server from whichever client you were using.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`, or the release you installed.
+    validations:
+      required: true
+
+  - type: input
+    id: features
+    attributes:
+      label: Build features
+      description: >
+        The `--features` you built with, or "default" if none. If you installed a binary
+        somebody else built, say so.
+      placeholder: default
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Server mode
+      options:
+        - serve (standard, /api/v1)
+        - serve --simple (zero-config collection API)
+        - vectordb mcp (MCP over stdio)
+        - embedded / library use
+        - not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: storage
+    attributes:
+      label: Storage configuration
+      description: >
+        Any `DB_*` environment variables you set — `DB_WAL_DIR`, `DB_RECORD_STORE`,
+        `DB_VECTOR_STORE`, object storage settings. "None" is a useful answer; it means
+        everything is in memory and nothing is durable.
+      placeholder: None
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log
+      description: >
+        The relevant lines, with `RUST_LOG=info` or better. Startup lines are worth including —
+        recovery and index selection both report themselves there.
+      render: shell
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Linux x86_64, rustc 1.8x.y"

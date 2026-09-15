@@ -1,0 +1,44 @@
+name: Feature request
+description: Something the database should do and does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: a module existing in this repository is not a promise that it works. The
+        README's "Known Limitations" section lists what is stubbed, experimental, or falls back
+        to something simpler. If what you want is listed there, an issue saying you need it is
+        still useful — say so, and say what you are trying to build.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The problem, not the solution. What does your application need that it cannot get today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would it look like
+      description: >
+        A route, a configuration option, an index — whatever shape you have in mind. Rough is
+        fine.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you are doing instead today
+      description: >
+        The workaround, or the other system you are using for this part. This is the most useful
+        field for judging how much a feature is worth.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is about the single-node server, which is the current focus
+        - label: This is about clustering or replication, which is not
