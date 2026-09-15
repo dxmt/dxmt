@@ -369,6 +369,14 @@ impl IndexWrapper {
         Ok(true)
     }
 
+    /// Live entries and the slots holding them: `(live, slots)`. Equal for an index that
+    /// reclaims what it deletes, and far apart for a graph under steady upserts, where every
+    /// update leaves a tombstone behind. See `VectorIndex::slot_count`.
+    pub async fn live_and_slots(&self) -> (usize, usize) {
+        let index = self.index.read().await;
+        (index.len(), index.slot_count())
+    }
+
     /// Get index length - requires read lock
     pub async fn len(&self) -> usize {
         let index = self.index.read().await;

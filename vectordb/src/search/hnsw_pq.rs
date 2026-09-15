@@ -355,6 +355,10 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         Ok(())
     }
 
+    fn slot_count(&self) -> usize {
+        crate::search::index_traits::VectorIndex::slot_count(&self.hnsw)
+    }
+
     fn quantization_pending(&self) -> bool {
         // The inherent method of the same intent; named apart so this impl cannot call itself.
         HnswPqIndex::wants_quantizing(self)

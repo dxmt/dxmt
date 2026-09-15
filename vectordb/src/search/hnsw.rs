@@ -2312,6 +2312,12 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
         self.id_to_idx.len() + self.id_overflow.len()
     }
 
+    /// Node slots, tombstones included. `nodes` never gives a slot back: an update marks the
+    /// old one deleted and appends a new one.
+    fn slot_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     fn snapshot_to(&self, path: &std::path::Path) -> crate::Result<bool> {
         crate::search::index_traits::SerializableIndex::save(self, path)?;
         Ok(true)

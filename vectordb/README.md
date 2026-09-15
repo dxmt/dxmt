@@ -127,6 +127,12 @@ index is rebuilt when a table's size no longer suits the algorithm it has:
 One caveat: this table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
 a separate path that yields HNSW below 100K and HNSW-PQ above it.
 
+The same sweep also rebuilds a table whose graph has accumulated tombstones. An update cannot
+move a node, so it deletes the old slot and appends a new one; a table of constant size under
+steady upserts would otherwise grow one slot per write without bound. The rebuild is the
+reclamation, and it waits until the graph carries about twice the slots it needs, so the cost
+is one O(n) pass per as many writes as the table has rows.
+
 `CREATE TABLE` still picks from a fixed estimate, because a new table has no rows to size
 against — the periodic re-evaluation is what corrects it. `POST /api/v1/tables/{name}/index/rebuild`
 forces it immediately. A rebuild builds the replacement before swapping it in, so queries keep

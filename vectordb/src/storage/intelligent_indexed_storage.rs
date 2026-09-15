@@ -686,6 +686,30 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
 /// Both caps bound the added latency of the request at the head of the queue, not throughput.
 /// Coalescing only ever consumes requests that are *already* waiting: under a single writer
 /// `try_recv` finds nothing, a group is one request, and the behaviour is what it was before.
+/// Slots below which a graph is not worth rebuilding for its tombstones, whatever the ratio.
+/// A rebuild is O(n) and a small table's garbage is measured in megabytes.
+///
+/// `DB_INDEX_COMPACTION_MIN_SLOTS` overrides it, for tests: reaching a hundred thousand slots
+/// honestly means a hundred thousand insertions, which says nothing about the behaviour under
+/// test that a thousand does not.
+fn min_compaction_slots() -> usize {
+    const DEFAULT: usize = 100_000;
+    std::env::var("DB_INDEX_COMPACTION_MIN_SLOTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
+/// Whether a graph carries enough tombstones to be worth an O(n) rebuild.
+///
+/// Used twice, and it has to be the same test in both places: the sweep asks it to decide
+/// whether to rebuild, and `rebuild_index` asks it to decide whether the graph it already has
+/// counts as equivalent to the one a rebuild would produce. They disagreed for exactly one
+/// commit, and the result was a sweep that called for a rebuild and a rebuild that declined it.
+fn worth_compacting(live: usize, slots: usize) -> bool {
+    slots >= min_compaction_slots() && live.saturating_mul(2) <= slots
+}
+
 /// Dead vector-file bytes worth a `fallocate` sweep. Below this the syscall costs more than
 /// the space is worth, and a table that has just crossed a few thousand updates does not need
 /// its file walked every ten minutes.
@@ -2474,6 +2498,38 @@ impl IntelligentIndexedStorage {
                         }
                         Ok(false) => {}
                         Err(e) => warn!("Maintaining '{}' failed: {}", name, e),
+                    }
+
+                    // The algorithm fits; the tombstones may still not. An update cannot move
+                    // a node -- where a node sits is decided by the vector it had -- so it
+                    // deletes the old slot and appends a new one, and nothing gives the slot
+                    // back. A table of constant size under steady upserts therefore grows one
+                    // slot per write, for ever. Measured in a 17-hour soak at 200 rows/s over
+                    // a 400,000-row key space: 11.1 million slots for 400,000 records, a
+                    // 5.3 GB index where the live rows need about 200 MB, resident memory
+                    // climbing 8.4 GB a day, snapshots from 1.2 s to 18.9 s, and 196 s to
+                    // recover from `kill -9`.
+                    //
+                    // A rebuild is the reclamation: it builds a new graph from the live
+                    // records and drops the tombstoned slots with the old one. It is also
+                    // O(n), which is why it waits for the garbage to be worth it rather than
+                    // running on a timer -- at the threshold below, a table rebuilds once per
+                    // as many writes as it has rows, and holds at most twice the slots it
+                    // needs.
+                    let (live, slots) = wrapper.live_and_slots().await;
+                    if worth_compacting(live, slots) {
+                        info!(
+                            "Table '{}': {} live entries in {} slots, rebuilding to reclaim the \
+                             tombstones",
+                            name, live, slots
+                        );
+                        match self.rebuild_index(&name).await {
+                            Ok(()) => rebuilt.push(name.clone()),
+                            Err(e) => warn!(
+                                "Compacting '{}' failed, keeping the current index: {}",
+                                name, e
+                            ),
+                        }
                     }
                 }
                 continue;
@@ -5074,11 +5130,18 @@ impl IntelligentIndexedStorage {
             // record as an exact graph; the rebuild is what trains and quantizes it, so it is
             // not skipped as "equivalent". The first 1M acceptance run was skipped this way and
             // measured the exact graph -- 8,295 MB resident, the same as plain HNSW.
+            // A graph holding twice the slots it needs is not equivalent to a freshly built
+            // one, whatever the algorithm says: it is the same answers out of several times
+            // the memory. Without this clause the sweep asked for a compaction and this
+            // function declined it, because every other test it makes looks at live entries
+            // and the tombstones are not live.
+            let (live, slots) = table_data.index.live_and_slots().await;
             let up_to_date = !table_data
                 .selected_algorithm
                 .requires_rebuild_to_reach(&algorithm)
                 && table_data.index.len().await == record_count
-                && !table_data.index.wants_rebuild().await;
+                && !table_data.index.wants_rebuild().await
+                && !worth_compacting(live, slots);
             if up_to_date {
                 drop(tables);
                 let mut tables = self.write_tables("rebuild_index").await;

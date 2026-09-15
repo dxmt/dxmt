@@ -91,6 +91,20 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// Slots the index holds, tombstoned ones included, where [`Self::len`] counts only the
+    /// live ones.
+    ///
+    /// An update is a delete and an insert: the graph cannot move a node, because where a node
+    /// sits is decided by the vector it had. So an upsert tombstones the old slot and appends a
+    /// new one, and a table of constant size under steady upserts grows a slot per write with
+    /// nothing reclaiming them. Measured in a 17-hour soak at 200 rows/s: 11.1 million slots
+    /// for 400,000 records, a 5.3 GB index where the live rows need about 200 MB, snapshots
+    /// grown from 1.2 s to 18.9 s, and 196 s to recover from `kill -9`. The re-evaluation sweep
+    /// compares these two numbers and rebuilds when the gap is large enough to be worth it.
+    fn slot_count(&self) -> usize {
+        self.len()
+    }
+
     /// Whether [`Self::quantization_job`] would return work, without paying for the sample.
     ///
     /// `quantization_job` copies up to 65,536 vectors out of the graph -- 200 MB at 768

@@ -93,6 +93,16 @@ releases. Everything below is unreleased work on `main`.
   pool `HnswIndex::plan_batch` submits to above `PARALLEL_PLAN_MIN_NODES`, so an insert could
   not be picked up until a worker finished its whole share of the subspaces; it now trains in a
   pool of its own, sized to half the cores.
+- **An upsert grew the index for ever.** A graph node cannot move -- where it sits is decided
+  by the vector it had when it was linked in -- so an update tombstones the old slot and
+  appends a new one, and nothing gave the slot back. A table of constant size under steady
+  upserts therefore grew one slot per write. Measured in a 17-hour soak at 200 rows/s over a
+  400,000-row key space: 11.1 million slots holding 400,000 records, `index_size_bytes` 5.3 GB
+  where the live rows need about 200 MB, resident memory climbing 8.4 GB a day with the row
+  count flat for sixteen of those hours, snapshots grown from 1.2 s to 18.9 s, and 196 s to
+  come back from `kill -9`. The re-evaluation sweep now compares live entries against slots and
+  rebuilds when the graph carries twice the slots it needs; `rebuild_index` no longer counts
+  such a graph as equivalent to the one it would build.
 - **A restored table could come back as the wrong index.** Recovery ignored the algorithm the
   snapshot recorded, rebuilding a 94,000-row brute-force table as HNSW before binding the port.
 - `update_record` never wrote to the WAL, so updates did not survive a restart. Upserts left
