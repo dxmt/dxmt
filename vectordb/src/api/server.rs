@@ -8,17 +8,12 @@ use std::sync::Arc;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    api::{
-        // batch_handlers::batch_search_vectors,  // Removed
-        // bulk_handlers::bulk_insert_records,  // Removed
-        handlers::{
-            alter_table, branch_table, create_backup, create_snapshot, create_table,
-            delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
-            get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
-            hybrid_search_combined, insert_records, insert_records_optimized, list_records,
-            list_tables, liveness, readiness, rebuild_index, search_vectors, update_record,
-            AppState,
-        },
+    api::handlers::{
+        alter_table, branch_table, create_backup, create_snapshot, create_table, delete_records,
+        delete_table, drop_index, execute_dxql, full_text_search, get_record, get_status,
+        get_table, get_table_stats, health_check, health_metrics, hybrid_search,
+        hybrid_search_combined, insert_records, insert_records_optimized, list_records,
+        list_tables, liveness, readiness, rebuild_index, search_vectors, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -343,7 +338,6 @@ pub async fn create_app_with_storage(
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/stats", get(get_table_stats))
         // 批量操作API
-        // .route("/tables/:table_name/bulk_insert", post(bulk_insert_records))  // Removed
         .route(
             "/tables/:table_name/records/bulk",
             post(insert_records_optimized),
@@ -351,10 +345,10 @@ pub async fn create_app_with_storage(
         // 搜索API
         .route("/tables/:table_name/search", post(search_vectors))
         .route("/tables/:table_name/hybrid_search", post(hybrid_search))
-        .route(
-            "/tables/:table_name/batch_search",
-            post(search_vectors), // Use standard search
-        )
+        // An alias for /search, on purpose and pinned by a test: both claim to answer "what
+        // is nearest to this vector" and an alias that quietly starts answering differently is
+        // drift no unit test sees. It does not batch anything.
+        .route("/tables/:table_name/batch_search", post(search_vectors))
         // 索引管理API
         .route("/tables/:table_name/index", delete(drop_index))
         .route("/tables/:table_name/index/rebuild", post(rebuild_index))

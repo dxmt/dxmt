@@ -441,6 +441,20 @@ pub async fn delete_table(
     }
 }
 
+/// Change a table's schema in place. The dimension is not changeable: it is fixed when the table is
+/// created and every vector in it is that wide.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    patch,
+    path = "/api/v1/tables/{table_name}",
+    request_body = TableAlterRequest,
+    params(("table_name" = String, Path, description = "Table name")),
+    responses(
+        (status = 200, description = "Table altered", body = ApiResponse),
+        (status = 400, description = "The change is not one that can be made", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "tables"
+))]
 /// Alter table schema — safe mutations only (description, memory_optimization,
 /// enable_full_text_search toggle, add/drop payload field declarations).
 ///
@@ -458,6 +472,18 @@ pub async fn alter_table(
     }
 }
 
+/// Drop the table's index. Searches still answer -- by brute force, exactly and slowly -- until an
+/// index is rebuilt.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    delete,
+    path = "/api/v1/tables/{table_name}/index",
+    params(("table_name" = String, Path, description = "Table name")),
+    responses(
+        (status = 200, description = "Index dropped", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
 /// Drop the vector index of a table without deleting records.
 ///
 /// `DELETE /api/v1/tables/:table_name/index`
@@ -484,6 +510,18 @@ pub async fn drop_index(
     }
 }
 
+/// Rebuild the index now rather than waiting for the periodic re-evaluation. The replacement is
+/// built before it is swapped in, so queries keep being served by the old index throughout.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/index/rebuild",
+    params(("table_name" = String, Path, description = "Table name")),
+    responses(
+        (status = 200, description = "Index rebuilt", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
 /// Rebuild the vector index from persisted records.
 ///
 /// POST /tables/:table_name/index/rebuild
@@ -512,6 +550,19 @@ pub async fn rebuild_index(
     }
 }
 
+/// Write every table to disk and compact the write-ahead log up to that point. A snapshot is the
+/// only copy of what it covers once the log is trimmed, so back up the snapshot directory like the
+/// data it is. Refused while local durability is degraded, so an unacknowledged write cannot become
+/// a new durable frontier.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/snapshot",
+    responses(
+        (status = 200, description = "Snapshot written", body = ApiResponse),
+        (status = 503, description = "Durability degraded; the server is read-only", body = ApiResponse)
+    ),
+    tag = "maintenance"
+))]
 /// Write a snapshot of every table so the next restart skips replaying the whole WAL.
 ///
 /// Explicit rather than automatic: snapshotting walks every table and serializes every index,
@@ -552,6 +603,19 @@ pub async fn get_table_stats(
     }
 }
 
+/// Copy a table under a new name, records and index included, so an experiment can run against real
+/// data without touching it.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/branch",
+    params(("table_name" = String, Path, description = "Table name")),
+    responses(
+        (status = 200, description = "Branch created", body = ApiResponse),
+        (status = 400, description = "branch_name missing or already taken", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "tables"
+))]
 /// Branch a table — create an independent copy of source table's schema and records.
 ///
 /// POST /tables/:table_name/branch
@@ -888,7 +952,10 @@ pub async fn delete_records(
 
 // ============ 搜索API ============
 
-/// 向量搜索
+/// Nearest neighbours to a query vector.
+///
+/// `POST /api/v1/tables/{table_name}/batch_search` is an alias for this route and answers
+/// identically; it does not batch anything.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search",
@@ -1045,7 +1112,7 @@ pub async fn hybrid_search(
     responses(
         (status = 200, description = "系统健康状态", body = ApiResponse)
     ),
-    tag = "system"
+    tag = "health"
 ))]
 #[axum::debug_handler]
 pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -1070,7 +1137,7 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
         (status = 200, description = "服务健康"),
         (status = 503, description = "服务不健康")
     ),
-    tag = "system"
+    tag = "health"
 ))]
 /// Server health check endpoint
 ///
@@ -1110,6 +1177,14 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     ApiResponse::success(response).into_response()
 }
 
+/// Liveness only: the process is up and the HTTP runtime is answering. It says nothing about
+/// whether a write can be made durable -- use /ready for that.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/live",
+    responses((status = 200, description = "The process is alive")),
+    tag = "health"
+))]
 /// Process liveness probe. This endpoint intentionally does not touch storage or wait for
 /// recovery; a process that is alive but not ready must be restarted only when the orchestrator
 /// policy says so, not because a cold snapshot takes time to load.
@@ -1124,6 +1199,18 @@ pub async fn liveness() -> impl IntoResponse {
     )
 }
 
+/// Readiness, and the probe a deployment should use. Answers 503 once a write-ahead log write has
+/// failed and the process has gone read-only, where /health still answers 200 with a diagnostic
+/// document.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/ready",
+    responses(
+        (status = 200, description = "Ready to serve writes"),
+        (status = 503, description = "Local durability is degraded")
+    ),
+    tag = "health"
+))]
 /// Readiness probe for load balancers and orchestrators.
 ///
 /// Readiness is separate from liveness: a read-only process after a WAL failure is still alive,
@@ -1171,7 +1258,7 @@ pub struct CreateBackupRequest {
         (status = 200, description = "备份完成", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse)
     ),
-    tag = "backup"
+    tag = "maintenance"
 ))]
 pub async fn create_backup(
     State(state): State<AppState>,
@@ -1496,6 +1583,21 @@ pub async fn hybrid_search_combined(
     }
 }
 
+/// Run a DXQL statement. SELECT, INSERT, UPDATE, DELETE, CREATE TABLE and DROP are executed; vector
+/// search, text search and graph traversal inside a WHERE clause are refused by name, with the
+/// route to use instead, rather than being accepted and quietly doing something else.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/query",
+    responses(
+        (status = 200, description = "Statement executed", body = ApiResponse),
+        (status = 400, description = "The statement does not parse or compile", body = ApiResponse),
+        (status = 404, description = "The statement names a table that does not exist", body = ApiResponse),
+        (status = 501, description = "Valid DXQL this server does not execute", body = ApiResponse),
+        (status = 422, description = "Understood, and storage refused it", body = ApiResponse)
+    ),
+    tag = "query"
+))]
 /// Execute a DXQL query
 ///
 /// POST /api/v1/query

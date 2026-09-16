@@ -15,17 +15,45 @@ use crate::types::{
 /// DXMT VectorDB API 文档
 #[derive(OpenApi)]
 #[openapi(
+    // Every route the router serves, grouped the way the tags below group them. It listed ten
+    // of them before, so nine handlers that carried an annotation never reached the page and
+    // the whole of index, maintenance and query was missing -- a reader of the UI would have
+    // concluded the server could not snapshot, back up, rebuild an index or run DXQL.
     paths(
+        // health
+        crate::api::handlers::health_check,
+        crate::api::handlers::liveness,
+        crate::api::handlers::readiness,
+        crate::api::handlers::health_metrics,
         crate::api::handlers::get_status,
+        // tables
         crate::api::handlers::create_table,
-        crate::api::handlers::get_table,
         crate::api::handlers::list_tables,
+        crate::api::handlers::get_table,
+        crate::api::handlers::alter_table,
         crate::api::handlers::delete_table,
+        crate::api::handlers::get_table_stats,
+        crate::api::handlers::branch_table,
+        // records
         crate::api::handlers::insert_records,
+        crate::api::handlers::insert_records_optimized,
+        crate::api::handlers::list_records,
         crate::api::handlers::get_record,
         crate::api::handlers::update_record,
         crate::api::handlers::delete_records,
-        crate::api::handlers::search_vectors),
+        // search
+        crate::api::handlers::search_vectors,
+        crate::api::handlers::full_text_search,
+        crate::api::handlers::hybrid_search_combined,
+        crate::api::handlers::hybrid_search,
+        // index
+        crate::api::handlers::rebuild_index,
+        crate::api::handlers::drop_index,
+        // query
+        crate::api::handlers::execute_dxql,
+        // maintenance
+        crate::api::handlers::create_snapshot,
+        crate::api::handlers::create_backup),
     components(
         schemas(
             Table, TableConfig, CreateRecordRequest, SearchQuery, SearchResult, Record,
@@ -36,15 +64,36 @@ use crate::types::{
             crate::types::table::TableInfoResponse)
     ),
     tags(
-        (name = "system", description = "系统管理API"),
-        (name = "tables", description = "表管理API"),
-        (name = "records", description = "记录操作API"),
-        (name = "search", description = "向量搜索API")
+        (name = "health", description =
+            "Probes. /live says the process is up; /ready says a write can be made durable and \
+             answers 503 when it cannot. /health and /status are diagnostic documents and are \
+             not a substitute for either. Each probe answers at more than one path, and the \
+             generated page can only show one of them: /live is also /health/live, /ready is \
+             also /health/ready, and all four are mounted under /api/v1 as well, for clients \
+             that prefix everything. Same handler, same answer."),
+        (name = "tables", description =
+            "Create, describe, alter, branch and drop. A table's dimension is fixed when it is \
+             created."),
+        (name = "records", description =
+            "Insert (which is an upsert), read, update and delete. An update with no vector \
+             keeps the stored one, along with the sparse and named vectors."),
+        (name = "search", description =
+            "Nearest neighbours, full-text, and the two hybrid routes. /search/hybrid fuses \
+             vector and text; /hybrid_search is dense-only and refuses sparse fusion by name \
+             rather than discarding half the query."),
+        (name = "index", description =
+            "Rebuild or drop a table's index. Dropping one leaves searches answering by brute \
+             force -- exactly, and slowly."),
+        (name = "query", description = "DXQL, the SQL-shaped query language. See POST /query."),
+        (name = "maintenance", description =
+            "Snapshot and backup. Both are refused while local durability is degraded, so an \
+             unacknowledged write cannot become a new durable frontier.")
     ),
     info(
         title = "DXMT VectorDB API",
-        description = "轻量级、水平可扩展的向量数据库API",
-        version = "1.0.0",
+        description = "The HTTP surface of DXMT VectorDB. Alpha: see the repository's README \
+                       for what is supported and what is experimental.",
+        version = "0.2.0",
         contact(
             name = "DXMT Team",
             url = "https://github.com/dxmt/dxmt"
@@ -55,8 +104,7 @@ use crate::types::{
         )
     ),
     servers(
-        (url = "http://localhost:9999", description = "本地开发服务器"),
-        (url = "https://api.dxmt.tech", description = "生产环境API")
+        (url = "http://localhost:9999", description = "A server started with `vectordb serve`")
     )
 )]
 pub struct ApiDoc;
