@@ -13,6 +13,8 @@ The entry point starts a server for you, once per storage mode, and reports whic
     scripts/api_tests.sh -m "not slow"    # functional tests only, seconds
     scripts/api_tests.sh -k filter -x     # anything else goes through to pytest
     DXMT_FEATURES=text-bm25 scripts/api_tests.sh   # full-text search built in; its tests must not skip
+    DXMT_FEATURES=api-swagger scripts/api_tests.sh # also starts with --swagger, so the OpenAPI
+                                                   # examples are executed rather than skipped
 
 To attach to a server you are already running, invoke pytest from `vectordb/` -- the suite is a
 package and uses relative imports, so it has to be `pytest tests/api`, not `cd tests/api`:
@@ -41,6 +43,24 @@ Borrowed from Qdrant's `tests/openapi` (Apache 2.0 — the shape, not the code):
   from a mapped file in one and from the record in the other -- and until now nothing ran the
   same functional assertions across both. Unset means *disk*, so the mode that had never been
   exercised over HTTP was memory.
+
+## `test_openapi_examples.py` — the Swagger page as a console
+
+Every operation in the OpenAPI document that takes a body carries an example, and the examples
+are one walkthrough: create a four-dimensional table called `demo`, put `doc-1`..`doc-4` in it,
+search, filter, update, branch, delete. This file runs them in that order against the server and
+fails on the first one it refuses.
+
+The reason it exists: Swagger UI fills "Try it out" from the schema when there is no example,
+and the schema-derived body here is `{"name": "string", "dimension": 0}`, which the server
+rejects. Adding the examples turned the page from something you read into something you run;
+this keeps it that way. It caught three wrong examples the day it was written — a field named
+`destination` that the handler calls `path`, a `vector` the hybrid route only accepts as
+`dense_vector`, and a `top_k` that full-text search spells `limit`.
+
+It skips unless the server serves `/api/docs/openapi.json`, which needs `--features
+api-swagger` *and* `--swagger`; `DXMT_FEATURES=api-swagger` arranges both and turns the skip
+into a failure.
 
 ## `property/` — invariants over a generated corpus
 

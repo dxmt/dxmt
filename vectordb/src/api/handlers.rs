@@ -245,7 +245,13 @@ pub struct ListRecordsRequest {
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables",
-    request_body = CreateTableRequest,
+    request_body(content = CreateTableRequest, example = json!({
+        "name": "demo",
+        "dimension": 4,
+        "distance_metric": "cosine",
+        "description": "A table to try the routes on",
+        "enable_full_text_search": true
+    })),
     responses(
         (status = 200, description = "创建表成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -346,7 +352,7 @@ pub async fn create_table(
     get,
     path = "/api/v1/tables/{table_name}",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
     responses(
         (status = 200, description = "获取表信息成功", body = TableWithCount),
@@ -417,7 +423,7 @@ pub async fn list_tables(
     delete,
     path = "/api/v1/tables/{table_name}",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
     responses(
         (status = 200, description = "删除表成功", body = ApiResponse),
@@ -446,8 +452,8 @@ pub async fn delete_table(
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     patch,
     path = "/api/v1/tables/{table_name}",
-    request_body = TableAlterRequest,
-    params(("table_name" = String, Path, description = "Table name")),
+    request_body(content = TableAlterRequest, example = json!({"description": "Renamed by PATCH"})),
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
     responses(
         (status = 200, description = "Table altered", body = ApiResponse),
         (status = 400, description = "The change is not one that can be made", body = ApiResponse),
@@ -477,7 +483,7 @@ pub async fn alter_table(
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     delete,
     path = "/api/v1/tables/{table_name}/index",
-    params(("table_name" = String, Path, description = "Table name")),
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
     responses(
         (status = 200, description = "Index dropped", body = ApiResponse),
         (status = 404, description = "No such table", body = ApiResponse)
@@ -515,7 +521,7 @@ pub async fn drop_index(
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/index/rebuild",
-    params(("table_name" = String, Path, description = "Table name")),
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
     responses(
         (status = 200, description = "Index rebuilt", body = ApiResponse),
         (status = 404, description = "No such table", body = ApiResponse)
@@ -586,7 +592,7 @@ pub async fn create_snapshot(State(state): State<AppState>) -> impl IntoResponse
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/tables/{table_name}/stats",
-    params(("table_name" = String, Path, description = "表名")),
+    params(("table_name" = String, Path, description = "表名", example = "demo")),
     responses(
         (status = 200, description = "表统计", body = ApiResponse),
         (status = 404, description = "表不存在", body = ApiResponse)
@@ -608,7 +614,12 @@ pub async fn get_table_stats(
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/branch",
-    params(("table_name" = String, Path, description = "Table name")),
+    request_body(
+        content = serde_json::Value,
+        description = "The name for the copy, under `branch_name`",
+        example = json!({"branch_name": "demo_experiment"})
+    ),
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
     responses(
         (status = 200, description = "Branch created", body = ApiResponse),
         (status = 400, description = "branch_name missing or already taken", body = ApiResponse),
@@ -663,9 +674,18 @@ pub async fn branch_table(
     post,
     path = "/api/v1/tables/{table_name}/records",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = BatchInsertRequest,
+    request_body(content = BatchInsertRequest, example = json!({
+        "records": [
+            {"id": "doc-1", "vector": [1.0, 0.0, 0.0, 0.0],
+             "payload": {"topic": "rust", "rank": 1, "content": "rust borrows instead of collecting"}},
+            {"id": "doc-2", "vector": [0.0, 1.0, 0.0, 0.0],
+             "payload": {"topic": "go", "rank": 2, "content": "go collects instead of borrowing"}},
+            {"id": "doc-3", "vector": [0.9, 0.1, 0.0, 0.0],
+             "payload": {"topic": "rust", "rank": 3, "content": "rust traits are not interfaces"}}
+        ]
+    })),
     responses(
         (status = 200, description = "插入记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -744,8 +764,8 @@ pub async fn insert_records(
     get,
     path = "/api/v1/tables/{table_name}/records/{record_id}",
     params(
-        ("table_name" = String, Path, description = "表名"),
-        ("record_id" = String, Path, description = "记录ID")
+        ("table_name" = String, Path, description = "表名", example = "demo"),
+        ("record_id" = String, Path, description = "记录ID", example = "doc-1")
     ),
     responses(
         (status = 200, description = "获取记录成功", body = ApiResponse),
@@ -772,10 +792,13 @@ pub async fn get_record(
     put,
     path = "/api/v1/tables/{table_name}/records/{record_id}",
     params(
-        ("table_name" = String, Path, description = "表名"),
-        ("record_id" = String, Path, description = "记录ID")
+        ("table_name" = String, Path, description = "表名", example = "demo"),
+        ("record_id" = String, Path, description = "记录ID", example = "doc-1")
     ),
-    request_body = UpdateRecordRequest,
+    request_body(content = UpdateRecordRequest, example = json!({
+        "payload": {"topic": "systems"},
+        "merge_mode": "merge"
+    })),
     responses(
         (status = 200, description = "更新记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -918,9 +941,9 @@ pub async fn update_record(
     delete,
     path = "/api/v1/tables/{table_name}/records",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = BatchDeleteRequest,
+    request_body(content = BatchDeleteRequest, example = json!({"ids": ["doc-2", "doc-3"]})),
     responses(
         (status = 200, description = "删除记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -960,9 +983,17 @@ pub async fn delete_records(
     post,
     path = "/api/v1/tables/{table_name}/search",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = SearchQuery,
+    request_body(content = SearchQuery, example = json!({
+        "vector": [1.0, 0.0, 0.0, 0.0],
+        "top_k": 3,
+        "limit": 3,
+        "with_payload": true,
+        "filter": {
+            "must": [{"key": "topic", "operation": {"type": "Equal", "value": "rust"}}]
+        }
+    })),
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -998,9 +1029,9 @@ pub async fn search_vectors(
     post,
     path = "/api/v1/tables/{table_name}/records/list",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = ListRecordsRequest,
+    request_body(content = ListRecordsRequest, example = json!({"limit": 10, "offset": 0})),
     responses(
         (status = 200, description = "列出记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1035,14 +1066,22 @@ pub async fn list_records(
     }
 }
 
-/// 混合搜索（向量 + 文本 + 稀疏向量）
+/// Dense-vector search under a hybrid-shaped body.
+///
+/// Despite the name it fuses nothing: a body carrying `sparse_vector` or `text_query` is
+/// answered 501 naming the endpoint that does fuse them (`POST /tables/{name}/search/hybrid`,
+/// feature `text-bm25`). The example is therefore a lone `dense_vector`, which is the only
+/// request this route serves.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/hybrid_search",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = HybridSearchQuery,
+    request_body(content = HybridSearchQuery, example = json!({
+        "dense_vector": [1.0, 0.0, 0.0, 0.0],
+        "top_k": 3
+    })),
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1253,7 +1292,7 @@ pub struct CreateBackupRequest {
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/backup",
-    request_body = CreateBackupRequest,
+    request_body(content = CreateBackupRequest, example = json!({"path": "/tmp/dxmt-backup"})),
     responses(
         (status = 200, description = "备份完成", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse)
@@ -1281,9 +1320,15 @@ pub async fn create_backup(
     post,
     path = "/api/v1/tables/{table_name}/records/bulk",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = OptimizedBatchInsertRequest,
+    request_body(content = OptimizedBatchInsertRequest, example = json!({
+        "records": [
+            {"id": "doc-4", "vector": [0.0, 0.0, 1.0, 0.0],
+             "payload": {"topic": "python", "content": "python collects and does not borrow"}}
+        ],
+        "mode": "standard"
+    })),
     responses(
         (status = 200, description = "插入记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1466,14 +1511,18 @@ pub async fn insert_records_optimized(
     }
 }
 
-/// 全文搜索
+/// BM25 search over the payload's text, for a table created with `enable_full_text_search`.
+///
+/// Needs the `text-bm25` feature; a build without it answers `FEATURE_DISABLED`. Without a
+/// declared `text_fields`, the indexed field is `content` — which is why the insert examples
+/// put one there.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/tables/{table_name}/search/text",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = FullTextSearchRequest,
+    request_body(content = FullTextSearchRequest, example = json!({"query": "rust", "limit": 3})),
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1542,9 +1591,15 @@ pub async fn full_text_search(
     post,
     path = "/api/v1/tables/{table_name}/search/hybrid",
     params(
-        ("table_name" = String, Path, description = "表名")
+        ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body = HybridSearchRequest,
+    request_body(content = HybridSearchRequest, example = json!({
+        "vector": [1.0, 0.0, 0.0, 0.0],
+        "text": "rust",
+        "top_k": 3,
+        "limit": 3,
+        "alpha": 0.5
+    })),
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1589,6 +1644,11 @@ pub async fn hybrid_search_combined(
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
     path = "/api/v1/query",
+    request_body(
+        content = serde_json::Value,
+        description = "A DXQL statement under `query`",
+        example = json!({"query": "SELECT * FROM demo WHERE rank > 1 LIMIT 10"})
+    ),
     responses(
         (status = 200, description = "Statement executed", body = ApiResponse),
         (status = 400, description = "The statement does not parse or compile", body = ApiResponse),

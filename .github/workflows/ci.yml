@@ -144,17 +144,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      # The default build has no full-text search, so everywhere else the four tests in
-      # tests/api/test_full_text.py skip themselves -- and a skipped test is an absent one.
-      # This builds the server with the feature and runs the whole suite in both storage
-      # modes. DXMT_FEATURES also turns those skips into failures, so a build that quietly lost
-      # the feature cannot pass. Its own job rather than a step in sdk-live: that job already
-      # has target/debug/vectordb running, and rebuilding over a running binary fails.
-      - name: Functional API tests with text-bm25 (memory and disk)
+      # The default build has no full-text search and no Swagger, so everywhere else the four
+      # tests in tests/api/test_full_text.py and the five in tests/api/test_openapi_examples.py
+      # skip themselves -- and a skipped test is an absent one. This builds the server with both
+      # features and runs the whole suite in both storage modes. DXMT_FEATURES also turns those
+      # skips into failures, so a build that quietly lost a feature cannot pass, and it is what
+      # makes the script start the server with `--swagger`. Its own job rather than a step in
+      # sdk-live: that job already has target/debug/vectordb running, and rebuilding over a
+      # running binary fails.
+      - name: Functional API tests with text-bm25 and api-swagger (memory and disk)
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest httpx
-          DXMT_FEATURES=text-bm25 scripts/api_tests.sh -q
+          DXMT_FEATURES=text-bm25,api-swagger scripts/api_tests.sh -q
 
   sdk-live:
     name: Python and JavaScript SDK live contract

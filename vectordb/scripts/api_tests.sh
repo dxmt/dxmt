@@ -17,7 +17,9 @@
 #   DXMT_SKIP_BUILD=1         the binary is already built (CI)
 #   DXMT_FEATURES=text-bm25   build with these cargo features, and tell the tests the server has
 #                             them: a test that needs one then fails where it would otherwise
-#                             skip, so a build that lost the feature cannot pass
+#                             skip, so a build that lost the feature cannot pass. Naming
+#                             api-swagger also starts the server with `--swagger`, which is what
+#                             makes the OpenAPI examples checkable
 #   PYTEST=...                a specific interpreter's pytest
 
 # Deliberately not `set -e`: both modes must run, so the summary can say which one failed.
@@ -28,6 +30,14 @@ MODES=${DXMT_MODES:-"memory disk"}
 PYTEST=${PYTEST:-"python3 -m pytest"}
 BIN=target/debug/vectordb
 export DXMT_FEATURES=${DXMT_FEATURES:-}
+
+# Compiling Swagger in is not the same as serving it -- `--swagger` is a separate runtime
+# decision, and without the flag the binary carries the document and answers 404 for it. So the
+# flag follows the feature, and `test_openapi_examples.py` turns its skip into a failure when
+# `DXMT_FEATURES` names api-swagger: otherwise "the examples are checked" degrades into "the
+# examples were not there to check" without anything going red.
+SERVE_FLAGS=""
+case ",$(echo "$DXMT_FEATURES" | tr ' ' ','), " in *,api-swagger,*) SERVE_FLAGS="--swagger" ;; esac
 
 if [ "${DXMT_SKIP_BUILD:-0}" != "1" ]; then
   cargo build --bin vectordb ${DXMT_FEATURES:+--features "$DXMT_FEATURES"} || exit 1
@@ -74,7 +84,7 @@ for mode in $MODES; do
   DB_SNAPSHOT_INTERVAL_SECS=0 \
   DB_EVICTION_INTERVAL_SECS=0 \
   RUST_LOG=${RUST_LOG:-info} \
-    setsid "$BIN" serve --host 127.0.0.1 --port "$port" > "$log" 2>&1 &
+    setsid "$BIN" serve --host 127.0.0.1 --port "$port" $SERVE_FLAGS > "$log" 2>&1 &
   server_pid=$!
 
   ready=0
