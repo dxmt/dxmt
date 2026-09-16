@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Any, Optional
 
+from urllib.parse import quote
+
 import httpx
 
 from .exceptions import (
@@ -65,6 +67,19 @@ def _encode_json(payload: Any) -> bytes:
     return json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
+
+
+
+def _seg(value: str) -> str:
+    """Percent-encode one URL path segment.
+
+    A table name or a record id goes into the path, and ids carry characters the path reserves.
+    `doc.md#3` stops at the `#` -- a fragment delimiter -- so the request reaches
+    `/records/doc.md` and the server answers about a record nobody asked for; `s3://bucket/key`
+    turns one segment into three. Both shapes are routine in a RAG corpus. Characters that need
+    no encoding pass through unchanged, so this is safe on every id.
+    """
+    return quote(str(value), safe="")
 
 
 class DXMTClient:
@@ -491,7 +506,7 @@ class DXMTClient:
         payload = {"records": normalized_records, "mode": mode}
         try:
             response = self._client.post(
-                f"/tables/{table_name}/records",
+                f"/tables/{_seg(table_name)}/records",
                 content=_encode_json(payload),
                 headers=_JSON_HEADERS,
             )
@@ -522,7 +537,7 @@ class DXMTClient:
         payload = {"records": normalized_records, "mode": mode}
         try:
             response = await self.async_client.post(
-                f"/tables/{table_name}/records",
+                f"/tables/{_seg(table_name)}/records",
                 json=payload,
             )
             response.raise_for_status()
@@ -588,7 +603,7 @@ class DXMTClient:
 
         try:
             response = self._client.put(
-                f"/tables/{table_name}/records/{record_id}",
+                f"/tables/{_seg(table_name)}/records/{_seg(record_id)}",
                 json=request_payload,
             )
             response.raise_for_status()
@@ -633,7 +648,7 @@ class DXMTClient:
 
         try:
             response = await self.async_client.put(
-                f"/tables/{table_name}/records/{record_id}",
+                f"/tables/{_seg(table_name)}/records/{_seg(record_id)}",
                 json=request_payload,
             )
             response.raise_for_status()
@@ -666,7 +681,7 @@ class DXMTClient:
         try:
             response = self._client.request(
                 "DELETE",
-                f"/tables/{table_name}/records",
+                f"/tables/{_seg(table_name)}/records",
                 json=payload,
             )
             response.raise_for_status()
@@ -688,7 +703,7 @@ class DXMTClient:
         try:
             response = await self.async_client.request(
                 "DELETE",
-                f"/tables/{table_name}/records",
+                f"/tables/{_seg(table_name)}/records",
                 json=payload,
             )
             response.raise_for_status()
@@ -729,7 +744,7 @@ class DXMTClient:
         """
         try:
             response = self._client.post(
-                f"/tables/{table_name}/records/list",
+                f"/tables/{_seg(table_name)}/records/list",
                 json={"limit": limit, "offset": offset},
             )
             response.raise_for_status()
@@ -752,7 +767,7 @@ class DXMTClient:
         """Async twin of :meth:`list_records`."""
         try:
             response = await self.async_client.post(
-                f"/tables/{table_name}/records/list",
+                f"/tables/{_seg(table_name)}/records/list",
                 json={"limit": limit, "offset": offset},
             )
             response.raise_for_status()
@@ -788,7 +803,7 @@ class DXMTClient:
         for record_id in ids:
             try:
                 response = self._client.get(
-                    f"/tables/{table_name}/records/{record_id}"
+                    f"/tables/{_seg(table_name)}/records/{_seg(record_id)}"
                 )
                 response.raise_for_status()
                 data = self._response_data(response.json())
@@ -818,7 +833,7 @@ class DXMTClient:
         for record_id in ids:
             try:
                 response = await self.async_client.get(
-                    f"/tables/{table_name}/records/{record_id}"
+                    f"/tables/{_seg(table_name)}/records/{_seg(record_id)}"
                 )
                 response.raise_for_status()
                 data = self._response_data(response.json())
@@ -888,7 +903,7 @@ class DXMTClient:
             payload["search_mode"] = search_mode
         try:
             response = self._client.post(
-                f"/tables/{table_name}/search",
+                f"/tables/{_seg(table_name)}/search",
                 content=_encode_json(payload),
                 headers=_JSON_HEADERS,
             )
@@ -938,7 +953,7 @@ class DXMTClient:
             payload["search_mode"] = search_mode
         try:
             response = await self.async_client.post(
-                f"/tables/{table_name}/search",
+                f"/tables/{_seg(table_name)}/search",
                 json=payload,
             )
             response.raise_for_status()
@@ -1006,7 +1021,7 @@ class DXMTClient:
         }
         try:
             response = self._client.post(
-                f"/tables/{table_name}/search/hybrid",
+                f"/tables/{_seg(table_name)}/search/hybrid",
                 json=payload,
             )
             response.raise_for_status()
@@ -1071,7 +1086,7 @@ class DXMTClient:
         }
         try:
             response = await self.async_client.post(
-                f"/tables/{table_name}/search/hybrid",
+                f"/tables/{_seg(table_name)}/search/hybrid",
                 json=payload,
             )
             response.raise_for_status()
@@ -1138,7 +1153,7 @@ class DXMTClient:
         }
         try:
             response = self._client.post(
-                f"/tables/{table_name}/search/text",
+                f"/tables/{_seg(table_name)}/search/text",
                 json=payload,
             )
             response.raise_for_status()
@@ -1254,7 +1269,7 @@ class DXMTClient:
         }
         try:
             response = await self.async_client.post(
-                f"/tables/{table_name}/search/text",
+                f"/tables/{_seg(table_name)}/search/text",
                 json=payload,
             )
             response.raise_for_status()
