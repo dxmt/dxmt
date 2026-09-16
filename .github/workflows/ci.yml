@@ -96,7 +96,7 @@ jobs:
       # ever compiled under `-D warnings`. A weaker gate here means the opt-in features drift
       # to a different standard than the code they sit next to.
       - name: API and text integrations
-        run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,metrics -- -D warnings
+        run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,api-grpc,metrics -- -D warnings
 
       - name: Object store backend
         run: cargo check --features s3-storage
@@ -107,7 +107,7 @@ jobs:
       - name: Feature-gated test targets
         run: >
           cargo clippy --all-targets
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc
           -- -D warnings
 
       # Compiling a test is not running it. Before this step the dataset, recall-metric and
@@ -118,7 +118,7 @@ jobs:
       - name: Feature-gated tests
         run: >
           cargo test --tests
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc
 
   build:
     name: release build

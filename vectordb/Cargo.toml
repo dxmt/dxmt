@@ -57,6 +57,11 @@ path = "examples/full_text_search_example.rs"
 required-features = ["text-bm25"]
 
 [[example]]
+name = "grpc_client"
+path = "examples/grpc_client.rs"
+required-features = ["api-grpc"]
+
+[[example]]
 name = "dxql_demo"
 path = "examples/dxql_demo.rs"
 
@@ -290,6 +295,12 @@ incremental = true
 # If needed, we can patch specific dependencies here
 
 # Feature flags for conditional compilation
+[build-dependencies]
+# Only compiled with `api-grpc`. `protoc-bin-vendored` ships the compiler itself, so building
+# the gRPC surface does not require protoc to be installed on the machine.
+tonic-build = { version = "0.11", optional = true }
+protoc-bin-vendored = { version = "3.0", optional = true }
+
 [features]
 # The default build is the supported single-node Alpha surface. Heavy or experimental
 # integrations must be opted into explicitly so a normal build does not require AWS, GraphQL,
@@ -313,6 +324,8 @@ hybrid-search = ["text-bm25"]
 api-graphql = ["async-graphql", "async-graphql-axum"]
 api-swagger = ["utoipa", "utoipa-swagger-ui"]
 api-ws = []
+# gRPC, for the data path. Off by default like every other interface; see proto/dxmt.proto.
+api-grpc = ["dep:tonic", "dep:prost", "dep:tonic-build", "dep:protoc-bin-vendored"]
 embeddings = ["reqwest", "backoff"]
 gpu = ["embeddings", "cudarc"]
 simd = ["embeddings"]
@@ -320,7 +333,7 @@ simd = ["embeddings"]
 # the global allocator, which is the point.
 jemalloc = ["tikv-jemallocator"]
 metrics = ["prometheus"]
-cluster = ["consul", "tonic", "prost", "hash_ring", "consensus"]
+cluster = ["consul", "dep:tonic", "dep:prost", "hash_ring", "consensus"]
 consensus = []
 # Multimodal support (experimental - ONNX Runtime API changes in progress)
 multimodal = ["embeddings", "ort", "image"]

@@ -1,5 +1,7 @@
 #[cfg(feature = "api-graphql")]
 pub mod graphql;
+#[cfg(feature = "api-grpc")]
+pub mod grpc;
 pub mod handlers;
 #[cfg(feature = "multimodal")]
 pub mod multimodal;

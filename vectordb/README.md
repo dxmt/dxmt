@@ -52,6 +52,7 @@ cargo build --release --features api-swagger,api-graphql,api-ws
 | `--swagger`   | `GET /api/docs`, spec at `/api/docs/openapi.json`    |
 | `--graphql`   | `POST /graphql`                                      |
 | `--websocket` | `GET /ws` (upgrade)                                  |
+| `--grpc-port` | gRPC on that port, alongside HTTP (`proto/dxmt.proto`) |
 
 `GET /api/v1/tables/{name}/stats` reports `resident`: whether the table was in memory when
 asked. A query against an evicted table rehydrates it transparently, so without this a caller
@@ -61,6 +62,28 @@ has no way to know the next one will pay for a fetch from object storage.
 `storage.wal_next_sequence`, `storage.last_wal_sync_at`, `storage.last_snapshot_at`, and
 `storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
 timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
+
+### gRPC
+
+The data path also speaks gRPC, on its own port, when the server is built with the feature and
+told to serve it:
+
+```bash
+cargo build --release --features api-grpc
+./target/release/vectordb serve --grpc-port 9998        # HTTP stays on 9999
+```
+
+`proto/dxmt.proto` is the schema: search, insert, get, update, delete and the table lifecycle.
+Hybrid search, full-text search, DXQL, snapshots and backups stay on REST, where an extra
+millisecond of JSON does not matter and a second schema would only have to be kept in step.
+
+What it buys is the vector. A 768-dimension search request is 3,090 bytes as protobuf and
+15,571 as JSON — **5.0x** — and the protobuf side needs no parsing beyond a copy, where every
+float in the JSON is decimal text the sender formats and the receiver parses. Measured with
+`cargo run --features api-grpc --example grpc_client`, which prints it.
+
+Both interfaces go through the same storage calls, including the one that decides what an
+update leaves alone, so they cannot drift into meaning different things.
 
 ### MCP server
 
@@ -179,7 +202,7 @@ export DB_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 
 Default: `tokio-runtime`, `basic-storage`.
 
-Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `s3-storage`, `gpu` (CUDA),
+Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `gpu` (CUDA),
 `cluster`, `multimodal`, `embeddings`, `python` (PyO3 bindings), `metrics`, `hf-datasets`.
 
 ## Client SDKs
@@ -286,8 +309,9 @@ These are real gaps, not roadmap aspirations:
   `create_index_instance`.
 - **Multimodal** (`src/multimodal/`) — returns placeholder embeddings, pending a stable
   `ort` 2.0 release.
-- **No gRPC.** It is not built; `api/grpc.rs` was never declared by `api/mod.rs` and has been
-  removed.
+- **gRPC carries the data path only.** Search, insert and the record routes, plus the table
+  lifecycle; hybrid search, full-text search, DXQL, snapshots and backups stay on REST. It is
+  off by default and off without `--grpc-port`.
 - **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
   `embeddings`.
 - **The graph is built inside the write request.** There is no compaction or optimizer stage

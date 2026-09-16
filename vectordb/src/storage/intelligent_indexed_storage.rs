@@ -6025,6 +6025,75 @@ impl IntelligentIndexedStorage {
     }
 
     /// Update a record
+    /// Update a record the way a caller means it: change what was given, keep what was not.
+    ///
+    /// [`Self::update_record`] takes a whole `CreateRecordRequest` and replaces the record with
+    /// it. Everything between that and what an API caller sends -- deciding whether the record
+    /// has to exist, keeping the stored vector when none is given, keeping the sparse and named
+    /// vectors that hybrid search depends on, and merging a payload rather than replacing it --
+    /// lived inline in the HTTP handler. gRPC needs the same semantics, and two copies of sixty
+    /// lines of "which of these do we keep" is how two interfaces come to disagree about what
+    /// an update means. It lives here so there is one answer.
+    ///
+    /// `vector: None` keeps the stored dense vector, and the sparse and named vectors are kept
+    /// either way -- the update shape exposes only the dense one, and silently dropping the
+    /// postings that hybrid and named-vector search rely on is not something a payload edit
+    /// should do.
+    pub async fn apply_update(
+        &self,
+        tablename: &str,
+        record_id: &RecordId,
+        vector: Option<DenseVector>,
+        payload: Option<serde_json::Value>,
+        merge: bool,
+        upsert: bool,
+    ) -> crate::Result<Record> {
+        let existing = self.get_record(tablename, record_id).await.ok();
+        if !upsert && existing.is_none() {
+            return Err(crate::Error::RecordNotFound(record_id.to_string()));
+        }
+
+        let final_vector = match vector {
+            Some(v) => v,
+            None => existing
+                .as_ref()
+                .map(|r| r.vector.clone())
+                .unwrap_or_default(),
+        };
+        let final_payload = match (merge, &existing) {
+            (true, Some(record)) => {
+                let mut merged = record.payload.clone();
+                if let Some(new_payload) = payload {
+                    match (merged.as_object_mut(), new_payload.as_object()) {
+                        (Some(into), Some(from)) => {
+                            for (key, value) in from {
+                                into.insert(key.clone(), value.clone());
+                            }
+                        }
+                        // Merging into something that is not an object has no meaning; the
+                        // new value wins, which is what replace would have done anyway.
+                        _ => merged = new_payload,
+                    }
+                }
+                Some(merged)
+            }
+            _ => payload,
+        };
+
+        self.update_record(
+            tablename,
+            record_id,
+            CreateRecordRequest {
+                id: record_id.clone(),
+                vector: final_vector,
+                sparse_vector: existing.as_ref().and_then(|r| r.sparse_vector.clone()),
+                payload: final_payload,
+                named_vectors: existing.as_ref().and_then(|r| r.named_vectors.clone()),
+            },
+        )
+        .await
+    }
+
     pub async fn update_record(
         &self,
         tablename: &str,

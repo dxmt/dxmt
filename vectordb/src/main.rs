@@ -75,6 +75,10 @@ enum Commands {
         /// Serve the WebSocket endpoint (standard mode only)
         #[arg(long)]
         websocket: bool,
+        /// Serve gRPC on this port, alongside HTTP (standard mode only; requires `api-grpc`).
+        /// 0 disables, which is the default.
+        #[arg(long, default_value = "0", env = "DB_GRPC_PORT")]
+        grpc_port: u16,
     },
     /// Speak the Model Context Protocol over stdin/stdout
     ///
@@ -138,6 +142,7 @@ async fn main() -> Result<()> {
             swagger,
             graphql,
             websocket,
+            grpc_port,
         } => {
             let bind_addr: SocketAddr = format!("{}:{}", host, port)
                 .parse()
@@ -201,6 +206,49 @@ async fn main() -> Result<()> {
                 }
                 if websocket {
                     info!("  WebSocket      GET  /ws  (upgrade)");
+                }
+
+                // gRPC gets its own port rather than sharing the HTTP one. Multiplexing both
+                // over one listener is possible and costs a tower layer that has to sniff every
+                // connection; two ports is what the comparable databases do, and it keeps the
+                // HTTP path exactly as it was.
+                if grpc_port != 0 {
+                    #[cfg(feature = "api-grpc")]
+                    {
+                        let Some(storage) = storage.clone() else {
+                            return Err(dxmt_vectordb::Error::InvalidConfig(
+                                "gRPC needs standard mode; simple mode has no shared storage \
+                                 handle to serve from"
+                                    .to_string(),
+                            ));
+                        };
+                        let grpc_addr: std::net::SocketAddr =
+                            format!("{}:{}", host, grpc_port).parse().map_err(|e| {
+                                dxmt_vectordb::Error::InvalidConfig(format!(
+                                    "bad gRPC address: {e}"
+                                ))
+                            })?;
+                        info!("  gRPC           {} (proto/dxmt.proto)", grpc_addr);
+                        let service =
+                            dxmt_vectordb::api::grpc::GrpcService::new(storage).into_server();
+                        tokio::spawn(async move {
+                            if let Err(e) = tonic::transport::Server::builder()
+                                .add_service(service)
+                                .serve(grpc_addr)
+                                .await
+                            {
+                                tracing::error!("gRPC server stopped: {}", e);
+                            }
+                        });
+                    }
+                    #[cfg(not(feature = "api-grpc"))]
+                    {
+                        return Err(dxmt_vectordb::Error::InvalidConfig(
+                            "--grpc-port needs the `api-grpc` feature: rebuild with \
+                             `cargo build --features api-grpc`"
+                                .to_string(),
+                        ));
+                    }
                 }
 
                 info!("VectorDB server listening on {}", bind_addr);
