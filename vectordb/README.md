@@ -77,10 +77,32 @@ cargo build --release --features api-grpc
 Hybrid search, full-text search, DXQL, snapshots and backups stay on REST, where an extra
 millisecond of JSON does not matter and a second schema would only have to be kept in step.
 
-What it buys is the vector. A 768-dimension search request is 3,090 bytes as protobuf and
-15,571 as JSON — **5.0x** — and the protobuf side needs no parsing beyond a copy, where every
-float in the JSON is decimal text the sender formats and the receiver parses. Measured with
-`cargo run --features api-grpc --example grpc_client`, which prints it.
+**It does not make this database faster, and the measurement says so.** A 768-dimension search
+request is 3,084 bytes as protobuf against 9,694 as JSON — 3.1x less on the wire — but
+`src/bin/loadgen` and `src/bin/loadgen_grpc` put the two transports against the same server,
+table and queries, and the throughput is the same:
+
+| 100,000 x 768, same server, clients on their own cores | JSON | gRPC |
+| --- | --- | --- |
+| k=100, 16 connections | 1,369 QPS, p50 11.2 ms | 1,431 QPS, p50 10.6 ms |
+| k=10, 48 connections | 1,735 QPS, p50 27.0 ms | 1,766 QPS, p50 26.7 ms |
+| client CPU per query | 53–56 µs | 194–235 µs |
+
+Between 2% and 5%, which is inside the run-to-run noise, and the gRPC client costs four times
+the CPU per query. The reason is not subtle: the server spends milliseconds walking the graph
+and microseconds parsing the request, so the format of the request cannot matter. A cheap JSON
+client was already enough to saturate it.
+
+What gRPC is still worth having for:
+
+- **Bandwidth**, where it is not free. Three times less traffic is three times less traffic over
+  a WAN, a metered link, or a shared NIC at high QPS. The measurements above are loopback.
+- **A schema that cannot be misspelt.** A filter's operator is a string over REST, so `"Equalz"`
+  is a runtime error; in `proto/dxmt.proto` it is a `oneof` and does not compile.
+- **Being expected.** The comparable databases all offer it.
+
+What it is *not* yet: streaming. Every method is unary, so the one thing gRPC does that REST
+genuinely cannot — a server-streamed result set for a bulk export — is not implemented.
 
 Both interfaces go through the same storage calls, including the one that decides what an
 update leaves alone, so they cannot drift into meaning different things.

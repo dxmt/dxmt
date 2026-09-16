@@ -30,6 +30,11 @@ name = "route_probe"
 path = "src/bin/route_probe.rs"
 
 [[bin]]
+name = "loadgen_grpc"
+path = "src/bin/loadgen_grpc.rs"
+required-features = ["api-grpc"]
+
+[[bin]]
 name = "loadgen"
 path = "src/bin/loadgen.rs"
 
