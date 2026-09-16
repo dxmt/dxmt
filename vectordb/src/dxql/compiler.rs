@@ -29,18 +29,23 @@ impl Compiler {
     }
 
     pub fn compile(&self, ast: Statement) -> Result<QueryPlan, DxqlError> {
+        // `NOW()` is resolved here rather than where each value is converted, so that two of
+        // them in one statement mean the same instant. SQL defines it that way, and a
+        // `SET created = NOW(), updated = NOW()` that stored two different times would be a
+        // nuisance to explain and impossible to notice.
+        let now = chrono::Utc::now();
         match ast {
-            Statement::Select(select) => compile_select(select),
-            Statement::Insert(insert) => compile_insert(insert),
-            Statement::Update(update) => compile_update(update),
-            Statement::Delete(delete) => compile_delete(delete),
+            Statement::Select(select) => compile_select(select, now),
+            Statement::Insert(insert) => compile_insert(insert, now),
+            Statement::Update(update) => compile_update(update, now),
+            Statement::Delete(delete) => compile_delete(delete, now),
             Statement::Create(create) => compile_create(create),
             Statement::Drop(drop) => compile_drop(drop),
         }
     }
 }
 
-fn compile_select(select: SelectStatement) -> Result<QueryPlan, DxqlError> {
+fn compile_select(select: SelectStatement, now: Instant) -> Result<QueryPlan, DxqlError> {
     let projections = select
         .fields
         .into_iter()
@@ -49,7 +54,10 @@ fn compile_select(select: SelectStatement) -> Result<QueryPlan, DxqlError> {
             SelectField::Field { name, alias } => Some(Projection { field: name, alias }),
         })
         .collect();
-    let filter = select.where_clause.map(compile_where).transpose()?;
+    let filter = select
+        .where_clause
+        .map(|w| compile_where(w, now))
+        .transpose()?;
     let order_by = select
         .order_by
         .into_iter()
@@ -75,33 +83,36 @@ fn compile_select(select: SelectStatement) -> Result<QueryPlan, DxqlError> {
     }))
 }
 
-fn compile_where(clause: WhereClause) -> Result<FilterExpr, DxqlError> {
+fn compile_where(clause: WhereClause, now: Instant) -> Result<FilterExpr, DxqlError> {
     Ok(match clause {
         WhereClause::And(terms) => FilterExpr::And(
             terms
                 .into_iter()
-                .map(compile_where)
+                .map(|term| compile_where(term, now))
                 .collect::<Result<_, _>>()?,
         ),
         WhereClause::Or(terms) => FilterExpr::Or(
             terms
                 .into_iter()
-                .map(compile_where)
+                .map(|term| compile_where(term, now))
                 .collect::<Result<_, _>>()?,
         ),
         WhereClause::Comparison { field, op, value } => FilterExpr::Compare(Filter {
             field,
             operation: operator(&op).to_string(),
-            value: json(value)?,
+            value: json(value, now)?,
         }),
         WhereClause::In { field, values } => FilterExpr::In {
             field,
-            values: values.into_iter().map(json).collect::<Result<_, _>>()?,
+            values: values
+                .into_iter()
+                .map(|v| json(v, now))
+                .collect::<Result<_, _>>()?,
         },
         WhereClause::Between { field, low, high } => FilterExpr::Between {
             field,
-            low: json(low)?,
-            high: json(high)?,
+            low: json(low, now)?,
+            high: json(high, now)?,
         },
         WhereClause::VectorSimilarity { .. } => {
             return Err(DxqlError::Unsupported(
@@ -135,7 +146,10 @@ fn operator(op: &ComparisonOp) -> &'static str {
 
 /// A literal as the JSON a payload holds. Parameters are refused: `POST /query` takes a string
 /// and nothing to bind them to.
-fn json(value: Value) -> Result<serde_json::Value, DxqlError> {
+/// The instant a statement is compiled at, which is what `NOW()` means.
+type Instant = chrono::DateTime<chrono::Utc>;
+
+fn json(value: Value, now: Instant) -> Result<serde_json::Value, DxqlError> {
     Ok(match value {
         Value::Null => serde_json::Value::Null,
         Value::Boolean(b) => serde_json::Value::Bool(b),
@@ -143,6 +157,9 @@ fn json(value: Value) -> Result<serde_json::Value, DxqlError> {
         Value::Float(f) => serde_json::Value::from(f),
         Value::Text(s) => serde_json::Value::String(s),
         Value::Vector(v) => serde_json::json!(v),
+        // RFC 3339, the same spelling `created_at` and `updated_at` use on a record, so a
+        // payload field set by `NOW()` sorts and compares against them.
+        Value::Now => serde_json::Value::String(now.to_rfc3339()),
         Value::Parameter(p) => {
             return Err(DxqlError::Unsupported(format!(
                 "query parameter {p}: POST /query has no parameter bindings; write the value inline"
@@ -152,7 +169,7 @@ fn json(value: Value) -> Result<serde_json::Value, DxqlError> {
 }
 
 /// `id` and `vector` are the record's own; every other column becomes a payload field.
-fn compile_insert(insert: InsertStatement) -> Result<QueryPlan, DxqlError> {
+fn compile_insert(insert: InsertStatement, now: Instant) -> Result<QueryPlan, DxqlError> {
     let mut row = InsertRow {
         id: None,
         vector: Vec::new(),
@@ -180,7 +197,10 @@ fn compile_insert(insert: InsertStatement) -> Result<QueryPlan, DxqlError> {
                     ))
                 }
             },
-            _ => row.payload.insert(field.clone(), json(value)?).is_some(),
+            _ => row
+                .payload
+                .insert(field.clone(), json(value, now)?)
+                .is_some(),
         };
         if repeated {
             return Err(DxqlError::CompilationError(format!(
@@ -199,7 +219,7 @@ fn compile_insert(insert: InsertStatement) -> Result<QueryPlan, DxqlError> {
     }))
 }
 
-fn compile_update(update: UpdateStatement) -> Result<QueryPlan, DxqlError> {
+fn compile_update(update: UpdateStatement, now: Instant) -> Result<QueryPlan, DxqlError> {
     let mut set_payload = serde_json::Map::new();
     let mut set_vector = None;
     for (field, value) in update.assignments {
@@ -218,7 +238,7 @@ fn compile_update(update: UpdateStatement) -> Result<QueryPlan, DxqlError> {
                 }
             },
             _ => {
-                set_payload.insert(field.clone(), json(value)?);
+                set_payload.insert(field.clone(), json(value, now)?);
             }
         }
     }
@@ -226,14 +246,20 @@ fn compile_update(update: UpdateStatement) -> Result<QueryPlan, DxqlError> {
         table: update.table,
         set_payload,
         set_vector,
-        filter: update.where_clause.map(compile_where).transpose()?,
+        filter: update
+            .where_clause
+            .map(|w| compile_where(w, now))
+            .transpose()?,
     }))
 }
 
-fn compile_delete(delete: DeleteStatement) -> Result<QueryPlan, DxqlError> {
+fn compile_delete(delete: DeleteStatement, now: Instant) -> Result<QueryPlan, DxqlError> {
     Ok(QueryPlan::Delete(DeletePlan {
         table: delete.table,
-        filter: delete.where_clause.map(compile_where).transpose()?,
+        filter: delete
+            .where_clause
+            .map(|w| compile_where(w, now))
+            .transpose()?,
     }))
 }
 
@@ -395,6 +421,27 @@ pub struct DropPlan {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two `NOW()`s in one statement are one instant. SQL defines it that way, and a
+    /// `SET created = NOW(), updated = NOW()` that stored two different times would be both
+    /// wrong and invisible.
+    #[test]
+    fn every_now_in_one_statement_is_the_same_instant() {
+        let statement = crate::dxql::parser::Parser::new()
+            .parse("UPDATE t SET created = NOW(), updated = NOW() WHERE id = 'a'")
+            .expect("parses");
+        let QueryPlan::Update(plan) = Compiler::new().compile(statement).expect("compiles") else {
+            panic!("not an UPDATE plan");
+        };
+        assert_eq!(
+            plan.set_payload.get("created"),
+            plan.set_payload.get("updated"),
+            "two NOW() in one statement must resolve together"
+        );
+        let stamped = plan.set_payload["created"].as_str().expect("a string");
+        chrono::DateTime::parse_from_rfc3339(stamped)
+            .unwrap_or_else(|e| panic!("NOW() should be RFC 3339, got {stamped:?}: {e}"));
+    }
     use super::*;
     use crate::dxql::parser::Parser;
     use serde_json::json;

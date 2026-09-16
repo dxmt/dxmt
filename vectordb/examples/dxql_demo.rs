@@ -1,18 +1,70 @@
-use dxmt_vectordb::dxql::{DxqlEngine, QueryResult};
+//! What DXQL parses, compiles and executes -- and what it refuses.
+//!
+//! Every statement below runs against a real in-memory table, through the same three stages the
+//! server's `POST /query` uses: parse, compile, execute. That matters, because `DxqlEngine::new`
+//! wires the *storage-free* executor, which returns an empty result for every plan; a demo built
+//! on it printed "Results: 0 records found" for a SELECT and looked like an empty table rather
+//! than like nothing having happened.
+//!
+//! The refusals are the point as much as the successes. DXQL says no to vector search, text
+//! search and graph traversal in a WHERE clause, and names the route to use instead, rather than
+//! accepting the syntax and quietly doing something else.
+
+use dxmt_vectordb::config::{MemoryConfig, StorageConfig};
+use dxmt_vectordb::dxql::{compiler::Compiler, executor::StorageAwareExecutor, parser::Parser};
+use dxmt_vectordb::dxql::{DxqlError, QueryResult};
+use dxmt_vectordb::storage::IntelligentIndexedStorage;
+use std::sync::Arc;
+
+/// Parse, compile, execute: the three stages, wired the way `POST /query` wires them.
+async fn run(executor: &StorageAwareExecutor, query: &str) -> Result<QueryResult, DxqlError> {
+    let statement = Parser::new().parse(query)?;
+    let plan = Compiler::new().compile(statement)?;
+    executor.execute(plan).await
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("DXQL Query Language Demo");
     println!("========================\n");
 
-    // Initialize the DXQL engine
-    let engine = DxqlEngine::new();
+    let storage = Arc::new(
+        IntelligentIndexedStorage::new(&StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(MemoryConfig {
+                max_size_mb: 512,
+                eviction_policy: "lru".to_string(),
+            }),
+            ..Default::default()
+        })
+        .await?,
+    );
+    let executor = StorageAwareExecutor::new(
+        storage.clone() as Arc<dyn dxmt_vectordb::storage::traits::_Storage>
+    );
+
+    // Two tables for the statements below to act on. Created through DXQL itself, which is
+    // also section 9's subject.
+    // Only `products`: section 9 creates `documents` itself, and the WHERE-clause sections
+    // that name it are refused before storage is ever consulted.
+    run(
+        &executor,
+        "CREATE TABLE products (id TEXT, vector VECTOR(3), price FLOAT, category TEXT)",
+    )
+    .await?;
+    run(
+        &executor,
+        "INSERT INTO products (id, vector, price, category) \
+         VALUES ('prod_123', [0.9, 0.1, 0.0], 149.99, 'wearables')",
+    )
+    .await?;
+    println!("(set up: table 'products' with one row)\n");
 
     // Example 1: Simple SELECT query
     println!("1. Simple SELECT Query:");
     let query = "SELECT * FROM products WHERE price > 100 LIMIT 10";
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -27,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LIMIT 5
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -42,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LIMIT 10
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -58,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LIMIT 20
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -73,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LIMIT 50
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -91,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LIMIT 15
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -99,11 +151,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Example 7: INSERT statement
     println!("\n7. INSERT Statement:");
     let query = r#"
-        INSERT INTO products (id, name, embedding, price, category)
-        VALUES ('prod_456', 'Smart Watch', [0.1, 0.2, 0.3], 299.99, 'wearables')
+        INSERT INTO products (id, vector, name, price, category)
+        VALUES ('prod_456', [0.1, 0.2, 0.3], 'Smart Watch', 299.99, 'wearables')
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -116,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         WHERE id = 'prod_456'
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -134,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -147,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         WITH (m = 16, ef_construct = 200)
     "#;
     println!("Query: {}", query);
-    match engine.execute(query).await {
+    match run(&executor, query).await {
         Ok(result) => print_result(&result),
         Err(e) => println!("Error: {}", e),
     }
@@ -156,7 +208,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_result(result: &QueryResult) {
-    println!("Results: {} records found", result.records.len());
+    // SELECT returns records; INSERT, UPDATE, DELETE and CREATE move rows and return none. The
+    // first version of this printed the record count for all of them, so a successful INSERT
+    // announced "0 records found" and read like a failure.
+    match result.metadata.plan_type.as_str() {
+        "SELECT" => println!("Results: {} records found", result.records.len()),
+        _ => println!("Affected rows: {}", result.metadata.affected_rows),
+    }
     println!("Execution time: {}ms", result.metadata.execution_time_ms);
     println!("Plan type: {}", result.metadata.plan_type);
 

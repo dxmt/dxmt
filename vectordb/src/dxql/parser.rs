@@ -225,6 +225,7 @@ fn parse_op(pair: &Pair<'_, Rule>) -> ParseResult<ComparisonOp> {
 fn parse_value(pair: Pair<'_, Rule>) -> ParseResult<Value> {
     let inner = first_inner(pair, "value")?;
     Ok(match inner.as_rule() {
+        Rule::now_func => Value::Now,
         Rule::vector_value => Value::Vector(parse_vector(inner)?),
         Rule::string_literal => Value::Text(unquote(inner.as_str())),
         Rule::number => parse_number(inner.as_str())?,
@@ -694,6 +695,10 @@ pub enum Value {
     Text(String),
     Vector(Vec<f32>),
     Parameter(String),
+    /// `NOW()`, unresolved. The parser records what was written and the compiler decides what
+    /// it means, so the clock stays out of parsing and every `NOW()` in one statement resolves
+    /// to the same instant rather than to whenever each was converted.
+    Now,
 }
 
 #[cfg(test)]
@@ -719,6 +724,55 @@ mod tests {
             op,
             value,
         }
+    }
+
+    /// `NOW()` is the one function DXQL evaluates, and both places it is ordinarily written
+    /// used to be parse errors: `SET updated_at = NOW()` and `DEFAULT NOW()`. Both statements
+    /// were otherwise fully supported -- UPDATE compiles to a real plan and CREATE TABLE makes
+    /// a real table -- so the only thing between them and working was the `value` rule having
+    /// no alternative for a function call.
+    #[test]
+    fn now_is_a_value_wherever_a_value_goes() {
+        let Statement::Update(update) =
+            parse("UPDATE products SET price = 249.99, updated_at = NOW() WHERE id = 'prod_456'")
+        else {
+            panic!("not an UPDATE");
+        };
+        assert_eq!(
+            update.assignments,
+            vec![
+                ("price".to_string(), Value::Float(249.99)),
+                ("updated_at".to_string(), Value::Now),
+            ],
+            "the parser records NOW(), unresolved; the compiler decides what it means"
+        );
+
+        // In a column default, where nothing reads the value -- CREATE TABLE only looks for the
+        // VECTOR(n) column -- so this only has to parse.
+        let Statement::Create(_) = parse(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY, embedding VECTOR(384) NOT NULL, \
+             created_at TIMESTAMP DEFAULT NOW())",
+        ) else {
+            panic!("not a CREATE");
+        };
+
+        // And in a comparison, which comes free and is the third place SQL puts it.
+        let Statement::Select(select) = parse("SELECT * FROM logs WHERE created_at < NOW()") else {
+            panic!("not a SELECT");
+        };
+        assert_eq!(
+            select.where_clause,
+            Some(cmp("created_at", ComparisonOp::Less, Value::Now))
+        );
+    }
+
+    /// Only `NOW()`. Anything else that looks like a function stays a parse error rather than
+    /// becoming a silently-ignored field name.
+    #[test]
+    fn other_functions_are_still_refused_in_a_value() {
+        assert!(Parser::new()
+            .parse("UPDATE products SET name = UPPER('x') WHERE id = 'a'")
+            .is_err());
     }
 
     fn text(s: &str) -> Value {

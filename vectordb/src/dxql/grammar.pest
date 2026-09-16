@@ -127,7 +127,13 @@ drop_kind      = { ^"TABLE" | ^"INDEX" }
 
 // ---- Values and names -----------------------------------------------------------------------
 
-value        = { vector_value | string_literal | number | boolean | null | parameter }
+// `now_func` comes first for the same reason the condition functions do: without it, `NOW`
+// would be read as a bare name and the `(` would be the parse error, which points at the wrong
+// character. It is the only function DXQL evaluates -- SQL spells "the time this statement
+// ran" this way, and both `SET updated_at = NOW()` and `DEFAULT NOW()` are ordinary enough that
+// refusing them reads as a parser that cannot cope rather than a feature that is absent.
+value        = { now_func | vector_value | string_literal | number | boolean | null | parameter }
+now_func     = { ^"NOW" ~ "(" ~ ")" }
 vector_value = { "[" ~ (number ~ ("," ~ number)*)? ~ "]" }
 value_list   = { value ~ ("," ~ value)* }
 field_list   = { field_name ~ ("," ~ field_name)* }
