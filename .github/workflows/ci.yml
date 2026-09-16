@@ -214,6 +214,13 @@ jobs:
       # from this checkout, which is what satisfies both packages' dependency on it -- there is
       # no such distribution on PyPI, and a non-editable resolution would test the adapters
       # against an SDK this commit does not contain.
+      # The Rust client is the third one that has to keep working against a real server, and
+      # the only one whose tests compile. `--test live` rather than `cargo test`: the doctest
+      # in lib.rs is `no_run`, so building it adds a link step that proves nothing here.
+      - name: Rust client live tests
+        run: DXMT_URL=http://127.0.0.1:19999 cargo test --test live
+        working-directory: vectordb/dxmt-rust-sdk
+
       - name: LangChain adapter tests
         run: |
           python -m pip install -e .
