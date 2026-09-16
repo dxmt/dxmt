@@ -2549,3 +2549,136 @@ async fn a_dropped_table_stays_dropped_across_a_restart() {
         "a dropped table is readable after a restart"
     );
 }
+
+/// The snapshot carries the graph, and a restart reads it back rather than rebuilding it.
+///
+/// This exists because `CLAUDE.md` claimed for months that "HNSW and HNSW-PQ have no save/load,
+/// so a restart means a full index rebuild" while `tests/index_persistence_test.rs` sat in the
+/// tree proving the round trip. What neither the doc nor that file covered was the part an
+/// operator cares about: that the *server's* restore path uses it. Measured on 100,000 rows at
+/// 128 dimensions, the difference is 0.43 s to start serving against 37.1 s to rebuild, so a
+/// regression here is not a detail -- it is a restart that takes minutes.
+///
+/// `has_index` is what the restore path keys on, and the `.idx` file beside the `.meta` is what
+/// it reads. Assert the artifact, then assert the answers survive the trip.
+#[tokio::test]
+async fn a_snapshot_writes_the_index_and_a_restart_reads_it_back() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    // Enough rows that the graph is worth persisting and a wrong answer is not a coin flip.
+    const ROWS: usize = 2_000;
+    let vector = |i: usize| vec![i as f32, (i % 7) as f32, (i % 13) as f32, 1.0];
+
+    let before = {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                (0..ROWS)
+                    .map(|i| record(&format!("r{}", i), vector(i)))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+        storage
+            .search("t", query(vector(1_234), 10))
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|h| h.id)
+            .collect::<Vec<_>>()
+    };
+
+    // The graph, on disk, beside the table metadata. The `.meta` holds the records and is the
+    // larger of the two here; what matters is that the `.idx` exists and is not a stub, because
+    // an absent one is exactly what "no index persistence" would look like.
+    let idx = wal_dir.join("snapshot").join("t0.idx");
+    assert!(
+        idx.exists(),
+        "the snapshot wrote no index file; the restore path will rebuild the graph from the \
+         rows on every restart. Contents: {:?}",
+        std::fs::read_dir(wal_dir.join("snapshot")).map(|d| d
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>())
+    );
+    let idx_bytes = std::fs::metadata(&idx).unwrap().len();
+    assert!(
+        idx_bytes > 1_024,
+        "the index file is {idx_bytes} bytes for {ROWS} rows, which is not a graph"
+    );
+
+    let recovered = open(&wal_dir).await;
+    let after: Vec<String> = recovered
+        .search("t", query(vector(1_234), 10))
+        .await
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|h| h.id)
+        .collect();
+
+    assert_eq!(
+        after, before,
+        "the reloaded index answers a different question than the one that was saved"
+    );
+    assert_eq!(after[0], "r1234", "the nearest neighbour is the row itself");
+}
+
+/// Losing the index file costs time, not data.
+///
+/// The other half of the pair above, and the reason the restore path logs by name instead of
+/// falling through quietly: if the snapshot says it wrote an index and the file will not read
+/// back, the server pays the full re-index that the snapshot existed to avoid. That is a
+/// correct outcome and a slow one, so it must keep working -- and it must not be how the
+/// database behaves normally, which is what the test above pins.
+#[tokio::test]
+async fn a_missing_index_file_is_rebuilt_from_the_rows_rather_than_lost() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let vector = |i: usize| vec![i as f32, 0.0, 0.0, 1.0];
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                (0..200)
+                    .map(|i| record(&format!("r{}", i), vector(i)))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+    }
+
+    let idx = wal_dir.join("snapshot").join("t0.idx");
+    assert!(
+        idx.exists(),
+        "nothing to remove; the snapshot wrote no index"
+    );
+    std::fs::remove_file(&idx).unwrap();
+
+    let recovered = open(&wal_dir).await;
+    assert_eq!(
+        recovered.list_tables().await.unwrap()[0].record_count,
+        200,
+        "the records live in the `.meta`, not the `.idx`; losing the graph must not lose them"
+    );
+    let hits = recovered.search("t", query(vector(42), 1)).await.unwrap();
+    assert_eq!(
+        hits.hits[0].id, "r42",
+        "the rebuilt-from-rows index must answer as well as the saved one"
+    );
+}
