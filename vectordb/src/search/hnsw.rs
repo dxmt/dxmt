@@ -2245,7 +2245,7 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
     ///
     /// Without this override HnswIndex took the trait's default, which inserts one record at a
     /// time. A 1M-vector `rebuild_index` was therefore a million serial single-threaded
-    /// `insert` calls that never touched `insert_batch` -- the path made parallel in e85fc6f.
+    /// `insert` calls that never touched `insert_batch` -- the path made parallel in 2133ed6.
     /// Measured against Qdrant on the same machine with the same graph parameters, that was
     /// `optimize` 3,504 s against its 806 s, while DXMT's own insert had already caught up.
     ///
@@ -2663,7 +2663,7 @@ mod persistence_tests {
     use crate::search::index_traits::SerializableIndex;
 
     /// An index file written before the edge lists went behind locks, by the code at
-    /// c7e1cbe: 200 clustered 16-d vectors, `HnswConfig::default()`, cosine.
+    /// 25c279c: 200 clustered 16-d vectors, `HnswConfig::default()`, cosine.
     const HNSW_V2_GOLDEN: &[u8] = include_bytes!("testdata/hnsw_v2_golden.idx");
 
     #[test]

@@ -49,7 +49,7 @@ impl Clone for BruteForceIndex {
 
 /// Nearest first; among equal distances, the smaller id first.
 ///
-/// The storage layer orders results the same way (`5c89817`), but it can only reorder what an
+/// The storage layer orders results the same way (`25e5515`), but it can only reorder what an
 /// index hands back, so the order has to hold here too, before anything is cut to `k`.
 /// Selecting the top `k` by distance alone -- a heap or `select_nth_unstable` -- kept an
 /// arbitrary member of a tie at the cutoff, chosen by insertion order: after

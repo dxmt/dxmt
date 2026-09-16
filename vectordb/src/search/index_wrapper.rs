@@ -156,7 +156,7 @@ impl IndexWrapper {
     /// lock the whole time (searches were never slowed), and still cost eight batches -- 800
     /// rows -- which sat in the queue past the client's 60 s timeout and were answered by
     /// `Failed to send insert response: insertion result was dropped` when their turn finally
-    /// came. Releasing the lock in `7623f7f` fixed what searches saw; this is the other half.
+    /// came. Releasing the lock in `54777e8` fixed what searches saw; this is the other half.
     ///
     /// Three properties the background task has to keep:
     ///
@@ -285,7 +285,7 @@ impl IndexWrapper {
     /// An index cuts to `k` itself. When several records sit at exactly the `k`-th distance it
     /// keeps whichever it met first -- walk order for a graph, insertion order for a scan -- and
     /// nothing that orders the results afterwards can bring back the ones it dropped. The storage
-    /// layer's tie-break by id (`5c89817`) was therefore decided by build order: over HNSW-PQ a
+    /// layer's tie-break by id (`25e5515`) was therefore decided by build order: over HNSW-PQ a
     /// query whose tied neighbours were `t00`..`t19` got `["exact", "t11", "t12"]`, and the HTTP
     /// suite saw r1's fifth neighbour change after a rebuild.
     ///
