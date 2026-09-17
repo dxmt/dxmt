@@ -3060,7 +3060,11 @@ impl IntelligentIndexedStorage {
         if !text_backfill.is_empty() {
             if let Some(engine) = text_engine {
                 let count = text_backfill.len();
-                info!(
+                // `warn`, not `info`: an index that lost its contents is not a normal start,
+                // and a server running at the default `RUST_LOG=warn` would otherwise rebuild
+                // 20,000 documents without leaving a line to say it had. Silence about this
+                // class of repair is what the whole bug was made of.
+                warn!(
                     "Table '{}': the full-text index holds no documents for {} records; \
                      rebuilding it from the rows",
                     name, count
