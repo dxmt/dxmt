@@ -7241,27 +7241,68 @@ impl IntelligentIndexedStorage {
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        let mut matching_records: Vec<Record> = if let Some(filter) = filter {
+        // Unfiltered, on disk: the store can answer a page without decoding the rest of the
+        // table. That is the whole cost here -- 194 ms for 25 rows out of 120,000, against 3 ms
+        // for a vector search over the same table, and the same at any offset.
+        if filter.is_none() {
+            let total = table_data.records.len();
+            if let Some(page) = table_data.records.page_newest_first(offset, limit) {
+                let mut page: Vec<Record> = page.iter().map(|r| (**r).clone()).collect();
+                Self::fill_vectors(table_data, &mut page, with_vector);
+                return Ok((page, total));
+            }
+        }
+
+        // `Arc<Record>`, not `Record`. This used to deep-clone every matching record -- payload
+        // `serde_json::Value` and all -- to return a page of twenty-five, so a table of 120,000
+        // paid 120,000 JSON clones for 25 rows. A refcount bump costs nothing and the page is
+        // cloned at the end, where it is twenty-five of them.
+        let mut matching: Vec<std::sync::Arc<Record>> = if let Some(filter) = filter {
             let matching_ids = table_data.payload_index.get_matching_ids(filter);
             matching_ids
                 .iter()
-                .filter_map(|id| table_data.records.get(id).map(|r| (*r).clone()))
+                .filter_map(|id| table_data.records.get(id))
                 .collect()
         } else {
-            table_data.records.values_cloned()
+            let mut out = Vec::with_capacity(table_data.records.len());
+            table_data.records.for_each(|r| out.push(r));
+            out
         };
 
-        // Sort by created_at (newest first)
-        matching_records.sort_by_key(|r| std::cmp::Reverse(r.created_at));
-
-        let total_matching = matching_records.len();
+        let total_matching = matching.len();
         let start = offset.min(total_matching);
         let end = (offset + limit).min(total_matching);
-        let mut page = matching_records[start..end].to_vec();
 
-        // After the slice, never before: reading vectors for the whole table to return ten of
-        // them would be the expensive half of a rerank on every page.
-        for record in &mut page {
+        // Newest first, ties by id. The tiebreak is not decoration: without it the order
+        // between records sharing a `created_at` is whatever the partition below leaves, and
+        // *which* of them lands on a page would then be unspecified -- a page that repeats or
+        // skips a record between two calls. Timestamps here are nanosecond-precision and ties
+        // are rare, which is exactly the kind of thing that works until someone inserts a batch
+        // on a coarser clock.
+        let newest_first = |a: &std::sync::Arc<Record>, b: &std::sync::Arc<Record>| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        };
+
+        // Only the page has to be in order. `select_nth_unstable_by` partitions in O(n) and
+        // leaves the `end` newest records before the split -- a full sort of 120,000 to answer
+        // with 25 of them was the other half of this.
+        if end > 0 && end < total_matching {
+            matching.select_nth_unstable_by(end - 1, newest_first);
+        }
+        matching[..end].sort_by(newest_first);
+        let mut page: Vec<Record> = matching[start..end].iter().map(|r| (**r).clone()).collect();
+
+        Self::fill_vectors(table_data, &mut page, with_vector);
+        Ok((page, total_matching))
+    }
+
+    /// Attach or clear each record's vector. Called on the page, never before it is cut:
+    /// reading vectors for the whole table to return ten of them would be the expensive half of
+    /// a rerank, on every page.
+    fn fill_vectors(table_data: &IntelligentTableData, page: &mut [Record], with_vector: bool) {
+        for record in page {
             if with_vector {
                 if record.vector.is_empty() {
                     record.vector = table_data.vector_for(record);
@@ -7273,8 +7314,6 @@ impl IntelligentIndexedStorage {
                 record.vector = Vec::new();
             }
         }
-
-        Ok((page, total_matching))
     }
 
     /// Simple filter matching helper
