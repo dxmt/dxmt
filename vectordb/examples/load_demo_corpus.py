@@ -48,6 +48,12 @@ TOPICS = {
         "note": ["The survey has seen it twice.", "Nobody has confirmed it.",
                  "The photometry is noisy.", "It was missed in the first pass.",
                  "The period is still uncertain.", "Two teams disagree about it."],
+        "detail": ["at the limit of the array",
+                   "from the southern site",
+                   "in the archival plates",
+                   "against a crowded field",
+                   "with adaptive optics",
+                   "through thin cloud"],
     },
     "spaceflight": {
         "subject": ["the second stage", "the docking adapter", "a reentry capsule",
@@ -61,6 +67,12 @@ TOPICS = {
         "note": ["The review board asked about it.", "It held through the vibration test.",
                  "The margin was thinner than planned.", "Telemetry dropped for a moment.",
                  "It was waived for this flight.", "The sim never reproduced it."],
+        "detail": ["on the pad",
+                   "in the flight readiness review",
+                   "during the coast phase",
+                   "under range safety rules",
+                   "with the crew aboard",
+                   "after separation"],
     },
     "cooking": {
         "subject": ["the braise", "a proofed dough", "this reduction", "the emulsion",
@@ -74,6 +86,12 @@ TOPICS = {
         "note": ["Taste it before you salt again.", "The pan matters more than the recipe.",
                  "Leftovers are better.", "Do not skip the resting time.",
                  "It freezes badly.", "Halve it and it still works."],
+        "detail": ["in a cast-iron pan",
+                   "over a low flame",
+                   "the night before",
+                   "with the door propped open",
+                   "in a borrowed kitchen",
+                   "at altitude"],
     },
     "gardening": {
         "subject": ["the espaliered pear", "a bed of alliums", "this rootstock",
@@ -87,6 +105,12 @@ TOPICS = {
         "note": ["Move it and start again.", "The label is optimistic.",
                  "Cut it back hard in autumn.", "It seeds itself everywhere.",
                  "Slugs find it first.", "Give it more room than you think."],
+        "detail": ["on the north wall",
+                   "in the third bed",
+                   "after the hedge came down",
+                   "under the old apple",
+                   "along the gravel path",
+                   "in a container"],
     },
     "contract law": {
         "subject": ["the indemnity clause", "a liquidated damages provision",
@@ -102,6 +126,12 @@ TOPICS = {
         "note": ["The point was not argued below.", "Authority is thin either way.",
                  "The drafting is unusual.", "Both parties were advised.",
                  "It was conceded at the hearing.", "The schedule contradicts the body."],
+        "detail": ["in the recitals",
+                   "under the governing law clause",
+                   "at clause 14.2",
+                   "in the side letter",
+                   "across the whole agreement",
+                   "before completion"],
     },
     "criminal procedure": {
         "subject": ["the search warrant", "this identification parade", "a custodial interview",
@@ -118,6 +148,12 @@ TOPICS = {
         "note": ["The custody record is incomplete.", "No note was made at the time.",
                  "The defence did not object.", "The point is taken for the first time on appeal.",
                  "The recording stops midway.", "Two officers recall it differently."],
+        "detail": ["at the police station",
+                   "in the committal bundle",
+                   "during the voir dire",
+                   "before charge",
+                   "on the second interview",
+                   "at the door of the court"],
     },
     "distributed systems": {
         "subject": ["the follower replica", "a quorum read", "this partition strategy",
@@ -132,6 +168,12 @@ TOPICS = {
         "note": ["It reproduced once in a week.", "The retry made it worse.",
                  "Nothing in the logs said so.", "It went away after a deploy.",
                  "The metric was averaged away.", "Two services blamed each other."],
+        "detail": ["in the second region",
+                   "behind the load balancer",
+                   "on the read replica",
+                   "during a rolling restart",
+                   "at the ninety-ninth percentile",
+                   "under a cold cache"],
     },
     "cycling": {
         "subject": ["the breakaway", "a crosswind section", "this gear ratio", "the descent",
@@ -146,15 +188,26 @@ TOPICS = {
         "note": ["The gap never came down.", "Nobody wanted to work.",
                  "It was decided in the first hour.", "The radio was useless.",
                  "Two riders sat up.", "The wind turned at the worst moment."],
+        "detail": ["on the inside line",
+                   "over the top of the col",
+                   "into the last corner",
+                   "in the neutral zone",
+                   "on a closed road",
+                   "before the feed zone"],
     },
 }
 
 
-SLOTS = ("subject", "verb", "object", "tail", "note")
+SLOTS = ("subject", "verb", "object", "detail", "tail", "note")
 
 
 def combinations_per_topic():
-    """How many distinct sentences a topic can make. Five slots of six is 7,776."""
+    """How many distinct sentences a topic can make. Six slots of six is 46,656.
+
+    Five slots was 7,776, which caps the corpus at 62,208 across eight topics -- under
+    `DEFAULT_QUANTIZE_AT_ROWS`, so a table built from it never reaches the quantised index and
+    the demo silently only ever exercised the exact HNSW path.
+    """
     return min(
         # Every topic has the same slot shape; take the smallest in case one is edited.
         [len(slots[name]) for name in SLOTS]
@@ -204,6 +257,7 @@ def documents(count, seed=11):
             scrambled //= len(options)
         note = slots["note"][scrambled % len(slots["note"])]
 
+        # Subject, verb, object, detail, tail -- the note is a second sentence.
         sentence = " ".join(parts)
         yield {
             "id": f"doc-{i:06d}",
