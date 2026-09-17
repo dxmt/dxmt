@@ -18,8 +18,9 @@
 #   DXMT_FEATURES=text-bm25   build with these cargo features, and tell the tests the server has
 #                             them: a test that needs one then fails where it would otherwise
 #                             skip, so a build that lost the feature cannot pass. Naming
-#                             api-swagger also starts the server with `--swagger`, which is what
-#                             makes the OpenAPI examples checkable
+#                             api-swagger also starts the server with `--swagger`, and
+#                             api-dashboard with `--dashboard` -- compiling an interface in and
+#                             serving it are separate decisions, and the tests need both
 #   PYTEST=...                a specific interpreter's pytest
 
 # Deliberately not `set -e`: both modes must run, so the summary can say which one failed.
@@ -36,8 +37,12 @@ export DXMT_FEATURES=${DXMT_FEATURES:-}
 # flag follows the feature, and `test_openapi_examples.py` turns its skip into a failure when
 # `DXMT_FEATURES` names api-swagger: otherwise "the examples are checked" degrades into "the
 # examples were not there to check" without anything going red.
+# Appending, not assigning: with two features named, the second used to silently replace the
+# first, so `DXMT_FEATURES=api-swagger,api-dashboard` served only one of them.
 SERVE_FLAGS=""
-case ",$(echo "$DXMT_FEATURES" | tr ' ' ','), " in *,api-swagger,*) SERVE_FLAGS="--swagger" ;; esac
+_features=",$(echo "$DXMT_FEATURES" | tr ' ' ','), "
+case "$_features" in *,api-swagger,*) SERVE_FLAGS="$SERVE_FLAGS --swagger" ;; esac
+case "$_features" in *,api-dashboard,*) SERVE_FLAGS="$SERVE_FLAGS --dashboard" ;; esac
 
 if [ "${DXMT_SKIP_BUILD:-0}" != "1" ]; then
   cargo build --bin vectordb ${DXMT_FEATURES:+--features "$DXMT_FEATURES"} || exit 1
@@ -101,7 +106,11 @@ for mode in $MODES; do
     failed=1
   else
     echo "### $mode: server on port $port, wal $wal_dir"
-    DXMT_URL="http://127.0.0.1:$port" DXMT_STORAGE_MODE="$mode" $PYTEST tests/api "$@"
+    # `DXMT_WAL_DIR` is passed so a test can assert something about where the server keeps its
+    # durable state -- `POST /backup` refusing a destination inside it, for one. Tests that need
+    # it skip when it is absent, so attaching to someone else's server still works.
+    DXMT_URL="http://127.0.0.1:$port" DXMT_STORAGE_MODE="$mode" DXMT_WAL_DIR="$wal_dir" \
+      $PYTEST tests/api "$@"
     rc=$?
     if [ "$rc" = 0 ]; then
       summary="$summary\n  $mode: PASS"

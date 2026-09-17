@@ -227,6 +227,27 @@ Default: `tokio-runtime`, `basic-storage`.
 Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `gpu` (CUDA),
 `cluster`, `multimodal`, `embeddings`, `python` (PyO3 bindings), `metrics`, `hf-datasets`.
 
+## Web console
+
+A read-only dashboard is served from the binary itself — no separate process, no CDN, works on
+an air-gapped host:
+
+```bash
+make dashboard-build                                     # needs Node 20+
+cargo build --release --features api-dashboard
+./target/release/vectordb serve --dashboard              # http://localhost:9999/dashboard
+```
+
+Off at both levels by default: not in the default feature set, and not served without
+`--dashboard` even when compiled in. It adds about 1.5 MB to the binary.
+
+**It is read-only, and the server is not.** The console issues only GETs and the search-shaped
+POSTs; the port it is served on still accepts writes, snapshots and backups from anything that
+can reach it, because this server has no authentication of its own (see
+[SECURITY.md](SECURITY.md)). What the dashboard changes is discoverability — it turns an exposed
+port into a browsable console — so bind it to a private interface or put an authenticating proxy
+in front.
+
 ## Client SDKs
 
 | Directory                          | Package                                  |

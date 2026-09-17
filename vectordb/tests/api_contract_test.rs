@@ -124,6 +124,18 @@ const CONTRACTS: &[Contract] = &[
         path: "/tables/{t}/stats",
         caller: "js",
     },
+    // The dashboard reads these two and nothing else does. `/status` is root-only, which is
+    // why `curl` above has to know about it.
+    Contract {
+        method: "GET",
+        path: "/status",
+        caller: "dashboard",
+    },
+    Contract {
+        method: "POST",
+        path: "/tables/{t}/records/list",
+        caller: "dashboard",
+    },
 ];
 
 fn free_port() -> u16 {
@@ -180,7 +192,13 @@ fn start_server() -> Server {
 fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
     let root_probe = matches!(
         path,
-        "/health" | "/live" | "/ready" | "/health/live" | "/health/ready" | "/health/metrics"
+        "/health"
+            | "/live"
+            | "/ready"
+            | "/status"
+            | "/health/live"
+            | "/health/ready"
+            | "/health/metrics"
     );
     let url = if root_probe {
         // System probes are served at the root for orchestrators.
@@ -269,6 +287,10 @@ fn every_route_the_sdks_call_exists() {
                 r#"{"records":[{"id":"r2","vector":[0,1,0,0]}]}"#
             }
             p if p.ends_with("/records") && method == "DELETE" => r#"{"ids":["r2"]}"#,
+            // Before the `/records/` arm below, which would otherwise claim it and send a
+            // record body to a listing route. It deserialises either way -- every field of
+            // `ListRecordsRequest` is optional -- so the accident would be invisible.
+            p if p.ends_with("/records/list") => r#"{"limit":1}"#,
             p if p.contains("/records/") => r#"{"vector":[0,0,1,0]}"#,
             p if p.ends_with("/search") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
             p if p.ends_with("/search/text") => r#"{"query":"x","top_k":1}"#,
@@ -295,7 +317,7 @@ fn every_route_the_sdks_call_exists() {
 
         match result {
             Some((status, body)) if route_is_missing(status, &body) => missing.push(format!(
-                "{} {} (used by the {} SDK) -> {}",
+                "{} {} (used by {}) -> {}",
                 contract.method, contract.path, contract.caller, status
             )),
             // Everything else, 400 and 500 included, proves the route is wired — which is the
@@ -395,4 +417,112 @@ fn standard_response_and_probe_contract_is_stable() {
     let missing_json: serde_json::Value = serde_json::from_str(&missing.1).unwrap();
     assert_eq!(missing_json["success"], false);
     assert_eq!(missing_json["error"]["code"], "TABLE_NOT_FOUND");
+}
+
+/// Every route the dashboard issues is under contract.
+///
+/// The dashboard builds its request URLs from `dashboard/dashboard-routes.json`, so that file
+/// is the list of routes it cannot work without. This asserts each one appears in `CONTRACTS`
+/// above, which the test before it proves the server still serves.
+///
+/// The value is in where this runs rather than in what it checks. It needs no Node, no built
+/// bundle and no `api-dashboard` feature, so it goes green or red in the ordinary
+/// `cargo test --tests` — which means a route rename cannot reach a release with only the
+/// dashboard's own job, which requires all three, standing between it and the user.
+#[test]
+fn every_route_the_dashboard_uses_is_under_contract() {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        routes: Vec<Route>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Route {
+        method: String,
+        path: String,
+        why: String,
+    }
+
+    let manifest_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dashboard/dashboard-routes.json");
+    let text = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display()));
+    let manifest: Manifest = serde_json::from_str(&text).expect("the manifest is not valid JSON");
+
+    assert!(
+        !manifest.routes.is_empty(),
+        "the dashboard declares no routes, which cannot be right"
+    );
+
+    let mut uncovered = Vec::new();
+    for route in &manifest.routes {
+        // Three spellings of the same route are in play. The manifest writes what the browser
+        // issues (`/api/v1/tables`, but root-level `/health/metrics`); CONTRACTS writes the
+        // versioned ones bare (`/tables`) and some probes with the prefix. And four probes are
+        // genuinely served at both. So compare with the prefix removed from both sides and let
+        // `curl` above decide which one to actually request -- it already has to.
+        let bare = |path: &str| path.strip_prefix("/api/v1").unwrap_or(path).to_string();
+        let wanted = bare(&route.path);
+        let covered = CONTRACTS
+            .iter()
+            .any(|contract| contract.method == route.method && bare(contract.path) == wanted);
+        if !covered {
+            uncovered.push(format!("{} {} — {}", route.method, route.path, route.why));
+        }
+    }
+
+    assert!(
+        uncovered.is_empty(),
+        "the dashboard calls {} route(s) that no contract entry covers, so a rename would 404 \
+         the UI with nothing going red. Add them to CONTRACTS with caller \"dashboard\":\n  {}",
+        uncovered.len(),
+        uncovered.join("\n  ")
+    );
+}
+
+/// The dashboard's manifest contains nothing that writes.
+///
+/// "Read-only" is enforced in the front end by a closed union of permitted paths, which is a
+/// TypeScript guarantee and therefore invisible to everything here. This is the same claim
+/// asserted where a Rust reviewer will see it: whatever the front end believes, the list of
+/// routes it declares must contain no mutation.
+///
+/// `POST /api/v1/query` is the one to watch. DXQL executes INSERT, UPDATE, DELETE and DROP
+/// TABLE, so a query console would make the phrase "read-only dashboard" false on the day it
+/// is added — and it would look exactly like a reading route from here.
+#[test]
+fn the_dashboard_declares_no_route_that_writes() {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dashboard/dashboard-routes.json"),
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    let mut writes = Vec::new();
+    for route in manifest["routes"].as_array().unwrap() {
+        let method = route["method"].as_str().unwrap();
+        let path = route["path"].as_str().unwrap();
+
+        if matches!(method, "PUT" | "PATCH" | "DELETE") {
+            writes.push(format!("{method} {path}"));
+            continue;
+        }
+        if method == "POST" {
+            // The only POSTs that read: search variants, and listing records. Their bodies are
+            // too structured for a query string, which is the only reason they are POSTs.
+            let reads = path.ends_with("/search")
+                || path.contains("/search/")
+                || path.ends_with("/records/list");
+            if !reads {
+                writes.push(format!("{method} {path}"));
+            }
+        }
+    }
+
+    assert!(
+        writes.is_empty(),
+        "the dashboard is documented as read-only but declares {} route(s) that can change \
+         data:\n  {}",
+        writes.len(),
+        writes.join("\n  ")
+    );
 }

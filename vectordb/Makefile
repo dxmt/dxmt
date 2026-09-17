@@ -8,7 +8,7 @@ CARGO_INCREMENTAL ?= 0
 CARGO_PROFILE_DEV_DEBUG ?= 0
 export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
 
-.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live
+.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live dashboard-install dashboard-build dashboard-dev run-dashboard verify-dashboard dashboard-clean
 
 # Default target - show help
 help:
@@ -108,6 +108,34 @@ test-api:
 test-api-quick:
 	@echo "Running functional API tests (skipping the property suite)..."
 	@scripts/api_tests.sh -m "not slow"
+
+# Dashboard (the read-only web console). Node 20+; nothing else in this Makefile needs it.
+dashboard-install:
+	@command -v npm >/dev/null || { echo "the dashboard needs Node 20+; the rest of the build does not"; exit 1; }
+	@cd dashboard && npm ci
+
+dashboard-build:
+	@command -v npm >/dev/null || { echo "the dashboard needs Node 20+; the rest of the build does not"; exit 1; }
+	@[ -d dashboard/node_modules ] || $(MAKE) dashboard-install
+	@cd dashboard && npm run build
+
+dashboard-dev:
+	@echo "Vite on :3000, proxying the API to :9999 — start the server separately."
+	@cd dashboard && npm run dev
+
+run-dashboard: dashboard-build
+	@cargo run --features api-dashboard -- serve --dashboard
+
+# The opt-in gate, parallel to verify-live. `verify` itself stays pure cargo so it runs on a
+# checkout with neither Python nor Node.
+verify-dashboard: dashboard-build
+	@cargo clippy --all-targets --features api-dashboard -- -D warnings
+	@cargo test --features api-dashboard --test dashboard_test
+	@cd dashboard && npm run lint && npm test
+	@DXMT_FEATURES=api-dashboard DXMT_MODES=memory scripts/api_tests.sh -q tests/api/test_dashboard.py
+
+dashboard-clean:
+	@rm -rf dashboard/dist dashboard/node_modules
 
 verify-live: verify test-api
 	@echo "All checks passed, including the live API suite."

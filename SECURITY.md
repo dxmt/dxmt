@@ -46,6 +46,13 @@ decisions rather than vulnerabilities:
   `vectordb/examples/nginx-jwt.conf` is a sample of the latter.
 - **Payload data is stored and returned as given.** There is no encryption at rest; the write-
   ahead log, snapshots and row files hold plaintext vectors and payloads.
+- **The web console (`--dashboard`) is read-only; the port it is served on is not.** The console
+  issues only reading requests, but `--dashboard` does not put the server into any kind of
+  read-only mode — the same port still accepts writes, snapshots and backups from anything that
+  can reach it. What the console changes is discoverability: it turns an exposed port into a
+  browsable, screenshot-ready view of the data. It is off unless both compiled in
+  (`--features api-dashboard`) and asked for (`--dashboard`); keep it that way unless the port
+  is on a private interface or behind an authenticating proxy.
 
 Reports that the server is unauthenticated are not treated as vulnerabilities. Reports that a
 route bypasses a boundary the documentation does claim — a filter that returns records it

@@ -1,0 +1,11 @@
+node_modules/
+
+# The build output. It is embedded into the server binary at compile time by
+# `src/api/dashboard.rs`, so what ships is the binary and not this directory. `rust-embed`'s
+# `allow_missing` lets a clean checkout compile without it; the server then refuses to start
+# with `--dashboard` rather than serving a blank page.
+dist/
+
+# package-lock.json is deliberately NOT ignored. CI runs `npm ci`, which is a hard error
+# without a lockfile -- the mistake `dxmt-js-sdk/.gitignore` makes, where the same CI step
+# therefore cannot have been passing.

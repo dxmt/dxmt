@@ -1,0 +1,34 @@
+/* One palette, two schemes, no framework.
+   The app needs about twelve primitives; a component library would be a forty-fold multiplier
+   on that, and it would land inside the server binary. */
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --border: #e3e3e0;
+  --text: #1c1c19;
+  --muted: #6b6b63;
+  --accent: #2f6f4f;
+  --warn: #8a6100;
+  --warn-bg: #fdf6e3;
+  --bad: #9b2c2c;
+  --bad-bg: #fdf0f0;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --surface: #1e1f22;
+    --border: #2f3136;
+    --text: #e8e8e5;
+    --muted: #9a9a93;
+    --accent: #6fbf92;
+    --warn: #e0b050;
+    --warn-bg: #2a2314;
+    --bad: #e08a8a;
+    --bad-bg: #2a1717;
+  }
+}
