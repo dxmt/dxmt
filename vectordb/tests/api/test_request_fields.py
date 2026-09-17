@@ -771,7 +771,20 @@ def test_every_documented_field_has_a_probe(spec):
     )
 
 
-@pytest.mark.parametrize("key", sorted(PROBES), ids=lambda k: f"{k[0]}.{k[1]}")
+def pytest_generate_tests(metafunc):
+    """Parametrise from `PROBES` at collection time rather than at decoration time.
+
+    The obvious spelling -- `@pytest.mark.parametrize("key", sorted(PROBES))` -- reads the table
+    at the moment the decorator runs, part way down this file. A probe registered *below* the
+    test function is then registered, counted as covered by the completeness check, and never
+    actually run. Two were, and the suite reported 58 passing while running 56 of them: the
+    exact failure this file exists to catch, in this file. This hook is called after the module
+    is fully imported, so where a probe sits cannot matter.
+    """
+    if "key" in metafunc.fixturenames:
+        metafunc.parametrize("key", sorted(PROBES), ids=lambda k: f"{k[0]}.{k[1]}")
+
+
 def test_the_field_changes_the_answer(key, table, request):
     """Run one probe. Each sends a request the field must change, and checks that it did."""
     probe_fn = PROBES[key]
