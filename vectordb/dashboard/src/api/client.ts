@@ -25,6 +25,7 @@
  */
 
 import { ApiFailure, unwrap } from './envelope';
+import type { Parsed } from '../lib/console';
 import type {
   KnnGraph,
   KnnGraphRequest,
@@ -166,3 +167,59 @@ export const api = {
 };
 
 export type { Table };
+
+export interface RawReply {
+  status: number;
+  /** Parsed when the body is JSON, the raw text when it is not — a plain-text rejection is a
+   *  real answer the console should show, not a `SyntaxError` to swallow. */
+  body: unknown;
+  text: string;
+  ms: number;
+  bytes: number;
+}
+
+/**
+ * Send a request the console composed, and hand back what came off the wire.
+ *
+ * The console needs a path decided at runtime, which the closed union above cannot express —
+ * that is a compile-time construct and a typed string is not. So the guarantee moves into the
+ * argument: this takes a `Parsed`, and a `Parsed` can only be produced by `parse()` in
+ * `lib/console.ts`, which refuses everything that writes. There is no way to call this with a
+ * path that has not been through the gate.
+ *
+ * It also stays in this module so the eslint rule holds — `fetch` appears in exactly one file,
+ * which is what makes "nothing else can reach the network" checkable rather than a convention.
+ */
+export async function sendRead(request: Parsed, signal?: AbortSignal): Promise<RawReply> {
+  const started = performance.now();
+  let response: Response;
+  try {
+    response = await fetch(apiBase() + request.path, {
+      method: request.method,
+      signal,
+      headers: request.body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: request.body === undefined ? undefined : JSON.stringify(request.body),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+    throw new ApiFailure({
+      kind: 'network',
+      message: cause instanceof Error ? cause.message : String(cause),
+    });
+  }
+
+  const text = await response.text();
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Left as text on purpose.
+  }
+  return {
+    status: response.status,
+    body,
+    text,
+    ms: performance.now() - started,
+    bytes: text.length,
+  };
+}

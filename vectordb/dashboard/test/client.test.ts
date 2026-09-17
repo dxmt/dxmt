@@ -79,6 +79,29 @@ describe('read-only by construction', () => {
     }
   });
 
+  it('only lets the console send what the console gate produced', async () => {
+    // `sendRead` is the one function taking a runtime path, which the closed union cannot
+    // express. Its argument is the guarantee: a `Parsed` can only come from `parse()`, and
+    // `parse()` refuses everything that writes. This checks the two halves are actually
+    // connected rather than merely adjacent.
+    const { sendRead } = await import('../src/api/client');
+    const { parse, isError } = await import('../src/lib/console');
+
+    const write = parse('POST /api/v1/tables\n{"name":"x","dimension":4}');
+    expect(isError(write)).toBe(true);
+
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', (url: string) => {
+      calls.push(url);
+      return Promise.resolve(new Response('{}', { headers: { 'content-type': 'application/json' } }));
+    });
+
+    const read = parse('GET /api/v1/tables');
+    if (isError(read)) throw new Error(read.error);
+    await sendRead(read);
+    expect(calls).toEqual(['/api/v1/tables']);
+  });
+
   it('exposes only reading operations', async () => {
     const names = Object.keys(api);
     // Anything that mutates would have to be named here to be callable, and the type of

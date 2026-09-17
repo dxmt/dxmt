@@ -3,6 +3,7 @@ import { Boundary } from './components/Boundary';
 import { Sidebar } from './components/Sidebar';
 import { Overview } from './pages/Overview';
 import { Tables } from './pages/Tables';
+import { Console } from './pages/Console';
 import { TableDetail } from './pages/TableDetail';
 import { TableRecords } from './pages/TableRecords';
 import { TableSearch } from './pages/TableSearch';
@@ -23,6 +24,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/tables" element={<Tables />} />
+          <Route path="/console" element={<Console />} />
           <Route path="/tables/:name" element={<TableDetail />}>
             <Route index element={<Navigate to="records" replace />} />
             <Route path="records" element={<TableRecords />} />

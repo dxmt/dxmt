@@ -19,6 +19,7 @@ const KEY = 'dxmt.sidebar.collapsed';
 const LINKS: { to: string; label: string; icon: IconName; end?: boolean }[] = [
   { to: '/', label: 'Overview', icon: 'overview', end: true },
   { to: '/tables', label: 'Tables', icon: 'tables' },
+  { to: '/console', label: 'Console', icon: 'console' },
 ];
 
 function remembered(): boolean {

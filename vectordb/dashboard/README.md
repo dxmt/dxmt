@@ -88,6 +88,7 @@ table regardless of `limit`.
 | Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
 | Search | why did this come back, and what is the index costing | see below |
 | Index quality | how much recall is the index losing, on this data | see below |
+| Console | vary a request and send it again, with what it cost | read-only, see below |
 | Visualize | does this embedding have structure, and can the picture be trusted | see below |
 
 ### The search inspector
@@ -251,3 +252,29 @@ an `aria-label` on the scatter canvas carrying the same two figures the header s
 is opaque to a screen reader, and stating them in text is also the honest summary for anyone
 reading quickly.
 
+## Console
+
+A scratchpad for requests, beside the Swagger page rather than instead of it. Swagger is
+per-operation — a form per route, a modal at a time, the body reset whenever you navigate — which
+is right for reading what an API does and wrong for the loop this is for: vary one field, send it
+again, compare against what came back a minute ago. So free text, a history that persists, and
+the timing and size of every response.
+
+    # Ctrl+Enter sends.
+    POST /api/v1/tables/articles/search
+    { "vector": [0.1, 0.2], "top_k": 5, "search_mode": "exact" }
+
+**It sends nothing that changes data**, and that is enforced rather than intended. `client.ts`
+makes a write a compile error, which is worth everything for code we wrote and nothing at all for
+a string someone types into a box — so the console has a second gate, in `lib/console.ts`, and
+`sendRead` accepts only a value that gate produced.
+
+That last claim was false when first written. `Parsed` was a plain interface, so
+`{ method: 'POST', path: '/api/v1/tables', body: {} }` satisfied it and walked straight around
+the check; the probe that was supposed to fail compiled cleanly. It carries a private brand now,
+and the same probe is rejected: *Property '[checked]' is missing in type … but required in type
+'Parsed'*.
+
+A refused request names the Swagger page, because "I need to create a table" is a real need and
+deserves an answer rather than a wall. No Monaco: two megabytes for highlighting two lines of
+JSON, compiled into a server binary whose entire console is 115 KB.

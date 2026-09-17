@@ -18,6 +18,7 @@ export type IconName =
   | 'search'
   | 'visualize'
   | 'quality'
+  | 'console'
   | 'collapse';
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -64,6 +65,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <circle cx="12" cy="12" r="8" />
       <circle cx="12" cy="12" r="3.4" />
       <path d="M12 4v2M12 18v2M4 12h2M18 12h2" />
+    </>
+  ),
+  // A terminal prompt: the one place you type a request rather than fill in a form.
+  console: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="m7 10 2.5 2L7 14M12.5 14H16" />
     </>
   ),
   collapse: (
