@@ -237,6 +237,19 @@ pub struct ListRecordsRequest {
     pub limit: Option<usize>,
     /// Number of records to skip for pagination (default: 0)
     pub offset: Option<usize>,
+    /// Include each record's full vector. Default **false**.
+    ///
+    /// Off by default because a page of 100 rows at 768 dimensions is over a megabyte of JSON
+    /// floats, and almost nothing listing records wants them.
+    ///
+    /// This field exists because `vector` used to mean two different things here. The handler
+    /// returned whatever the record's own field held, which is the vector for an in-memory
+    /// table and an **empty array** for one with its vectors in a row file — the default once a
+    /// WAL directory exists. So the same request answered differently depending on a server
+    /// setting the caller cannot see, and `[]` was indistinguishable from "this record has no
+    /// vector". `GET /records/{id}` and `POST /search` with `with_vector` never had that
+    /// problem; they read through the row file. Now neither does this.
+    pub with_vector: Option<bool>,
 }
 
 // ============ 表管理API ============
@@ -1039,7 +1052,9 @@ pub async fn search_vectors(
     params(
         ("table_name" = String, Path, description = "表名", example = "demo")
     ),
-    request_body(content = ListRecordsRequest, example = json!({"limit": 10, "offset": 0})),
+    request_body(content = ListRecordsRequest, example = json!({
+        "limit": 10, "offset": 0, "with_vector": false
+    })),
     responses(
         (status = 200, description = "列出记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
@@ -1055,10 +1070,17 @@ pub async fn list_records(
 ) -> impl IntoResponse {
     let limit = request.limit.unwrap_or(100).min(1000); // Max 1000 records per request
     let offset = request.offset.unwrap_or(0);
+    let with_vector = request.with_vector.unwrap_or(false);
 
     match state
         .storage
-        .list_records(&table_name, request.filter.as_ref(), limit, offset)
+        .list_records(
+            &table_name,
+            request.filter.as_ref(),
+            limit,
+            offset,
+            with_vector,
+        )
         .await
     {
         Ok((records, total)) => {

@@ -330,6 +330,12 @@ These are real gaps, not roadmap aspirations:
   commit yet.
 - **`POST /api/v1/tables/{name}/records` caps a request at 10,000 records** and returns
   `Validation failed` above that.
+- **`POST /api/v1/tables/{name}/records/list` omits vectors unless asked.** Pass
+  `"with_vector": true` for them. The default is off because a page of 100 rows at 768
+  dimensions is over a megabyte of JSON floats, and responses are not compressed.
+- **Listing scans the whole table.** `limit` and `offset` shape the response, not the work: the
+  handler collects every matching record, sorts by `created_at`, and slices. Paging a large
+  table is proportional to the table each time, not to the page.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures
   are logged without failing an already durable local write. Multi-process coordination and full

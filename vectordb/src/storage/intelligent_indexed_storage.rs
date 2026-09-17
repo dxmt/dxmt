@@ -6892,12 +6892,21 @@ impl IntelligentIndexedStorage {
     /// # Returns
     /// List of records matching the filter criteria, sorted by creation time (newest first)
     /// Returns `(page, total_matching)` so callers can surface pagination info.
+    /// A page of records, newest first.
+    ///
+    /// `with_vector` decides whether each record carries its vector, and it decides it the same
+    /// way whatever the storage mode. That is the whole reason the parameter exists: this used
+    /// to hand back the record's own `vector` field, which holds the vector for an in-memory
+    /// table and nothing at all once the vectors live in a row file — so the same call answered
+    /// `[1.0, 0.0, ...]` or `[]` depending on `DB_VECTOR_STORE`, with no way for the caller to
+    /// tell that from a record that genuinely has no vector.
     pub async fn list_records(
         &self,
         tablename: &str,
         filter: Option<&crate::types::Filter>,
         limit: usize,
         offset: usize,
+        with_vector: bool,
     ) -> crate::Result<(Vec<Record>, usize)> {
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("list_records").await;
@@ -6921,8 +6930,24 @@ impl IntelligentIndexedStorage {
         let total_matching = matching_records.len();
         let start = offset.min(total_matching);
         let end = (offset + limit).min(total_matching);
+        let mut page = matching_records[start..end].to_vec();
 
-        Ok((matching_records[start..end].to_vec(), total_matching))
+        // After the slice, never before: reading vectors for the whole table to return ten of
+        // them would be the expensive half of a rerank on every page.
+        for record in &mut page {
+            if with_vector {
+                if record.vector.is_empty() {
+                    record.vector = table_data.vector_for(record);
+                }
+            } else {
+                // Cleared rather than left alone, so an in-memory table answers the same shape
+                // as a row-file one. A caller that asked for no vectors and got some anyway
+                // would be paying for them without knowing why.
+                record.vector = Vec::new();
+            }
+        }
+
+        Ok((page, total_matching))
     }
 
     /// Simple filter matching helper
