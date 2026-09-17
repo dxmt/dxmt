@@ -59,10 +59,21 @@ suite('the wire is the shape the client expects', () => {
     const record = page.records[0]!;
     expect(typeof record.payload_json).toBe('string');
     expect(record).not.toHaveProperty('payload');
-    // And always the full vector, with no flag to suppress it — the constraint the whole
-    // record browser is designed around.
-    expect(Array.isArray(record.vector)).toBe(true);
-    expect(record.vector).toHaveLength(4);
+  });
+
+  it('omits vectors from a listing unless they are asked for', async () => {
+    // The default is the cheap answer: a page of 100 rows at 768 dimensions would otherwise be
+    // over a megabyte of JSON floats, and this server does not compress its API responses.
+    const cheap = await call<RecordPage>('POST', `/api/v1/tables/${table}/records/list`, {
+      limit: 10,
+    });
+    expect(cheap.records[0]!.vector).toEqual([]);
+
+    const full = await call<RecordPage>('POST', `/api/v1/tables/${table}/records/list`, {
+      limit: 10,
+      with_vector: true,
+    });
+    expect(full.records[0]!.vector).toHaveLength(4);
   });
 
   it('sends a search hit\'s payload as an object, unlike a listed record', async () => {
@@ -78,6 +89,7 @@ suite('the wire is the shape the client expects', () => {
   it('normalises both shapes to the same thing', async () => {
     const page = await call<RecordPage>('POST', `/api/v1/tables/${table}/records/list`, {
       limit: 10,
+      with_vector: true,
     });
     const listed = page.records.find((r) => r.id === 'a')!;
     const record = normalizeRecord(table, listed);

@@ -96,3 +96,98 @@ tbody tr:hover { background: var(--bg); }
 
 .note { color: var(--muted); font-size: 13px; margin-top: 10px; }
 .mono { font-family: var(--mono); }
+
+/* --- tabs, toolbars, paging ------------------------------------------------ */
+
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 18px 0 16px; }
+.tabs a {
+  padding: 7px 14px;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tabs a.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+
+.rowstats { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); margin-bottom: 4px; }
+.rowstats b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.toolbar { display: flex; align-items: center; gap: 16px; margin: 14px 0; flex-wrap: wrap; }
+.toolbar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+
+button, select, input, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 9px;
+}
+textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.ghost { border-color: transparent; color: var(--muted); padding: 2px 7px; }
+button.ghost:hover { color: var(--accent); }
+input[type='checkbox'] { width: auto; padding: 0; }
+
+.pager { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
+
+/* --- the record table ------------------------------------------------------ */
+
+tr.clickable { cursor: pointer; }
+td.expanded { background: var(--bg); padding: 12px; }
+
+.chip {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.veccell { display: inline-flex; align-items: center; gap: 8px; color: var(--accent); }
+.veccell canvas { display: block; }
+.muted { color: var(--muted); }
+.err { color: var(--bad); font-size: 13px; }
+
+/* --- JSON, requests, filters ------------------------------------------------ */
+
+.jsonblock { position: relative; }
+.jsonblock-tools { position: absolute; top: 4px; right: 4px; }
+.jsonblock pre,
+.request-body pre,
+.vecdump {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.vecdump { max-height: 420px; }
+.j-key { color: var(--muted); }
+.j-str { color: var(--accent); }
+.j-num { color: var(--warn); }
+.j-lit { color: var(--bad); }
+
+.request { margin: 12px 0; }
+.request summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.request-body { position: relative; margin-top: 8px; }
+
+.filter {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+.filter-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.filter-row { display: flex; gap: 8px; margin-bottom: 7px; flex-wrap: wrap; }
+.filter-row input { flex: 1; min-width: 120px; }
+.filter-actions { display: flex; gap: 8px; margin-top: 12px; }

@@ -73,4 +73,32 @@ table regardless of `limit`.
 | `src/api/normalize.ts` | the two record shapes reconciled; vectors held outside React state |
 | `src/api/capabilities.ts` | does this build have `search_mode: "exact"`, does it have BM25 |
 | `src/quality/recall.ts` | the recall method, and why the query point is dropped by id |
+| `src/lib/filter.ts` | the filter model, and the SDK's Mongo shorthand detected by name |
+| `src/pages/TableRecords.tsx` | the record browser, designed around a listing that scans the table |
 | `test/live.test.ts` | the wire assertions, against a running server (`DXMT_LIVE_URL`) |
+
+## Pages
+
+| page | answers | notes |
+| --- | --- | --- |
+| Overview | is it healthy, how much would a restart replay | the replay figure is derived; no endpoint states it |
+| Tables | what exists, how big, which index | sorting and filtering are client-side because the endpoint offers neither |
+| Table detail | schema, footprint, bytes per record | shows all three record counts when they disagree |
+| Records | what is actually stored | see below |
+| Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
+
+### What shapes the record browser
+
+`POST /records/list` collects every matching record, sorts the whole set by `created_at`, and
+then slices. `limit` and `offset` shape the response, not the work — measured at **121 ms for a
+page of 25 from a 100,000-row table**, whether or not vectors are included. So:
+
+- nothing is fetched automatically above 50,000 rows; the page says why and offers a button;
+- page sizes stop at 100, and there is no infinite scroll, no prefetch and no polling;
+- `staleTime: Infinity`, so returning to the tab is not another table scan;
+- vectors are off by default behind a toggle that states the cost (5.7 KB → 67 KB for 25 rows
+  at 128 dimensions; roughly 400 KB at 768).
+
+A vector never appears in a cell as numbers. The cell is a canvas sparkline of the first
+components plus the dimension and the norm, drawn from the `Float32Array` map in `normalize.ts`
+— React never holds the floats.
