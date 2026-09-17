@@ -249,3 +249,49 @@ table.report b { font-size: 15px; }
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* --- the projection --------------------------------------------------------- */
+
+.plothead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 14px 0 8px;
+}
+.plothead b { font-variant-numeric: tabular-nums; }
+
+.plot { position: relative; }
+.plot canvas {
+  display: block;
+  width: 100%;
+  height: 460px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: crosshair;
+  touch-action: none;
+  color: var(--text);
+}
+.plot-hover {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; font-size: 13px; }
+.legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: baseline;
+}

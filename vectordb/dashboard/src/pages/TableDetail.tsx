@@ -101,6 +101,9 @@ export function TableDetail() {
         <NavLink to="search" className={({ isActive }) => (isActive ? 'on' : '')}>
           Search
         </NavLink>
+        <NavLink to="visualize" className={({ isActive }) => (isActive ? 'on' : '')}>
+          Visualize
+        </NavLink>
         <NavLink to="quality" className={({ isActive }) => (isActive ? 'on' : '')}>
           Index quality
         </NavLink>

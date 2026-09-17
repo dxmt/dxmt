@@ -71,11 +71,30 @@ def test_the_page_is_the_app_shell(page):
     assert headers["content-type"].startswith("text/html")
 
 
+ASSET = r'/dashboard/[A-Za-z0-9_./-]+\.(?:js|css|svg|png|woff2?)'
+
+
 def test_every_asset_the_page_references_is_served(page):
-    """The check that catches a partial or stale embed, which nothing server-side can see."""
+    """The check that catches a partial or stale embed, which nothing server-side can see.
+
+    Two levels deep, not one. The entry bundle is named in `index.html`, but a code-split chunk
+    is named *inside* the entry bundle — the PCA web worker is loaded that way. A one-level scan
+    goes green while the worker 404s, and the symptom is a projection that silently never
+    appears, with nothing in any log.
+    """
     html, _ = page
-    referenced = sorted(set(re.findall(r'/dashboard/[A-Za-z0-9_./-]+\.(?:js|css|svg|png|woff2?)', html)))
+    referenced = set(re.findall(ASSET, html))
     assert referenced, "index.html references no assets at all, so nothing was bundled"
+
+    for entry in [a for a in referenced if a.endswith('.js')]:
+        _, body, _ = raw(entry)
+        referenced |= set(re.findall(ASSET, body.decode('utf-8', 'replace')))
+
+    referenced = sorted(referenced)
+    assert any('worker' in a for a in referenced), (
+        "no worker chunk is referenced; either the build stopped code-splitting it or this "
+        "test stopped following the entry bundle, and both would hide a broken projection"
+    )
 
     missing = []
     for asset in referenced:

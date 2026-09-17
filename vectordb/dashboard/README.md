@@ -88,6 +88,7 @@ table regardless of `limit`.
 | Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
 | Search | why did this come back, and what is the index costing | see below |
 | Index quality | how much recall is the index losing, on this data | see below |
+| Visualize | does this embedding have structure, and can the picture be trusted | see below |
 
 ### The search inspector
 
@@ -155,3 +156,41 @@ page of 25 from a 100,000-row table**, whether or not vectors are included. So:
 A vector never appears in a cell as numbers. The cell is a canvas sparkline of the first
 components plus the dimension and the norm, drawn from the `Float32Array` map in `normalize.ts`
 — React never holds the floats.
+
+### Visualize
+
+Qdrant's equivalent lays out a server-computed k-nearest-neighbour graph and never moves raw
+vectors to the browser. DXMT has no distance-matrix endpoint and this console adds none, so PCA
+on a sample is the only path — and PCA on a high-dimensional embedding is a weak summary.
+Measured on the two demo tables:
+
+    persist_demo   1000 x 128   PC1 1.4%  PC2 1.4%  together  2.8%   -> the page warns
+    papers          300 x   8   PC1 15.4% PC2 16.0% together 31.4%   -> it does not
+
+2.8% is what isotropic noise in 128 dimensions looks like: the scatter means nothing, and saying
+so is the page's job. Five things do that work, and none is decoration:
+
+1. the explained-variance ratio is in the header, not a tooltip;
+2. below 25% a caption states that distance on the plot is not distance in the embedding;
+3. nothing is drawn beyond the points — no hulls, no density, no groupings, and the word
+   "cluster" appears nowhere;
+4. **clicking a point runs a real search** and rings its true neighbours where they actually
+   landed. If they scatter, the reader watches the projection fail. Neighbours that fell outside
+   the sample are counted and stated, because an unstated absence reads as evidence;
+5. the sample is described: how many of how many, drawn from how many insertion-time windows,
+   and why the ceiling is where it is.
+
+The budget is a pair because there are two costs. `n x d` bounds the wire (JSON floats, ~13
+bytes a dimension, uncompressed), and the number of `records/list` calls bounds the server
+(each is a full table sort). That gives ~4,000 points at 128 dimensions, ~1,300 at 768, ~650 at
+1,536. Since `records/list` is `created_at` descending, offset 0 would be a sample of last
+Tuesday — so the requests stride across evenly spaced windows, and the page says that is a
+cluster sample over insertion time rather than a uniform one.
+
+The projection runs in a worker on a transferred flat `Float32Array` (6 MB moved, not 24 MB
+copied as boxed numbers), centres once instead of inside both inner loops of all 64 iterations,
+and carries a `jobId` so a run started two slider adjustments ago cannot land on the current
+one. 110 ms for 1,000 x 128.
+
+The renderer is 2-D canvas, not WebGL: the sampling budget caps this at four thousand points,
+where batching by colour is under a millisecond a frame.
