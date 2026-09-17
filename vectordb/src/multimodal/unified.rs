@@ -247,7 +247,6 @@ impl UnifiedMultimodalAPI {
             with_payload: query.include_metadata,
             with_vector: false,
             limit: query.k,
-            include_metadata: query.include_metadata,
             ..Default::default()
         };
 
@@ -328,7 +327,6 @@ impl UnifiedMultimodalAPI {
             with_payload: true,
             with_vector: false,
             limit: k,
-            include_metadata: true,
             ..Default::default()
         };
 

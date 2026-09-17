@@ -98,7 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         with_payload: true,
         with_vector: false,
         limit: 2,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };

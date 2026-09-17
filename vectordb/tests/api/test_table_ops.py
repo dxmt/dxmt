@@ -23,7 +23,12 @@ from .helpers.corpus import BY_ID, CORPUS, DIM, ORDER_FROM_R1, ids_of, query_at
 
 STORAGE_MODE = os.environ.get("DXMT_STORAGE_MODE", "memory")
 
-BULK_MODES = [
+#: `/records/bulk` used to take a `mode` with these ten values. Every one of them reached the
+#: same function -- eight seven-line wrappers and a `insert_records_batch` whose body read
+#: `// For now, just use regular insert` -- so they were ten names for one code path, each
+#: promising an optimisation that did not exist. The field is gone; these are kept here only to
+#: check that a client still sending one is not broken by its removal.
+FORMER_BULK_MODES = [
     "standard",
     "lock_free",
     "streaming",
@@ -174,8 +179,14 @@ def test_index_operations_on_a_table_that_does_not_exist_are_a_404(method, path)
 # ---- Bulk insert ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", BULK_MODES + [None])
-def test_every_bulk_mode_stores_the_same_records_the_same_way(empty_table, mode):
+@pytest.mark.parametrize("mode", FORMER_BULK_MODES + [None])
+def test_a_bulk_insert_stores_the_records_whatever_mode_is_sent(empty_table, mode):
+    """The endpoint takes no `mode` any more, and a body that still carries one still works.
+
+    Removing the field rather than rejecting the values it used to take is what keeps an
+    existing client working: the body is deserialised without `deny_unknown_fields`, so a
+    `mode` is now read by nothing instead of selecting between ten identical paths.
+    """
     body = {"records": CORPUS}
     if mode is not None:
         body["mode"] = mode
@@ -184,7 +195,7 @@ def test_every_bulk_mode_stores_the_same_records_the_same_way(empty_table, mode)
 
     assert data["count"] == len(CORPUS)
     assert sorted(data["inserted_ids"]) == ALL_IDS
-    assert data["mode"] == (mode or "standard"), "an omitted mode is standard"
+    assert "mode" not in data, "the response still echoes a mode the endpoint no longer has"
     assert stats(empty_table)["record_count"] == len(CORPUS)
     for record in CORPUS:
         assert nearest(empty_table, record["vector"], k=1) == [record["id"]]
@@ -192,8 +203,8 @@ def test_every_bulk_mode_stores_the_same_records_the_same_way(empty_table, mode)
     assert payload_of(stored) == BY_ID["r3"]["payload"]
 
 
-@pytest.mark.parametrize("mode", BULK_MODES)
-def test_every_bulk_mode_refuses_a_wrong_dimension_and_stores_nothing(empty_table, mode):
+@pytest.mark.parametrize("mode", FORMER_BULK_MODES)
+def test_a_wrong_dimension_is_refused_whatever_mode_is_sent(empty_table, mode):
     response = post(
         f"/tables/{empty_table}/records/bulk",
         {"records": [{"id": "bad", "vector": [1.0, 2.0]}], "mode": mode},
@@ -208,14 +219,17 @@ def test_an_empty_batch_is_a_400(empty_table):
     assert response.status_code == 400, response.text
 
 
-def test_an_unknown_mode_is_refused_and_the_answer_names_the_modes_that_exist(empty_table):
+def test_an_unknown_mode_is_ignored_rather_than_refused(empty_table):
+    """This used to be a 422 naming the ten modes. It is a 200 now, and that is the intended
+    change: there is no `mode` to be unknown. Pinned so the removal is a decision on the
+    record rather than something that quietly happened."""
     response = post(
         f"/tables/{empty_table}/records/bulk",
         {"records": CORPUS, "mode": "warp_speed"},
         expect_ok=False,
     )
-    assert response.status_code == 422, response.text
-    assert all(mode in response.text for mode in BULK_MODES)
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["count"] == len(CORPUS)
 
 
 def test_bulk_insert_into_a_table_that_does_not_exist_is_a_404():

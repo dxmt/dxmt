@@ -601,7 +601,6 @@ mod tests {
             with_payload: true,
             with_vector: false,
             limit: 1,
-            include_metadata: true,
             ..Default::default()
         };
 

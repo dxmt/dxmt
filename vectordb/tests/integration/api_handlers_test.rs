@@ -221,7 +221,6 @@ async fn test_search_basic() {
         with_payload: true,
         with_vector: false,
         limit: 5,
-        include_metadata: false,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
     };
@@ -251,7 +250,6 @@ async fn test_search_nonexistent_table() {
         with_payload: false,
         with_vector: false,
         limit: 10,
-        include_metadata: false,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
     };
@@ -311,7 +309,6 @@ async fn test_delete_record() {
         with_payload: false,
         with_vector: false,
         limit: 10,
-        include_metadata: false,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
     };
@@ -372,7 +369,6 @@ async fn test_update_record() {
         with_payload: true,
         with_vector: false,
         limit: 1,
-        include_metadata: false,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
     };

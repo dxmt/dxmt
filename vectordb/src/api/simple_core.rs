@@ -687,7 +687,6 @@ async fn plain_search(
         filter,
         with_payload: true,
         with_vector: false,
-        include_metadata: true,
         ..Default::default()
     };
     state

@@ -811,7 +811,6 @@ impl<S: Storage + 'static> McpServer<S> {
                 with_payload: true,
                 with_vector: false,
                 limit,
-                include_metadata: true,
                 ..Default::default()
             }
         } else {

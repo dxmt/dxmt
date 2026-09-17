@@ -259,7 +259,6 @@ async fn test_automatic_promotion_on_access() {
         with_payload: true,
         with_vector: false,
         limit: 10,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };

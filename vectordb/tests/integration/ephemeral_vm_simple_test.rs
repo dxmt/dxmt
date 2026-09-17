@@ -90,7 +90,6 @@ async fn test_basic_state_recreation() {
             with_payload: false,
             with_vector: false,
             limit: 10,
-            include_metadata: false,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };
@@ -124,7 +123,6 @@ async fn test_basic_state_recreation() {
             with_payload: false,
             with_vector: false,
             limit: 10,
-            include_metadata: false,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };
@@ -197,7 +195,6 @@ async fn test_fast_data_loading() {
         with_payload: false,
         with_vector: false,
         limit: 10,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -263,7 +260,6 @@ async fn test_index_consistency_after_rebuild() {
                 with_payload: false,
                 with_vector: false,
                 limit: 10,
-                include_metadata: false,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
             };
@@ -301,7 +297,6 @@ async fn test_index_consistency_after_rebuild() {
                 with_payload: false,
                 with_vector: false,
                 limit: 10,
-                include_metadata: false,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
             };

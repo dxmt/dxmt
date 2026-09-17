@@ -167,7 +167,6 @@ async fn bench_mixed_workload() {
                 with_payload: false,
                 with_vector: false,
                 limit: 10,
-                include_metadata: false,
                 search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
                 vector_name: None,
             };

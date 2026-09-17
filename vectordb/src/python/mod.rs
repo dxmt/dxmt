@@ -181,7 +181,6 @@ impl DXMTVectorDB {
             filter,
             with_payload: true,
             with_vector: false,
-            include_metadata: true,
         };
 
         let results = self

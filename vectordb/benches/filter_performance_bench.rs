@@ -124,7 +124,6 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
                             vector: random_vector(*dimension),
                             top_k: 10,
                             limit: 10,
-                            include_metadata: false,
                             search_mode: Default::default(),
                             vector_name: None,
                             filter: Some(Filter {
@@ -180,7 +179,6 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
                 vector: random_vector(dimension),
                 top_k: 10,
                 limit: 10,
-                include_metadata: false,
                 search_mode: Default::default(),
                 vector_name: None,
                 filter: None,

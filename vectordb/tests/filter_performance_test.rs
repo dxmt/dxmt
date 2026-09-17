@@ -93,7 +93,6 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         }),
         with_payload: true,
         with_vector: false,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -196,7 +195,6 @@ async fn test_post_filtering_with_low_selective_filter() {
         }),
         with_payload: true,
         with_vector: false,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -289,7 +287,6 @@ async fn test_filter_with_in_operation() {
         }),
         with_payload: true,
         with_vector: false,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };

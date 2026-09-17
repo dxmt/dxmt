@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tantivy::{
     collector::TopDocs,
-    query::{BooleanQuery, Occur, Query, QueryParser},
+    query::{BooleanQuery, FuzzyTermQuery, Occur, Query, QueryParser},
     schema::*,
     Index, IndexReader, IndexWriter, TantivyDocument, Term,
 };
@@ -576,10 +576,47 @@ impl FullTextSearchEngine {
             QueryParser::for_index(&self.index, fields)
         });
 
-        // Parse query
-        let mut query = query_parser
-            .parse_query(&request.query)
-            .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?;
+        // Parse query, or build a fuzzy one.
+        //
+        // `fuzzy` was carried from the HTTP request all the way into this struct and then read
+        // by nothing: a caller could ask for edit-distance matching, get a 200, and get the
+        // exact-match answer. Tantivy's `QueryParser` has no fuzzy syntax to hand it, so the
+        // query is built term by term instead -- one `FuzzyTermQuery` per (field, term), any of
+        // which may match. `max_distance` is clamped to 2 because Levenshtein automata beyond
+        // that are enormous and Tantivy refuses them.
+        let mut query: Box<dyn Query> = if let Some(fuzzy) = &request.fuzzy {
+            let distance = fuzzy.max_distance.min(2);
+            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for term_text in request.query.split_whitespace() {
+                let lowered = term_text.to_lowercase();
+                for field_name in &search_fields {
+                    let field = match field_name.as_str() {
+                        "title" => self.schema_fields.title_field,
+                        "content" => self.schema_fields.content_field,
+                        "description" => self.schema_fields.description_field,
+                        "tags" => self.schema_fields.tags_field,
+                        _ => continue,
+                    };
+                    let term = Term::from_field_text(field, &lowered);
+                    let fuzzy_query = if fuzzy.prefix_length > 0 {
+                        FuzzyTermQuery::new_prefix(term, distance, fuzzy.transpositions)
+                    } else {
+                        FuzzyTermQuery::new(term, distance, fuzzy.transpositions)
+                    };
+                    clauses.push((Occur::Should, Box::new(fuzzy_query)));
+                }
+            }
+            if clauses.is_empty() {
+                return Err(crate::Error::InvalidInput(
+                    "a fuzzy query needs at least one term and one known field".to_string(),
+                ));
+            }
+            Box::new(BooleanQuery::new(clauses))
+        } else {
+            query_parser
+                .parse_query(&request.query)
+                .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?
+        };
 
         // Apply filters if any
         if let Some(filters) = &request.filters {

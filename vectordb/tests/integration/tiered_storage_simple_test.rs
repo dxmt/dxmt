@@ -91,7 +91,6 @@ async fn test_basic_insert_and_search() {
         with_payload: true,
         with_vector: false,
         limit: 10,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -164,7 +163,6 @@ async fn test_memory_tier_performance() {
             with_payload: false,
             with_vector: false,
             limit: 10,
-            include_metadata: false,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };
@@ -183,7 +181,6 @@ async fn test_memory_tier_performance() {
             with_payload: false,
             with_vector: false,
             limit: 10,
-            include_metadata: false,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };
@@ -251,7 +248,6 @@ async fn test_data_persistence() {
             with_payload: false,
             with_vector: false,
             limit: 10,
-            include_metadata: false,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };

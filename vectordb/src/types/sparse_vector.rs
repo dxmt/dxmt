@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 /// Sparse vector representation using indices and values
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct SparseVector {
     /// Non-zero indices
     pub indices: Vec<u32>,

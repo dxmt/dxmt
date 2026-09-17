@@ -66,6 +66,21 @@ pub struct CreateTableRequest {
     /// 是否启用内存优化（可选，None = 使用全局配置）
     #[serde(default)]
     pub memory_optimization: Option<bool>,
+    /// Additional vector spaces, each with its own dimension and metric, searchable by name
+    /// through `vector_name` on `POST /search`.
+    ///
+    /// This was missing from this struct while `TableConfig` had it, and the body is
+    /// deserialised without `deny_unknown_fields` — so a request declaring named vector spaces
+    /// was accepted, the field was dropped, no named index was built, and a later search naming
+    /// one of those spaces silently scored against the *default* vector instead. A wrong answer
+    /// rather than an error, over a feature the engine has had all along.
+    #[serde(default)]
+    pub named_vectors: Option<Vec<crate::types::table::VectorSpaceConfig>>,
+    /// Declared payload fields. Dropped here for the same reason and with the same shape of
+    /// consequence: the table reported no schema, and `PATCH /tables/{t}` was the only way to
+    /// get one.
+    #[serde(default)]
+    pub payload_schema: Option<Vec<crate::types::table::FieldDef>>,
 }
 
 /// 批量插入记录的请求
@@ -77,40 +92,21 @@ pub struct BatchInsertRequest {
 
 /// 优化的批量插入请求（支持不同的插入模式）
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+/// The body of `POST /tables/{t}/records/bulk`.
+///
+/// It used to carry a `mode` with ten values -- `lock_free`, `streaming`, `memory_pool`,
+/// `deferred_index`, `bulk_optimized`, `ultra_fast`, `vm_optimized`, `nvme_optimized`,
+/// `ultimate` and `standard`. Every one of them reached `insert_records_batch`, whose body is
+/// `// For now, just use regular insert` followed by a call to `insert_records`: **one code
+/// path behind ten names**, each promising an optimisation that does not exist. The only real
+/// difference was the size cap the mode selected.
+///
+/// The field is gone rather than kept as a set of aliases, because a knob that does nothing is
+/// the thing this API had too many of. A body that still sends `mode` is accepted and ignored
+/// (serde takes unknown fields here), so nothing breaks; it simply stops being documented.
 pub struct OptimizedBatchInsertRequest {
     pub records: Vec<CreateRecordRequest>,
-    #[serde(default = "default_insert_mode")]
-    pub mode: BulkInsertMode,
-}
-
-/// 批量插入模式
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum BulkInsertMode {
-    /// 标准批量插入
-    Standard,
-    /// 无锁高性能插入
-    LockFree,
-    /// 流式处理插入
-    Streaming,
-    /// 内存池优化插入
-    MemoryPool,
-    /// 延迟索引构建
-    DeferredIndex,
-    /// 批量优化插入
-    BulkOptimized,
-    /// Ultra-fast columnar insert
-    UltraFast,
-    /// VM resource-optimized insert
-    VmOptimized,
-    /// NVMe SSD optimized insert
-    NvmeOptimized,
-    /// Ultimate performance mode (all optimizations)
-    Ultimate,
-}
-
-fn default_insert_mode() -> BulkInsertMode {
-    BulkInsertMode::Standard
 }
 
 // 添加验证常量
@@ -346,9 +342,12 @@ pub async fn create_table(
         text_fields: request.text_fields,
         enable_full_text_search: request.enable_full_text_search.unwrap_or(false),
         memory_optimization: request.memory_optimization,
-        payload_schema: None,
+        payload_schema: request.payload_schema,
+        // Server-managed: it counts the migrations `PATCH /tables/{t}` has applied, so a caller
+        // choosing its own starting number would be describing a history that did not happen.
+        // Deliberately not on `CreateTableRequest`.
         schema_version: 1,
-        named_vectors: None,
+        named_vectors: request.named_vectors,
     };
 
     match state.storage.create_table(config).await {
@@ -1146,7 +1145,6 @@ pub async fn hybrid_search(
             with_payload: query.with_payload,
             with_vector: query.with_vector,
             limit: query.top_k,
-            include_metadata: query.with_payload,
             ..Default::default()
         };
 
@@ -1372,21 +1370,16 @@ pub async fn insert_records_optimized(
     Path(table_name): Path<String>,
     Json(request): Json<OptimizedBatchInsertRequest>,
 ) -> impl IntoResponse {
-    // 批量大小验证
-    let max_size = match request.mode {
-        BulkInsertMode::LockFree | BulkInsertMode::Streaming => 100000, // 10万条
-        BulkInsertMode::BulkOptimized | BulkInsertMode::DeferredIndex => 50000, // 5万条
-        _ => MAXBATCH_SIZE,
-    };
-
-    if request.records.len() > max_size {
+    // The cap used to depend on the `mode` the caller named -- 100,000 for two of them, 50,000
+    // for two more -- which made the limit a property of a word rather than of the work. One
+    // cap now, and it is the higher one: the path is the same path either way.
+    const BULK_MAX: usize = 100_000;
+    if request.records.len() > BULK_MAX {
         let error = ApiError::new(
             "INVALID_INPUT",
             &format!(
-                "Batch size {} exceeds maximum {} for mode {:?}",
+                "Batch size {} exceeds the maximum of {BULK_MAX} for this endpoint",
                 request.records.len(),
-                max_size,
-                request.mode
             ),
         );
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
@@ -1425,115 +1418,19 @@ pub async fn insert_records_optimized(
     }
 
     // 根据模式选择不同的插入方法
-    let result = match request.mode {
-        BulkInsertMode::Standard => {
-            match state
-                .storage
-                .insert_records(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records.into_iter().map(|r| r.id).collect()),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::LockFree => {
-            match state
-                .storage
-                .insert_records_lockfree(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::Streaming => {
-            match state
-                .storage
-                .insert_records_streaming(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::MemoryPool => {
-            match state
-                .storage
-                .insert_records_with_memory_pool(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::DeferredIndex => {
-            match state
-                .storage
-                .insert_records_deferred_index(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::BulkOptimized => {
-            match state
-                .storage
-                .insert_records(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records.into_iter().map(|r| r.id).collect()),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::UltraFast => {
-            match state
-                .storage
-                .insert_records_ultra_fast(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::VmOptimized => {
-            match state
-                .storage
-                .insert_records_vm_optimized(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::NvmeOptimized => {
-            match state
-                .storage
-                .insert_records_nvme_optimized(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-        BulkInsertMode::Ultimate => {
-            match state
-                .storage
-                .insert_records_ultimate(&table_name, request.records)
-                .await
-            {
-                Ok(records) => Ok(records),
-                Err(e) => Err(e),
-            }
-        }
-    };
+    // One insert. `insert_records_batch` and its eight differently-named siblings all reduce
+    // to this, and calling it directly is the honest spelling of what was already happening.
+    let result = state
+        .storage
+        .insert_records(&table_name, request.records)
+        .await
+        .map(|records| records.into_iter().map(|r| r.id).collect::<Vec<_>>());
 
     match result {
         Ok(inserted_ids) => {
             let response = serde_json::json!({
                 "inserted_ids": inserted_ids,
-                "count": inserted_ids.len(),
-                "mode": request.mode
+                "count": inserted_ids.len()
             });
             ApiResponse::success(response).into_response()
         }

@@ -695,7 +695,6 @@ impl StorageIntegration {
                 filter: None,
                 with_payload: true,
                 with_vector: true,
-                include_metadata: true,
                 search_mode: crate::types::record::SearchMode::Normal,
                 vector_name: None,
             };

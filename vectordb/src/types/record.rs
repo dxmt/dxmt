@@ -234,8 +234,6 @@ pub struct SearchQuery {
     pub with_vector: bool,
     #[serde(default = "default_top_k")]
     pub limit: usize,
-    #[serde(default = "default_true")]
-    pub include_metadata: bool,
     /// Search accuracy/speed mode. Defaults to Normal.
     #[serde(default)]
     pub search_mode: SearchMode,
@@ -246,6 +244,7 @@ pub struct SearchQuery {
 
 /// 混合搜索查询
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct HybridSearchQuery {
     /// 密集向量查询
     pub dense_vector: Option<DenseVector>,
@@ -253,15 +252,10 @@ pub struct HybridSearchQuery {
     pub sparse_vector: Option<SparseVector>,
     /// 文本查询
     pub text_query: Option<String>,
-    /// 密集向量权重 (0.0-1.0)
-    #[serde(default = "default_alpha")]
-    pub alpha: f32,
-    /// 稀疏向量权重 (0.0-1.0)
-    #[serde(default = "default_beta")]
-    pub beta: f32,
-    /// 文本权重 (0.0-1.0)
-    #[serde(default = "default_gamma")]
-    pub gamma: f32,
+    // `alpha`, `beta` and `gamma` used to sit here: per-component weights for a fusion this
+    // endpoint does not perform. It serves a lone dense vector and refuses anything carrying a
+    // sparse or text component, so the three were documented knobs on a path that cannot run.
+    // The weights that are read live on `HybridSearchRequest`, at POST /search/hybrid.
     /// 返回结果数量
     #[serde(default = "default_top_k")]
     pub top_k: usize,
@@ -420,18 +414,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_alpha() -> f32 {
-    0.7
-}
-
-fn default_beta() -> f32 {
-    0.2
-}
-
-fn default_gamma() -> f32 {
-    0.1
-}
-
 /// 搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
@@ -452,6 +434,7 @@ pub struct SearchHit {
 
 /// 过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct Filter {
     pub must: Option<Vec<Condition>>,
     pub must_not: Option<Vec<Condition>>,
@@ -460,6 +443,7 @@ pub struct Filter {
 
 /// 单个过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct Condition {
     pub key: String,
     pub operation: FilterOperation,
@@ -468,6 +452,7 @@ pub struct Condition {
 /// 过滤操作
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub enum FilterOperation {
     Equal(serde_json::Value),
     NotEqual(serde_json::Value),
@@ -671,7 +656,6 @@ impl Default for SearchQuery {
             with_payload: true,
             with_vector: false,
             limit: 10,
-            include_metadata: true,
             search_mode: SearchMode::Normal,
             vector_name: None,
         }

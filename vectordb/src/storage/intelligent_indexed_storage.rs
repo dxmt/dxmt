@@ -6643,28 +6643,7 @@ impl IntelligentIndexedStorage {
     }
 
     /// Bulk optimized insert
-    pub async fn insert_records_batch(
-        &self,
-        tablename: &str,
-        records: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        // For now, just use regular insert
-        let inserted = self.insert_records(tablename, records).await?;
-        Ok(inserted.into_iter().map(|r| r.id).collect())
-    }
-
     /// Deferred index insert
-    pub async fn insert_records_deferred_index(
-        &self,
-        tablename: &str,
-        records: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        // For now, just use regular insert
-        // In a full implementation, this would defer index building
-        let inserted = self.insert_records(tablename, records).await?;
-        Ok(inserted.into_iter().map(|r| r.id).collect())
-    }
-
     /// Get a single record
     pub async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
         self.ensure_resident(tablename).await?;
@@ -7143,64 +7122,11 @@ impl IntelligentIndexedStorage {
         }
     }
 
-    // Lock-free insert (stub)
-    // Simplified insertion methods - removed 8 redundant stubs that all called the same function
-    // All "optimized" modes (lockfree, streaming, memory_pool, ultra_fast, vm_optimized, nvme, ultimate)
-    // were just calling insert_records_batch, so we keep only the essential ones:
-
-    /// Optimized batch insert - for backwards compatibility
-    pub async fn insert_records_lockfree(
-        &self,
-        tablename: &str,
-        records: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        // All "optimized" modes delegate to batch insert since they had no real implementation
-        self.insert_records_batch(tablename, records).await
-    }
-
-    // Aliases for backwards compatibility - will be deprecated
-    pub async fn insert_records_streaming(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
-    pub async fn insert_records_with_memory_pool(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
-    pub async fn insert_records_ultra_fast(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
-    pub async fn insert_records_vm_optimized(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
-    pub async fn insert_records_nvme_optimized(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
-    pub async fn insert_records_ultimate(
-        &self,
-        t: &str,
-        r: Vec<CreateRecordRequest>,
-    ) -> crate::Result<Vec<RecordId>> {
-        self.insert_records_batch(t, r).await
-    }
+    // A comment here used to say eight redundant insert stubs had been removed. They had not:
+    // `insert_records_lockfree`, `_streaming`, `_with_memory_pool`, `_deferred_index`,
+    // `_ultra_fast`, `_vm_optimized`, `_nvme_optimized` and `_ultimate` were all still present,
+    // all seven lines long, and all reduced to `insert_records`. They are gone now, with the
+    // `mode` field on `/records/bulk` that was the only thing selecting between them.
 
     /// Add a single record to a table (for simple mode API)
     pub async fn add_record(

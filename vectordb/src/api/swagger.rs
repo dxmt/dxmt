@@ -55,10 +55,33 @@ use crate::types::{
         crate::api::handlers::create_snapshot,
         crate::api::handlers::create_backup),
     components(
+        // Every type a request body names has to be listed here, or utoipa emits a `$ref` to a
+        // schema it never defines and the page renders that operation with **no fields at all**.
+        // Seven of the thirteen request bodies were in that state -- `/records/list`,
+        // `/search/text`, `/search/hybrid`, `/records/bulk`, `/backup`, `/hybrid_search` and the
+        // table PATCH -- so the spec described them as taking an empty object. It is also what
+        // `tests/api/test_request_fields.py` reads to decide which fields it must cover, so an
+        // unregistered schema is a silent hole in that test as well as in the docs.
         schemas(
             Table, TableConfig, CreateRecordRequest, SearchQuery, SearchResult, Record,
             DistanceMetric, IndexType, CreateTableRequest, BatchInsertRequest,
             UpdateRecordRequest, BatchDeleteRequest, PaginationQuery,
+            crate::api::handlers::ListRecordsRequest,
+            crate::api::handlers::OptimizedBatchInsertRequest,
+            crate::api::handlers::CreateBackupRequest,
+            crate::api::handlers::KnnGraphRequest,
+            crate::api::handlers::PayloadUpdateMode,
+            crate::types::record::FullTextSearchRequest,
+            crate::types::record::HybridSearchRequest,
+            crate::types::record::HybridSearchQuery,
+            crate::types::record::FusionMethod,
+            crate::types::record::SearchMode,
+            crate::types::record::Filter,
+            crate::types::record::Condition,
+            crate::types::record::FilterOperation,
+            crate::types::sparse_vector::SparseVector,
+            crate::types::table::TableAlterRequest,
+            crate::types::table::TextFieldConfig,
             crate::api::response::ApiResponse,
             crate::api::response::ApiError,
             crate::types::table::TableInfoResponse)

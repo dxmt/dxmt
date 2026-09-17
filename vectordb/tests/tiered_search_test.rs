@@ -88,7 +88,6 @@ async fn test_tiered_search_memory_only() {
         with_payload: true,
         with_vector: false,
         limit: 10,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -160,7 +159,6 @@ async fn test_tiered_search_with_warm_tier() {
         with_payload: true,
         with_vector: false,
         limit: 20,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -241,7 +239,6 @@ async fn test_tiered_search_all_tiers() {
         with_payload: false,
         with_vector: false,
         limit: 30,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -308,7 +305,6 @@ async fn test_hot_vector_promotion() {
         with_payload: true,
         with_vector: false,
         limit: 10,
-        include_metadata: true,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -403,7 +399,6 @@ async fn test_search_result_reranking() {
         with_payload: false,
         with_vector: false,
         limit: 3,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -464,7 +459,6 @@ async fn test_early_termination_optimization() {
         with_payload: false,
         with_vector: false,
         limit: 10,
-        include_metadata: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
     };
@@ -518,7 +512,6 @@ mod performance_benchmarks {
             with_payload: true,
             with_vector: false,
             limit: 10,
-            include_metadata: true,
             search_mode: SearchMode::Normal,
             vector_name: None,
         };

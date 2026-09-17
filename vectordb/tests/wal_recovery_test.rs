@@ -2028,7 +2028,6 @@ async fn a_selective_filter_works_on_a_partitioned_table() {
         limit: 5,
         filter: Some(filter.clone()),
         with_payload: true,
-        include_metadata: true,
         ..Default::default()
     };
 
