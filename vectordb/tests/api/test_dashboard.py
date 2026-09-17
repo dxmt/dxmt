@@ -71,22 +71,23 @@ def test_the_page_is_the_app_shell(page):
     assert headers["content-type"].startswith("text/html")
 
 
-ASSET = r'/dashboard/[A-Za-z0-9_./-]+\.(?:js|css|svg|png|woff2?)'
+ASSET = r'/dashboard/[A-Za-z0-9_./-]+\.(?:js|css|svg|png|woff2?|txt)'
 
 
 def test_every_asset_the_page_references_is_served(page):
     """The check that catches a partial or stale embed, which nothing server-side can see.
 
-    Two levels deep, not one. The entry bundle is named in `index.html`, but a code-split chunk
-    is named *inside* the entry bundle — the PCA web worker is loaded that way. A one-level scan
-    goes green while the worker 404s, and the symptom is a projection that silently never
-    appears, with nothing in any log.
+    Two levels deep, not one, and through the stylesheet as well as the script. `index.html`
+    names the entry bundle and the stylesheet; the PCA worker is named *inside* the bundle and
+    the webfont *inside* the stylesheet. A one-level scan goes green while either 404s — and
+    both fail silently: a missing worker is a projection that never appears, a missing font is
+    a page that quietly falls back to the system stack, and neither puts anything in a log.
     """
     html, _ = page
     referenced = set(re.findall(ASSET, html))
     assert referenced, "index.html references no assets at all, so nothing was bundled"
 
-    for entry in [a for a in referenced if a.endswith('.js')]:
+    for entry in [a for a in referenced if a.endswith(('.js', '.css'))]:
         _, body, _ = raw(entry)
         referenced |= set(re.findall(ASSET, body.decode('utf-8', 'replace')))
 
@@ -94,6 +95,10 @@ def test_every_asset_the_page_references_is_served(page):
     assert any('worker' in a for a in referenced), (
         "no worker chunk is referenced; either the build stopped code-splitting it or this "
         "test stopped following the entry bundle, and both would hide a broken projection"
+    )
+    assert any(a.endswith('.woff2') for a in referenced), (
+        "no webfont is referenced; the stylesheet is not being followed, or the font stopped "
+        "being self-hosted — and a CDN font is a page that is blank on an air-gapped host"
     )
 
     missing = []

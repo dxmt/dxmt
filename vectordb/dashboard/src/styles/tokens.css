@@ -1,34 +1,81 @@
-/* One palette, two schemes, no framework.
-   The app needs about twelve primitives; a component library would be a forty-fold multiplier
-   on that, and it would land inside the server binary. */
+/* Design tokens.
+ *
+ * The palette, the radius, the shadow and the type scale follow UBold, a commercial admin
+ * theme the team likes — the shape, not the code. None of its files are here and none can be:
+ * it is a ThemeForest item with no redistributable licence, and this repository is Apache-2.0.
+ * What is reproduced is the visual language, which is why these are plain custom properties
+ * over hand-written CSS rather than an imported stylesheet.
+ *
+ * Nunito is the one asset actually shipped, and it is shipped because it can be: SIL OFL 1.1,
+ * licence text beside it in public/fonts/OFL.txt. Self-hosted rather than pulled from Google's
+ * CDN, because the page's own CSP says `script-src 'self'` and the whole point of embedding the
+ * console in the binary is that it works on a host with no route to the internet. 39 KB, latin
+ * subset, one variable file for every weight.
+ */
+
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/dashboard/fonts/nunito-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
 :root {
   color-scheme: light dark;
 
-  --bg: #fbfbfa;
+  --bg: #f5f6f8;
   --surface: #ffffff;
-  --border: #e3e3e0;
-  --text: #1c1c19;
-  --muted: #6b6b63;
-  --accent: #2f6f4f;
-  --warn: #8a6100;
-  --warn-bg: #fdf6e3;
-  --bad: #9b2c2c;
-  --bad-bg: #fdf0f0;
-  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --raised: #f6f7fb;
+  --border: #e7e9eb;
+  --border-soft: #eef2f7;
+  --text: #4c4c5c;
+  --heading: #313a46;
+  --muted: #8a969c;
+  --accent: #6658dd;
+  --accent-soft: #e8e6fa;
+  --ok: #0acf97;
+  --warn: #f7b84b;
+  --warn-bg: #fdf6e6;
+  --bad: #f1556c;
+  --bad-bg: #fdeef0;
+  --info: #43bfe5;
+
+  --radius: 0.3rem;
+  --radius-sm: 0.25rem;
+  --radius-lg: 0.4rem;
+  /* The shadow is most of the look: barely there, cool-toned, no border needed with it. */
+  --shadow: 0 1px 4px 0 rgba(130, 143, 163, 0.15);
+  --shadow-lg: 0 3px 14px 0 rgba(130, 143, 163, 0.22);
+
+  --sans: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --size: 0.875rem;
+  --lh: 1.5;
+
+  --pad: 1.5rem;
+  --pad-cap: 1.125rem;
+  --nav-width: 240px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17181a;
-    --surface: #1e1f22;
-    --border: #2f3136;
-    --text: #e8e8e5;
-    --muted: #9a9a93;
-    --accent: #6fbf92;
-    --warn: #e0b050;
+    --bg: #17181e;
+    --surface: #1e1f27;
+    --raised: #272832;
+    --border: #2f313c;
+    --border-soft: #262730;
+    --text: #aab8c5;
+    --heading: #e3e7ec;
+    --muted: #8a94a3;
+    --accent: #8b7fe8;
+    --accent-soft: #272444;
     --warn-bg: #2a2314;
-    --bad: #e08a8a;
-    --bad-bg: #2a1717;
+    --bad-bg: #2a1a1d;
+    --shadow: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 3px 14px 0 rgba(0, 0, 0, 0.5);
   }
 }

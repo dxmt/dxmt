@@ -4,6 +4,21 @@ Copyright 2026 上海点线面体信息科技有限公司
 
 This product includes software developed by the DXMT VectorDB authors.
 
+--------------------------------------------------------------------------------
+Third-party assets bundled with this product
+--------------------------------------------------------------------------------
+
+The web console (vectordb/dashboard, served at /dashboard) embeds the Nunito
+typeface, Copyright 2014 The Nunito Project Authors
+(https://github.com/googlefonts/nunito), licensed under the SIL Open Font
+License, Version 1.1. The full licence text ships beside the font file, at
+vectordb/dashboard/public/fonts/OFL.txt, and is served at
+/dashboard/fonts/OFL.txt.
+
+The console's visual language -- palette, radii, shadow, type scale -- follows
+the UBold admin theme by Coderthemes. No files, styles or assets from that theme
+are included or derived from here; the stylesheet is written from scratch.
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
