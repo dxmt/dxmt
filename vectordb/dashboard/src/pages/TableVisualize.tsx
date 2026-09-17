@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Link, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { normalizeRecord, vectorFor } from '../api/normalize';
@@ -58,11 +59,34 @@ export function TableVisualize() {
   const wanted = Math.min(Number(params.get('n') ?? budget.points), budget.points);
   const colorKey = params.get('by') ?? '';
 
+  /**
+   * The payload keys, learned before anything is projected.
+   *
+   * They used to come only from the sample, which meant the colour-by control sat there with
+   * one meaningless option until you had already pressed Project — a visible, enabled, useless
+   * control, and no hint as to why. The natural order is the other way round: choose what to
+   * colour by, then look. So a handful of records are read on arrival (no vectors, so it is a
+   * small response) purely to find out what the payloads contain.
+   *
+   * A handful rather than one, because DXMT payloads are schemaless and a key present on most
+   * records can be absent from the first.
+   */
+  const probe = useQuery({
+    queryKey: ['payload-keys', name],
+    staleTime: Infinity,
+    queryFn: ({ signal }) =>
+      api
+        .records(name, { limit: 20, offset: 0, with_vector: false }, signal)
+        .then((r) => r.value.records.map((wire) => normalizeRecord(name, wire).payload ?? {})),
+  });
+
   const keys = useMemo(() => {
     const seen = new Set<string>();
-    for (const payload of payloads) for (const key of Object.keys(payload)) seen.add(key);
+    for (const payload of [...(probe.data ?? []), ...payloads]) {
+      for (const key of Object.keys(payload)) seen.add(key);
+    }
     return [...seen].sort();
-  }, [payloads]);
+  }, [probe.data, payloads]);
 
   const coloring: Coloring = useMemo(
     () => colorBy(payloads.map((payload) => (colorKey ? payload[colorKey] : undefined))),
@@ -253,13 +277,14 @@ export function TableVisualize() {
             colour by
             <select
               value={colorKey}
+              disabled={keys.length === 0}
               onChange={(event) => {
                 const next = new URLSearchParams(params);
                 next.set('by', event.target.value);
                 setParams(next, { replace: true });
               }}
             >
-              <option value="">nothing</option>
+              <option value="">{keys.length === 0 ? 'no payload fields' : 'nothing'}</option>
               {keys.map((key) => (
                 <option key={key} value={key}>
                   {key}
