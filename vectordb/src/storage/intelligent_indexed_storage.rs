@@ -458,6 +458,35 @@ pub struct IntelligentIndexedStorage {
 }
 
 /// 智能表数据
+/// Indexes derived from the records: payload values for filtering, sparse postings for MIPS.
+///
+/// Both are built at insert time and neither is written anywhere, so a restart has to rebuild
+/// them from the records. `restore_table` did not, and the result was silent in the way this
+/// codebase keeps finding: after any restart **every filter matched nothing**. `records/list`
+/// and `search` both answered 200 with an empty result, indistinguishable from a filter that
+/// genuinely selects no rows, for `search` and `records/list` alike. Sparse search did the same.
+/// Measured on the demo box: a record inserted after the restart was filterable, 2,500 records
+/// inserted before it were not.
+///
+/// The whole existing test suite was green through this, because `tests/api/` inserts and
+/// queries in one process. Nothing restarted the server before filtering.
+///
+/// # Why this is built on demand rather than at restore
+///
+/// Rebuilding costs one decode of every record -- about 150 ms per 120,000 rows, so roughly
+/// fifteen seconds at ten million. Paying that during `restore_table` would turn a restart that
+/// currently serves in 0.43 s into one that does not, for every server, including the ones that
+/// never filter. Built on first use instead: the first filtered query on each table pays the
+/// scan, everything after it is free, and a server that never filters never builds it.
+///
+/// Writes do not build it. An insert into a table whose indexes are not built leaves them not
+/// built, because a later build reads the records the insert just landed. Only a read forces it.
+#[derive(Default)]
+struct DerivedIndexes {
+    payload: crate::storage::payload_index::PayloadIndex,
+    sparse: SparseIndex,
+}
+
 struct IntelligentTableData {
     /// 表元数据
     table: Table,
@@ -497,11 +526,9 @@ struct IntelligentTableData {
     /// 性能统计（Arc<Mutex> 支持在读锁持有期间并发更新）
     performance_stats: Arc<Mutex<PerformanceStats>>,
 
-    /// Payload索引（用于元数据过滤优化）
-    payload_index: crate::storage::payload_index::PayloadIndex,
-
-    /// 稀疏向量倒排索引（支持 WAND 剪枝的 MIPS）
-    sparse_index: SparseIndex,
+    /// The two indexes that are a pure function of the records, and are rebuilt rather than
+    /// restored. `None` means "not built yet" -- see [`IntelligentTableData::derived`].
+    derived: parking_lot::RwLock<Option<DerivedIndexes>>,
 
     /// 全文搜索引擎（仅当启用全文搜索时）
     #[cfg(feature = "text-bm25")]
@@ -561,6 +588,50 @@ impl IntelligentTableData {
 
     /// Every live record's vector, for building an index. From disk this reads the rows in
     /// file order, a few thousand at a time, rather than one row per record.
+    /// The derived indexes, built from the records if this is the first time anyone asked.
+    ///
+    /// The build is one pass over the records, which on a disk-backed table means decoding each
+    /// one. That is the cost this defers until a filter or a sparse query actually needs it;
+    /// see [`DerivedIndexes`] for why it is not paid at restore.
+    fn derived(&self) -> parking_lot::MappedRwLockReadGuard<'_, DerivedIndexes> {
+        if self.derived.read().is_none() {
+            let mut built = DerivedIndexes::default();
+            let mut records = 0usize;
+            self.records.for_each(|record| {
+                records += 1;
+                built.payload.insert_record(&record.id, &record.payload);
+                if let Some(sparse) = &record.sparse_vector {
+                    if let Err(e) = built.sparse.insert(record.id.clone(), sparse) {
+                        warn!("Failed to index sparse vector for {}: {}", record.id, e);
+                    }
+                }
+            });
+            let mut slot = self.derived.write();
+            // Another thread may have built it while this one was scanning. Theirs is as good
+            // as this one -- both read the same records under the same lock -- so the first to
+            // arrive wins and the loser's work is dropped rather than overwriting it.
+            if slot.is_none() {
+                debug!(
+                    "Table '{}': built the payload and sparse indexes from {} records",
+                    self.table.name, records
+                );
+                *slot = Some(built);
+            }
+        }
+        parking_lot::RwLockReadGuard::map(self.derived.read(), |slot| {
+            slot.as_ref().expect("built just above, and never unset")
+        })
+    }
+
+    /// The derived indexes for a write to update, or `None` when they have not been built.
+    ///
+    /// A write to an unbuilt pair does nothing on purpose: whoever builds them later reads the
+    /// records, which by then include this write. Forcing a build here would make the first
+    /// insert into a restored table pay for a scan nobody asked for.
+    fn derived_mut(&self) -> parking_lot::MappedRwLockWriteGuard<'_, Option<DerivedIndexes>> {
+        parking_lot::RwLockWriteGuard::map(self.derived.write(), |slot| slot)
+    }
+
     fn vectors_for_index(&self) -> Vec<(RecordId, Vec<f32>)> {
         let Some(file) = &self.vector_file else {
             let mut out = Vec::with_capacity(self.records.len());
@@ -1007,25 +1078,23 @@ async fn process_insert_group(
                     // Upsert is replacement semantics. Leaving the previous sparse postings or
                     // payload values indexed makes filters and sparse search return a record for
                     // values it no longer has.
-                    if is_update {
-                        let _ = table_data.sparse_index.delete(&record_id);
-                    }
-                    if let Some(sv) = &record.sparse_vector {
-                        if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
-                            warn!("Failed to index sparse vector for {}: {}", record_id, e);
+                    if let Some(derived) = table_data.derived_mut().as_mut() {
+                        if is_update {
+                            let _ = derived.sparse.delete(&record_id);
                         }
-                    }
+                        if let Some(sv) = &record.sparse_vector {
+                            if let Err(e) = derived.sparse.insert(record_id.clone(), sv) {
+                                warn!("Failed to index sparse vector for {}: {}", record_id, e);
+                            }
+                        }
 
-                    if let Some(old_payload) = old_payload.as_ref() {
-                        table_data.payload_index.update_record(
-                            &record_id,
-                            old_payload,
-                            &record.payload,
-                        );
-                    } else {
-                        table_data
-                            .payload_index
-                            .insert_record(&record_id, &record.payload);
+                        if let Some(old_payload) = old_payload.as_ref() {
+                            derived
+                                .payload
+                                .update_record(&record_id, old_payload, &record.payload);
+                        } else {
+                            derived.payload.insert_record(&record_id, &record.payload);
+                        }
                     }
                     // The caller gets the record as sent; the map keeps it without the
                     // vector when that lives in the row file.
@@ -3018,6 +3087,13 @@ impl IntelligentIndexedStorage {
         }
         data.table.record_count = data.records.len() as u64;
 
+        // The payload and sparse indexes belong to the records that were just put back, and
+        // `create_table_inner` handed this container an empty pair on the assumption that it
+        // had none. Clearing them is what marks them for rebuilding; leaving the empty pair in
+        // place is what made every filter match nothing after a restart, with no error and no
+        // way to tell it from a filter that genuinely selects nothing. See `DerivedIndexes`.
+        *data.derived.write() = None;
+
         // A restored table's text index normally survives on disk under the table's id, and this
         // finds it populated and does nothing. It comes back *empty* in two cases, and both used
         // to be silent for the life of the table:
@@ -3573,8 +3649,9 @@ impl IntelligentIndexedStorage {
             named_indexes,
             index_decision,
             performance_stats: Arc::new(Mutex::new(PerformanceStats::default())),
-            payload_index: crate::storage::payload_index::PayloadIndex::new(),
-            sparse_index: SparseIndex::new(),
+            // A table being created has no records, so an empty pair is already correct and
+            // there is nothing to rebuild. `restore_table` clears this back to `None`.
+            derived: parking_lot::RwLock::new(Some(DerivedIndexes::default())),
             #[cfg(feature = "text-bm25")]
             full_text_engine,
         };
@@ -3758,7 +3835,7 @@ impl IntelligentIndexedStorage {
 
             // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
             let cardinality_and_sel = if let Some(ref filter) = query.filter {
-                let cardinality = table_data.payload_index.estimate_cardinality(filter);
+                let cardinality = table_data.derived().payload.estimate_cardinality(filter);
                 let selectivity = if total_records > 0 {
                     cardinality.exp as f64 / total_records as f64
                 } else {
@@ -3789,10 +3866,10 @@ impl IntelligentIndexedStorage {
                 // last step -- the fallback is reached after an initial fetch and at least
                 // one escalating refetch, and each of those reranks thousands of candidates
                 // against their stored vectors to discover what this already knows.
-                if table_data.payload_index.cannot_match_anything(filter) {
+                if table_data.derived().payload.cannot_match_anything(filter) {
                     exact_scored = Some(Vec::new());
                 } else if *selectivity < 0.05 {
-                    let filter_ids = table_data.payload_index.get_matching_ids(filter);
+                    let filter_ids = table_data.derived().payload.get_matching_ids(filter);
                     // Exact scoring over the candidate set, when the set is small enough that
                     // doing so beats walking the graph. `result_limit * 4` alone made that
                     // threshold depend on the caller's top_k rather than on the work involved:
@@ -4226,7 +4303,7 @@ impl IntelligentIndexedStorage {
             let allowed = query
                 .filter
                 .as_ref()
-                .map(|f| table_data.payload_index.get_matching_ids(f));
+                .map(|f| table_data.derived().payload.get_matching_ids(f));
 
             let candidates = match &allowed {
                 Some(ids) => ids.len(),
@@ -4402,7 +4479,7 @@ impl IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
             let dimension = table_data.table.dimension;
-            let allowed = filter.map(|f| table_data.payload_index.get_matching_ids(f));
+            let allowed = filter.map(|f| table_data.derived().payload.get_matching_ids(f));
             let mut candidates: Vec<RecordId> = table_data
                 .records
                 .ids()
@@ -5192,7 +5269,7 @@ impl IntelligentIndexedStorage {
             }
 
             let sparse_results: Vec<(RecordId, f32)> = match request.sparse_vector {
-                Some(ref sv) => table_data.sparse_index.search(sv, fetch_limit),
+                Some(ref sv) => table_data.derived().sparse.search(sv, fetch_limit),
                 None => Vec::new(),
             };
 
@@ -6743,25 +6820,25 @@ impl IntelligentIndexedStorage {
                 .records
                 .insert(Arc::new(record.clone()), updated_vector_row)?;
 
-            if let Some(old_payload_val) = old_payload.as_ref() {
-                table_data
-                    .payload_index
-                    .update_record(record_id, old_payload_val, &record.payload);
-            } else {
-                table_data
-                    .payload_index
-                    .insert_record(record_id, &record.payload);
-            }
+            if let Some(derived) = table_data.derived_mut().as_mut() {
+                if let Some(old_payload_val) = old_payload.as_ref() {
+                    derived
+                        .payload
+                        .update_record(record_id, old_payload_val, &record.payload);
+                } else {
+                    derived.payload.insert_record(record_id, &record.payload);
+                }
 
-            // Always remove the old sparse posting first. If the new record has no sparse
-            // vector, leaving the old postings behind makes hybrid search return stale ids.
-            let _ = table_data.sparse_index.delete(record_id);
-            if let Some(sv) = &record.sparse_vector {
-                if let Err(e) = table_data.sparse_index.insert(record_id.clone(), sv) {
-                    warn!(
-                        "Failed to update sparse index for record {}: {}",
-                        record_id, e
-                    );
+                // Always remove the old sparse posting first. If the new record has no sparse
+                // vector, leaving the old postings behind makes hybrid search return stale ids.
+                let _ = derived.sparse.delete(record_id);
+                if let Some(sv) = &record.sparse_vector {
+                    if let Err(e) = derived.sparse.insert(record_id.clone(), sv) {
+                        warn!(
+                            "Failed to update sparse index for record {}: {}",
+                            record_id, e
+                        );
+                    }
                 }
             }
 
@@ -6894,12 +6971,13 @@ impl IntelligentIndexedStorage {
                 table_data.records.remove(id)?;
                 table_data.vector_rows.remove(id);
 
-                if let Some(payload) = old_payload {
-                    table_data.payload_index.remove_record(id, &payload);
-                }
-
-                if let Err(e) = table_data.sparse_index.delete(id) {
-                    warn!("Failed to remove record {} from sparse index: {}", id, e);
+                if let Some(derived) = table_data.derived_mut().as_mut() {
+                    if let Some(payload) = old_payload {
+                        derived.payload.remove_record(id, &payload);
+                    }
+                    if let Err(e) = derived.sparse.delete(id) {
+                        warn!("Failed to remove record {} from sparse index: {}", id, e);
+                    }
                 }
             }
 
@@ -7258,7 +7336,7 @@ impl IntelligentIndexedStorage {
         // paid 120,000 JSON clones for 25 rows. A refcount bump costs nothing and the page is
         // cloned at the end, where it is twenty-five of them.
         let mut matching: Vec<std::sync::Arc<Record>> = if let Some(filter) = filter {
-            let matching_ids = table_data.payload_index.get_matching_ids(filter);
+            let matching_ids = table_data.derived().payload.get_matching_ids(filter);
             matching_ids
                 .iter()
                 .filter_map(|id| table_data.records.get(id))
