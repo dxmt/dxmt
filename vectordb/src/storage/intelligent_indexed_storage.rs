@@ -2178,6 +2178,15 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        // `fulltext/` is deliberately not copied, though it now sits beside these.
+        //
+        // It is derived state — every document in it was built from a record in `records/` by
+        // `text_document_for` — and a backup is taken while the server is running, so copying a
+        // live Tantivy index file by file could capture a half-written segment set with no way
+        // to tell. Restoring rebuilds it instead: `restore_table` finds an index holding no
+        // documents for a table that has records and re-indexes from the rows. Deterministic,
+        // already tested, and the only cost is the first start after a restore.
+        //
         // 快照点之后的日志尾巴。刚做完快照通常很短，但不能不带——恢复要靠它补上
         // 快照与备份完成之间的那几条写入。
         let wal_log = wal_dir.join("wal.log");
@@ -3535,7 +3544,7 @@ impl IntelligentIndexedStorage {
         // 创建全文搜索引擎（如果启用）
         #[cfg(feature = "text-bm25")]
         let full_text_engine = if table.enable_full_text_search {
-            match Self::create_full_text_engine(&table).await {
+            match self.create_full_text_engine(&table).await {
                 Ok(engine) => {
                     info!(
                         "Successfully created full-text search engine for table {}",
@@ -5483,7 +5492,7 @@ impl IntelligentIndexedStorage {
                 let _ = std::fs::remove_file(PathBuf::from(log));
             }
 
-            // The full-text index, which lives outside the WAL directory entirely.
+            // The full-text index, a sibling of the row files above.
             //
             // This became necessary when table ids stopped being random: an id is now a
             // function of the name, so a table dropped and recreated under the same name gets
@@ -5492,7 +5501,7 @@ impl IntelligentIndexedStorage {
             // minted a new id and simply leaked a directory; it is not survivable now.
             #[cfg(feature = "text-bm25")]
             {
-                let _ = std::fs::remove_dir_all(Self::full_text_index_path(&data.table.id));
+                let _ = std::fs::remove_dir_all(self.full_text_index_path(&data.table.id));
             }
 
             data.table.id.to_string()
@@ -7281,20 +7290,59 @@ impl IntelligentIndexedStorage {
         true
     }
 
-    /// Where a table's Tantivy index lives.
+    /// Where a table's Tantivy index lives: `{wal_dir}/fulltext/{table_id}`.
     ///
     /// Named rather than inlined because two places need to agree on it: the engine that opens
     /// it and the drop that removes it. They did not, and the index outlived its table.
+    ///
+    /// # It used to default to `/tmp`
+    ///
+    /// The old default was `{DB_STORAGE_PATH:-/tmp}/dxmt_full_text_{id}`, which put a real
+    /// index — data, not a cache; the only copy of the term postings — in the one directory an
+    /// operating system feels free to empty. `systemd-tmpfiles` clears `/tmp` on a schedule on
+    /// most distributions and many images wipe it on boot, so a server could come back with its
+    /// WAL, its row files and its snapshots all intact and its text search silently answering
+    /// nothing. It also sat outside `DB_WAL_DIR`, so a backup of that directory — which is what
+    /// `docs/operations/backup-restore.md` tells you to take — never contained it.
+    ///
+    /// Beside the WAL is where the rest of a table's durable state already lives: `records/`,
+    /// `vectors/` and `snapshot/` are all siblings of this. One directory to back up, one to
+    /// restore, one to delete.
+    ///
+    /// The shared default had also become a collision. A table id is now a function of its
+    /// name, so two servers on one machine — two instances, a test suite, a staging copy — with
+    /// a table of the same name derived the *same* id and, under `/tmp`, opened the *same*
+    /// index: one holding the other's documents, and contending for Tantivy's writer lock.
+    /// Under `DB_WAL_DIR` they are as separate as the rest of their state. Reverting this
+    /// function to the old path turns five of the six tests in
+    /// `tests/full_text_recovery_test.rs` red, and that is how.
+    ///
+    /// `DB_STORAGE_PATH` still wins when it is set, in its original shape, so a deployment that
+    /// pointed it somewhere deliberate keeps that placement and finds its index where it left
+    /// it. Without a WAL directory at all — embedded use, most tests — `/tmp` remains, because
+    /// nothing in that configuration survives the process anyway.
+    ///
+    /// Moving is safe without a migration step: a table whose index is not where this now looks
+    /// comes back with an empty one, and `restore_table` rebuilds it from the rows. That costs
+    /// one re-index on the first start after upgrading and nothing afterwards.
     #[cfg(feature = "text-bm25")]
-    fn full_text_index_path(table_id: &uuid::Uuid) -> String {
-        let base_dir = std::env::var("DB_STORAGE_PATH").unwrap_or_else(|_| "/tmp".to_string());
-        format!("{}/dxmt_full_text_{}", base_dir, table_id)
+    fn full_text_index_path(&self, table_id: &uuid::Uuid) -> PathBuf {
+        if let Ok(explicit) = std::env::var("DB_STORAGE_PATH") {
+            if !explicit.is_empty() {
+                return PathBuf::from(explicit).join(format!("dxmt_full_text_{table_id}"));
+            }
+        }
+        match &self.wal_dir {
+            Some(wal_dir) => wal_dir.join("fulltext").join(table_id.to_string()),
+            None => PathBuf::from("/tmp").join(format!("dxmt_full_text_{table_id}")),
+        }
     }
 
     /// 创建全文搜索引擎
     #[cfg(feature = "text-bm25")]
-    async fn create_full_text_engine(table: &Table) -> crate::Result<FullTextSearchEngine> {
-        let index_path = Self::full_text_index_path(&table.id);
+    async fn create_full_text_engine(&self, table: &Table) -> crate::Result<FullTextSearchEngine> {
+        let index_path = self.full_text_index_path(&table.id);
+        let index_path = index_path.to_string_lossy().into_owned();
 
         // Create directory if it doesn't exist
         std::fs::create_dir_all(&index_path).map_err(|e| {
