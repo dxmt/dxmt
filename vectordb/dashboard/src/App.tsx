@@ -4,6 +4,7 @@ import { Tables } from './pages/Tables';
 import { TableDetail } from './pages/TableDetail';
 import { TableRecords } from './pages/TableRecords';
 import { TableSearch } from './pages/TableSearch';
+import { TableQuality } from './pages/TableQuality';
 import { RecordDetail } from './pages/RecordDetail';
 
 export function App() {
@@ -26,10 +27,11 @@ export function App() {
             <Route index element={<Navigate to="records" replace />} />
             <Route path="records" element={<TableRecords />} />
             <Route path="search" element={<TableSearch />} />
+            <Route path="quality" element={<TableQuality />} />
           </Route>
           <Route path="/tables/:name/records/:id" element={<RecordDetail />} />
-          {/* Visualize and quality land here next. Until then a deep link should go somewhere
-              rather than render nothing. */}
+          {/* Visualize lands here next. Until then a deep link should go somewhere rather
+              than render nothing. */}
           <Route path="/tables/:name/*" element={<Navigate to="records" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

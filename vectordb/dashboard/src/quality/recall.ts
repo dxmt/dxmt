@@ -118,6 +118,77 @@ export function compare(
   };
 }
 
+export interface SweepOptions {
+  table: string;
+  ids: string[];
+  k: number;
+  modes: SearchMode[];
+  /** The mode that stands in for ground truth: `exact` when available, else `accurate`. */
+  truthMode: SearchMode;
+  filter?: Filter | null;
+  vectorOf: (id: string) => Promise<number[]>;
+  onProgress?: (line: string, done: number, total: number) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Every mode against one ground truth, which is the only affordable way to draw the curve.
+ *
+ * Running `run` once per mode would issue an exhaustive search per mode per point — at twenty
+ * points and four modes that is eighty full passes over the table, most of them recomputing an
+ * answer already in hand. The truth for a point does not depend on which mode it is being
+ * compared against, so it is fetched once and reused: N exact scans instead of 4N.
+ *
+ * Sequential throughout, and for the same reason the search inspector is: two searches at once
+ * contend for the index and the page cache, and every millisecond this page reports would then
+ * be partly a measurement of the other.
+ */
+export async function sweep(options: SweepOptions): Promise<RecallReport[]> {
+  const { table, ids, k, modes, truthMode, filter, vectorOf, onProgress, signal } = options;
+  const probes = new Map<SearchMode, Probe[]>(modes.map((mode) => [mode, []]));
+
+  for (const [index, id] of ids.entries()) {
+    if (signal?.aborted) break;
+    const vector = await vectorOf(id);
+    const body = {
+      vector,
+      // One more than wanted, so removing the query point still leaves k.
+      top_k: k + 1,
+      limit: k + 1,
+      with_payload: false,
+      filter: filter ?? null,
+    };
+
+    const truth = await api.search(table, { ...body, search_mode: truthMode }, signal);
+
+    const parts: string[] = [];
+    for (const mode of modes) {
+      if (signal?.aborted) break;
+      const ann =
+        mode === truthMode
+          ? truth
+          : await api.search(table, { ...body, search_mode: mode }, signal);
+      const probe: Probe = {
+        ...compare(id, truth.value.hits, ann.value.hits, k),
+        exactMs: truth.value.tookms,
+        annMs: ann.value.tookms,
+      };
+      probes.get(mode)?.push(probe);
+      parts.push(`${mode} ${probe.recall.toFixed(2)}`);
+    }
+
+    onProgress?.(
+      `${id} (${index + 1}/${ids.length}) — ${parts.join(', ')} · truth ${truth.value.tookms} ms`,
+      index + 1,
+      ids.length,
+    );
+  }
+
+  return modes.map((mode) =>
+    summarise(probes.get(mode) ?? [], k, mode, truthMode === 'exact'),
+  );
+}
+
 export interface RunOptions {
   table: string;
   ids: string[];

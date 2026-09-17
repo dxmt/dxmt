@@ -87,6 +87,7 @@ table regardless of `limit`.
 | Records | what is actually stored | see below |
 | Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
 | Search | why did this come back, and what is the index costing | see below |
+| Index quality | how much recall is the index losing, on this data | see below |
 
 ### The search inspector
 
@@ -110,6 +111,34 @@ On a server without the exact mode — detected by a probe that reads the plain-
 extractor answers with — the page says so and stops calling anything recall. `accurate` is 4x
 ef and about 0.98 itself, so agreement with it is an upper bound, blind to whatever every mode
 misses.
+
+### Index quality
+
+The method is Qdrant's (Apache 2.0 — the method, not the code): existing records as queries,
+each run twice, recall as the overlap. Twenty sample points on the 100,000-row demo table, which
+costs twenty exhaustive passes plus eighty indexed searches:
+
+    mode        recall@10    @1   score ratio    ms   vs truth   histogram
+    fast      0.650±0.136  0.75        0.9975    <1        10×   ····▃▄▅▆▇··
+    normal    0.840±0.110  0.95        0.9993     1        10×   ·······▆▇▆▅
+    accurate  0.955±0.076  1.00        0.9999     4       2.5×   ········▄▄█
+    auto      0.955±0.076  1.00        0.9999     3       3.3×   ········▄▄█
+
+The score ratio is why recall alone is not enough: `fast` misses 35% of the true neighbours and
+still returns 99.75% of the summed similarity, so what it substituted was almost as close. The
+histogram is why the mean is not enough: `fast`'s recall is spread from 0.4 to 0.9 where
+`accurate`'s is bunched at the top, and a mean cannot tell "everyone misses one" from "a few are
+catastrophic". The worst five points are listed by id and link to the record.
+
+Three things it refuses to do. It will not start while an index is rebuilding — every query on
+the server is queued behind that, so the numbers would be about the rebuild. It will not run
+four separate comparisons: the truth for a point does not depend on which mode it is compared
+against, so it is fetched once and reused, N exhaustive passes rather than 4N (a test counts the
+requests and fails if that regresses). And it will not call the result recall when there was no
+ground truth.
+
+Stopping a run keeps what it measured and says the figures are partial. The sample is drawn by a
+seeded PRNG with the seed in the URL, so a run is reproducible by sharing the link.
 
 ### What shapes the record browser
 
