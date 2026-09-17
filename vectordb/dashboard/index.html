@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DXMT VectorDB</title>
+    <!-- Declared inline, as a data URI, for two reasons. A browser asks for /favicon.ico on
+         every page whether or not anyone wants one, and without this it is a permanent 404 in
+         the console of a tool whose entire job is showing people what is wrong. And a data URI
+         is no request and no embedded file: the icon lives in the 400 bytes of this document.
+         `img-src 'self' data:` in the page's CSP is what permits it. -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%236658dd'/><circle cx='10' cy='21' r='2.6' fill='white'/><circle cx='16' cy='13' r='2.6' fill='white'/><circle cx='23' cy='19' r='2.6' fill='white'/><circle cx='13' cy='8' r='1.7' fill='white' opacity='.55'/><circle cx='24' cy='10' r='1.7' fill='white' opacity='.55'/></svg>" />
   </head>
   <body>
     <div id="root"></div>

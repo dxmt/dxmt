@@ -120,6 +120,22 @@ def test_every_asset_the_page_references_is_served(page):
     )
 
 
+def test_the_page_declares_an_icon_so_the_browser_stops_asking_for_one(page):
+    """A browser requests `/favicon.ico` on every page whether anyone wants one or not.
+
+    Without a declared icon that is a permanent 404 in the console of a tool whose whole job is
+    showing people what is wrong — reported as one, too. Declaring it inline as a data URI costs
+    no request and no embedded file, and this asserts it stays that way rather than drifting
+    back to a fetched file that would have to be embedded and could go missing.
+    """
+    html, _ = page
+    assert 'rel="icon"' in html, "no icon is declared, so /favicon.ico will 404 on every load"
+    assert 'href="data:image/svg+xml' in html, (
+        "the icon is fetched rather than inline; that is a request and a file that can go "
+        "missing, for something the browser asks for unprompted"
+    )
+
+
 def test_a_client_side_route_survives_a_reload(page):
     status, body, headers = raw("/dashboard/tables")
     assert status == 200
