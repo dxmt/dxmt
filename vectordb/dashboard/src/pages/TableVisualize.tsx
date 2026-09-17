@@ -36,7 +36,12 @@ export function TableVisualize() {
   const { table } = useOutletContext<{ table: Table | undefined }>();
   const [params, setParams] = useSearchParams();
 
-  const canvas = useRef<HTMLCanvasElement>(null);
+  // A callback ref, not `useRef`: the canvas is inside `{positions ? … : null}`, so on mount
+  // there is nothing to attach to. The first version constructed the renderer in an effect with
+  // an empty dependency list, which ran while `canvas.current` was still null, bailed, and left
+  // the plot permanently blank — the header rendered, because those numbers come from the
+  // worker, and nothing else ever did. A callback ref fires when the element actually appears.
+  const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
   const scatter = useRef<Scatter | null>(null);
   const worker = useRef<Worker | null>(null);
   const job = useRef(0);
@@ -113,15 +118,24 @@ export function TableVisualize() {
     return () => worker.current?.terminate();
   }, []);
 
+  // The click handler closes over `ids`, which changes on every resample. Held in a ref and
+  // read at call time so the renderer is built once per canvas rather than rebuilt whenever the
+  // sample changes — and so a click never acts on the ids of a previous projection.
+  const onPoint = useRef<(index: number) => void>(() => {});
+  onPoint.current = (index: number) => void verify(index);
+
   useEffect(() => {
-    if (!canvas.current) return;
-    scatter.current = new Scatter(canvas.current, {
+    if (!canvasEl) return;
+    const instance = new Scatter(canvasEl, {
       onHover: setHover,
-      onClick: (index) => void verify(index),
+      onClick: (index) => onPoint.current(index),
     });
-    return () => scatter.current?.destroy();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    scatter.current = instance;
+    return () => {
+      instance.destroy();
+      scatter.current = null;
+    };
+  }, [canvasEl]);
 
   useEffect(() => {
     if (!positions || !scatter.current) return;
@@ -132,7 +146,9 @@ export function TableVisualize() {
         color: coloring.colorAt(index),
       })),
     );
-  }, [positions, ids, coloring]);
+    // `canvasEl` is a dependency because the renderer is built from it: without it here, the
+    // first projection sets points on a renderer that does not exist yet and never retries.
+  }, [positions, ids, coloring, canvasEl]);
 
   const load = async () => {
     setError(null);
@@ -373,7 +389,7 @@ export function TableVisualize() {
             {/* A canvas is opaque to a screen reader, so the figures it draws are stated in
                 text as well — that is also the honest summary for anyone reading quickly. */}
             <canvas
-              ref={canvas}
+              ref={setCanvasEl}
               role="img"
               aria-label={`Scatter plot of ${ids.length} sampled records. The two components carry ${(together * 100).toFixed(1)} per cent of the variance${preserved && preserved.probes > 0 ? `, and ${(preserved.rate * 100).toFixed(0)} per cent of each point's nearest neighbours survive the projection` : ''}.`}
             />

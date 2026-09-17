@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { TableVisualize } from '../src/pages/TableVisualize';
 import { renderAt } from './render';
 import type { PcaRequest, PcaResponse } from '../src/viz/pca.worker';
+import { Scatter } from '../src/viz/scatter';
 
 const TABLE = { name: 't', dimension: 8, record_count: 500, distance_metric: 'cosine' };
 vi.mock('react-router-dom', async () => {
@@ -73,5 +74,27 @@ describe('colour by', () => {
     await user.click(screen.getByRole('button', { name: /project/i }));
     await waitFor(() => expect(screen.getByText(/of variance/)).toBeInTheDocument(), { timeout: 5000 });
     expect(options()).toContain('topic');
+  }, 20000);
+
+  it('hands the projected points to the renderer, not just to the header', async () => {
+    // The bug this exists for: the renderer was built in an effect with an empty dependency
+    // list, while the canvas was still inside `{positions ? … : null}` and therefore absent.
+    // The effect bailed, nothing was ever drawn, and every number on the page was still
+    // correct — they come from the worker. A test that checked the text would have passed.
+    const points = vi.spyOn(Scatter.prototype, 'setPoints');
+    const user = userEvent.setup();
+    renderAt('/tables/t/visualize', '/tables/:name/visualize', <TableVisualize />);
+
+    await user.click(screen.getByRole('button', { name: /project/i }));
+    await waitFor(() => expect(screen.getByText(/of variance/)).toBeInTheDocument(), {
+      timeout: 5000,
+    });
+
+    await waitFor(() => expect(points).toHaveBeenCalled(), { timeout: 5000 });
+    const drawn = points.mock.calls.at(-1)![0];
+    expect(drawn.length).toBeGreaterThan(0);
+    // Real coordinates, not a list of NaNs, which is the other way this goes quietly wrong.
+    expect(drawn.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))).toBe(true);
+    points.mockRestore();
   }, 20000);
 });
