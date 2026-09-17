@@ -977,6 +977,14 @@ pub async fn delete_records(
 
 /// Nearest neighbours to a query vector.
 ///
+/// `search_mode` trades recall against latency: `fast` (ef = top_k), `normal` (the default),
+/// `accurate` (4× ef), `auto` (scaled by filter selectivity), and `exact`. The first four walk
+/// the index and answer approximately — `accurate` measures 0.98–0.99 recall depending on the
+/// corpus, not 1.0. **`exact` scores every live row**, which is the only way to find out what
+/// recall your index is actually giving you on your own data: run the same query twice and
+/// compare. It costs a full pass over the table's vectors and is refused above
+/// `DB_EXACT_SCAN_MAX` rows (default 1,000,000); a filter narrows what it has to read.
+///
 /// `POST /api/v1/tables/{table_name}/batch_search` is an alias for this route and answers
 /// identically; it does not batch anything.
 #[cfg_attr(feature = "api-swagger", utoipa::path(

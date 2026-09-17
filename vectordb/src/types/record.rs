@@ -142,10 +142,16 @@ pub struct UpdateRecordRequest {
 
 /// Search accuracy/speed tradeoff mode.
 ///
-/// Controls HNSW ef_search: Fast uses top_k (minimum scanning), Normal uses the
-/// configured default, Accurate uses 4× the configured value for higher recall.
-/// Auto dynamically scales ef based on top_k and filter selectivity.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// Four of the five are the same knob at different settings: they scale HNSW's `ef_search`,
+/// the traversal budget. `Exact` is not that knob at all -- it skips the graph and scores
+/// every live row, which is the only way to get an answer with no recall loss in it.
+///
+/// That distinction is the reason `Exact` exists. `Accurate` is 4× ef and measures 0.9798 to
+/// 0.9912 recall depending on the corpus; it is the most the graph will give you, not the
+/// truth. Without a mode that returns the truth, "what is my recall on my own data" can only
+/// be answered by the benchmark harness against a dataset with published ground truth --
+/// never against the data someone actually loaded.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
@@ -158,9 +164,23 @@ pub enum SearchMode {
     Accurate,
     /// Dynamically scale ef based on top_k and filter selectivity (DynamicEF).
     Auto,
+    /// Score every live row. No index, no approximation, no `ef` -- this is the ground truth
+    /// the other four are approximating, and it costs a full pass over the table's vectors.
+    ///
+    /// Refused above `EXACT_SCAN_MAX` rows rather than run for minutes; see
+    /// `IntelligentIndexedStorage::exact_scan_max`.
+    Exact,
 }
 
 impl SearchMode {
+    /// Whether this mode bypasses the index entirely.
+    ///
+    /// The search path branches on this before it computes an `ef`, because `ef` is a budget
+    /// for a graph traversal and this mode does not traverse a graph.
+    pub fn is_exhaustive(&self) -> bool {
+        matches!(self, SearchMode::Exact)
+    }
+
     /// Compute the effective ef_search value given the configured default and top_k.
     pub fn ef_search(&self, configured_ef: usize, top_k: usize) -> usize {
         match self {
@@ -169,6 +189,10 @@ impl SearchMode {
             SearchMode::Accurate => (configured_ef * 4).max(top_k),
             // Auto without selectivity: fall back to Accurate for safety
             SearchMode::Auto => (configured_ef * 4).max(top_k),
+            // Never reached -- `is_exhaustive` diverts this mode before any ef is computed.
+            // Answering `top_k` rather than panicking keeps a future caller that forgets the
+            // check merely wrong about speed, not dead.
+            SearchMode::Exact => top_k.max(1),
         }
     }
 

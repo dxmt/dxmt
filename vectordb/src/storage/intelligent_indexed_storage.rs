@@ -3566,6 +3566,31 @@ impl IntelligentIndexedStorage {
             query.top_k
         };
 
+        // `Exact` is not a setting of the machinery below -- it is the absence of it. Every
+        // branch from here on picks an `ef`, a candidate count, or a filter strategy, and all
+        // three are ways of deciding what *not* to look at. Diverting before any of that is
+        // what keeps this mode's one claim true: it looked at everything.
+        if query.search_mode.is_exhaustive() {
+            let (results, metric) = self.exact_scan(tablename, &query, result_limit).await?;
+            let hits = self
+                .assemble_hits(tablename, &query, results, false, metric, result_limit)
+                .await?;
+            let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+            if let Some(table_data) = self.read_tables("search").await.get(tablename) {
+                if let Ok(mut stats) = table_data.performance_stats.lock() {
+                    stats.total_queries += 1;
+                    stats.avg_query_latency_ms =
+                        (stats.avg_query_latency_ms * 0.9) + (latency_ms * 0.1);
+                }
+            }
+            let total = hits.len();
+            return Ok(SearchResult {
+                hits,
+                total,
+                tookms: latency_ms as u64,
+            });
+        }
+
         // Phase 1: take everything out of the table map that the search needs, then let go of it.
         //
         // This used to hold the map's read lock for the whole function, index search included,
@@ -4027,6 +4052,219 @@ impl IntelligentIndexedStorage {
             total,
             tookms: latency_ms as u64,
         })
+    }
+
+    /// Score every live row against the query. The implementation of `SearchMode::Exact`.
+    ///
+    /// Returns `(id, distance)` pairs -- unsorted and already truncated per chunk; the caller
+    /// hands them to `assemble_hits`, which owns the total order and the score conversion.
+    ///
+    /// Three things this has to get right, and each one is a lesson already paid for elsewhere
+    /// in this file:
+    ///
+    /// * **The map lock is not held across the scan.** `search`'s phase split exists because a
+    ///   brute-force pass over 60,000 vectors takes about a second, and holding the table map's
+    ///   read lock for it starves the insertion processor -- measured at 25.6 s read p99 during
+    ///   a rebuild. A full pass over a million rows is worse. So phase 1 here takes out the row
+    ///   list and the file handle, and phase 2 runs with nothing held.
+    /// * **It does not run on a runtime worker.** This is CPU-bound and synchronous, the same
+    ///   shape as PQ training, which blocked every insert until it moved to `spawn_blocking`
+    ///   with a pool of its own (`IndexWrapper::quantize_now`). Same treatment: half the cores,
+    ///   so a diagnostic query cannot monopolise the machine it is diagnosing.
+    /// * **It reads in file order.** `vectors_for_index` already established that reading rows
+    ///   sorted and chunked beats one seek per record; the chunks here are the unit of
+    ///   parallelism as well, which is why they carry their own partial top-k.
+    async fn exact_scan(
+        &self,
+        tablename: &str,
+        query: &SearchQuery,
+        result_limit: usize,
+    ) -> crate::Result<(Vec<(RecordId, f32)>, DistanceMetric)> {
+        /// Rows per chunk: the unit of both the sequential read and the parallel split.
+        /// 4,096 is what `vectors_for_index` reads at, and at 768 dimensions it is 12 MB of
+        /// vectors per chunk -- big enough that the prefetch is worth its syscall, small enough
+        /// that a machine with 32 of them in flight is not holding a gigabyte of mappings.
+        const CHUNK: usize = 4_096;
+
+        // Phase 1, under the map lock: take what the scan needs, then let go.
+        let (metric, file, by_row, resident) = {
+            let tables = self.read_tables("exact_scan").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+            // A named vector space has its own file and its own dimension, and resolving which
+            // is which here would duplicate the named-index plumbing for a diagnostic. Say so
+            // rather than silently scanning the default space and calling the answer exact.
+            if query.vector_name.is_some() {
+                return Err(crate::Error::InvalidInput(
+                    "search_mode \"exact\" does not support named vector spaces; omit \
+                     vector_name, or use one of fast/normal/accurate/auto"
+                        .to_string(),
+                ));
+            }
+
+            let expected_dim = table_data.table.dimension;
+            if !query.vector.is_empty() && query.vector.len() != expected_dim {
+                return Err(crate::Error::DimensionMismatch {
+                    expected: expected_dim,
+                    actual: query.vector.len(),
+                });
+            }
+
+            // Pre-filter, so the cap is measured against what will actually be read rather than
+            // against the table. A selective filter is exactly when an exact answer is cheap.
+            let allowed = query
+                .filter
+                .as_ref()
+                .map(|f| table_data.payload_index.get_matching_ids(f));
+
+            let candidates = match &allowed {
+                Some(ids) => ids.len(),
+                None => table_data.records.len(),
+            };
+            let cap = Self::exact_scan_max();
+            if candidates > cap {
+                return Err(crate::Error::InvalidInput(format!(
+                    "search_mode \"exact\" would have to score {candidates} rows, over the \
+                     {cap}-row limit. Narrow it with a filter, raise DB_EXACT_SCAN_MAX, or use \
+                     search_mode \"accurate\""
+                )));
+            }
+
+            // Two shapes, because a table's vectors are either in a row file or inside the
+            // records, and a table that predates its row file has some of both.
+            let mut by_row: Vec<(u64, RecordId)> = Vec::new();
+            let mut resident: Vec<Arc<Record>> = Vec::new();
+            let keep = |id: &RecordId| allowed.as_ref().is_none_or(|set| set.contains(id));
+
+            if table_data.vector_file.is_some() {
+                for id in table_data.records.ids() {
+                    if !keep(&id) {
+                        continue;
+                    }
+                    match table_data.vector_row(&id) {
+                        Some(row) => by_row.push((row, id)),
+                        // No row: an older record still carrying its own vector.
+                        None => {
+                            if let Some(r) = table_data.records.get(&id) {
+                                if !r.vector.is_empty() {
+                                    resident.push(r);
+                                }
+                            }
+                        }
+                    }
+                }
+                // File order. The point of the chunking is lost if the chunks are scattered.
+                by_row.sort_unstable();
+            } else {
+                // `Arc<Record>`, not `Record`: cloning the records themselves is the 90 GB
+                // temporary that got a 10M-row snapshot killed by the kernel. Eight bytes each.
+                table_data.records.for_each(|r| {
+                    if keep(&r.id) && !r.vector.is_empty() {
+                        resident.push(r);
+                    }
+                });
+            }
+
+            (
+                table_data.table.distance_metric,
+                table_data.vector_file.clone(),
+                by_row,
+                resident,
+            )
+        };
+
+        // Phase 2: nothing held, off the runtime's workers, on a pool of its own.
+        let vector = query.vector.clone();
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(1);
+        tokio::task::spawn_blocking(move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("exact-scan-{i}"))
+                .build()
+                .map_err(|e| crate::Error::Internal(format!("exact scan pool: {e}")))?;
+
+            let mut scored: Vec<(RecordId, f32)> = pool.install(|| {
+                use rayon::prelude::*;
+
+                let from_file = file
+                    .as_ref()
+                    .map(|file| {
+                        by_row
+                            .par_chunks(CHUNK)
+                            .map(|chunk| {
+                                let rows: Vec<u64> = chunk.iter().map(|(row, _)| *row).collect();
+                                let mut best: Vec<(RecordId, f32)> =
+                                    Vec::with_capacity(chunk.len());
+                                file.with_rows(&rows, |i, v| {
+                                    if let Some(v) = v {
+                                        let d =
+                                            metric.calculate(&vector, v).unwrap_or(f32::INFINITY);
+                                        best.push((chunk[i].1.clone(), d));
+                                    }
+                                });
+                                Self::keep_best(best, result_limit)
+                            })
+                            .reduce(Vec::new, |mut a, b| {
+                                a.extend(b);
+                                Self::keep_best(a, result_limit)
+                            })
+                    })
+                    .unwrap_or_default();
+
+                let from_memory = resident
+                    .par_chunks(CHUNK)
+                    .map(|chunk| {
+                        let best: Vec<(RecordId, f32)> = chunk
+                            .iter()
+                            .map(|r| {
+                                let d = metric
+                                    .calculate(&vector, &r.vector)
+                                    .unwrap_or(f32::INFINITY);
+                                (r.id.clone(), d)
+                            })
+                            .collect();
+                        Self::keep_best(best, result_limit)
+                    })
+                    .reduce(Vec::new, |mut a, b| {
+                        a.extend(b);
+                        Self::keep_best(a, result_limit)
+                    });
+
+                let mut all = from_file;
+                all.extend(from_memory);
+                all
+            });
+
+            scored = Self::keep_best(scored, result_limit);
+            Ok::<_, crate::Error>((scored, metric))
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(format!("exact scan task: {e}")))?
+    }
+
+    /// The `limit` smallest distances, with an id tiebreak so a run is reproducible.
+    ///
+    /// `select_nth_unstable_by` rather than a full sort: the chunks that feed this are 4,096
+    /// wide and the limit is usually ten, so sorting every chunk in full is most of the scan's
+    /// arithmetic spent on records nobody will see. The tiebreak matters for the same reason it
+    /// matters in `assemble_hits` -- equal distances are common, and which of them survives the
+    /// truncation must not depend on which thread got there first.
+    fn keep_best(mut scored: Vec<(RecordId, f32)>, limit: usize) -> Vec<(RecordId, f32)> {
+        let order = |a: &(RecordId, f32), b: &(RecordId, f32)| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        };
+        if scored.len() > limit && limit > 0 {
+            scored.select_nth_unstable_by(limit - 1, order);
+            scored.truncate(limit);
+        }
+        scored.sort_by(order);
+        scored
     }
 
     /// Every record the filter accepts, scored exactly against the query.
@@ -5604,6 +5842,26 @@ impl IntelligentIndexedStorage {
     /// a few hundred nanoseconds a code, 100,000 is tens of milliseconds -- past that a
     /// walk with the filter applied in-graph is the cheaper shape.
     const CODE_SCAN_MAX: usize = 100_000;
+
+    /// Largest number of rows `SearchMode::Exact` will scan before refusing the query.
+    ///
+    /// Unlike the two caps above, this one does not pick between strategies -- there is no
+    /// cheaper shape to fall back to, because the whole point of the mode is that it does not
+    /// approximate. So it refuses instead, and says how many rows it would have had to read.
+    ///
+    /// A million 768-dimension rows is 3 GB off disk and a few seconds of arithmetic. That is
+    /// a reasonable thing to ask for deliberately and an unreasonable thing to trigger from a
+    /// button, which is why the number is here rather than unbounded: at 100M rows the same
+    /// request is minutes of full-file reads, and the caller has no way to tell the difference
+    /// from a hang. `DB_EXACT_SCAN_MAX` raises it for anyone who means it.
+    const EXACT_SCAN_MAX_DEFAULT: usize = 1_000_000;
+
+    fn exact_scan_max() -> usize {
+        std::env::var("DB_EXACT_SCAN_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(Self::EXACT_SCAN_MAX_DEFAULT)
+    }
 
     /// Largest matching set the in-graph filter will materialise ids for.
     ///

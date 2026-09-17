@@ -278,6 +278,19 @@ parallel writers. Cohere for the 1M and 10M rows, LAION for 100M.
 `SearchMode::Accurate` buys recall back without a rebuild: 0.9912 at 4,351 QPS on 1M, 0.9803 at
 3,720 on 10M, 0.9825 at 3,546 on 100M.
 
+Those recall figures are against datasets with published ground truth, which is not the dataset
+you have. `search_mode: "exact"` scores every live row and skips the index entirely, so you can
+run the same query twice and measure the difference on your own data:
+
+```bash
+curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 10, "search_mode": "exact"}'
+curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 10}'
+# recall@10 = |overlap| / 10
+```
+
+It costs a full pass over the table's vectors, so it is refused above `DB_EXACT_SCAN_MAX` rows
+(default 1,000,000) rather than running for minutes; a filter narrows what it has to read.
+
 Four things the table does not say on its own:
 
 - **The client is inside the measurement.** Those QPS figures come from VectorDBBench's Python
