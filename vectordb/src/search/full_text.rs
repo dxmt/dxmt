@@ -774,6 +774,17 @@ impl FullTextSearchEngine {
         }
     }
 
+    /// How many documents the index on disk actually holds.
+    ///
+    /// Distinct from `get_stats().total_documents`, which counts what *this process* has added
+    /// and is therefore zero for an index that was opened rather than filled. Telling those two
+    /// states apart is the point: an engine reporting zero here over a table that has records is
+    /// an index that lost its contents, and the only other symptom is a text search that answers
+    /// 200 with nothing at all.
+    pub fn document_count(&self) -> u64 {
+        self.reader.searcher().num_docs()
+    }
+
     /// Get search statistics
     pub async fn get_stats(&self) -> FullTextStats {
         self.stats.read().await.clone()

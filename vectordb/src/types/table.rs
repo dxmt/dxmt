@@ -225,12 +225,46 @@ fn default_schema_version() -> u64 {
 }
 
 impl Table {
+    /// The namespace `table_id` hashes names in. Arbitrary, fixed, and never to be changed:
+    /// changing it renames every table's id and orphans everything keyed by one.
+    const ID_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+        0x64, 0x78, 0x6d, 0x74, 0x2d, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x2d, 0x69, 0x64, 0x76, 0x35,
+        0x00,
+    ]);
+
+    /// A table's id, derived from its name rather than drawn at random.
+    ///
+    /// It used to be `Uuid::new_v4()`, which made the id a property of the *process* and not of
+    /// the table: recovery rebuilds a table through `TableConfig`, `TableConfig` carries no id,
+    /// and so every table got a new one on every restart. Two things were keyed by it and both
+    /// broke silently.
+    ///
+    /// The full-text index lives at `/tmp/dxmt_full_text_{id}`, so after a restart the engine
+    /// opened a *different, empty* directory: the table still reported
+    /// `enable_full_text_search: true`, `/search/text` still answered 200, and it returned
+    /// nothing at all. On this machine that had left 135 orphaned index directories behind five
+    /// tables. Partitioned-IVF segments are keyed by it too; there the damage is a leak rather
+    /// than a wrong answer, because the sweep only deletes under `partitions/{id}/` and after a
+    /// restart that prefix is empty — so old segments are simply never collected.
+    ///
+    /// A name is what actually identifies a table across a restart: it is the map key, it is
+    /// what the API takes, and it is what the WAL records. Deriving the id from it makes the
+    /// invariant structural rather than something a future recovery path has to remember to
+    /// preserve — including the WAL replay path, which has no id to preserve.
+    ///
+    /// The cost is that a dropped and recreated table gets its old id back, so anything keyed by
+    /// id must be cleaned up on drop. `drop_table` does that.
+    pub fn table_id(name: &str) -> uuid::Uuid {
+        uuid::Uuid::new_v5(&Self::ID_NAMESPACE, name.as_bytes())
+    }
+
     /// 创建新表
     pub fn new(config: TableConfig) -> crate::Result<Self> {
         let now = chrono::Utc::now();
+        let id = Self::table_id(&config.name);
 
         Ok(Table {
-            id: uuid::Uuid::new_v4(),
+            id,
             name: config.name,
             dimension: config.dimension,
             distance_metric: config.distance_metric,

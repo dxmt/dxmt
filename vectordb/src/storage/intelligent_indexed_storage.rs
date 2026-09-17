@@ -615,6 +615,28 @@ pub struct PerformanceStats {
     insert_throughput: f64,
 }
 
+/// The indexable document for a record, or `None` if this table indexes no text from it.
+///
+/// Shared by the insert path and by the restore backfill so the two cannot drift: a document
+/// rebuilt from the rows has to be the same document the insert would have written, or a
+/// recovered index answers differently from the one it replaced.
+#[cfg(feature = "text-bm25")]
+fn text_document_for(table: &Table, record: &Record) -> Option<FullTextDocument> {
+    let text_content = extract_text_from_record(table, record)?;
+    Some(FullTextDocument {
+        id: record.id.clone(),
+        title: text_content.get("title").cloned(),
+        content: text_content.get("content").cloned().unwrap_or_default(),
+        description: text_content.get("description").cloned(),
+        tags: text_content
+            .get("tags")
+            .map(|s| vec![s.clone()])
+            .unwrap_or_default(),
+        payload: Some(record.payload.clone()),
+        timestamp: chrono::Utc::now().timestamp(),
+    })
+}
+
 /// 从记录中提取文本内容（辅助函数）
 #[cfg(feature = "text-bm25")]
 fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<String, String>> {
@@ -1121,19 +1143,7 @@ async fn process_insert_group(
                     }
                 }
                 for record in owners.iter().flat_map(|(_, records)| records) {
-                    if let Some(text_content) = extract_text_from_record(&table_meta, record) {
-                        let doc = FullTextDocument {
-                            id: record.id.clone(),
-                            title: text_content.get("title").cloned(),
-                            content: text_content.get("content").cloned().unwrap_or_default(),
-                            description: text_content.get("description").cloned(),
-                            tags: text_content
-                                .get("tags")
-                                .map(|s| vec![s.clone()])
-                                .unwrap_or_default(),
-                            payload: Some(record.payload.clone()),
-                            timestamp: chrono::Utc::now().timestamp(),
-                        };
+                    if let Some(doc) = text_document_for(&table_meta, record) {
                         // Text indexing must not fail an insert that already landed.
                         if let Err(e) = engine.add_document(doc).await {
                             warn!("Failed to index text for record {}: {}", record.id, e);
@@ -2999,6 +3009,35 @@ impl IntelligentIndexedStorage {
         }
         data.table.record_count = data.records.len() as u64;
 
+        // A restored table's text index normally survives on disk under the table's id, and this
+        // finds it populated and does nothing. It comes back *empty* in two cases, and both used
+        // to be silent for the life of the table:
+        //
+        //   * the table predates table ids being a function of the name, so its documents sit in
+        //     an orphaned directory under an id no longer issued to anything;
+        //   * the directory was removed while the records survived — the default location is
+        //     under `/tmp`, which plenty of systems clear on reboot.
+        //
+        // Either way `/search/text` answers 200 with no hits, forever, for a table that reports
+        // `enable_full_text_search: true`. The records are right here and carry everything the
+        // index needs, so rebuild from them rather than leave that.
+        #[cfg(feature = "text-bm25")]
+        let text_backfill: Vec<FullTextDocument> = match &data.full_text_engine {
+            Some(engine) if engine.document_count() == 0 && !data.records.is_empty() => {
+                let table_meta = data.table.clone();
+                let mut docs = Vec::with_capacity(data.records.len());
+                data.records.for_each(|record| {
+                    if let Some(doc) = text_document_for(&table_meta, &record) {
+                        docs.push(doc);
+                    }
+                });
+                docs
+            }
+            _ => Vec::new(),
+        };
+        #[cfg(feature = "text-bm25")]
+        let text_engine = data.full_text_engine.clone();
+
         let to_index: Vec<(RecordId, Vec<f32>)> = if index_restored {
             Vec::new()
         } else {
@@ -3013,6 +3052,34 @@ impl IntelligentIndexedStorage {
         // vector at once to cluster it; fed one at a time the lot ends up in its overflow buffer.
         if !to_index.is_empty() {
             wrapper.bulk_build(to_index).await?;
+        }
+
+        // Outside the lock for the same reason, and after the vector index: a table with a lost
+        // text index is still fully usable for vector search while this runs.
+        #[cfg(feature = "text-bm25")]
+        if !text_backfill.is_empty() {
+            if let Some(engine) = text_engine {
+                let count = text_backfill.len();
+                info!(
+                    "Table '{}': the full-text index holds no documents for {} records; \
+                     rebuilding it from the rows",
+                    name, count
+                );
+                for doc in text_backfill {
+                    let id = doc.id.clone();
+                    if let Err(e) = engine.add_document(doc).await {
+                        warn!("Failed to re-index text for record {}: {}", id, e);
+                    }
+                }
+                if let Err(e) = engine.commit().await {
+                    warn!(
+                        "Table '{}': full-text rebuild would not commit: {}",
+                        name, e
+                    );
+                } else {
+                    info!("Table '{}': re-indexed {} documents", name, count);
+                }
+            }
         }
 
         Ok(())
@@ -5411,6 +5478,19 @@ impl IntelligentIndexedStorage {
                 log.push(".log");
                 let _ = std::fs::remove_file(PathBuf::from(log));
             }
+
+            // The full-text index, which lives outside the WAL directory entirely.
+            //
+            // This became necessary when table ids stopped being random: an id is now a
+            // function of the name, so a table dropped and recreated under the same name gets
+            // the same id and would otherwise open the previous table's index and answer text
+            // searches with its documents. Leaving it behind was survivable while every restart
+            // minted a new id and simply leaked a directory; it is not survivable now.
+            #[cfg(feature = "text-bm25")]
+            {
+                let _ = std::fs::remove_dir_all(Self::full_text_index_path(&data.table.id));
+            }
+
             data.table.id.to_string()
         };
 
@@ -7197,11 +7277,20 @@ impl IntelligentIndexedStorage {
         true
     }
 
+    /// Where a table's Tantivy index lives.
+    ///
+    /// Named rather than inlined because two places need to agree on it: the engine that opens
+    /// it and the drop that removes it. They did not, and the index outlived its table.
+    #[cfg(feature = "text-bm25")]
+    fn full_text_index_path(table_id: &uuid::Uuid) -> String {
+        let base_dir = std::env::var("DB_STORAGE_PATH").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{}/dxmt_full_text_{}", base_dir, table_id)
+    }
+
     /// 创建全文搜索引擎
     #[cfg(feature = "text-bm25")]
     async fn create_full_text_engine(table: &Table) -> crate::Result<FullTextSearchEngine> {
-        let base_dir = std::env::var("DB_STORAGE_PATH").unwrap_or_else(|_| "/tmp".to_string());
-        let index_path = format!("{}/dxmt_full_text_{}", base_dir, table.id);
+        let index_path = Self::full_text_index_path(&table.id);
 
         // Create directory if it doesn't exist
         std::fs::create_dir_all(&index_path).map_err(|e| {
