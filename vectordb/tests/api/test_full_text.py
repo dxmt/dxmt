@@ -185,3 +185,126 @@ def test_hybrid_search_accepts_both_a_vector_and_text(text_table):
     if feature_is_absent(response):
         absent("text-bm25")
     assert succeeded(response), response.text[:400]
+
+
+def test_the_two_endpoints_spell_their_timing_field_differently(text_table):
+    """`/search/text` answers `took_ms`; `/search` and `/search/hybrid` answer `tookms`.
+
+    Two Rust structs — `FullTextSearchResult` and `SearchResult` — written at different times
+    and never reconciled. This is pinned rather than fixed because renaming either breaks
+    whichever clients read it, and a client that guesses wrong gets `undefined` rather than an
+    error: the dashboard's BM25 column rendered `NaN ms` from exactly this. If the two are ever
+    unified, this test is the place that says what it costs.
+    """
+    text = text_search(text_table, {"query": "quantization", "limit": 3})
+    if feature_is_absent(text):
+        absent("text-bm25")
+    assert succeeded(text), text.text[:400]
+    body = text.json()["data"]
+    assert "took_ms" in body, f"/search/text lost took_ms: {sorted(body)}"
+    assert "tookms" not in body
+
+    dense = post(
+        f"/tables/{text_table}/search",
+        {"vector": vector_for(3), "top_k": 3, "limit": 3},
+    ).json()["data"]
+    assert "tookms" in dense, f"/search lost tookms: {sorted(dense)}"
+    assert "took_ms" not in dense
+
+    hybrid = post(
+        f"/tables/{text_table}/search/hybrid",
+        {"vector": vector_for(3), "text": "quantization", "limit": 3},
+    ).json()["data"]
+    assert "tookms" in hybrid, f"/search/hybrid lost tookms: {sorted(hybrid)}"
+
+
+def test_hybrid_reads_vector_weight_and_ignores_a_misspelled_knob(text_table):
+    """`HybridSearchRequest` has no `alpha` and no `top_k`, and serde accepts a body carrying
+    them anyway — no `deny_unknown_fields` — so a caller tuning the wrong name sees a request
+    succeed and nothing change. The Swagger example used to advertise both.
+
+    Pinned two ways: the real names are accepted, and the invented ones are accepted *and do
+    nothing*, which is the behaviour a caller has to know about.
+    """
+    query = {"vector": vector_for(3), "text": "quantization", "limit": 3}
+
+    real = post(
+        f"/tables/{text_table}/search/hybrid",
+        {**query, "fusion_method": "weighted_sum", "vector_weight": 0.9},
+        expect_ok=False,
+    )
+    if feature_is_absent(real):
+        absent("text-bm25")
+    assert succeeded(real), real.text[:400]
+
+    invented = post(f"/tables/{text_table}/search/hybrid", {**query, "alpha": 0.1, "top_k": 99})
+    assert succeeded(invented)
+    hits = invented.json()["data"]["hits"]
+    assert len(hits) <= 3, (
+        f"`top_k: 99` changed the result count to {len(hits)}; if the server has learned to read "
+        "it, the dashboard and the Swagger example should start sending it"
+    )
+
+
+def test_a_text_hit_carries_what_the_console_draws(text_table):
+    """id, score and payload on every hit, and `highlights` present as a key even when the
+    request did not ask for highlighting — a console that reads `hit.highlights.length` without
+    narrowing would white-screen on a missing key rather than an explicit null."""
+    response = text_search(text_table, {"query": "quantization", "limit": 3, "highlight": False})
+    if feature_is_absent(response):
+        absent("text-bm25")
+    hits = response.json()["data"]["hits"]
+    assert hits, "expected at least one hit for a term that is in the corpus"
+    for hit in hits:
+        assert set(hit) >= {"id", "score", "payload", "highlights"}, sorted(hit)
+        assert isinstance(hit["score"], (int, float))
+
+
+def test_rrf_is_weighted_here_despite_what_the_name_suggests(text_table):
+    """`reciprocal_rank_fusion` reads `vector_weight`; only `dbsf` ignores it.
+
+    Textbook RRF is unweighted — that is the property it is chosen for — but
+    `fuse_reciprocal_rank` takes `text_weight = 1 - vector_weight` and scales each side's
+    `1/(k + rank)` by it. The console's fusion controls say so, and this is what makes that
+    sentence checkable: if RRF ever becomes unweighted, the weight slider silently starts lying
+    rather than breaking.
+
+    The assertion is on the **scores**, not on the ranking. On a corpus this small every
+    document is in the dense list, so a document that also matches the text stays on top at any
+    weight while the scores underneath it move by a factor of twenty. Asserting on the top hit
+    would have made this test a property of the corpus.
+    """
+    # The vector points at d4 ("quantization compresses vectors"); the text asks about d2
+    # ("full text search ranks documents"). The two sides disagree on purpose.
+    query = {"vector": vector_for(3), "text": "term frequency ranks documents", "limit": 4}
+
+    def fuse(method, weight):
+        response = post(
+            f"/tables/{text_table}/search/hybrid",
+            {**query, "fusion_method": method, "vector_weight": weight},
+            expect_ok=False,
+        )
+        if feature_is_absent(response):
+            absent("text-bm25")
+        assert succeeded(response), response.text[:400]
+        return {hit["id"]: hit["score"] for hit in response.json()["data"]["hits"]}
+
+    dense_heavy = fuse("reciprocal_rank_fusion", 0.95)
+    text_heavy = fuse("reciprocal_rank_fusion", 0.05)
+    assert dense_heavy.keys() == text_heavy.keys()
+    moved = [k for k in dense_heavy if abs(dense_heavy[k] - text_heavy[k]) > 1e-6]
+    assert moved, (
+        "every RRF score was identical at vector_weight 0.95 and 0.05, so it is ignoring the "
+        "weight; the console's fusion controls claim it does not"
+    )
+    # d4 is the vector's own document and matches no text, so it is the clearest case: its
+    # score is the dense side's contribution alone, scaled by the weight.
+    assert dense_heavy["d4"] > text_heavy["d4"] * 5, (
+        f"d4 scored {dense_heavy['d4']} dense-heavy and {text_heavy['d4']} text-heavy; the "
+        "weight should scale a dense-only document's contribution directly"
+    )
+
+    # And dbsf, which genuinely ignores it, does not move at all.
+    assert fuse("dbsf", 0.95) == fuse("dbsf", 0.05), (
+        "dbsf normalises each list by its own distribution and should not read vector_weight"
+    )

@@ -27,6 +27,9 @@
 import { ApiFailure, unwrap } from './envelope';
 import type { Parsed } from '../lib/console';
 import type {
+  FullTextQuery,
+  FullTextResult,
+  HybridQuery,
   KnnGraph,
   KnnGraphRequest,
   ListRecordsRequest,
@@ -159,11 +162,13 @@ export const api = {
   search: (name: string, query: SearchQuery, signal?: AbortSignal) =>
     post<SearchResult>(`/api/v1/tables/${seg(name)}/search`, query, signal),
 
-  searchText: (name: string, body: unknown, signal?: AbortSignal) =>
-    post<SearchResult>(`/api/v1/tables/${seg(name)}/search/text`, body, signal),
+  /** Answers with `FullTextResult`, whose timing field is `took_ms` and not `tookms`. */
+  searchText: (name: string, query: FullTextQuery, signal?: AbortSignal) =>
+    post<FullTextResult>(`/api/v1/tables/${seg(name)}/search/text`, query, signal),
 
-  searchHybrid: (name: string, body: unknown, signal?: AbortSignal) =>
-    post<SearchResult>(`/api/v1/tables/${seg(name)}/search/hybrid`, body, signal),
+  /** Answers with the same `SearchResult` the dense path does, fused server-side. */
+  searchHybrid: (name: string, query: HybridQuery, signal?: AbortSignal) =>
+    post<SearchResult>(`/api/v1/tables/${seg(name)}/search/hybrid`, query, signal),
 };
 
 export type { Table };

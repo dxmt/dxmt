@@ -1708,12 +1708,15 @@ pub async fn full_text_search(
     params(
         ("table_name" = String, Path, description = "表名", example = "demo")
     ),
+    // `top_k` and `alpha` used to be in this example and are not fields of
+    // `HybridSearchRequest`. serde takes this body without `deny_unknown_fields`, so both were
+    // accepted, ignored, and left anyone tuning `alpha` watching a number that changed nothing.
+    // The real knobs are `limit`, `fusion_method` and — for `weighted_sum` only — `vector_weight`.
     request_body(content = HybridSearchRequest, example = json!({
         "vector": [1.0, 0.0, 0.0, 0.0],
         "text": "rust",
-        "top_k": 3,
         "limit": 3,
-        "alpha": 0.5
+        "fusion_method": "reciprocal_rank_fusion"
     })),
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),

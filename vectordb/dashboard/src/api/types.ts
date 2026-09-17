@@ -112,6 +112,79 @@ export interface SearchResult {
 }
 
 /**
+ * A BM25 hit. Same three leading fields as `WireHit`, and then it diverges.
+ *
+ * There is no `vector` — the text index does not hold one — and there is a `highlights` array
+ * the dense path has no equivalent for.
+ */
+export interface WireTextHit {
+  id: string;
+  /** A BM25 score. Unbounded above and **not comparable to a similarity**: 6.3 here says
+   *  nothing about how it would rank under the dense metric, and averaging the two is
+   *  meaningless, which is why fusion is done by rank on the server rather than by score here. */
+  score: number;
+  payload: Record<string, unknown> | null;
+  highlights: string[] | null;
+}
+
+/**
+ * `POST /search/text`, and note the timing field.
+ *
+ * It is `took_ms` here and `tookms` on `/search` and `/search/hybrid` — two Rust structs,
+ * `FullTextSearchResult` and `SearchResult`, that were written at different times and never
+ * reconciled. Renaming either one would break whichever SDKs read it, so the asymmetry is real,
+ * it is on the wire, and `timingOf()` in the search page is where it is absorbed. Writing
+ * `tookms` here would produce a silent `undefined` and a page reporting `NaN ms`.
+ */
+export interface FullTextResult {
+  hits: WireTextHit[];
+  total: number;
+  /** With the underscore. See above. */
+  took_ms: number;
+}
+
+export interface FullTextQuery {
+  query: string;
+  limit: number;
+  offset?: number;
+  highlight?: boolean;
+  search_fields?: string[];
+}
+
+/**
+ * How the server fuses the rankings. `dbsf` is the server's default when the field is omitted.
+ *
+ * `vector_weight` applies to two of the three, which is not what their names suggest:
+ * `weighted_sum` normalises each side and sums them weighted, and `reciprocal_rank_fusion` is
+ * a *weighted* RRF — `fuse_reciprocal_rank` takes `text_weight = 1 - vector_weight` and scales
+ * each side's `1/(k + rank)` by it. Only `dbsf` ignores the weight, normalising each list by
+ * its own mean and standard deviation instead. Measured rather than assumed: the same query
+ * under RRF at 0.7 and at 0.1 returns two entirely different lists.
+ */
+export type FusionMethod = 'weighted_sum' | 'reciprocal_rank_fusion' | 'dbsf';
+
+/**
+ * `POST /search/hybrid`, which answers with a plain `SearchResult`.
+ *
+ * The field names matter more than usual here, because the server takes the body through serde
+ * with no `deny_unknown_fields`: a misspelled knob is **silently ignored** rather than refused.
+ * `vector_weight` is the dense side's share and is read by `weighted_sum` **and** by
+ * `reciprocal_rank_fusion`; `limit` is the result count. There is no `alpha` and no `top_k`,
+ * whatever else may suggest otherwise.
+ */
+export interface HybridQuery {
+  vector?: number[] | null;
+  text?: string | null;
+  limit: number;
+  vector_weight?: number;
+  fusion_method?: FusionMethod;
+  rrf_k?: number;
+  filter?: Filter | null;
+  with_payload?: boolean;
+  with_vector?: boolean;
+}
+
+/**
  * Four of these scale HNSW's traversal budget; `exact` skips the index and scores every row.
  *
  * That last one is the only answer with no recall in it, which is what makes measuring recall

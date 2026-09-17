@@ -26,6 +26,13 @@ export interface Capabilities {
   exactModeReason: string | null;
 }
 
+export interface TextCapability {
+  /** BM25 and hybrid fusion can be asked for on this table. */
+  textSearch: boolean;
+  /** Which of the two absences this is, in the server's own words where it has them. */
+  textSearchReason: string | null;
+}
+
 const cache = new Map<string, Capabilities>();
 
 /**
@@ -82,7 +89,77 @@ export async function probeExactMode(
   return result;
 }
 
+const textCache = new Map<string, TextCapability>();
+
+/**
+ * Whether this table can answer a text query, and if not, which kind of "not".
+ *
+ * There are two, they are not interchangeable, and a page that renders one sentence for both
+ * sends people to fix the wrong thing:
+ *
+ *   - **the build has no `text-bm25`** -- `/search/text` answers `FEATURE_DISABLED` for every
+ *     table, and `/search/hybrid` silently drops the text half rather than failing, which is
+ *     the more dangerous of the two because the answer still looks like a hybrid answer;
+ *   - **the table was created without `enable_full_text_search`** -- the feature is compiled in
+ *     and this one table has no text index. That flag cannot be changed after creation, so the
+ *     honest advice is to recreate the table, not to restart the server.
+ *
+ * The table's own flag settles the second without a request, so the probe only runs when the
+ * flag says yes. A table flagged for text search that still answers `FEATURE_DISABLED` is the
+ * first case, and is reported as such.
+ */
+export async function probeTextSearch(
+  table: string,
+  enabledOnTable: boolean,
+  signal?: AbortSignal,
+): Promise<TextCapability> {
+  const cached = textCache.get(table);
+  if (cached) return cached;
+
+  let result: TextCapability;
+  if (!enabledOnTable) {
+    result = {
+      textSearch: false,
+      textSearchReason:
+        'this table was created without enable_full_text_search, which cannot be turned on afterwards',
+    };
+  } else {
+    try {
+      // A token nothing will match, asking for one hit: the answer is uninteresting and the
+      // question is whether the endpoint is there at all.
+      await api.searchText(table, { query: 'dxmt_capability_probe', limit: 1 }, signal);
+      result = { textSearch: true, textSearchReason: null };
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+
+      if (cause instanceof ApiFailure && cause.code === 'FEATURE_DISABLED') {
+        result = {
+          textSearch: false,
+          textSearchReason: 'this server was built without the text-bm25 feature',
+        };
+      } else if (cause instanceof ApiFailure && cause.code === 'FULL_TEXT_NOT_ENABLED') {
+        // The table's flag said yes and the server says no. Trust the server and say so plainly
+        // rather than quietly showing the control.
+        result = {
+          textSearch: false,
+          textSearchReason: cause.message,
+        };
+      } else {
+        throw cause;
+      }
+    }
+  }
+
+  textCache.set(table, result);
+  return result;
+}
+
 export function forgetCapabilities(table?: string): void {
-  if (table) cache.delete(table);
-  else cache.clear();
+  if (table) {
+    cache.delete(table);
+    textCache.delete(table);
+  } else {
+    cache.clear();
+    textCache.clear();
+  }
 }
