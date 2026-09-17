@@ -120,3 +120,38 @@ export function preservation(
 
   return { rate: counted === 0 ? 0 : total / counted, k: effectiveK, probes: counted };
 }
+
+/**
+ * The same measurement, against a neighbour list the server already computed.
+ *
+ * When the layout came from a k-nearest-neighbour graph there is no need to have the vectors at
+ * all: the graph *is* the answer to "what is near what", and it is exact. So this is both
+ * cheaper than [`preservation`] and stricter — no sampling of probes, no approximation on
+ * either side, and nothing about the metric to get wrong, because the server used the table's.
+ *
+ * `truth[i]` is node `i`'s neighbours, nearest first.
+ */
+export function preservationFromGraph(
+  positions: Float32Array,
+  truth: number[][],
+  k = 10,
+): Preservation {
+  const n = truth.length;
+  const effectiveK = Math.min(k, n - 1, ...truth.map((edges) => edges.length || Infinity));
+  if (n < 3 || !Number.isFinite(effectiveK) || effectiveK < 1) {
+    return { rate: 0, k: 0, probes: 0 };
+  }
+
+  let total = 0;
+  let counted = 0;
+  for (let from = 0; from < n; from += 1) {
+    const edges = truth[from];
+    if (!edges || edges.length === 0) continue;
+    const inSpace = new Set(edges.slice(0, effectiveK));
+    const onScreen = nearest(positions, n, 2, from, effectiveK, 'euclidean');
+    total += onScreen.filter((index) => inSpace.has(index)).length / effectiveK;
+    counted += 1;
+  }
+
+  return { rate: counted === 0 ? 0 : total / counted, k: effectiveK, probes: counted };
+}

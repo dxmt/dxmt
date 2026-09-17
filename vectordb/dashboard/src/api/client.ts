@@ -26,6 +26,8 @@
 
 import { ApiFailure, unwrap } from './envelope';
 import type {
+  KnnGraph,
+  KnnGraphRequest,
   ListRecordsRequest,
   RecordPage,
   SearchQuery,
@@ -62,7 +64,8 @@ type ReadOnlyPost =
   | `/api/v1/tables/${string}/records/list`
   | `/api/v1/tables/${string}/search`
   | `/api/v1/tables/${string}/search/text`
-  | `/api/v1/tables/${string}/search/hybrid`;
+  | `/api/v1/tables/${string}/search/hybrid`
+  | `/api/v1/tables/${string}/graph`;
 
 export interface Timed<T> {
   value: T;
@@ -138,6 +141,16 @@ export const api = {
 
   records: (name: string, body: ListRecordsRequest, signal?: AbortSignal) =>
     post<RecordPage>(`/api/v1/tables/${seg(name)}/records/list`, body, signal),
+
+  /**
+   * The nearest-neighbour structure of a sample, without its vectors.
+   *
+   * A thousand 768-dimension vectors is 8.5 MB of JSON; the same thousand nodes as a graph is
+   * 0.36 MB, and four thousand nodes is 1.5 MB — still less than a quarter of the vectors it
+   * replaces. That is what lifts the ceiling on how much of a table can be laid out.
+   */
+  graph: (name: string, body: KnnGraphRequest, signal?: AbortSignal) =>
+    post<KnnGraph>(`/api/v1/tables/${seg(name)}/graph`, body, signal),
 
   record: (name: string, id: string, signal?: AbortSignal) =>
     get<WireRecord>(`/api/v1/tables/${seg(name)}/records/${seg(id)}`, signal),

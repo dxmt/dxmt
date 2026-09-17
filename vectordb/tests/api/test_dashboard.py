@@ -148,6 +148,7 @@ def test_every_route_the_dashboard_declares_answers(page, table):
     manifest = json.loads(MANIFEST.read_text())
     bodies = {
         "/records/list": {"limit": 1},
+        "/graph": {"sample": 4, "neighbours": 2},
         "/search": {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1},
         "/search/text": {"query": "x", "limit": 1},
         "/search/hybrid": {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1},

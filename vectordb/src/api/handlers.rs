@@ -1541,6 +1541,91 @@ pub async fn insert_records_optimized(
     }
 }
 
+/// 请求一张 kNN 图
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct KnnGraphRequest {
+    /// How many records to sample as nodes. Default 1,000, capped by `DB_KNN_GRAPH_MAX_NODES`.
+    pub sample: Option<usize>,
+    /// Neighbours per node. Default 15.
+    pub neighbours: Option<usize>,
+    /// Restrict the sample to records the filter accepts.
+    pub filter: Option<crate::types::Filter>,
+    /// Shifts which records the even spacing lands on, so a run is reproducible. Default 0.
+    pub seed: Option<u64>,
+    /// Include each node's payload, for labelling and colouring. Default **true**.
+    ///
+    /// On by default here, unlike `records/list`, because the two requests are for different
+    /// things: listing records is browsing and usually wants neither vectors nor extra weight,
+    /// while a graph is fetched in order to draw something, and a node with no label cannot be
+    /// drawn usefully. Payloads are also negligible beside what this endpoint saves.
+    pub with_payload: Option<bool>,
+}
+
+/// The nearest-neighbour structure of a sample, without its vectors.
+///
+/// A client that wants to lay out or summarise a table needs to know which records are near
+/// which. Answering that from a browser means downloading the vectors: at 768 dimensions a
+/// thousand records is already thirteen megabytes of JSON floats, and nothing here is
+/// compressed — so the sample a projection can use is bounded by the wire rather than by
+/// anything about the data.
+///
+/// This returns the answer instead of the inputs. A thousand nodes with fifteen neighbours each
+/// is fifteen thousand edges, tens of times smaller than the vectors they were computed from.
+///
+/// Neighbours are computed **within the sample** and **exactly**. Within, because a layout is
+/// drawn from the points on screen and an edge to a point that is not drawn describes nothing.
+/// Exactly, because this is the reference a layout gets judged against, and an approximate
+/// graph would turn "how much structure survived the projection" into a measurement of two
+/// approximations at once.
+///
+/// O(n² · d), so it refuses above the node cap rather than running for a minute — a caller
+/// cannot tell a slow answer from a hung one.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/graph",
+    params(
+        ("table_name" = String, Path, description = "表名", example = "demo")
+    ),
+    request_body(content = KnnGraphRequest, example = json!({
+        "sample": 500, "neighbours": 10
+    })),
+    responses(
+        (status = 200, description = "图构建成功", body = ApiResponse),
+        (status = 400, description = "采样数超过上限", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse)
+    ),
+    tag = "search"
+))]
+#[axum::debug_handler]
+pub async fn knn_graph(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    Json(request): Json<KnnGraphRequest>,
+) -> impl IntoResponse {
+    let sample = request.sample.unwrap_or(1_000);
+    let neighbours = request.neighbours.unwrap_or(15);
+
+    match state
+        .storage
+        .knn_graph(
+            &table_name,
+            sample,
+            neighbours,
+            request.filter.as_ref(),
+            request.seed.unwrap_or(0),
+            request.with_payload.unwrap_or(true),
+        )
+        .await
+    {
+        Ok(graph) => {
+            ApiResponse::success(serde_json::to_value(graph).unwrap_or(serde_json::Value::Null))
+                .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
 /// BM25 search over the payload's text, for a table created with `enable_full_text_search`.
 ///
 /// Needs the `text-bm25` feature; a build without it answers `FEATURE_DISABLED`. Without a

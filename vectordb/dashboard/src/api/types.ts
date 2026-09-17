@@ -214,3 +214,27 @@ export interface HealthMetrics {
   index_status: { building: boolean };
   storage: StorageHealthSnapshot;
 }
+
+/** A k-nearest-neighbour graph over a sample, from `POST /tables/{t}/graph`. */
+export interface KnnGraph {
+  /** The sampled records, in node order. */
+  ids: string[];
+  /** Per node, its nearest neighbours as indices into `ids`, nearest first. */
+  neighbours: number[][];
+  /** Per node, the similarity to each of those. Higher is nearer, as in search. */
+  scores: number[][];
+  sampled: number;
+  /** How many records the sample was drawn from, after any filter. */
+  total: number;
+  /** Per node, its payload as the same JSON string `records/list` sends. */
+  payloads?: (string | null)[];
+}
+
+export interface KnnGraphRequest {
+  sample?: number;
+  neighbours?: number;
+  filter?: Filter | null;
+  seed?: number;
+  /** Default true: a node with no label cannot be drawn usefully. */
+  with_payload?: boolean;
+}

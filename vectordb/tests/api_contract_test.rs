@@ -136,6 +136,11 @@ const CONTRACTS: &[Contract] = &[
         path: "/tables/{t}/records/list",
         caller: "dashboard",
     },
+    Contract {
+        method: "POST",
+        path: "/tables/{t}/graph",
+        caller: "dashboard",
+    },
 ];
 
 fn free_port() -> u16 {
@@ -291,6 +296,7 @@ fn every_route_the_sdks_call_exists() {
             // record body to a listing route. It deserialises either way -- every field of
             // `ListRecordsRequest` is optional -- so the accident would be invisible.
             p if p.ends_with("/records/list") => r#"{"limit":1}"#,
+            p if p.ends_with("/graph") => r#"{"sample":4,"neighbours":2}"#,
             p if p.contains("/records/") => r#"{"vector":[0,0,1,0]}"#,
             p if p.ends_with("/search") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
             p if p.ends_with("/search/text") => r#"{"query":"x","top_k":1}"#,
@@ -507,11 +513,19 @@ fn the_dashboard_declares_no_route_that_writes() {
             continue;
         }
         if method == "POST" {
-            // The only POSTs that read: search variants, and listing records. Their bodies are
-            // too structured for a query string, which is the only reason they are POSTs.
+            // The POSTs that read. Each one is a POST because its body is structured -- a
+            // filter, a vector, a sample specification -- not because it changes anything, and
+            // every addition to this list is a claim that has to be made deliberately rather
+            // than by a route slipping past a method check.
+            //
+            //   /search, /search/*   a query vector and a filter
+            //   /records/list        a filter and a page
+            //   /graph               a sample size, a neighbour count and a filter; it computes
+            //                        the nearest-neighbour structure of a sample and returns it
             let reads = path.ends_with("/search")
                 || path.contains("/search/")
-                || path.ends_with("/records/list");
+                || path.ends_with("/records/list")
+                || path.ends_with("/graph");
             if !reads {
                 writes.push(format!("{method} {path}"));
             }

@@ -12,7 +12,7 @@ use crate::{
         alter_table, branch_table, create_backup, create_snapshot, create_table, delete_records,
         delete_table, drop_index, execute_dxql, full_text_search, get_record, get_status,
         get_table, get_table_stats, health_check, health_metrics, hybrid_search,
-        hybrid_search_combined, insert_records, insert_records_optimized, list_records,
+        hybrid_search_combined, insert_records, insert_records_optimized, knn_graph, list_records,
         list_tables, liveness, readiness, rebuild_index, search_vectors, update_record, AppState,
     },
     config::AppConfig,
@@ -376,6 +376,9 @@ pub async fn create_app_with_storage(
         )
         .route("/tables/:table_name/records", delete(delete_records))
         .route("/tables/:table_name/records/list", post(list_records))
+        // The nearest-neighbour structure of a sample, without its vectors — so a client can
+        // lay a table out without the wire deciding how many points it may draw.
+        .route("/tables/:table_name/graph", post(knn_graph))
         .route("/tables/:table_name/stats", get(get_table_stats))
         // 批量操作API
         .route(

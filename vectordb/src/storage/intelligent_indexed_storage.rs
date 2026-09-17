@@ -508,6 +508,35 @@ struct IntelligentTableData {
     full_text_engine: Option<Arc<FullTextSearchEngine>>,
 }
 
+/// A k-nearest-neighbour graph over a sample of a table.
+///
+/// `neighbours[i]` and `scores[i]` describe node `i`, whose record is `ids[i]`; the entries are
+/// indices into `ids`, not record ids, because a layout works in node numbers and the repetition
+/// would be most of the response.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct KnnGraph {
+    /// The sampled records, in node order.
+    pub ids: Vec<RecordId>,
+    /// Per node, its nearest neighbours as indices into `ids`, nearest first.
+    pub neighbours: Vec<Vec<u32>>,
+    /// Per node, the similarity to each of those neighbours. Higher is nearer, as in search.
+    pub scores: Vec<Vec<f32>>,
+    /// How many nodes the graph has.
+    pub sampled: usize,
+    /// How many records the sample was drawn from, after any filter.
+    pub total: usize,
+    /// Per node, its payload as JSON, when asked for.
+    ///
+    /// A layout needs labels for the nodes it draws — something to colour by, something to show
+    /// on hover — and those cannot come from a second request: the sample is scattered across
+    /// the table and there is no route that fetches a list of ids. They are cheap next to what
+    /// this endpoint exists to avoid: a payload is tens of bytes where a 768-dimension vector
+    /// is ten kilobytes of JSON floats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payloads: Option<Vec<Option<String>>>,
+}
+
 /// 性能统计
 impl IntelligentTableData {
     /// Where `id`'s vector sits in the vector file: the record store knows when the records
@@ -4244,6 +4273,211 @@ impl IntelligentIndexedStorage {
         })
         .await
         .map_err(|e| crate::Error::Internal(format!("exact scan task: {e}")))?
+    }
+
+    /// A k-nearest-neighbour graph over a sample of the table.
+    ///
+    /// This exists to move a specific piece of work off the browser. A projection needs to know
+    /// which points are near which, and the only way to answer that from a client was to
+    /// download the vectors and compute it there — which caps the sample at what fits down a
+    /// wire: about 1,300 rows at 768 dimensions before the JSON is thirteen megabytes. The
+    /// graph is the answer without the vectors. At 2,000 nodes and 15 neighbours it is 30,000
+    /// edges, roughly a fortieth of what the vectors weigh, and the ceiling stops being the
+    /// network.
+    ///
+    /// Neighbours are computed **within the sample**, not against the table. A layout is drawn
+    /// from the points on screen, so an edge to a point that is not being drawn describes
+    /// nothing; and a sample's own nearest neighbours are what a reader is comparing the layout
+    /// against.
+    ///
+    /// Exact, not indexed. The graph is small and the answer is the reference the projection
+    /// gets judged against — an approximate one would make "how much structure survived the
+    /// layout" a measurement of two approximations at once. It is O(n² · d), which is why
+    /// `sample` is capped: 4,000 nodes at 384 dimensions is about six billion multiply-adds,
+    /// a couple of seconds on the pool below, and the cost is quadratic from there.
+    pub async fn knn_graph(
+        &self,
+        tablename: &str,
+        sample: usize,
+        neighbours: usize,
+        filter: Option<&crate::types::Filter>,
+        seed: u64,
+        with_payload: bool,
+    ) -> crate::Result<KnnGraph> {
+        self.ensure_resident(tablename).await?;
+
+        let cap = Self::knn_graph_max_nodes();
+        if sample > cap {
+            return Err(crate::Error::InvalidInput(format!(
+                "a {sample}-node graph is over the {cap}-node limit; the computation is \
+                 quadratic in the node count. Lower `sample`, or raise DB_KNN_GRAPH_MAX_NODES"
+            )));
+        }
+
+        // Phase 1, under the map lock: choose the sample and read its vectors, then let go.
+        let (metric, ids, flat, dimension, total, payloads) = {
+            let tables = self.read_tables("knn_graph").await;
+            let table_data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+            let dimension = table_data.table.dimension;
+            let allowed = filter.map(|f| table_data.payload_index.get_matching_ids(f));
+            let mut candidates: Vec<RecordId> = table_data
+                .records
+                .ids()
+                .into_iter()
+                .filter(|id| allowed.as_ref().is_none_or(|set| set.contains(id)))
+                .collect();
+            // Sorted, so which rows a given seed picks does not depend on the map's iteration
+            // order -- otherwise the same request answers differently between restarts.
+            candidates.sort_unstable();
+            let total = candidates.len();
+
+            // Evenly spaced rather than random, and stated as such by the caller. A table is
+            // usually loaded in some order, and taking a contiguous block samples whenever that
+            // block was written rather than the table.
+            let wanted = sample.min(total);
+            let picked: Vec<RecordId> = if wanted == 0 {
+                Vec::new()
+            } else if wanted >= total {
+                candidates
+            } else {
+                let offset = (seed as usize) % (total / wanted).max(1);
+                (0..wanted)
+                    .map(|i| candidates[(i * total / wanted + offset).min(total - 1)].clone())
+                    .collect()
+            };
+
+            let mut flat = vec![0.0f32; picked.len() * dimension];
+            let mut kept = Vec::with_capacity(picked.len());
+            let mut payloads = with_payload.then(|| Vec::with_capacity(picked.len()));
+            for id in picked {
+                let Some(record) = table_data.records.get(&id) else {
+                    continue;
+                };
+                let vector = table_data.vector_for(&record);
+                if vector.len() != dimension {
+                    continue;
+                }
+                let at = kept.len() * dimension;
+                flat[at..at + dimension].copy_from_slice(&vector);
+                kept.push(id);
+                if let Some(out) = payloads.as_mut() {
+                    // The same JSON string `records/list` sends, so a client has one shape to
+                    // parse rather than two.
+                    out.push(
+                        (!record.payload.is_null())
+                            .then(|| serde_json::to_string(&record.payload).ok())
+                            .flatten(),
+                    );
+                }
+            }
+            flat.truncate(kept.len() * dimension);
+
+            (
+                table_data.table.distance_metric,
+                kept,
+                flat,
+                dimension,
+                total,
+                payloads,
+            )
+        };
+
+        let n = ids.len();
+        if n < 2 {
+            return Ok(KnnGraph {
+                ids,
+                neighbours: Vec::new(),
+                scores: Vec::new(),
+                sampled: n,
+                total,
+                payloads,
+            });
+        }
+        let k = neighbours.min(n - 1).max(1);
+
+        // Phase 2: quadratic and synchronous, so off the runtime and on a pool of its own --
+        // the same treatment PQ training and the exact scan get, for the same reason.
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(1);
+        let (neighbours, scores) = tokio::task::spawn_blocking(move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("knn-graph-{i}"))
+                .build()
+                .map_err(|e| crate::Error::Internal(format!("knn graph pool: {e}")))?;
+
+            let rows: Vec<(Vec<u32>, Vec<f32>)> = pool.install(|| {
+                use rayon::prelude::*;
+                (0..n)
+                    .into_par_iter()
+                    .map(|i| {
+                        let me = &flat[i * dimension..(i + 1) * dimension];
+                        let mut scored: Vec<(f32, u32)> = (0..n)
+                            .filter(|&j| j != i)
+                            .map(|j| {
+                                let other = &flat[j * dimension..(j + 1) * dimension];
+                                let d = metric.calculate(me, other).unwrap_or(f32::INFINITY);
+                                (d, j as u32)
+                            })
+                            .collect();
+                        // Partial sort: k is ten or so against a few thousand candidates, and
+                        // sorting all of them is most of the arithmetic spent on edges nobody
+                        // will draw. The index tiebreak keeps the answer reproducible.
+                        if scored.len() > k {
+                            scored.select_nth_unstable_by(k - 1, |a, b| {
+                                a.0.partial_cmp(&b.0)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.1.cmp(&b.1))
+                            });
+                            scored.truncate(k);
+                        }
+                        scored.sort_by(|a, b| {
+                            a.0.partial_cmp(&b.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.1.cmp(&b.1))
+                        });
+                        (
+                            scored.iter().map(|(_, j)| *j).collect(),
+                            // Similarities, matching what search returns, so a client does not
+                            // have to know which way round this particular metric runs.
+                            scored
+                                .iter()
+                                .map(|(d, _)| Self::similarity_from_distance(metric, *d))
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            });
+            Ok::<_, crate::Error>(rows.into_iter().unzip::<_, _, Vec<_>, Vec<_>>())
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(format!("knn graph task: {e}")))??;
+
+        Ok(KnnGraph {
+            ids,
+            neighbours,
+            scores,
+            sampled: n,
+            total,
+            payloads,
+        })
+    }
+
+    /// Largest graph `knn_graph` will build. The work is O(n² · d).
+    ///
+    /// 4,000 nodes at 384 dimensions is about six billion multiply-adds — a couple of seconds
+    /// on half the cores — and doubling the nodes quadruples that. A ceiling that refuses is
+    /// better than one that takes a minute, because a caller cannot tell a slow answer from a
+    /// hung one.
+    fn knn_graph_max_nodes() -> usize {
+        std::env::var("DB_KNN_GRAPH_MAX_NODES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_000)
     }
 
     /// The `limit` smallest distances, with an id tiebreak so a run is reproducible.

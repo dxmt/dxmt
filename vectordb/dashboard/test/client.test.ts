@@ -85,6 +85,7 @@ describe('read-only by construction', () => {
     // `post`'s path forbids the routes that mutate. Both halves, asserted.
     expect(names.sort()).toEqual(
       [
+        'graph',
         'metrics',
         'record',
         'records',

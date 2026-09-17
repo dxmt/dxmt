@@ -159,10 +159,30 @@ components plus the dimension and the norm, drawn from the `Float32Array` map in
 
 ### Visualize
 
-Qdrant's equivalent lays out a server-computed k-nearest-neighbour graph and never moves raw
-vectors to the browser. DXMT has no distance-matrix endpoint and this console adds none, so PCA
-on a sample is the only path — and PCA on a high-dimensional embedding is a weak summary.
-Measured on the two demo tables:
+Two layouts, and the choice is the point.
+
+**Neighbour graph** (default). The server computes the true nearest neighbours of the sample and
+sends the graph; this lays it out with a force simulation. No vector crosses the wire, so the
+sample size stops being decided by how much JSON a tab can parse. Measured against the same
+thousand records of a 384-dimension table:
+
+    layout   fetch        wire   compute   neighbourhoods kept
+    graph     53 ms   0.36 MB    154 ms                   27%
+    pca      370 ms   8.45 MB    158 ms                   12%
+
+Twenty-three times less data, seven times faster to fetch, and it keeps more than twice as much
+of the neighbourhood structure — because it optimises for that directly, where PCA optimises for
+variance and only incidentally for what a reader of a scatter plot is asking.
+
+On `persist_demo`, whose vectors are uniformly random, **both score 2%**. That is the important
+control: a layout that "improved" on structureless data would be inventing it.
+
+**PCA** stays, because it answers a different question (which two directions carry the variance)
+and because it needs no server support. Its ceiling is the wire — about 1,300 points at 768
+dimensions; the graph's is the server's node cap, 4,000 at any dimension, since the computation
+is quadratic. A 4,000-node graph is still smaller than 1,000 vectors.
+
+PCA on a high-dimensional embedding is a weak summary, measured on the two demo tables:
 
     persist_demo   1000 x 128   PC1 1.4%  PC2 1.4%  together  2.8%   -> the page warns
     papers          300 x   8   PC1 15.4% PC2 16.0% together 31.4%   -> it does not

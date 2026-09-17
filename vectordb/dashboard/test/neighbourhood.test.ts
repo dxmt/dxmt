@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { preservation } from '../src/viz/neighbourhood';
+import { preservation, preservationFromGraph } from '../src/viz/neighbourhood';
 import { pca2d } from '../src/viz/pca';
 
 function flat(rows: number[][]): Float32Array {
@@ -269,5 +269,58 @@ describe('reading the preservation rate', () => {
     // against about 8x, either side of the 3x rule.
     expect(noisy.rate).toBeLessThan(chance * 3);
     expect(real.rate).toBeGreaterThan(chance * 5);
+  });
+});
+
+/**
+ * Measuring against a graph the server computed, which is the stricter of the two.
+ *
+ * With a k-nearest-neighbour graph in hand there is nothing to approximate: the neighbours are
+ * exact, they came from the table's own metric, and every node is checked rather than a sample
+ * of fifty. It is also the only way to measure a layout built *from* the graph, since that path
+ * never downloads a vector.
+ */
+describe('preservationFromGraph', () => {
+  it('scores a perfect layout at 1', () => {
+    // Points on a line, and a graph that says each one's neighbours are its line neighbours.
+    const n = 40;
+    const positions = new Float32Array(n * 2);
+    for (let i = 0; i < n; i += 1) positions[i * 2] = i;
+    const truth = Array.from({ length: n }, (_, i) =>
+      [i - 1, i + 1, i - 2, i + 2].filter((j) => j >= 0 && j < n).slice(0, 2),
+    );
+
+    expect(preservationFromGraph(positions, truth, 2).rate).toBeGreaterThan(0.95);
+  });
+
+  it('scores a layout that ignores the graph near zero', () => {
+    const n = 40;
+    const positions = new Float32Array(n * 2);
+    // Deliberately the reverse of the graph's ordering.
+    for (let i = 0; i < n; i += 1) positions[i * 2] = (i * 17) % n;
+    const truth = Array.from({ length: n }, (_, i) =>
+      [i - 1, i + 1].filter((j) => j >= 0 && j < n),
+    );
+
+    expect(preservationFromGraph(positions, truth, 2).rate).toBeLessThan(0.4);
+  });
+
+  it('checks every node rather than a sample, since there is nothing to save', () => {
+    const n = 25;
+    const positions = new Float32Array(n * 2);
+    for (let i = 0; i < n; i += 1) positions[i * 2] = i;
+    const truth = Array.from({ length: n }, (_, i) => [(i + 1) % n]);
+    expect(preservationFromGraph(positions, truth, 1).probes).toBe(n);
+  });
+
+  it('shrinks k to what the graph actually carries', () => {
+    const n = 10;
+    const positions = new Float32Array(n * 2);
+    const truth = Array.from({ length: n }, (_, i) => [(i + 1) % n, (i + 2) % n]);
+    expect(preservationFromGraph(positions, truth, 20).k).toBe(2);
+  });
+
+  it('returns nothing rather than dividing by zero on an empty graph', () => {
+    expect(preservationFromGraph(new Float32Array(0), [], 5)).toEqual({ rate: 0, k: 0, probes: 0 });
   });
 });

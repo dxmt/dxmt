@@ -6,7 +6,7 @@ import { normalizeRecord, vectorFor } from '../api/normalize';
 import type { Table } from '../api/types';
 import { ErrorBanner } from '../components/ErrorBanner';
 import { Scatter } from '../viz/scatter';
-import type { PcaRequest, PcaResponse } from '../viz/pca.worker';
+import type { GraphRequest, LayoutRequest, PcaResponse } from '../viz/pca.worker';
 import type { Metric, Preservation } from '../viz/neighbourhood';
 import { budgetFor, strata, PAGE } from '../lib/sample';
 import { colorBy, type Coloring } from '../lib/colors';
@@ -46,10 +46,12 @@ export function TableVisualize() {
   const worker = useRef<Worker | null>(null);
   const job = useRef(0);
 
+  const mode = params.get('layout') === 'pca' ? 'pca' : 'graph';
+  const [progress, setProgress] = useState<number | null>(null);
   const [ids, setIds] = useState<string[]>([]);
   const [payloads, setPayloads] = useState<Record<string, unknown>[]>([]);
   const [positions, setPositions] = useState<Float32Array | null>(null);
-  const [explained, setExplained] = useState<[number, number]>([0, 0]);
+  const [explained, setExplained] = useState<[number, number] | null>(null);
   const [preserved, setPreserved] = useState<Preservation | null>(null);
   const [shortfall, setShortfall] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -60,7 +62,27 @@ export function TableVisualize() {
 
   const dimension = table?.dimension ?? 0;
   const records = table?.record_count ?? 0;
-  const budget = useMemo(() => budgetFor(records, dimension), [records, dimension]);
+  /**
+   * What bounds the sample, which is not the same question in the two modes.
+   *
+   * PCA needs the vectors here, so the ceiling is the wire: n x d floats as JSON, uncompressed.
+   * The graph needs none of them — the server answers with the neighbours instead of the
+   * inputs — so the ceiling is the server's own node cap, and it is four thousand whatever the
+   * dimension. That difference is the entire reason the endpoint exists.
+   */
+  const GRAPH_MAX_NODES = 4_000;
+  const budget = useMemo(
+    () =>
+      mode === 'graph'
+        ? {
+            points: Math.min(GRAPH_MAX_NODES, records),
+            requests: 1,
+            estimatedBytes: Math.min(GRAPH_MAX_NODES, records) * 15 * 24,
+            reason: records <= GRAPH_MAX_NODES ? ('table' as const) : ('requests' as const),
+          }
+        : budgetFor(records, dimension),
+    [mode, records, dimension],
+  );
   const wanted = Math.min(Number(params.get('n') ?? budget.points), budget.points);
   const colorKey = params.get('by') ?? '';
 
@@ -103,17 +125,23 @@ export function TableVisualize() {
       type: 'module',
     });
     worker.current.onmessage = (event: MessageEvent<PcaResponse>) => {
-      // A run started two slider adjustments ago must not land on the current one.
-      if (event.data.jobId !== job.current) return;
-      if (!event.data.ok) {
-        setError(new Error(event.data.error));
+      const message = event.data;
+      // A run started two adjustments ago must not land on the current one.
+      if (message.jobId !== job.current) return;
+      if ('progress' in message) {
+        setProgress(message.progress);
+        return;
+      }
+      setProgress(null);
+      if (!message.ok) {
+        setError(new Error(message.error));
         setStatus(null);
         return;
       }
-      setPositions(event.data.positions);
-      setExplained(event.data.explained);
-      setPreserved(event.data.preservation);
-      setStatus(`projected in ${Math.round(event.data.ms)} ms`);
+      setPositions(message.positions);
+      setExplained(message.explained);
+      setPreserved(message.preservation);
+      setStatus(`laid out in ${Math.round(message.ms)} ms`);
     };
     return () => worker.current?.terminate();
   }, []);
@@ -156,9 +184,60 @@ export function TableVisualize() {
     setSelected(null);
     setPositions(null);
     setPreserved(null);
+    setExplained(null);
+    setShortfall(null);
     setStatus('fetching…');
+    job.current += 1;
+    const jobId = job.current;
 
     try {
+      if (mode === 'graph') {
+        // The whole point of the graph endpoint: the answer instead of the inputs. One request,
+        // no vectors on the wire, and the node count stops being decided by how much JSON a tab
+        // can parse.
+        const response = await api.graph(name, { sample: wanted, neighbours: 15, seed: 42 });
+        const graph = response.value;
+        if (graph.sampled < 3) {
+          setError(new Error(`only ${graph.sampled} nodes came back; a layout needs three`));
+          setStatus(null);
+          return;
+        }
+        setIds(graph.ids);
+        // The labels come back with the nodes. They have to: the sample is scattered across
+        // the table and no route fetches a list of ids, so a second request could not get them.
+        setPayloads(
+          (graph.payloads ?? []).map((raw) => {
+            if (!raw) return {};
+            try {
+              const parsed: unknown = JSON.parse(raw);
+              return typeof parsed === 'object' && parsed !== null
+                ? (parsed as Record<string, unknown>)
+                : {};
+            } catch {
+              return {};
+            }
+          }),
+        );
+        setShortfall(
+          graph.sampled < wanted
+            ? `asked for ${count(wanted)}, the table has ${count(graph.total)}`
+            : null,
+        );
+
+        setStatus('laying out…');
+        const request: GraphRequest = {
+          kind: 'graph',
+          jobId,
+          n: graph.sampled,
+          neighbours: graph.neighbours,
+          scores: graph.scores,
+          seed: 42,
+          steps: 300,
+        };
+        worker.current?.postMessage(request);
+        return;
+      }
+
       const requests = Math.max(1, Math.ceil(wanted / PAGE));
       const offsets = strata(records, requests);
       const perRequest = Math.ceil(wanted / requests);
@@ -200,10 +279,10 @@ export function TableVisualize() {
         if (vector) flat.set(vector, index * dimension);
       });
 
-      job.current += 1;
       setStatus('projecting…');
-      const request: PcaRequest = {
-        jobId: job.current,
+      const request: LayoutRequest = {
+        kind: 'pca',
+        jobId,
         data: flat,
         n: collectedIds.length,
         d: dimension,
@@ -248,7 +327,7 @@ export function TableVisualize() {
     }
   };
 
-  const together = explained[0] + explained[1];
+  const together = explained ? explained[0] + explained[1] : null;
   // Either measure failing is enough, because they come apart in both directions. One demo
   // table carries 31.4% of the variance — over any variance threshold — while keeping 17% of
   // each point's ten nearest neighbours; a variance-only test would pass that plot silently.
@@ -268,7 +347,8 @@ export function TableVisualize() {
   const chance = preserved && ids.length > 1 ? preserved.k / (ids.length - 1) : null;
   const noise = kept !== null && chance !== null && kept < chance * 3;
   const coarseOnly = kept !== null && !noise && kept < 0.2;
-  const weak = positions !== null && (together < 0.25 || noise || coarseOnly);
+  const weak =
+    positions !== null && ((together !== null && together < 0.25) || noise || coarseOnly);
 
   return (
     <>
@@ -308,24 +388,60 @@ export function TableVisualize() {
               ))}
             </select>
           </label>
+          <label
+            title="Graph: the server computes the true nearest neighbours of the sample and this lays that graph out — no vectors on the wire, so the sample can be much larger. PCA: the two directions of most variance, computed here from the vectors themselves."
+          >
+            layout
+            <select
+              value={mode}
+              onChange={(event) => {
+                const next = new URLSearchParams(params);
+                next.set('layout', event.target.value);
+                next.delete('n');
+                setParams(next, { replace: true });
+              }}
+            >
+              <option value="graph">neighbour graph</option>
+              <option value="pca">PCA</option>
+            </select>
+          </label>
           <button type="button" onClick={() => void load()} disabled={status !== null && status.endsWith('…')}>
-            {status?.endsWith('…') ? status : positions ? 'Resample' : 'Project'}
+            {status?.endsWith('…')
+              ? progress !== null
+                ? `${status} ${Math.round(progress * 100)}%`
+                : status
+              : positions
+                ? 'Resample'
+                : 'Lay out'}
           </button>
           {status && !status.endsWith('…') ? <span className="muted">{status}</span> : null}
         </div>
 
-        <p className="muted">
-          At most {count(budget.points)} points here:{' '}
-          {budget.reason === 'floats'
-            ? `${count(budget.points)} × ${dimension} dimensions is the 1M-float ceiling, about ${bytes(budget.estimatedBytes)} of JSON`
-            : budget.reason === 'requests'
-              ? `four requests of ${PAGE}, and each one makes the server sort the whole table`
-              : 'the whole table fits'}
-          . Vectors can only be fetched through <span className="mono">records/list</span>, which
-          is ordered by <span className="mono">created_at</span> — so the sample is drawn from{' '}
-          {Math.max(1, Math.ceil(wanted / PAGE))} evenly spaced windows by insertion time, not
-          uniformly at random.
-        </p>
+        {mode === 'graph' ? (
+          <p className="muted">
+            The server computes the true nearest neighbours of the sample and sends the graph —
+            about {bytes(budget.estimatedBytes)} for {count(budget.points)} nodes, where the same
+            nodes as {dimension}-dimension vectors would be{' '}
+            {bytes(budget.points * dimension * 13)} of JSON floats. That is why the ceiling here
+            is the server&apos;s node cap ({count(GRAPH_MAX_NODES)}, since the computation is
+            quadratic) and not the wire. The sample is spread evenly across the table rather than
+            taken from one end.
+          </p>
+        ) : (
+          <p className="muted">
+            At most {count(budget.points)} points here:{' '}
+            {budget.reason === 'floats'
+              ? `${count(budget.points)} × ${dimension} dimensions is the 1M-float ceiling, about ${bytes(budget.estimatedBytes)} of JSON`
+              : budget.reason === 'requests'
+                ? `four requests of ${PAGE}, and each one makes the server sort the whole table`
+                : 'the whole table fits'}
+            . PCA needs the vectors themselves, and they can only be fetched through{' '}
+            <span className="mono">records/list</span>, which is ordered by{' '}
+            <span className="mono">created_at</span> — so the sample is drawn from{' '}
+            {Math.max(1, Math.ceil(wanted / PAGE))} evenly spaced windows by insertion time, not
+            uniformly at random.
+          </p>
+        )}
       </div>
 
       {error ? <ErrorBanner error={error} /> : null}
@@ -333,14 +449,25 @@ export function TableVisualize() {
       {positions ? (
         <>
           <div className="plothead">
-            <span>
-              PC1 <b>{(explained[0] * 100).toFixed(1)}%</b> · PC2{' '}
-              <b>{(explained[1] * 100).toFixed(1)}%</b> · together{' '}
-              <b>{(together * 100).toFixed(1)}%</b> of variance
-            </span>
+            {explained && together !== null ? (
+              <span>
+                PC1 <b>{(explained[0] * 100).toFixed(1)}%</b> · PC2{' '}
+                <b>{(explained[1] * 100).toFixed(1)}%</b> · together{' '}
+                <b>{(together * 100).toFixed(1)}%</b> of variance
+              </span>
+            ) : (
+              <span className="muted">
+                laid out from the neighbour graph — variance is a PCA idea and this layout has
+                none
+              </span>
+            )}
             {preserved && preserved.probes > 0 ? (
               <span
-                title={`Measured on ${preserved.probes} sampled points: of each one's ${preserved.k} nearest neighbours in the embedding, this fraction are still among its ${preserved.k} nearest on screen.`}
+                title={
+                  mode === 'graph'
+                    ? `Every one of ${preserved.probes} nodes checked against the graph the server computed: of its ${preserved.k} true nearest neighbours, this fraction are still among its ${preserved.k} nearest on screen.`
+                    : `Measured on ${preserved.probes} sampled points: of each one's ${preserved.k} nearest neighbours in the embedding, this fraction are still among its ${preserved.k} nearest on screen.`
+                }
               >
                 neighbourhoods kept <b>{(preserved.rate * 100).toFixed(0)}%</b>
               </span>
@@ -358,12 +485,12 @@ export function TableVisualize() {
                   ? 'This is a picture of noise'
                   : coarseOnly
                     ? 'Broad shape only — the fine ordering did not survive'
-                    : `These two components explain ${(together * 100).toFixed(1)}% of the variance`}
+                    : `These two components explain ${((together ?? 0) * 100).toFixed(1)}% of the variance`}
               </strong>
               <span className="detail">
-                {(together * 100).toFixed(1)}% of the variance
+                {together !== null ? `${(together * 100).toFixed(1)}% of the variance, and ` : ''}
                 {kept !== null
-                  ? `, and ${(kept * 100).toFixed(0)}% of each point's ${preserved?.k} nearest neighbours survive the projection — chance alone would give about ${((chance ?? 0) * 100).toFixed(0)}%`
+                  ? `${(kept * 100).toFixed(0)}% of each point's ${preserved?.k} nearest neighbours survive the layout — chance alone would give about ${((chance ?? 0) * 100).toFixed(0)}%`
                   : ''}
                 .
               </span>
@@ -391,7 +518,7 @@ export function TableVisualize() {
             <canvas
               ref={setCanvasEl}
               role="img"
-              aria-label={`Scatter plot of ${ids.length} sampled records. The two components carry ${(together * 100).toFixed(1)} per cent of the variance${preserved && preserved.probes > 0 ? `, and ${(preserved.rate * 100).toFixed(0)} per cent of each point's nearest neighbours survive the projection` : ''}.`}
+              aria-label={`Scatter plot of ${ids.length} sampled records, laid out ${mode === 'graph' ? 'from the neighbour graph' : 'by PCA'}.${together !== null ? ` The two components carry ${(together * 100).toFixed(1)} per cent of the variance.` : ''}${preserved && preserved.probes > 0 ? ` ${(preserved.rate * 100).toFixed(0)} per cent of each point's nearest neighbours survive the layout.` : ''}`}
             />
             {hover !== null && ids[hover] ? (
               <div className="plot-hover mono">

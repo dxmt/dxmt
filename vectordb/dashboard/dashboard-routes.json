@@ -16,16 +16,65 @@
     "so a console for it would make the phrase 'read-only dashboard' false."
   ],
   "routes": [
-    { "method": "GET",  "path": "/api/v1/health",                      "why": "is this a DXMT server, and is it answering" },
-    { "method": "GET",  "path": "/status",                             "why": "overview: version, table count, total records, persistence" },
-    { "method": "GET",  "path": "/health/metrics",                     "why": "overview: in-flight operations, WAL frontier, snapshot state" },
-    { "method": "GET",  "path": "/api/v1/tables",                      "why": "the tables list" },
-    { "method": "GET",  "path": "/api/v1/tables/{t}",                  "why": "table detail: schema and record count" },
-    { "method": "GET",  "path": "/api/v1/tables/{t}/stats",            "why": "table detail: index type, resident flag, bytes" },
-    { "method": "POST", "path": "/api/v1/tables/{t}/records/list",     "why": "the record browser (vectors omitted), and with with_vector the PCA page's sample" },
-    { "method": "GET",  "path": "/api/v1/tables/{t}/records/{r}",      "why": "one record in full, including the vector used as a query" },
-    { "method": "POST", "path": "/api/v1/tables/{t}/search",           "why": "the search inspector and both searches of every recall probe" },
-    { "method": "POST", "path": "/api/v1/tables/{t}/search/text",      "why": "BM25 search; degrades when text-bm25 is not compiled in" },
-    { "method": "POST", "path": "/api/v1/tables/{t}/search/hybrid",    "why": "vector+text fusion; degrades to dense without text-bm25" }
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "why": "is this a DXMT server, and is it answering"
+    },
+    {
+      "method": "GET",
+      "path": "/status",
+      "why": "overview: version, table count, total records, persistence"
+    },
+    {
+      "method": "GET",
+      "path": "/health/metrics",
+      "why": "overview: in-flight operations, WAL frontier, snapshot state"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tables",
+      "why": "the tables list"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tables/{t}",
+      "why": "table detail: schema and record count"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tables/{t}/stats",
+      "why": "table detail: index type, resident flag, bytes"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tables/{t}/records/list",
+      "why": "the record browser (vectors omitted), and with with_vector the PCA page's sample"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tables/{t}/records/{r}",
+      "why": "one record in full, including the vector used as a query"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tables/{t}/search",
+      "why": "the search inspector and both searches of every recall probe"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tables/{t}/search/text",
+      "why": "BM25 search; degrades when text-bm25 is not compiled in"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tables/{t}/search/hybrid",
+      "why": "vector+text fusion; degrades to dense without text-bm25"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/tables/{t}/graph",
+      "why": "the visualize page's neighbour-graph layout \u2014 the answer instead of the vectors"
+    }
   ]
 }
