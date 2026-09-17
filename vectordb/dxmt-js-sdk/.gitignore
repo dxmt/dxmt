@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
-package-lock.json
+
+# package-lock.json is deliberately NOT ignored. CI's sdk-live job runs `npm ci` here, which is
+# a hard error without a lockfile -- so that step, and with it this SDK's unit tests, its build
+# and its live contract test against a real server, could never have run. Ignoring it also gave
+# up the thing a lockfile is for: CI resolving the same dependency tree twice running.
 yarn.lock
 pnpm-lock.yaml
 
