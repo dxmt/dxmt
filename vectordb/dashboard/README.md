@@ -86,6 +86,30 @@ table regardless of `limit`.
 | Table detail | schema, footprint, bytes per record | shows all three record counts when they disagree |
 | Records | what is actually stored | see below |
 | Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
+| Search | why did this come back, and what is the index costing | see below |
+
+### The search inspector
+
+The same query under every mode, side by side — the page `search_mode: "exact"` was added for.
+On a 100,000-row table, one query:
+
+    mode        server ms    overlap with exact
+    fast                3    60%
+    normal              2    80%
+    accurate            6    90%
+    auto                5    90%
+    exact              18    (ground truth)
+
+Two things it deliberately does not do. It does not run the modes **in parallel** — concurrent
+searches contend for the index and the page cache, and each `tookms` would then be partly a
+measurement of the others. A test makes the comparison fail by name if that changes. And it does
+not pre-empt the server's validation: a wrong-length vector gets a warning and a *send it
+anyway* checkbox, because seeing the real `DIMENSION_MISMATCH` is sometimes the point.
+
+On a server without the exact mode — detected by a probe that reads the plain-text 422 the axum
+extractor answers with — the page says so and stops calling anything recall. `accurate` is 4x
+ef and about 0.98 itself, so agreement with it is an upper bound, blind to whatever every mode
+misses.
 
 ### What shapes the record browser
 

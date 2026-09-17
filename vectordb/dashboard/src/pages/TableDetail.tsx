@@ -98,6 +98,9 @@ export function TableDetail() {
         <NavLink to="records" className={({ isActive }) => (isActive ? 'on' : '')}>
           Records
         </NavLink>
+        <NavLink to="search" className={({ isActive }) => (isActive ? 'on' : '')}>
+          Search
+        </NavLink>
       </nav>
 
       <Outlet context={{ table }} />
