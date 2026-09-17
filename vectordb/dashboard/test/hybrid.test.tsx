@@ -169,6 +169,32 @@ describe('BM25 and hybrid beside the dense modes', () => {
     expect(hybrid.body).not.toHaveProperty('top_k');
   }, 10_000);
 
+  it('names the table, not the build, when the table has no text index', async () => {
+    // The other absence, and the one a revert check found unguarded: the feature is compiled
+    // in and this one table was created without it. `enable_full_text_search` cannot be turned
+    // on afterwards, so the advice is to recreate the table — telling someone to rebuild the
+    // server instead sends them to fix the wrong thing.
+    const sent = stub();
+    table.enable_full_text_search = false;
+    try {
+      const user = userEvent.setup();
+      renderAt('/tables/t/search', '/tables/:name/search', <TableSearch />);
+      await user.click(screen.getByLabelText(/Query vector/i));
+      await user.paste('[1, 0, 0, 0]');
+
+      await waitFor(
+        () => expect(screen.getByText(/created without enable_full_text_search/)).toBeInTheDocument(),
+        { timeout: 4000 },
+      );
+      expect(screen.queryByText(/built without the text-bm25 feature/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/Text query/i)).not.toBeInTheDocument();
+      // And the table's own flag settles it without asking the server.
+      expect(sent.some((s) => s.url.endsWith('/search/text'))).toBe(false);
+    } finally {
+      table.enable_full_text_search = true;
+    }
+  }, 10_000);
+
   it('names which absence it is when the build has no text-bm25', async () => {
     stub({ textFeature: false });
     const user = userEvent.setup();
