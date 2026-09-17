@@ -1,5 +1,6 @@
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { Boundary } from './components/Boundary';
+import { Sidebar } from './components/Sidebar';
 import { Overview } from './pages/Overview';
 import { Tables } from './pages/Tables';
 import { TableDetail } from './pages/TableDetail';
@@ -15,15 +16,7 @@ export function App() {
       <a className="skip" href="#main">
         Skip to content
       </a>
-      <nav className="nav" aria-label="Sections">
-        <h1>DXMT VectorDB</h1>
-        <NavLink to="/" end className={({ isActive }) => (isActive ? 'on' : '')}>
-          Overview
-        </NavLink>
-        <NavLink to="/tables" className={({ isActive }) => (isActive ? 'on' : '')}>
-          Tables
-        </NavLink>
-      </nav>
+      <Sidebar />
       <main className="main" id="main">
         {/* Per page, not per app: a crash in one view leaves the navigation usable. */}
         <Boundary>

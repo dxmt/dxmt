@@ -20,31 +20,61 @@ a { color: var(--accent); }
   flex: 0 0 var(--nav-width);
   background: var(--surface);
   border-right: 1px solid var(--border-soft);
-  padding: 20px 0;
+  padding: 16px 0;
   position: sticky;
   top: 0;
   height: 100vh;
   overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.16s ease, flex-basis 0.16s ease;
 }
-.nav h1 {
+.nav[data-collapsed] {
+  width: var(--nav-width-sm);
+  flex-basis: var(--nav-width-sm);
+}
+
+.nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 14px 0 22px;
+  margin-bottom: 16px;
+  min-height: 30px;
+}
+.nav .brand {
   font-size: 12px;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--muted);
   font-weight: 700;
-  margin: 0 0 18px 22px;
+  white-space: nowrap;
+  overflow: hidden;
 }
+.nav-toggle { flex: none; padding: 4px; line-height: 0; }
+.nav[data-collapsed] .nav-head { padding: 0 0 0 4px; flex-direction: column; gap: 10px; }
+.nav[data-collapsed] .nav-toggle .icon { transform: rotate(180deg); }
+
 .nav a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 11px;
   margin: 1px 12px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border-radius: var(--radius);
   color: var(--text);
   text-decoration: none;
   font-weight: 600;
+  white-space: nowrap;
 }
 .nav a:hover { background: var(--raised); color: var(--heading); }
 .nav a.on { background: var(--accent-soft); color: var(--accent); }
+.nav .icon { flex: none; }
+
+/* Collapsed: the label goes, the icon centres, and the hit area stays the same height. The
+   link itself never goes anywhere — Tab walks the same destinations in the same order. */
+.nav[data-collapsed] a { justify-content: center; padding: 9px 0; margin: 1px 10px; }
+.nav[data-collapsed] .label { display: none; }
 
 .main { flex: 1; padding: 26px 30px 48px; max-width: 1240px; }
 .main > h2 { margin: 0 0 3px; font-size: 20px; font-weight: 700; }

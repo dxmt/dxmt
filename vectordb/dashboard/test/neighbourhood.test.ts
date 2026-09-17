@@ -103,3 +103,74 @@ describe('neighbourhood preservation', () => {
     expect(preservation(original, positions, 6, 3, 'euclidean', 20).k).toBe(5);
   });
 });
+
+/**
+ * Where the warning threshold sits, pinned against data whose answer is known.
+ *
+ * The page warns below 20% preservation, not 50%, and the reason is the first case here: a
+ * projection can recover the structure perfectly and still scramble the ordering *inside* each
+ * group. That is a good plot. Warning on it would be a false alarm, and a banner that cries
+ * wolf is a banner people learn to close.
+ */
+describe('calibration', () => {
+  function blobs(n: number, d: number) {
+    let s = 7;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff - 0.5;
+    };
+    const flat = new Float32Array(n * d);
+    for (let i = 0; i < n; i += 1) {
+      const blob = i % 4;
+      for (let j = 0; j < d; j += 1) flat[i * d + j] = rnd() * 0.15;
+      flat[i * d + 5] = (blob % 2) * 10 + rnd();
+      flat[i * d + 61] = Math.floor(blob / 2) * 10 + rnd();
+    }
+    return flat;
+  }
+
+  function uniform(n: number, d: number) {
+    let s = 42;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff;
+    };
+    const flat = new Float32Array(n * d);
+    for (let i = 0; i < n * d; i += 1) flat[i] = rnd();
+    return flat;
+  }
+
+  const WARNS_BELOW = 0.2;
+
+  it('does not warn on four real clusters, which project well and reorder within themselves', () => {
+    const n = 800;
+    const d = 128;
+    const original = blobs(n, d);
+    const { positions, explained } = pca2d(original.slice(), n, d);
+
+    expect(explained[0] + explained[1]).toBeGreaterThan(0.9);
+    const { rate } = preservation(original, positions, n, d, 'euclidean');
+    // Around 0.43 in practice: the groups are recovered, the order inside them is not.
+    expect(rate).toBeGreaterThan(WARNS_BELOW);
+    expect(rate).toBeLessThan(0.8);
+  });
+
+  it('warns on uniform noise, which is what a table of random vectors is', () => {
+    const n = 600;
+    const d = 128;
+    const original = uniform(n, d);
+    const { positions } = pca2d(original.slice(), n, d);
+
+    const { rate } = preservation(original, positions, n, d, 'cosine');
+    expect(rate).toBeLessThan(WARNS_BELOW);
+  });
+
+  it('reports 100% when the data really is two-dimensional', () => {
+    // The anchor: if this is not 1.0 the measure itself is wrong, and every number above is
+    // meaningless.
+    const n = 400;
+    const original = uniform(n, 2);
+    const { positions } = pca2d(original.slice(), n, 2);
+    expect(preservation(original, positions, n, 2, 'euclidean').rate).toBeCloseTo(1, 5);
+  });
+});

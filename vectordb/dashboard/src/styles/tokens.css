@@ -59,6 +59,8 @@
   --pad: 1.5rem;
   --pad-cap: 1.125rem;
   --nav-width: 240px;
+  /* Wide enough for an 18px icon with a comfortable hit area either side. */
+  --nav-width-sm: 72px;
 }
 
 @media (prefers-color-scheme: dark) {

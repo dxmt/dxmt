@@ -209,12 +209,19 @@ export function TableVisualize() {
   };
 
   const together = explained[0] + explained[1];
-  // Either measure failing is enough, because they come apart. Measured on the demo tables:
-  // one projection carried 31.4% of the variance — comfortably over any variance threshold —
-  // while keeping only 17% of each point's ten nearest neighbours. A variance-only test would
-  // have let that plot through without a word.
+  // Either measure failing is enough, because they come apart in both directions. One demo
+  // table carries 31.4% of the variance — over any variance threshold — while keeping 17% of
+  // each point's ten nearest neighbours; a variance-only test would pass that plot silently.
+  //
+  // The preservation line sits at 20% rather than 50% because of the opposite case, found by
+  // calibrating against data with known structure: four well-separated clusters living on a
+  // plane inside 128 dimensions project at 99.5% of the variance and still keep only 43% of
+  // neighbourhoods — the groups are perfectly recovered, the ordering *within* each group is
+  // not, and that is a good plot. Warning on it would be a false alarm, and false alarms teach
+  // people to close the banner. Below 20% the overlap is near what chance gives (k of n: about
+  // 1% for ten of a thousand), which is a picture of nothing.
   const kept = preserved && preserved.probes > 0 ? preserved.rate : null;
-  const weak = positions !== null && (together < 0.25 || (kept !== null && kept < 0.5));
+  const weak = positions !== null && (together < 0.25 || (kept !== null && kept < 0.2));
 
   return (
     <>
@@ -299,8 +306,8 @@ export function TableVisualize() {
           {weak ? (
             <div className="banner warn">
               <strong>
-                {kept !== null && kept < 0.5
-                  ? `${(100 - kept * 100).toFixed(0)}% of each point's nearest neighbours are not its nearest neighbours on this plot`
+                {kept !== null && kept < 0.2
+                  ? `Almost nothing survives the projection: ${(100 - kept * 100).toFixed(0)}% of each point's nearest neighbours are not its nearest neighbours here`
                   : `These two components explain ${(together * 100).toFixed(1)}% of the variance`}
               </strong>
               <span className="detail">
