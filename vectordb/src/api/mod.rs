@@ -1,3 +1,5 @@
+#[cfg(feature = "api-dashboard")]
+pub mod dashboard;
 #[cfg(feature = "api-graphql")]
 pub mod graphql;
 #[cfg(feature = "api-grpc")]
@@ -14,7 +16,7 @@ pub mod swagger;
 #[cfg(feature = "api-ws")]
 pub mod websocket;
 
-pub use server::{create_app, create_app_with_features, create_app_with_storage};
+pub use server::{create_app, create_app_with_features, create_app_with_storage, Interfaces};
 #[cfg(feature = "cluster")]
 pub use server_with_cluster::create_app_with_cluster;
 pub use simple_core::create_simple_app;

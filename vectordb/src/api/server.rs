@@ -20,6 +20,8 @@ use crate::{
     storage::IntelligentIndexedStorage,
 };
 
+#[cfg(feature = "api-dashboard")]
+use crate::api::dashboard;
 #[cfg(feature = "api-graphql")]
 use crate::api::graphql;
 #[cfg(feature = "api-swagger")]
@@ -50,9 +52,27 @@ pub(crate) fn wal_dir_from_env() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Which optional interfaces to serve.
+///
+/// A struct rather than a run of booleans. There are four of them now, all the same type, and
+/// `create_app_with_storage(swagger, graphql, websocket, dashboard)` gives the compiler nothing
+/// to catch a transposed pair with -- the symptom would be a server that serves the wrong two
+/// of four, which no test asserts against because every test passes the same values.
+///
+/// Compiling an interface in and serving it are separate decisions throughout: the cargo
+/// feature decides whether the code exists, and these decide whether it answers. Asking for one
+/// the binary was not built with is an error rather than a silent no-op.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Interfaces {
+    pub swagger: bool,
+    pub graphql: bool,
+    pub websocket: bool,
+    pub dashboard: bool,
+}
+
 /// 创建应用程序路由器
 pub async fn create_app() -> Result<Router> {
-    create_app_with_features(false, false, false).await
+    create_app_with_features(Interfaces::default()).await
 }
 
 /// Warn when the runtime cannot get round to a one-second timer.
@@ -258,12 +278,8 @@ fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u
 }
 
 /// 创建带有功能开关的应用程序路由器
-pub async fn create_app_with_features(
-    enable_swagger: bool,
-    enable_graphql: bool,
-    enable_websocket: bool,
-) -> Result<Router> {
-    create_app_with_storage(enable_swagger, enable_graphql, enable_websocket)
+pub async fn create_app_with_features(interfaces: Interfaces) -> Result<Router> {
+    create_app_with_storage(interfaces)
         .await
         .map(|(router, _)| router)
 }
@@ -273,10 +289,15 @@ pub async fn create_app_with_features(
 /// `main` needs it to snapshot on shutdown. Returning only a `Router` left no way to reach it,
 /// which is why a clean SIGTERM used to leave the next start replaying the entire log.
 pub async fn create_app_with_storage(
-    enable_swagger: bool,
-    enable_graphql: bool,
-    enable_websocket: bool,
+    interfaces: Interfaces,
 ) -> Result<(Router, Arc<IntelligentIndexedStorage>)> {
+    let Interfaces {
+        swagger: enable_swagger,
+        graphql: enable_graphql,
+        websocket: enable_websocket,
+        dashboard: enable_dashboard,
+    } = interfaces;
+
     #[cfg(not(feature = "api-swagger"))]
     if enable_swagger {
         return Err(crate::Error::InvalidConfig(
@@ -293,6 +314,25 @@ pub async fn create_app_with_storage(
     if enable_websocket {
         return Err(crate::Error::InvalidConfig(
             "WebSocket was requested, but this binary was built without `api-ws`".to_string(),
+        ));
+    }
+    #[cfg(not(feature = "api-dashboard"))]
+    if enable_dashboard {
+        return Err(crate::Error::InvalidConfig(
+            "The dashboard was requested, but this binary was built without `api-dashboard`"
+                .to_string(),
+        ));
+    }
+    // Compiled in is not the same as present. `#[allow_missing]` lets `dashboard/dist/` be
+    // absent so that a clean checkout -- and CI's feature-compilation job -- can build this
+    // without Node, which means a binary can carry the routes and none of the bytes. Serving
+    // that is a white page with no explanation, so refuse instead and name the command.
+    #[cfg(feature = "api-dashboard")]
+    if enable_dashboard && !dashboard::assets_are_embedded() {
+        return Err(crate::Error::InvalidConfig(
+            "The dashboard was requested, but no assets are embedded in this binary. Run \
+             `make dashboard-build` and rebuild with `--features api-dashboard`."
+                .to_string(),
         ));
     }
 
@@ -454,6 +494,25 @@ pub async fn create_app_with_storage(
                 .max_age(std::time::Duration::from_secs(3600)),
         )
         .layer(TraceLayer::new_for_http());
+
+    // Outside the layer stack, and not for the usual "it costs nothing" reason.
+    //
+    // The first attempt merged this before the layers, so the bundle would get `TraceLayer` and
+    // compression for free. It got compression, and lost its `Vary: accept-encoding` -- the
+    // `CorsLayer` replaces that header wholesale with its own three values, which a test
+    // caught. `Vary` is not decoration next to `immutable`: without it a shared cache can hand
+    // a gzip-encoded body to a client that never asked for one.
+    //
+    // So the dashboard sits outside and carries its own compression and tracing. Nothing is
+    // lost, and the response headers are entirely its own.
+    #[cfg(feature = "api-dashboard")]
+    let app = if enable_dashboard {
+        app.merge(dashboard::create_dashboard_router())
+    } else {
+        app
+    };
+    #[cfg(not(feature = "api-dashboard"))]
+    let app = app;
 
     #[cfg(feature = "api-swagger")]
     let app = if enable_swagger {

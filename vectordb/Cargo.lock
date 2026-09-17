@@ -490,7 +490,7 @@ checksum = "777d02b4b35c1eb15bb63391f45b4622206fe1199940fa8b4b6136904fae035c"
 dependencies = [
  "async-graphql",
  "async-trait",
- "axum 0.6.20",
+ "axum",
  "bytes",
  "futures-util",
  "http-body 0.4.6",
@@ -964,7 +964,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b829e4e32b91e643de6eafe82b1d90675f5874230191a4ffbc1b336dec4d6bf"
 dependencies = [
  "async-trait",
- "axum-core 0.3.4",
+ "axum-core",
  "axum-macros",
  "base64 0.21.7",
  "bitflags 1.3.2",
@@ -986,46 +986,12 @@ dependencies = [
  "serde_path_to_error",
  "serde_urlencoded",
  "sha1",
- "sync_wrapper 0.1.2",
+ "sync_wrapper",
  "tokio",
  "tokio-tungstenite",
  "tower 0.4.13",
  "tower-layer",
  "tower-service",
-]
-
-[[package]]
-name = "axum"
-version = "0.7.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
-dependencies = [
- "async-trait",
- "axum-core 0.4.5",
- "bytes",
- "futures-util",
- "http 1.3.1",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.7.0",
- "hyper-util",
- "itoa",
- "matchit",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "rustversion",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
- "sync_wrapper 1.0.2",
- "tokio",
- "tower 0.5.2",
- "tower-layer",
- "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -1043,27 +1009,6 @@ dependencies = [
  "rustversion",
  "tower-layer",
  "tower-service",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "http 1.3.1",
- "http-body 1.0.1",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "rustversion",
- "sync_wrapper 1.0.2",
- "tower-layer",
- "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -2020,7 +1965,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-async",
- "axum 0.6.20",
+ "axum",
  "backoff",
  "base64 0.22.1",
  "bincode",
@@ -2079,6 +2024,7 @@ dependencies = [
  "ring",
  "rmp-serde",
  "roaring",
+ "rust-embed",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2100,7 +2046,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utoipa",
- "utoipa-swagger-ui",
  "uuid",
  "wide",
  "xxhash-rust",
@@ -2764,7 +2709,6 @@ dependencies = [
  "http 1.3.1",
  "http-body 1.0.1",
  "httparse",
- "httpdate",
  "itoa",
  "pin-project-lite",
  "pin-utils",
@@ -4744,7 +4688,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sync_wrapper 0.1.2",
+ "sync_wrapper",
  "system-configuration",
  "tokio",
  "tokio-native-tls",
@@ -4851,6 +4795,7 @@ version = "8.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6cc0c81648b20b70c491ff8cce00c1c3b223bb8ed2b5d41f0e54c6c4c0a3594"
 dependencies = [
+ "mime_guess",
  "sha2",
  "walkdir",
 ]
@@ -5469,12 +5414,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2047c6ded9c721764247e62cd3b03c09ffc529b2ba5b10ec482ae507a4a70160"
 
 [[package]]
-name = "sync_wrapper"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
-
-[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6015,7 +5954,7 @@ checksum = "76c4eb7a4e9ef9d4763600161f12f5070b92a578e1b634db88a6887844c91a13"
 dependencies = [
  "async-stream",
  "async-trait",
- "axum 0.6.20",
+ "axum",
  "base64 0.21.7",
  "bytes",
  "h2 0.3.27",
@@ -6074,14 +6013,8 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
 dependencies = [
- "futures-core",
- "futures-util",
- "pin-project-lite",
- "sync_wrapper 1.0.2",
- "tokio",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -6395,22 +6328,6 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.106",
-]
-
-[[package]]
-name = "utoipa-swagger-ui"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b39868d43c011961e04b41623e050aedf2cc93652562ff7935ce0f819aaf2da"
-dependencies = [
- "axum 0.7.9",
- "mime_guess",
- "regex",
- "rust-embed",
- "serde",
- "serde_json",
- "utoipa",
- "zip",
 ]
 
 [[package]]
@@ -7187,18 +7104,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
-]
-
-[[package]]
-name = "zip"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "760394e246e4c28189f19d488c058bf16f564016aefac5d32bb1f3b51d5e9261"
-dependencies = [
- "byteorder",
- "crc32fast",
- "crossbeam-utils",
- "flate2",
 ]
 
 [[package]]

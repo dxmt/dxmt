@@ -234,7 +234,20 @@ colored = "2.1"
 
 # OpenAPI documentation
 utoipa = { version = "4.2", features = ["axum_extras"], optional = true }
-utoipa-swagger-ui = { version = "6.0", features = ["axum"], optional = true }
+
+# The dashboard's bundle, compiled into the binary.
+#
+# `mime-guess` resolves content types at compile time from the path, which is how `.mjs`,
+# `.wasm` and `.woff2` avoid being served as `application/octet-stream`. `debug-embed` is not
+# optional: without it a debug build reads the assets off disk at request time, and every
+# integration test in this repo runs the debug binary -- the tests would then depend on the
+# state of a directory rather than on the commit.
+#
+# It costs nothing new in the dependency graph. `rust-embed` and `mime_guess` were already
+# resolved transitively; the crate that pulled them in was `utoipa-swagger-ui`, which was
+# declared here, used nowhere in `src/`, and dragged axum 0.7.9 along beside the axum 0.6 this
+# crate is built on. Removing that and declaring this is a net subtraction.
+rust-embed = { version = "8.7", features = ["mime-guess", "debug-embed"], optional = true }
 ordered-float = "5.0.0"
 roaring = "0.11.2"
 # axum 0.6 is built on hyper 0.14; keeping this dependency on the same
@@ -327,7 +340,10 @@ s3-storage = ["aws-config", "aws-sdk-s3", "aws-smithy-async", "reqwest"]
 text-bm25 = ["tantivy", "jieba-rs"]
 hybrid-search = ["text-bm25"]
 api-graphql = ["async-graphql", "async-graphql-axum"]
-api-swagger = ["utoipa", "utoipa-swagger-ui"]
+api-swagger = ["utoipa"]
+# The read-only web console at /dashboard. Off by default like every other interface, and
+# served only when `--dashboard` is also passed.
+api-dashboard = ["dep:rust-embed"]
 api-ws = []
 # gRPC, for the data path. Off by default like every other interface; see proto/dxmt.proto.
 api-grpc = ["dep:tonic", "dep:prost", "dep:tonic-build", "dep:protoc-bin-vendored"]

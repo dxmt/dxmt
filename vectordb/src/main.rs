@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"background_thread:true\0";
 
 use dxmt_vectordb::{
-    api::{create_app_with_storage, simple_core::create_simple_app},
+    api::{create_app_with_storage, simple_core::create_simple_app, Interfaces},
     config::AppConfig,
     mcp::server::McpServer,
     storage::IntelligentIndexedStorage,
@@ -75,6 +75,11 @@ enum Commands {
         /// Serve the WebSocket endpoint (standard mode only)
         #[arg(long)]
         websocket: bool,
+        /// Serve the read-only web console at /dashboard (standard mode only; requires the
+        /// `api-dashboard` feature and a built bundle). Unauthenticated, like every other
+        /// route on this port.
+        #[arg(long)]
+        dashboard: bool,
         /// Serve gRPC on this port, alongside HTTP (standard mode only; requires `api-grpc`).
         /// 0 disables, which is the default.
         #[arg(long, default_value = "0", env = "DB_GRPC_PORT")]
@@ -142,6 +147,7 @@ async fn main() -> Result<()> {
             swagger,
             graphql,
             websocket,
+            dashboard,
             grpc_port,
         } => {
             let bind_addr: SocketAddr = format!("{}:{}", host, port)
@@ -156,6 +162,32 @@ async fn main() -> Result<()> {
                 );
                 info!("Memory limit: {} MB", memory_limit);
                 info!("Using auto-optimized search algorithms for best performance");
+
+                // Accepted-and-ignored is the defect the feature guards in `server.rs` exist
+                // to prevent, and simple mode has been doing exactly that with these four
+                // flags. The dashboard's case is the clearest -- it reads `/api/v1/*` and
+                // simple mode serves `/collections/*`, so it would render and then 404 on
+                // every request -- but none of the four does anything here.
+                for (asked, flag, why) in [
+                    (
+                        dashboard,
+                        "--dashboard",
+                        "it reads the /api/v1 routes, which simple mode does not serve",
+                    ),
+                    (swagger, "--swagger", "simple mode has no OpenAPI document"),
+                    (graphql, "--graphql", "simple mode mounts no GraphQL route"),
+                    (
+                        websocket,
+                        "--websocket",
+                        "simple mode mounts no WebSocket route",
+                    ),
+                ] {
+                    if asked {
+                        return Err(dxmt_vectordb::Error::InvalidConfig(format!(
+                            "{flag} needs standard mode: {why}. Drop --simple, or drop {flag}."
+                        )));
+                    }
+                }
 
                 let app = create_simple_app(memory_limit).await?;
 
@@ -190,10 +222,15 @@ async fn main() -> Result<()> {
                         ));
                     }
                 } else {
-                    // These are off unless asked for: each one widens the exposed
-                    // surface, and `create_app()` has always passed false for all three.
-                    let (app, storage) =
-                        create_app_with_storage(swagger, graphql, websocket).await?;
+                    // These are off unless asked for: each one widens the exposed surface,
+                    // and `create_app()` passes the default, which is all of them off.
+                    let (app, storage) = create_app_with_storage(Interfaces {
+                        swagger,
+                        graphql,
+                        websocket,
+                        dashboard,
+                    })
+                    .await?;
                     (app, Some(storage))
                 };
 
@@ -206,6 +243,9 @@ async fn main() -> Result<()> {
                 }
                 if websocket {
                     info!("  WebSocket      GET  /ws  (upgrade)");
+                }
+                if dashboard {
+                    info!("  Dashboard      GET  /dashboard  (read-only console, unauthenticated)");
                 }
 
                 // gRPC gets its own port rather than sharing the HTTP one. Multiplexing both
