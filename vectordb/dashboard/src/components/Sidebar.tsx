@@ -43,8 +43,8 @@ export function Sidebar() {
   return (
     <nav className="nav" data-collapsed={collapsed || undefined} aria-label="Sections">
       <div className="nav-head">
-        <span className="brand" title="DXMT VectorDB">
-          {collapsed ? 'DX' : 'DXMT VectorDB'}
+        <span className="brand" title="DXMT">
+          DXMT
         </span>
         <button
           type="button"

@@ -174,3 +174,100 @@ describe('calibration', () => {
     expect(preservation(original, positions, n, 2, 'euclidean').rate).toBeCloseTo(1, 5);
   });
 });
+
+/**
+ * Three situations the page must not describe with the same sentence.
+ *
+ * The preservation rate is only meaningful against what a random layout would score — `k` of
+ * `n - 1`, about 1% for ten neighbours over a thousand points. Thirteen per cent and one per
+ * cent are both "low", and they are as different as a photograph is from static: one has
+ * structure the projection is coarsening, the other has none at all.
+ */
+describe('reading the preservation rate', () => {
+  const chanceFor = (k: number, n: number) => k / (n - 1);
+
+  it('calls random vectors noise, because they are', () => {
+    // The shape of a table of arbitrary vectors: preservation sits at chance.
+    const n = 600;
+    const d = 128;
+    let s = 42;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff;
+    };
+    const flat = new Float32Array(n * d);
+    for (let i = 0; i < n * d; i += 1) flat[i] = rnd();
+
+    const { positions } = pca2d(flat.slice(), n, d);
+    const { rate, k } = preservation(flat, positions, n, d, 'cosine');
+    expect(rate).toBeLessThan(chanceFor(k, n) * 3);
+  });
+
+  it('does not call real embeddings noise, even when their fine ordering is lost', () => {
+    // The shape of a sentence-embedding table: eight topics, tight within each. A point's ten
+    // nearest in full dimensions are ten of its topic's hundred-odd members; on the plot they
+    // are a *different* ten of the same hundred. Coarse structure intact, fine ordering gone —
+    // which is a useful plot, and must not be described as noise.
+    const n = 800;
+    const d = 96;
+    const topics = 8;
+    let s = 3;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff - 0.5;
+    };
+    const flat = new Float32Array(n * d);
+    const centres = Array.from({ length: topics }, () =>
+      Array.from({ length: d }, () => rnd() * 4),
+    );
+    for (let i = 0; i < n; i += 1) {
+      const centre = centres[i % topics]!;
+      for (let j = 0; j < d; j += 1) flat[i * d + j] = centre[j]! + rnd() * 1.2;
+    }
+
+    const { positions } = pca2d(flat.slice(), n, d);
+    const { rate, k } = preservation(flat, positions, n, d, 'cosine');
+
+    expect(rate).toBeGreaterThan(chanceFor(k, n) * 3);
+    // And still low in absolute terms, which is the whole reason the two tests differ.
+    expect(rate).toBeLessThan(0.6);
+  });
+
+  it('puts the two on opposite sides of the rule, with room to spare', () => {
+    // The rule the page uses is "three times chance", so that is what this measures — not some
+    // arbitrary ratio between the two cases. If they landed a hair either side of the line it
+    // would be a coin toss on real data; they do not.
+    const n = 600;
+    const d = 96;
+    let s = 5;
+    const rnd = () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff - 0.5;
+    };
+
+    const noise = new Float32Array(n * d);
+    for (let i = 0; i < n * d; i += 1) noise[i] = rnd();
+
+    const structured = new Float32Array(n * d);
+    const centres = Array.from({ length: 6 }, () => Array.from({ length: d }, () => rnd() * 4));
+    for (let i = 0; i < n; i += 1) {
+      const centre = centres[i % 6]!;
+      for (let j = 0; j < d; j += 1) structured[i * d + j] = centre[j]! + rnd() * 1.2;
+    }
+
+    const noisy = preservation(noise, pca2d(noise.slice(), n, d).positions, n, d, 'cosine');
+    const real = preservation(
+      structured,
+      pca2d(structured.slice(), n, d).positions,
+      n,
+      d,
+      'cosine',
+    );
+    const chance = chanceFor(noisy.k, n);
+
+    // Noise sits under the line; structure sits well over it. Measured: about 2x chance
+    // against about 8x, either side of the 3x rule.
+    expect(noisy.rate).toBeLessThan(chance * 3);
+    expect(real.rate).toBeGreaterThan(chance * 5);
+  });
+});

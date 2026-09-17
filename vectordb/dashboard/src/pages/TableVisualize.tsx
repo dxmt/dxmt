@@ -221,7 +221,14 @@ export function TableVisualize() {
   // people to close the banner. Below 20% the overlap is near what chance gives (k of n: about
   // 1% for ten of a thousand), which is a picture of nothing.
   const kept = preserved && preserved.probes > 0 ? preserved.rate : null;
-  const weak = positions !== null && (together < 0.25 || (kept !== null && kept < 0.2));
+  // What a projection that preserved nothing would score: k neighbours drawn from n - 1. At
+  // k=10 over a thousand points that is about one per cent, and the difference between one and
+  // thirteen is the difference between two completely different situations that the first
+  // version of this described with the same sentence.
+  const chance = preserved && ids.length > 1 ? preserved.k / (ids.length - 1) : null;
+  const noise = kept !== null && chance !== null && kept < chance * 3;
+  const coarseOnly = kept !== null && !noise && kept < 0.2;
+  const weak = positions !== null && (together < 0.25 || noise || coarseOnly);
 
   return (
     <>
@@ -306,21 +313,34 @@ export function TableVisualize() {
           {weak ? (
             <div className="banner warn">
               <strong>
-                {kept !== null && kept < 0.2
-                  ? `Almost nothing survives the projection: ${(100 - kept * 100).toFixed(0)}% of each point's nearest neighbours are not its nearest neighbours here`
-                  : `These two components explain ${(together * 100).toFixed(1)}% of the variance`}
+                {noise
+                  ? 'This is a picture of noise'
+                  : coarseOnly
+                    ? 'Broad shape only — the fine ordering did not survive'
+                    : `These two components explain ${(together * 100).toFixed(1)}% of the variance`}
               </strong>
               <span className="detail">
-                Distance on this plot is not distance in the embedding, and groups you see here
-                may not be groups. The two components carry{' '}
                 {(together * 100).toFixed(1)}% of the variance
-                {preserved && preserved.probes > 0
-                  ? `, and ${(preserved.rate * 100).toFixed(0)}% of each point's ${preserved.k} nearest neighbours survive the projection`
+                {kept !== null
+                  ? `, and ${(kept * 100).toFixed(0)}% of each point's ${preserved?.k} nearest neighbours survive the projection — chance alone would give about ${((chance ?? 0) * 100).toFixed(0)}%`
                   : ''}
-                . Those are different questions and a plot can fail either one. Click a point to
-                see it for yourself: its true nearest neighbours get ringed where they actually
-                landed.
+                .
               </span>
+              {noise ? (
+                <>
+                  Neighbourhoods survive at about the rate a random layout would produce, so
+                  there is no structure here to see. That is a fact about the data, not about
+                  the projection: a table of arbitrary vectors has nothing a plot can show.
+                </>
+              ) : (
+                <>
+                  Distance on this plot is not distance in the embedding, so read the broad
+                  arrangement and not the fine one — two points side by side are not
+                  necessarily neighbours. Groups that look real may well be; colour by a payload
+                  field to check one you already know about, and click any point to have its
+                  true nearest neighbours ringed where they actually landed.
+                </>
+              )}
             </div>
           ) : null}
 
