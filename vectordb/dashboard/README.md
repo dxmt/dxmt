@@ -170,8 +170,10 @@ Measured on the two demo tables:
 2.8% is what isotropic noise in 128 dimensions looks like: the scatter means nothing, and saying
 so is the page's job. Five things do that work, and none is decoration:
 
-1. the explained-variance ratio is in the header, not a tooltip;
-2. below 25% a caption states that distance on the plot is not distance in the embedding;
+1. the explained-variance ratio **and the neighbourhood-preservation rate** are in the header,
+   not a tooltip;
+2. a caption fires when either one is poor, and states that distance on the plot is not distance
+   in the embedding;
 3. nothing is drawn beyond the points — no hulls, no density, no groupings, and the word
    "cluster" appears nowhere;
 4. **clicking a point runs a real search** and rings its true neighbours where they actually
@@ -194,3 +196,38 @@ one. 110 ms for 1,000 x 128.
 
 The renderer is 2-D canvas, not WebGL: the sampling budget caps this at four thousand points,
 where batching by colour is under a millisecond a frame.
+
+#### Two measures, because they come apart
+
+Explained variance says how much of the *variance* the two components carry. It says nothing
+about whether the points near each other on screen are near each other in the embedding — which
+is the only question a reader of a scatter plot is asking. So the page measures both: for fifty
+sampled points, the overlap between the k nearest in the plot and the k nearest in full
+dimensions, in the table's own metric.
+
+They disagree, and that is the point:
+
+    persist_demo   variance  2.8%   neighbourhoods kept   2%
+    papers         variance 31.4%   neighbourhoods kept  17%
+
+`papers` clears any variance threshold and still scrambles five neighbours in six. A
+variance-only warning would have let that plot through without a word, which is why the caption
+fires on either measure.
+
+It is deliberately not called *trustworthiness*: that names a specific rank-weighted measure,
+and this is the plain overlap. Using the word would claim a property that was not computed. The
+measurement is taken on the **uncentred** vectors, because PCA centres its input in place —
+which leaves Euclidean distances alone and changes every cosine.
+
+## When it breaks
+
+A render crash shows the crash, scoped to the page so the navigation survives and the reader can
+go somewhere else without reloading. A console is opened *because* something is already wrong; a
+blank document with the message only in the browser's own console is the least useful thing it
+could do at the moment it matters most.
+
+Keyboard: a skip link, `:focus-visible` rings that appear for Tab and not for a mouse click, and
+an `aria-label` on the scatter canvas carrying the same two figures the header shows — a canvas
+is opaque to a screen reader, and stating them in text is also the honest summary for anyone
+reading quickly.
+

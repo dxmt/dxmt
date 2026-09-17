@@ -1,4 +1,5 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { Boundary } from './components/Boundary';
 import { Overview } from './pages/Overview';
 import { Tables } from './pages/Tables';
 import { TableDetail } from './pages/TableDetail';
@@ -11,7 +12,10 @@ import { RecordDetail } from './pages/RecordDetail';
 export function App() {
   return (
     <div className="shell">
-      <nav className="nav">
+      <a className="skip" href="#main">
+        Skip to content
+      </a>
+      <nav className="nav" aria-label="Sections">
         <h1>DXMT VectorDB</h1>
         <NavLink to="/" end className={({ isActive }) => (isActive ? 'on' : '')}>
           Overview
@@ -20,7 +24,9 @@ export function App() {
           Tables
         </NavLink>
       </nav>
-      <main className="main">
+      <main className="main" id="main">
+        {/* Per page, not per app: a crash in one view leaves the navigation usable. */}
+        <Boundary>
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/tables" element={<Tables />} />
@@ -35,6 +41,7 @@ export function App() {
           <Route path="/tables/:name/*" element={<Navigate to="records" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Boundary>
       </main>
     </div>
   );

@@ -10,6 +10,7 @@
  */
 
 import { pca2d } from './pca';
+import { preservation, type Metric, type Preservation } from './neighbourhood';
 
 export interface PcaRequest {
   jobId: number;
@@ -17,22 +18,39 @@ export interface PcaRequest {
   n: number;
   d: number;
   seed: number;
+  /** The table's own metric, so "near" means what it means to the index. */
+  metric: Metric;
 }
 
 export type PcaResponse =
-  | { jobId: number; ok: true; positions: Float32Array; explained: [number, number]; ms: number }
+  | {
+      jobId: number;
+      ok: true;
+      positions: Float32Array;
+      explained: [number, number];
+      preservation: Preservation;
+      ms: number;
+    }
   | { jobId: number; ok: false; error: string };
 
 self.onmessage = (event: MessageEvent<PcaRequest>) => {
-  const { jobId, data, n, d, seed } = event.data;
+  const { jobId, data, n, d, seed, metric } = event.data;
   const started = performance.now();
   try {
+    // Neighbourhoods in the original space, **before** `pca2d` centres the buffer in place.
+    // Centring leaves Euclidean distances alone and changes every cosine, so measuring after
+    // it would compare against a metric the index does not use.
+    const original = data.slice();
+
     const { positions, explained } = pca2d(data, n, d, seed);
+    const preserved = preservation(original, positions, n, d, metric);
+
     const reply: PcaResponse = {
       jobId,
       ok: true,
       positions,
       explained,
+      preservation: preserved,
       ms: performance.now() - started,
     };
     (self as unknown as Worker).postMessage(reply, [positions.buffer]);

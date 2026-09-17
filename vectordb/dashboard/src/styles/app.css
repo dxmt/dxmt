@@ -295,3 +295,27 @@ table.report b { font-size: 15px; }
   margin-right: 4px;
   vertical-align: baseline;
 }
+
+/* --- keyboard and focus ------------------------------------------------------ */
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 0 0 6px 0;
+  z-index: 10;
+}
+.skip:focus { left: 0; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+/* A mouse click should not leave a ring behind; a Tab should. */
+:focus:not(:focus-visible) { outline: none; }
+
+tr.clickable:focus-visible { outline-offset: -2px; }
