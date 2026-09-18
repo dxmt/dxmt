@@ -12,6 +12,15 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// A record's place in this index. Postings hold one of these instead of the record's id.
+///
+/// The id is a `String`, and every posting used to hold its own clone of one. A field with a
+/// value per row therefore stored a full copy of every id, and a table with three such fields
+/// stored three — at 10M rows, tens of millions of heap allocations to say "this row". The
+/// ordinal is four bytes, the id is stored once in `by_ordinal`, and rebuilding the index
+/// after a restart went from **97 s of construction** to what a `u32` costs.
+type Ordinal = u32;
+
 /// Payload索引 - 为每个字段维护倒排索引
 #[derive(Debug, Clone)]
 pub struct PayloadIndex {
@@ -19,6 +28,81 @@ pub struct PayloadIndex {
     field_indices: HashMap<String, FieldIndex>,
     /// 总记录数
     total_records: usize,
+    /// Each indexed record's id, once, addressed by its ordinal. A removed record leaves its
+    /// slot empty and the ordinal on `free`, so ids do not accumulate across churn.
+    by_ordinal: Vec<Option<RecordId>>,
+    /// `id -> ordinal`, for the writes that arrive with an id and for `remove_record`.
+    ordinals: HashMap<RecordId, Ordinal>,
+    /// Ordinals whose record was removed, ready to be handed out again.
+    free: Vec<Ordinal>,
+    /// Set while the index is being rebuilt from the records in one pass. See
+    /// [`PayloadIndex::begin_bulk`].
+    bulk: bool,
+}
+
+impl PayloadIndex {
+    /// Stop merging the numeric half after every few thousand inserts, until [`Self::end_bulk`].
+    ///
+    /// The merge rule is written for a live table, where `pending` has to stay short because
+    /// every query scans it. Rebuilding the whole index from the records is the other case
+    /// entirely: nothing reads it until the last record is in, and merging on the way costs
+    /// `O(rows²/4096)` — 2,441 merges over an array growing towards ten million entries. One
+    /// numeric field with a value per row spent **41 s** of a 66 s rebuild there.
+    ///
+    /// Nothing may query the index between these two calls. The only caller builds it privately
+    /// and publishes it afterwards.
+    pub fn begin_bulk(&mut self) {
+        self.bulk = true;
+    }
+
+    /// Sort what `begin_bulk` left unsorted, once per field.
+    pub fn end_bulk(&mut self) {
+        self.bulk = false;
+        for field in self.field_indices.values_mut() {
+            field.numeric.merge();
+            field.distinct_count = field.value_to_ids.len() + field.numeric.distinct_count();
+        }
+    }
+
+    /// This record's ordinal, assigning one if it has none.
+    fn ordinal_for(&mut self, record_id: &RecordId) -> Ordinal {
+        if let Some(&existing) = self.ordinals.get(record_id) {
+            return existing;
+        }
+        let ordinal = match self.free.pop() {
+            Some(reused) => {
+                self.by_ordinal[reused as usize] = Some(record_id.clone());
+                reused
+            }
+            None => {
+                self.by_ordinal.push(Some(record_id.clone()));
+                (self.by_ordinal.len() - 1) as Ordinal
+            }
+        };
+        self.ordinals.insert(record_id.clone(), ordinal);
+        ordinal
+    }
+
+    /// The id behind an ordinal, or `None` if the record has since been removed.
+    fn id_of(&self, ordinal: Ordinal) -> Option<&RecordId> {
+        self.by_ordinal.get(ordinal as usize)?.as_ref()
+    }
+
+    /// Give an ordinal back once nothing references it.
+    fn release(&mut self, record_id: &RecordId) {
+        if let Some(ordinal) = self.ordinals.remove(record_id) {
+            self.by_ordinal[ordinal as usize] = None;
+            self.free.push(ordinal);
+        }
+    }
+
+    /// Turn a set of ordinals into the ids the caller asked for.
+    fn ids_of(&self, ordinals: impl IntoIterator<Item = Ordinal>) -> HashSet<RecordId> {
+        ordinals
+            .into_iter()
+            .filter_map(|ordinal| self.id_of(ordinal).cloned())
+            .collect()
+    }
 }
 
 /// 单个字段的索引
@@ -28,7 +112,7 @@ struct FieldIndex {
     ///
     /// Strings, bools and nulls only. Numbers go to `numeric` instead -- see [`NumericIndex`]
     /// for what one set per distinct number costs on a field with a value per row.
-    value_to_ids: HashMap<ValueKey, HashSet<RecordId>>,
+    value_to_ids: HashMap<ValueKey, HashSet<Ordinal>>,
     /// Numeric values, sorted. A field can hold both: the value decides, not the field.
     numeric: NumericIndex,
     /// 字段类型（推断）
@@ -60,9 +144,9 @@ struct FieldIndex {
 #[derive(Debug, Clone, Default)]
 struct NumericIndex {
     /// Sorted by value. Ties keep insertion order, which nothing depends on.
-    sorted: Vec<(OrderedFloat, RecordId)>,
+    sorted: Vec<(OrderedFloat, Ordinal)>,
     /// Appended since the last merge, unsorted.
-    pending: Vec<(OrderedFloat, RecordId)>,
+    pending: Vec<(OrderedFloat, Ordinal)>,
     /// Distinct values across both halves, recomputed at each merge.
     distinct: usize,
 }
@@ -72,8 +156,8 @@ impl NumericIndex {
     /// A flat floor as well as a fraction, so a small index does not merge on every insert.
     const MERGE_AT: usize = 4_096;
 
-    fn insert(&mut self, value: OrderedFloat, id: &RecordId) {
-        self.pending.push((value, id.clone()));
+    fn insert(&mut self, value: OrderedFloat, id: Ordinal) {
+        self.pending.push((value, id));
         if self.pending.len() >= Self::MERGE_AT
             || self.pending.len().saturating_mul(64) > self.sorted.len()
         {
@@ -81,11 +165,16 @@ impl NumericIndex {
         }
     }
 
-    fn remove(&mut self, value: OrderedFloat, id: &RecordId) {
+    /// Append without considering a merge. See [`PayloadIndex::begin_bulk`].
+    fn push(&mut self, value: OrderedFloat, id: Ordinal) {
+        self.pending.push((value, id));
+    }
+
+    fn remove(&mut self, value: OrderedFloat, id: Ordinal) {
         if let Some(at) = self
             .pending
             .iter()
-            .position(|(v, i)| *v == value && i == id)
+            .position(|(v, i)| *v == value && *i == id)
         {
             self.pending.swap_remove(at);
             return;
@@ -94,7 +183,7 @@ impl NumericIndex {
         let lo = self.sorted.partition_point(|(v, _)| *v < value);
         let mut at = lo;
         while at < self.sorted.len() && self.sorted[at].0 == value {
-            if self.sorted[at].1 == *id {
+            if self.sorted[at].1 == id {
                 self.sorted.remove(at);
                 return;
             }
@@ -106,6 +195,11 @@ impl NumericIndex {
         if self.pending.is_empty() {
             return;
         }
+        // Append and re-sort, rather than merging two runs into a fresh buffer. The obvious
+        // linear merge measured **three times slower** on a 10M-row field: it allocates and
+        // copies the whole array every time, where this reuses the buffer and hands pdqsort an
+        // array that is already sorted except for a short tail, which it recognises. The cost
+        // that matters is not one merge but how many, and `insert` is what decides that.
         self.sorted.append(&mut self.pending);
         self.sorted.sort_unstable_by_key(|(value, _)| *value);
         self.distinct = self.sorted.windows(2).filter(|w| w[0].0 != w[1].0).count()
@@ -153,7 +247,7 @@ impl NumericIndex {
         lo: Option<OrderedFloat>,
         hi: Option<OrderedFloat>,
         matches: impl Fn(OrderedFloat) -> bool,
-        mut visit: impl FnMut(&RecordId),
+        mut visit: impl FnMut(Ordinal),
     ) {
         let start = match lo {
             Some(v) => self.sorted.partition_point(|(k, _)| *k < v),
@@ -165,12 +259,12 @@ impl NumericIndex {
         };
         for (value, id) in &self.sorted[start..end] {
             if matches(*value) {
-                visit(id);
+                visit(*id);
             }
         }
         for (value, id) in &self.pending {
             if matches(*value) {
-                visit(id);
+                visit(*id);
             }
         }
     }
@@ -245,10 +339,21 @@ impl FieldStats {
     }
 
     /// 更新字符串统计（收集前缀）
+    /// The prefixes `StartsWith` estimates from, sampled rather than collected.
+    ///
+    /// The cap used to be on the number of *distinct* prefixes, which a low-cardinality field
+    /// never reaches — a field with four values kept sampling for ever, andeach record paid a
+    /// `chars().count()` over the whole value plus two `String` allocations and two hash
+    /// inserts to re-learn the same eight prefixes. At 10M rows that was most of the cost of
+    /// building the index. The first `PREFIX_SAMPLE` records describe the field's prefixes as
+    /// well as all of them do, and the estimate is already an estimate.
+    const PREFIX_SAMPLE: usize = 10_000;
+
     fn update_string(&mut self, value: &str) {
+        self.sample_count += 1;
         // 收集2-4字符的前缀用于StartsWith估计
         // IMPORTANT: Use .chars() to handle multi-byte UTF-8 characters correctly
-        if self.string_prefixes.len() < 1000 {
+        if self.sample_count <= Self::PREFIX_SAMPLE && self.string_prefixes.len() < 1000 {
             // Get first 2 characters (by character count, not bytes)
             let char_count = value.chars().count();
             if char_count >= 2 {
@@ -261,7 +366,6 @@ impl FieldStats {
                 self.string_prefixes.insert(prefix);
             }
         }
-        self.sample_count += 1;
     }
 
     /// 估计范围查询的选择性
@@ -366,6 +470,10 @@ impl PayloadIndex {
         Self {
             field_indices: HashMap::new(),
             total_records: 0,
+            by_ordinal: Vec::new(),
+            ordinals: HashMap::new(),
+            free: Vec::new(),
+            bulk: false,
         }
     }
 
@@ -374,8 +482,11 @@ impl PayloadIndex {
         self.total_records += 1;
 
         if let Some(obj) = payload.as_object() {
+            // One id clone for the record, however many fields it has, instead of one per
+            // field per posting.
+            let ordinal = self.ordinal_for(record_id);
             for (key, value) in obj {
-                self.index_field(key, value, record_id);
+                self.index_field(key, value, ordinal);
             }
         }
     }
@@ -398,16 +509,19 @@ impl PayloadIndex {
         if self.total_records > 0 {
             self.total_records -= 1;
         }
+        let Some(ordinal) = self.ordinals.get(record_id).copied() else {
+            return;
+        };
 
         if let Some(obj) = payload.as_object() {
             for (key, value) in obj {
                 if let Some(field_index) = self.field_indices.get_mut(key) {
                     if let Some(value_key) = Self::to_value_key(value) {
                         match Self::as_ordered(&value_key) {
-                            Some(number) => field_index.numeric.remove(number, record_id),
+                            Some(number) => field_index.numeric.remove(number, ordinal),
                             None => {
                                 if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
-                                    ids.remove(record_id);
+                                    ids.remove(&ordinal);
                                     if ids.is_empty() {
                                         field_index.value_to_ids.remove(&value_key);
                                     }
@@ -420,6 +534,16 @@ impl PayloadIndex {
                 }
             }
         }
+
+        // The ordinal goes back on the free list only now, after every posting naming it has
+        // been taken out above. That is an invariant worth stating, because it is what the
+        // move from ids to ordinals put at risk: a posting left behind used to name a deleted
+        // *id*, which `ids_of` drops, and would now name an ordinal a later record may be
+        // given — a wrong record rather than no record. The loop above visits exactly the
+        // fields of the payload the caller passed, so the caller has to pass the payload the
+        // record was indexed with. `delete_records` and `update_record` both do;
+        // `a_reused_ordinal_does_not_carry_the_previous_record_s_values` is the test.
+        self.release(record_id);
     }
 
     /// 估计filter的cardinality
@@ -688,7 +812,12 @@ impl PayloadIndex {
     }
 
     pub fn get_matching_ids(&self, filter: &Filter) -> HashSet<RecordId> {
-        let mut result = HashSet::new();
+        self.ids_of(self.matching_ordinals(filter))
+    }
+
+    /// The same answer as [`Self::get_matching_ids`], before the ids are materialised.
+    fn matching_ordinals(&self, filter: &Filter) -> HashSet<Ordinal> {
+        let mut result: HashSet<Ordinal> = HashSet::new();
 
         // 处理must条件（AND）
         if let Some(conditions) = &filter.must {
@@ -957,8 +1086,13 @@ impl PayloadIndex {
         }
     }
 
-    /// 获取满足单个条件的记录ID
-    fn get_condition_ids(&self, condition: &Condition) -> HashSet<RecordId> {
+    /// The ordinals satisfying one condition.
+    ///
+    /// Ordinals rather than ids all the way through `get_matching_ids`: the intersections and
+    /// differences it performs are then over four-byte integers rather than over hashed heap
+    /// strings, and only the survivors are turned back into ids. A filter matching 2.5M records
+    /// used to hash and clone 2.5M `String`s per condition on the way in as well as out.
+    fn get_condition_ids(&self, condition: &Condition) -> HashSet<Ordinal> {
         let field_index = match self.field_indices.get(&condition.key) {
             Some(idx) => idx,
             None => return HashSet::new(),
@@ -977,7 +1111,7 @@ impl PayloadIndex {
                 hi,
                 |value| Self::value_key_matches(&Self::from_ordered(value), &condition.operation),
                 |id| {
-                    result.insert(id.clone());
+                    result.insert(id);
                 },
             );
         }
@@ -995,7 +1129,7 @@ impl PayloadIndex {
                 if let Some(ids) =
                     Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
                 {
-                    result.extend(ids.iter().cloned());
+                    result.extend(ids.iter().copied());
                 }
             }
             FilterOperation::In(values) => {
@@ -1003,14 +1137,14 @@ impl PayloadIndex {
                     if let Some(ids) =
                         Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
                     {
-                        result.extend(ids.iter().cloned());
+                        result.extend(ids.iter().copied());
                     }
                 }
             }
             _ => {
                 for (value_key, ids) in &field_index.value_to_ids {
                     if Self::value_key_matches(value_key, &condition.operation) {
-                        result.extend(ids.iter().cloned());
+                        result.extend(ids.iter().copied());
                     }
                 }
             }
@@ -1052,31 +1186,42 @@ impl PayloadIndex {
     }
 
     /// 为字段建立索引
-    fn index_field(&mut self, key: &str, value: &serde_json::Value, record_id: &RecordId) {
+    fn index_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
         let value_key = match Self::to_value_key(value) {
             Some(vk) => vk,
             None => return, // 无法索引的类型（如数组、对象）
         };
 
+        // `entry(key.to_string())` allocated a copy of the field's name for every record, to
+        // find an entry that is almost always already there. One lookup first, and the
+        // allocation only on the record that creates the field.
+        if !self.field_indices.contains_key(key) {
+            self.field_indices.insert(
+                key.to_string(),
+                FieldIndex {
+                    value_to_ids: HashMap::new(),
+                    numeric: NumericIndex::default(),
+                    field_type: Self::infer_field_type(value),
+                    distinct_count: 0,
+                    stats: FieldStats::new(),
+                },
+            );
+        }
         let field_index = self
             .field_indices
-            .entry(key.to_string())
-            .or_insert_with(|| FieldIndex {
-                value_to_ids: HashMap::new(),
-                numeric: NumericIndex::default(),
-                field_type: Self::infer_field_type(value),
-                distinct_count: 0,
-                stats: FieldStats::new(),
-            });
+            .get_mut(key)
+            .expect("inserted just above when absent");
 
+        let bulk = self.bulk;
         match Self::as_ordered(&value_key) {
-            Some(number) => field_index.numeric.insert(number, record_id),
+            Some(number) if bulk => field_index.numeric.push(number, ordinal),
+            Some(number) => field_index.numeric.insert(number, ordinal),
             None => {
                 field_index
                     .value_to_ids
                     .entry(value_key)
                     .or_default()
-                    .insert(record_id.clone());
+                    .insert(ordinal);
             }
         }
 
@@ -1156,6 +1301,97 @@ impl Default for PayloadIndex {
 mod estimator_repro {
     use super::*;
     use crate::types::record::{Condition, Filter, FilterOperation};
+
+    fn payload(pairs: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        serde_json::Value::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn equals(field: &str, value: serde_json::Value) -> Filter {
+        Filter {
+            must: Some(vec![Condition {
+                key: field.to_string(),
+                operation: FilterOperation::Equal(value),
+            }]),
+            must_not: None,
+            should: None,
+        }
+    }
+
+    /// Postings hold an ordinal, and an ordinal is handed out again once its record is gone.
+    ///
+    /// That is the one failure mode the move from ids to ordinals introduced. A posting left
+    /// behind by an incomplete removal used to name a deleted id, which resolves to nothing; it
+    /// would now name a live record that happens to have inherited the number. This pins the
+    /// contract `remove_record` relies on: every posting for a record is taken out before its
+    /// ordinal is released.
+    #[test]
+    fn a_reused_ordinal_does_not_carry_the_previous_record_s_values() {
+        let mut index = PayloadIndex::new();
+        let gone = payload(&[
+            ("topic", serde_json::json!("alpha")),
+            ("n", serde_json::json!(1)),
+        ]);
+        index.insert_record(&"first".to_string(), &gone);
+        assert_eq!(
+            index
+                .get_matching_ids(&equals("topic", serde_json::json!("alpha")))
+                .len(),
+            1
+        );
+
+        index.remove_record(&"first".to_string(), &gone);
+        assert!(index
+            .get_matching_ids(&equals("topic", serde_json::json!("alpha")))
+            .is_empty());
+
+        // The new record takes the freed ordinal.
+        let fresh = payload(&[
+            ("topic", serde_json::json!("beta")),
+            ("n", serde_json::json!(2)),
+        ]);
+        index.insert_record(&"second".to_string(), &fresh);
+
+        assert_eq!(
+            index.get_matching_ids(&equals("topic", serde_json::json!("beta"))),
+            HashSet::from(["second".to_string()]),
+        );
+        assert!(
+            index
+                .get_matching_ids(&equals("topic", serde_json::json!("alpha")))
+                .is_empty(),
+            "the reused ordinal answered for the record that used to hold it"
+        );
+        assert!(index
+            .get_matching_ids(&equals("n", serde_json::json!(1)))
+            .is_empty());
+        assert_eq!(
+            index.get_matching_ids(&equals("n", serde_json::json!(2))),
+            HashSet::from(["second".to_string()]),
+        );
+    }
+
+    /// An update keeps the record's ordinal and replaces what it is indexed under.
+    #[test]
+    fn an_update_reindexes_the_same_record_rather_than_adding_a_second() {
+        let mut index = PayloadIndex::new();
+        let before = payload(&[("topic", serde_json::json!("alpha"))]);
+        let after = payload(&[("topic", serde_json::json!("beta"))]);
+        index.insert_record(&"r".to_string(), &before);
+        index.update_record(&"r".to_string(), &before, &after);
+
+        assert!(index
+            .get_matching_ids(&equals("topic", serde_json::json!("alpha")))
+            .is_empty());
+        assert_eq!(
+            index.get_matching_ids(&equals("topic", serde_json::json!("beta"))),
+            HashSet::from(["r".to_string()]),
+        );
+    }
 
     /// A numeric field answers counts, ranges and equality from the sorted half.
     ///

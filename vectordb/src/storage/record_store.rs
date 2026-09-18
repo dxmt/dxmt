@@ -525,15 +525,51 @@ impl RowStore {
 
     /// Every live record, decoded in row order. A full scan; callers that only need ids or
     /// vectors have cheaper paths.
+    ///
+    /// It fills `created` on the way when that is not built yet. Decoding is the expensive part
+    /// and this has already paid for it: without this, rebuilding the payload index and then
+    /// listing records scanned the whole table **twice**, once for each, for 8 s apiece at 10M
+    /// rows. A caller that never lists still never scans — it just no longer scans twice.
     pub fn for_each(&self, mut f: impl FnMut(Arc<Record>)) {
+        let mut timestamps = self
+            .created
+            .read()
+            .is_none()
+            .then(|| Vec::with_capacity(self.ids.rows()));
+
         for row in 0..self.ids.rows() as u32 {
+            // `created` is indexed by row, so a dead row still needs an entry -- but not a
+            // decode. Reading one to find a timestamp nothing can return would make this scan
+            // cost more on a table with many deletes than the two separate scans it replaces.
             if self.tombstone[row as usize] {
+                if let Some(at) = timestamps.as_mut() {
+                    at.push(i64::MIN);
+                }
                 continue;
             }
-            if let Some(bytes) = self.file.read(row) {
-                if let Ok(record) = rmp_serde::from_slice::<Record>(&bytes) {
-                    f(Arc::new(record));
-                }
+            let decoded = self
+                .file
+                .read(row)
+                .and_then(|bytes| rmp_serde::from_slice::<Record>(&bytes).ok());
+            if let Some(at) = timestamps.as_mut() {
+                at.push(
+                    decoded
+                        .as_ref()
+                        .and_then(|r| r.created_at.timestamp_nanos_opt())
+                        .unwrap_or(i64::MIN),
+                );
+            }
+            if let Some(record) = decoded {
+                f(Arc::new(record));
+            }
+        }
+
+        if let Some(at) = timestamps {
+            // Rows appended while this was scanning are not in `at`, so publish only if nothing
+            // else has, and only when the lengths still agree with the table.
+            let mut slot = self.created.write();
+            if slot.is_none() && at.len() == self.ids.rows() {
+                *slot = Some(at);
             }
         }
     }

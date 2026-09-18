@@ -596,6 +596,7 @@ impl IntelligentTableData {
     fn derived(&self) -> parking_lot::MappedRwLockReadGuard<'_, DerivedIndexes> {
         if self.derived.read().is_none() {
             let mut built = DerivedIndexes::default();
+            built.payload.begin_bulk();
             let mut records = 0usize;
             self.records.for_each(|record| {
                 records += 1;
@@ -606,6 +607,7 @@ impl IntelligentTableData {
                     }
                 }
             });
+            built.payload.end_bulk();
             let mut slot = self.derived.write();
             // Another thread may have built it while this one was scanning. Theirs is as good
             // as this one -- both read the same records under the same lock -- so the first to
