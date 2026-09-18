@@ -49,3 +49,7 @@ CLAUDE.md
 
 # Per-checkout agent settings. Local to whoever is working here, never shared.
 .claude/settings.local.json
+
+# Stray run output. `vectordb/.gitignore` has had this since the start; the repository root
+# did not, which is how an empty `logs/vectordb_bench.log` came to be committed here.
+logs/

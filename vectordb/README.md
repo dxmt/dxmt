@@ -337,6 +337,42 @@ Four things the table does not say on its own:
 These are single-machine numbers on two corpora. They say what this build did on that hardware,
 not what it will do on yours, and nothing at all about other systems.
 
+### Listing, filtering and restart
+
+The table above is about vector search. These are the other things a table does, on the same
+machine, measured across four orders of magnitude rather than at one size — because the costs
+here are not all linear and a single figure would hide that.
+
+Synthetic corpus, eight dimensions, three payload fields, one of them a distinct string per row.
+The filter matches a quarter of the table, which is a deliberately awkward shape: a real filter
+usually selects far less, and the cost of answering one follows what matches rather than how
+many rows there are.
+
+| Rows | Restart to serving | First filtered query | Filtered page after it | Unfiltered page |
+| --- | --- | --- | --- | --- |
+| 10,000 | 0.25 s | 22 ms | 0.8 ms | 0.7 ms |
+| 100,000 | 0.25 s | 211 ms | 7.5 ms | 1.8 ms |
+| 1,000,000 | 1.25 s | 2.9 s | 154 ms | 22 ms |
+| 10,000,000 | 18.3 s | 32.0 s | 2.1 s | 242 ms |
+
+A real corpus of 384-dimension sentence embeddings, filtering on a four-valued `topic`, after a
+restart:
+
+| Rows | First filtered query | Then | Page | Vector search | BM25 |
+| --- | --- | --- | --- | --- | --- |
+| 20,000 | 47 ms | 1.0 ms | 0.7 ms | 1.2 ms | 0.4 ms |
+| 120,000 | 353 ms | 8.4 ms | 1.0 ms | 2.3 ms | 0.5 ms |
+
+**The first filtered query is the one that is not like the others.** It rebuilds the payload
+index by reading every record, because that index is derived from them and is not persisted.
+What it costs is dominated by the *shape* of the payload rather than by the number of rows: a
+field with a distinct value per row keeps one container per value, and on the synthetic corpus
+that one field is a third of the 32 s at 10M. The numeric half of the index was moved out of
+that shape; the string half has not been.
+
+At a hundred thousand rows none of this is visible. At ten million the first filtered query is
+half a minute, and a server that restarts often and filters immediately will feel it.
+
 ## Known Limitations
 
 These are real gaps, not roadmap aspirations:
@@ -354,9 +390,12 @@ These are real gaps, not roadmap aspirations:
 - **`POST /api/v1/tables/{name}/records/list` omits vectors unless asked.** Pass
   `"with_vector": true` for them. The default is off because a page of 100 rows at 768
   dimensions is over a megabyte of JSON floats, and responses are not compressed.
-- **Listing scans the whole table.** `limit` and `offset` shape the response, not the work: the
-  handler collects every matching record, sorts by `created_at`, and slices. Paging a large
-  table is proportional to the table each time, not to the page.
+- **The first filtered query on a restored table rebuilds the index it filters with.** The
+  payload index is derived from the records and is not written anywhere, so a restart has to
+  build it again — and it is built on demand rather than at startup, so a server that never
+  filters never pays for it. That first query is proportional to the table: 211 ms at 100,000
+  rows, 32 s at 10M. Every query after it is proportional to what matches. See the numbers
+  above.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures
   are logged without failing an already durable local write. Multi-process coordination and full
