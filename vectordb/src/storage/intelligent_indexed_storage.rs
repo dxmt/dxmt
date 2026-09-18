@@ -7245,15 +7245,29 @@ impl IntelligentIndexedStorage {
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-        // Unfiltered, on disk: the store can answer a page without decoding the rest of the
-        // table. That is the whole cost here -- 194 ms for 25 rows out of 120,000, against 3 ms
-        // for a vector search over the same table, and the same at any offset.
-        if filter.is_none() {
-            let total = table_data.records.len();
-            if let Some(page) = table_data.records.page_newest_first(offset, limit) {
-                let mut page: Vec<Record> = page.iter().map(|r| (**r).clone()).collect();
-                Self::fill_vectors(table_data, &mut page, with_vector);
-                return Ok((page, total));
+        // On disk, the store can answer a page without decoding the rest of the table -- which
+        // is the whole cost here. Unfiltered it was 194 ms for 25 rows out of 120,000, against
+        // 3 ms for a vector search over the same table. Filtered it was worse: the ids came
+        // from the payload index and every one of them was decoded to be sorted by
+        // `created_at`, so a filter matching 2.5M records spent **7.8 s** to return five,
+        // measured at 10M rows.
+        match filter {
+            None => {
+                let total = table_data.records.len();
+                if let Some(page) = table_data.records.page_newest_first(offset, limit) {
+                    let mut page: Vec<Record> = page.iter().map(|r| (**r).clone()).collect();
+                    Self::fill_vectors(table_data, &mut page, with_vector);
+                    return Ok((page, total));
+                }
+            }
+            Some(filter) => {
+                let matching_ids = table_data.derived().payload.get_matching_ids(filter);
+                let total = matching_ids.len();
+                if let Some(page) = table_data.records.page_of_ids(&matching_ids, offset, limit) {
+                    let mut page: Vec<Record> = page.iter().map(|r| (**r).clone()).collect();
+                    Self::fill_vectors(table_data, &mut page, with_vector);
+                    return Ok((page, total));
+                }
             }
         }
 
