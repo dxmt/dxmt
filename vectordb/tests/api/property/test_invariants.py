@@ -21,6 +21,8 @@ from a mapped row file in disk mode and from the record in memory mode, and this
 invariant that would notice a broken row-file reader.
 """
 
+import json
+
 import pytest
 
 from ..helpers import client
@@ -139,3 +141,163 @@ def test_ann_accuracy_against_a_brute_force_computed_here(big_table):
         f"computed here; below {MIN_RECALL} means the index returned wrong neighbours, not "
         "that quantization lost precision -- at this size nothing is quantized"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# A filtered search must agree with the filter.
+#
+# Three code paths answer one question here, chosen by the estimated selectivity: score the
+# filter's matches exactly, walk the graph and keep what passes, or push the filter into the
+# traversal. They are supposed to be three ways of computing the same set. Nothing checked that
+# they were, and when the payload index disagreed with `Record::matches_filter` about
+# `must_not`, `should` and an empty `must`, the same filter returned different answers from
+# different endpoints for as long as it took someone to ask.
+#
+# So the expectation is computed here, from the records, without asking the server anything it
+# could be wrong about: take every record, apply the filter in Python, score the survivors by
+# hand, sort. Two properties come out of it, and the first is the one that holds for every mode:
+#
+#   * **Soundness** — nothing comes back that the filter excludes. A half-built index, a
+#     traversal that forgot to re-check, an id set from the wrong field: all of them show up as
+#     a hit that does not match.
+#   * **Completeness** — `search_mode: "exact"` skips the graph, so its answer must *be* the
+#     expected one. The approximate modes are allowed to miss, and are held to the same recall
+#     threshold as the unfiltered case.
+# ---------------------------------------------------------------------------------------------
+
+#: Filters spanning the shapes and the selectivities that pick different paths, including the
+#: three that were broken. `expected` is what each should select out of the generated corpus,
+#: stated here so a filter that silently stops matching is a failure rather than a vacuous pass.
+FILTERS = [
+    ("one bucket", {"must": [{"key": "bucket", "operation": {"type": "Equal", "value": "b3"}}]}),
+    ("two buckets", {"must": [{"key": "bucket", "operation": {"type": "In", "value": ["b1", "b5"]}}]}),
+    ("half by range", {"must": [{"key": "n", "operation": {"type": "GreaterThanOrEqual", "value": N // 2}}]}),
+    ("everything but one bucket", {"must_not": [{"key": "bucket", "operation": {"type": "Equal", "value": "b0"}}]}),
+    ("a range minus a bucket", {
+        "must": [{"key": "n", "operation": {"type": "LessThan", "value": N // 4}}],
+        "must_not": [{"key": "bucket", "operation": {"type": "Equal", "value": "b2"}}],
+    }),
+    ("either of two buckets, as should", {"should": [
+        {"key": "bucket", "operation": {"type": "Equal", "value": "b4"}},
+        {"key": "bucket", "operation": {"type": "Equal", "value": "b6"}},
+    ]}),
+    ("a range narrowed by should", {
+        "must": [{"key": "n", "operation": {"type": "GreaterThanOrEqual", "value": N // 2}}],
+        "should": [{"key": "bucket", "operation": {"type": "Equal", "value": "b3"}}],
+    }),
+]
+
+
+def _matches_condition(payload, condition):
+    value = payload.get(condition["key"])
+    operation = condition["operation"]
+    wanted = operation["value"]
+    kind = operation["type"]
+    if kind == "Equal":
+        return value == wanted
+    if kind == "NotEqual":
+        return value != wanted
+    if kind == "In":
+        return value in wanted
+    if kind == "NotIn":
+        return value not in wanted
+    if value is None or isinstance(value, str) != isinstance(wanted, str):
+        return False
+    if kind == "GreaterThan":
+        return value > wanted
+    if kind == "GreaterThanOrEqual":
+        return value >= wanted
+    if kind == "LessThan":
+        return value < wanted
+    if kind == "LessThanOrEqual":
+        return value <= wanted
+    raise AssertionError(f"the test cannot evaluate {kind}; add it or drop the filter using it")
+
+
+def matches(payload, filt):
+    """`Record::matches_filter`, in Python. Deliberately a second implementation: agreeing with
+    the server's own copy would prove only that the copy was consistent with itself."""
+    for condition in filt.get("must") or []:
+        if not _matches_condition(payload, condition):
+            return False
+    for condition in filt.get("must_not") or []:
+        if _matches_condition(payload, condition):
+            return False
+    should = filt.get("should") or []
+    if should and not any(_matches_condition(payload, c) for c in should):
+        return False
+    return True
+
+
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+@pytest.fixture(scope="module")
+def corpus(big_table):
+    """Every record with its vector and payload, read once."""
+    out = {}
+    offset = 0
+    while True:
+        data = client.post(
+            f"/tables/{big_table}/records/list",
+            {"limit": 1000, "offset": offset, "with_vector": True},
+        ).json()["data"]
+        records = data.get("records") or []
+        if not records:
+            break
+        for record in records:
+            payload = json.loads(record["payload_json"]) if record.get("payload_json") else {}
+            out[record["id"]] = (record["vector"], payload)
+        offset += len(records)
+    assert len(out) == N, f"read {len(out)} records of {N}"
+    return out
+
+
+@pytest.mark.parametrize("name,filt", FILTERS, ids=[f[0] for f in FILTERS])
+def test_a_filtered_search_agrees_with_the_filter(big_table, corpus, name, filt):
+    query = vector(7)
+    eligible = {rid: vec for rid, (vec, payload) in corpus.items() if matches(payload, filt)}
+    assert eligible, f"{name!r} selects no records, so it proves nothing"
+    assert len(eligible) < N or "must_not" not in filt, f"{name!r} selects everything"
+
+    ranked = sorted(
+        ((cosine(query, vec), rid) for rid, vec in eligible.items()),
+        key=lambda pair: (-pair[0], pair[1]),
+    )
+    expected = [rid for _, rid in ranked[:TOP_K]]
+    boundary = ranked[min(TOP_K, len(ranked)) - 1][0]
+
+    for mode in ("exact", "accurate", "normal"):
+        body = {"vector": query, "top_k": TOP_K, "limit": TOP_K, "filter": filt,
+                "search_mode": mode}
+        hits = client.post(f"/tables/{big_table}/search", body).json()["data"]["hits"]
+        got = [hit["id"] for hit in hits]
+
+        # Soundness, and it holds for every mode: nothing the filter excludes may appear.
+        unmatched = [rid for rid in got if rid not in eligible]
+        assert not unmatched, (
+            f"{name!r} in {mode} mode returned {unmatched}, which the filter excludes"
+        )
+
+        if mode == "exact":
+            # No graph, no approximation: the answer is the answer. Ids are compared as a set
+            # because two records at the same distance may come back in either order; a
+            # difference is only allowed at the boundary score, where the tie actually is.
+            missing = [rid for rid in expected if rid not in got]
+            allowed = [
+                rid for rid in missing
+                if abs(cosine(query, corpus[rid][0]) - boundary) < 1e-6
+            ]
+            assert not set(missing) - set(allowed), (
+                f"{name!r} in exact mode missed {sorted(set(missing) - set(allowed))}; "
+                f"expected {expected}, got {got}"
+            )
+        else:
+            recall = len(set(got) & set(expected)) / len(expected)
+            assert recall >= MIN_RECALL, (
+                f"{name!r} in {mode} mode recalled {recall:.2f} of the filtered ground truth"
+            )
