@@ -302,6 +302,8 @@ struct UpdateArtifacts {
 /// Data needed to finish a delete after the table-map write lock is released.
 struct DeleteArtifacts {
     index: crate::search::IndexWrapper,
+    /// The named vector spaces, which a delete used to leave alone.
+    named_indexes: Option<crate::search::IndexCollection>,
     record_ids: Vec<RecordId>,
     #[cfg(feature = "text-bm25")]
     full_text_engine: Option<Arc<FullTextSearchEngine>>,
@@ -458,6 +460,9 @@ pub struct IntelligentIndexedStorage {
 }
 
 /// 智能表数据
+/// Per named vector space, the records to rebuild it from.
+type NamedVectors = Vec<(String, Vec<(RecordId, Vec<f32>)>)>;
+
 /// Indexes derived from the records: payload values for filtering, sparse postings for MIPS.
 ///
 /// Both are built at insert time and neither is written anywhere, so a restart has to rebuild
@@ -3078,6 +3083,14 @@ impl IntelligentIndexedStorage {
         data.table.index_type = index_type_of(&meta.algorithm);
         data.selected_algorithm = meta.algorithm.clone();
 
+        // When the table was created, and when it was last written to. `create_table_inner`
+        // just stamped both with `Utc::now()`, because it builds through `TableConfig` and
+        // `TableConfig` carries neither -- the same gap that made a table's *id* change on
+        // every restart. So `created_at` moved forward every time the server came back, and
+        // `GET /tables/{t}` reported a table created seconds ago holding a year of records.
+        data.table.created_at = meta.table.created_at;
+        data.table.updated_at = meta.table.updated_at;
+
         // A table whose row file already holds rows is restored from that file: it was
         // written at insert time, so it is at least as new as any snapshot. The snapshot's
         // records matter when there is no such file -- a table that was in memory, or a
@@ -3131,6 +3144,30 @@ impl IntelligentIndexedStorage {
             data.vectors_for_index()
         };
         let wrapper = data.index.clone();
+
+        // The named vector spaces, which nothing restored. The snapshot carries the default
+        // index and not these, and `create_table_inner` builds the collection empty — so a
+        // table with named spaces came back answering `vector_name` searches with nothing at
+        // all, while its ordinary search worked. Collected here, under the lock that already
+        // holds the records, and fed to the indexes below.
+        let named_to_index: NamedVectors = match &data.named_indexes {
+            None => Vec::new(),
+            Some(_) => {
+                let mut by_space: HashMap<String, Vec<(RecordId, Vec<f32>)>> = HashMap::new();
+                data.records.for_each(|record| {
+                    if let Some(spaces) = &record.named_vectors {
+                        for (space, vector) in spaces {
+                            by_space
+                                .entry(space.clone())
+                                .or_default()
+                                .push((record.id.clone(), vector.clone()));
+                        }
+                    }
+                });
+                by_space.into_iter().collect()
+            }
+        };
+        let named_collection = data.named_indexes.clone();
         drop(tables);
 
         // Only reached when the index had no on-disk form, or would not load. Outside the write
@@ -3139,6 +3176,35 @@ impl IntelligentIndexedStorage {
         // vector at once to cluster it; fed one at a time the lot ends up in its overflow buffer.
         if !to_index.is_empty() {
             wrapper.bulk_build(to_index).await?;
+        }
+
+        if let Some(collection) = named_collection {
+            for (space, vectors) in named_to_index {
+                if vectors.is_empty() {
+                    continue;
+                }
+                let Some(index) = collection.get_index(&space).await else {
+                    warn!(
+                        "Table '{}': the records name a vector space '{}' the table does not \
+                         declare; those vectors are not searchable",
+                        name, space
+                    );
+                    continue;
+                };
+                let count = vectors.len();
+                if let Err(e) = index.bulk_build(vectors).await {
+                    warn!(
+                        "Table '{}': named vector space '{}' would not rebuild ({}); searches \
+                         naming it will answer nothing",
+                        name, space, e
+                    );
+                } else {
+                    debug!(
+                        "Table '{}': rebuilt named vector space '{}' from {} records",
+                        name, space, count
+                    );
+                }
+            }
         }
 
         // Outside the lock for the same reason, and after the vector index: a table with a lost
@@ -6967,6 +7033,7 @@ impl IntelligentIndexedStorage {
 
             DeleteArtifacts {
                 index: table_data.index.clone(),
+                named_indexes: table_data.named_indexes.clone(),
                 record_ids: record_ids.clone(),
                 #[cfg(feature = "text-bm25")]
                 full_text_engine: table_data.full_text_engine.clone(),
@@ -6978,6 +7045,26 @@ impl IntelligentIndexedStorage {
                 warn!("Failed to remove record {} from vector index: {}", id, e);
             } else {
                 debug!("Successfully removed record {} from vector index", id);
+            }
+        }
+
+        // And from every named vector space. `update_record` has always done this; a delete did
+        // not, so a record removed from the table kept answering searches that named a space --
+        // at rank one, with the score of an exact match, because it was still the nearest thing
+        // in a graph nobody had told. An absent record is a wrong answer that looks like a right
+        // one, which is worse than the empty result the rest of this family produces.
+        if let Some(collection) = &artifacts.named_indexes {
+            for name in collection.list_index_names().await {
+                if let Some(index) = collection.get_index(&name).await {
+                    for id in &artifacts.record_ids {
+                        if let Err(e) = index.remove(id).await {
+                            warn!(
+                                "Failed to remove record {} from named vector '{}': {}",
+                                id, name, e
+                            );
+                        }
+                    }
+                }
             }
         }
 

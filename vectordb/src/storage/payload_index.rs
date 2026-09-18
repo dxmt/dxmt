@@ -816,45 +816,64 @@ impl PayloadIndex {
     }
 
     /// The same answer as [`Self::get_matching_ids`], before the ids are materialised.
+    ///
+    /// This has to agree with `Record::matches_filter`, which is the other implementation of
+    /// "does this record match" — the one a filtered search falls back to when it walks the
+    /// graph instead of consulting the index. It did not, in three ways, and each one was a
+    /// silently wrong answer that depended on which endpoint you asked:
+    ///
+    ///   * **`must_not` on its own matched nothing.** The result set started empty, and with no
+    ///     `must` to seed it there was nothing for the exclusions to remove. `records/list` and
+    ///     the graph endpoint answered `0`; a search over the same filter answered correctly,
+    ///     because it post-filters.
+    ///   * **`should` was ignored whenever `must` was present**, where `matches_filter` requires
+    ///     at least one `should` to match as well. On a live table, `must` in
+    ///     (gardening, spaceflight) with `should` gardening returned 5,000 records through the
+    ///     index and 2,500 through the search path.
+    ///   * **An empty `must: []` matched nothing** rather than everything, which is what a
+    ///     conjunction of no conditions means and what `matches_filter` says.
+    ///
+    /// So: `must` intersects, `should` intersects a union, neither constrains anything when
+    /// absent or empty, and if nothing positive was named at all then every indexed record is a
+    /// candidate for `must_not` to subtract from.
     fn matching_ordinals(&self, filter: &Filter) -> HashSet<Ordinal> {
-        let mut result: HashSet<Ordinal> = HashSet::new();
+        // `None` means "nothing has narrowed this yet", which is not the same as an empty set.
+        let mut narrowed: Option<HashSet<Ordinal>> = None;
 
-        // 处理must条件（AND）
         if let Some(conditions) = &filter.must {
-            if conditions.is_empty() {
-                return result;
-            }
-
-            // 获取第一个条件的结果
-            if let Some(first) = conditions.first() {
-                result = self.get_condition_ids(first);
-            }
-
-            // 与其他条件取交集
-            for condition in conditions.iter().skip(1) {
+            for condition in conditions {
                 let ids = self.get_condition_ids(condition);
-                result.retain(|id| ids.contains(id));
-                if result.is_empty() {
-                    break; // 早期退出
+                narrowed = Some(match narrowed {
+                    None => ids,
+                    Some(current) => current.intersection(&ids).copied().collect(),
+                });
+                if narrowed.as_ref().is_some_and(HashSet::is_empty) {
+                    return HashSet::new();
                 }
             }
         }
 
-        // 处理must_not条件（NOT）- 从结果中移除
-        if let Some(conditions) = &filter.must_not {
-            for condition in conditions {
-                let ids = self.get_condition_ids(condition);
-                result.retain(|id| !ids.contains(id));
+        if let Some(conditions) = &filter.should {
+            if !conditions.is_empty() {
+                let mut any = HashSet::new();
+                for condition in conditions {
+                    any.extend(self.get_condition_ids(condition));
+                }
+                narrowed = Some(match narrowed {
+                    None => any,
+                    Some(current) => current.intersection(&any).copied().collect(),
+                });
             }
         }
 
-        // 处理should条件（OR）- 添加到结果
-        if let Some(conditions) = &filter.should {
-            if !conditions.is_empty() && filter.must.is_none() {
-                // 如果没有must条件，should条件作为初始集合
-                for condition in conditions {
-                    let ids = self.get_condition_ids(condition);
-                    result.extend(ids);
+        let mut result = narrowed.unwrap_or_else(|| self.ordinals.values().copied().collect());
+
+        if let Some(conditions) = &filter.must_not {
+            for condition in conditions {
+                let excluded = self.get_condition_ids(condition);
+                result.retain(|id| !excluded.contains(id));
+                if result.is_empty() {
+                    break;
                 }
             }
         }
@@ -1373,6 +1392,133 @@ mod estimator_repro {
             index.get_matching_ids(&equals("n", serde_json::json!(2))),
             HashSet::from(["second".to_string()]),
         );
+    }
+
+    fn filter(
+        must: Option<Vec<Condition>>,
+        must_not: Option<Vec<Condition>>,
+        should: Option<Vec<Condition>>,
+    ) -> Filter {
+        Filter {
+            must,
+            must_not,
+            should,
+        }
+    }
+
+    fn cond(field: &str, value: serde_json::Value) -> Condition {
+        Condition {
+            key: field.to_string(),
+            operation: FilterOperation::Equal(value),
+        }
+    }
+
+    fn three_topics() -> PayloadIndex {
+        let mut index = PayloadIndex::new();
+        for (id, topic) in [("a", "alpha"), ("b", "beta"), ("c", "gamma")] {
+            index.insert_record(
+                &id.to_string(),
+                &payload(&[("topic", serde_json::json!(topic))]),
+            );
+        }
+        index
+    }
+
+    fn ids(index: &PayloadIndex, filter: &Filter) -> Vec<String> {
+        let mut out: Vec<String> = index.get_matching_ids(filter).into_iter().collect();
+        out.sort();
+        out
+    }
+
+    /// The index has to answer the same question the same way `Record::matches_filter` does.
+    ///
+    /// It is the other implementation of "does this record match", reached whenever a filtered
+    /// search walks the graph instead of consulting the index — so a disagreement is the same
+    /// query returning different answers from different endpoints, which is what these three
+    /// were. Each assertion is a case measured on a live table before the fix.
+    #[test]
+    fn the_index_agrees_with_matches_filter_on_the_shapes_it_used_to_get_wrong() {
+        let index = three_topics();
+
+        // `must_not` alone: everything except what it excludes. Returned nothing, because the
+        // result set began empty and the exclusions had nothing to remove from.
+        assert_eq!(
+            ids(
+                &index,
+                &filter(
+                    None,
+                    Some(vec![cond("topic", serde_json::json!("beta"))]),
+                    None
+                )
+            ),
+            vec!["a", "c"],
+        );
+
+        // `should` alongside `must`: an additional constraint, not an alternative. `should` was
+        // consulted only when `must` was absent, so this used to return both a and b.
+        assert_eq!(
+            ids(
+                &index,
+                &filter(
+                    Some(vec![Condition {
+                        key: "topic".to_string(),
+                        operation: FilterOperation::In(vec![
+                            serde_json::json!("alpha"),
+                            serde_json::json!("beta"),
+                        ]),
+                    }]),
+                    None,
+                    Some(vec![cond("topic", serde_json::json!("alpha"))]),
+                )
+            ),
+            vec!["a"],
+        );
+
+        // A conjunction of no conditions constrains nothing. Returned nothing.
+        assert_eq!(
+            ids(&index, &filter(Some(vec![]), None, None)),
+            vec!["a", "b", "c"]
+        );
+
+        // And the combinations that were already right stay right.
+        assert_eq!(
+            ids(
+                &index,
+                &filter(
+                    Some(vec![cond("topic", serde_json::json!("alpha"))]),
+                    None,
+                    None
+                )
+            ),
+            vec!["a"],
+        );
+        assert_eq!(
+            ids(
+                &index,
+                &filter(
+                    Some(vec![Condition {
+                        key: "topic".to_string(),
+                        operation: FilterOperation::In(vec![
+                            serde_json::json!("alpha"),
+                            serde_json::json!("beta"),
+                        ]),
+                    }]),
+                    Some(vec![cond("topic", serde_json::json!("alpha"))]),
+                    None,
+                )
+            ),
+            vec!["b"],
+        );
+        // A `must` that matches nothing stays empty whatever else the filter says.
+        assert!(ids(
+            &index,
+            &filter(
+                Some(vec![cond("topic", serde_json::json!("nothing"))]),
+                Some(vec![cond("topic", serde_json::json!("beta"))]),
+                None
+            )
+        )
+        .is_empty());
     }
 
     /// An update keeps the record's ordinal and replaces what it is indexed under.
