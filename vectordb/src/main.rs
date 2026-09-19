@@ -189,7 +189,13 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                let app = create_simple_app(memory_limit).await?;
+                // The `simple/` subdirectory keeps a simple-mode server's tables out of the
+                // way of a standard one sharing the same root.
+                let app = create_simple_app(
+                    memory_limit,
+                    dxmt_vectordb::api::server::wal_dir_from_env().map(|d| d.join("simple")),
+                )
+                .await?;
 
                 info!("✓ Simple mode API endpoints:");
                 info!("  POST   /collections          - Create collection");

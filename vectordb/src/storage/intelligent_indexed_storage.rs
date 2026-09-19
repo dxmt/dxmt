@@ -7516,9 +7516,12 @@ impl IntelligentIndexedStorage {
     fn full_text_index_path(&self, table_id: &uuid::Uuid) -> PathBuf {
         match &self.wal_dir {
             Some(wal_dir) => wal_dir.join("fulltext").join(table_id.to_string()),
-            // No durable storage at all -- embedded use, most tests. Nothing in this
-            // configuration survives the process, so neither does the index.
-            None => std::env::temp_dir().join(format!("dxmt_full_text_{table_id}")),
+            // No durable storage at all -- embedded use, most tests. An empty path tells the
+            // engine to keep the index in memory: nothing in this configuration survives the
+            // process, so neither should it. A path under the temporary directory looked
+            // harmless until table ids became a function of the table's name, at which point
+            // two processes using the same table name shared one index.
+            None => PathBuf::new(),
         }
     }
 

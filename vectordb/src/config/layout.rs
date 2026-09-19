@@ -54,46 +54,66 @@ pub struct Layout {
     root_explicit: bool,
     /// Set when the root itself could not be determined from the environment.
     root_note: Option<String>,
+    /// The per-child overrides, read once.
+    store: Option<PathBuf>,
+    backups: Option<PathBuf>,
+    cache: Option<PathBuf>,
+    ssd_cache: Option<PathBuf>,
+    processes: Option<PathBuf>,
 }
 
 /// What `DB_ROOT_DIR` defaults to under the user's home.
 const ROOT_UNDER_HOME: &str = ".dxmt";
 
-fn from_env(name: &str) -> Option<PathBuf> {
-    match std::env::var(name) {
-        Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
-        _ => None,
-    }
-}
-
 impl Layout {
-    /// Read the root from the environment, or put it under the user's home.
+    /// Read the whole layout from the environment, once.
     pub fn from_env() -> Self {
-        if let Some(root) = from_env("DB_ROOT_DIR") {
-            return Self {
-                root,
-                root_explicit: true,
-                root_note: None,
-            };
-        }
-        match std::env::var_os("HOME").map(PathBuf::from) {
-            Some(home) => Self {
-                root: home.join(ROOT_UNDER_HOME),
-                root_explicit: false,
-                root_note: None,
-            },
-            // `/nonexistent` under systemd's `DynamicUser=`, `/` in some images. Falling back to
-            // the working directory keeps the server usable and says why that is a poor place
-            // for it, rather than failing on a path nobody chose.
-            None => Self {
-                root: PathBuf::from("."),
-                root_explicit: false,
-                root_note: Some(
-                    "no home directory, so data goes under the working directory — starting the \
-                     server elsewhere will open a different database. Set DB_ROOT_DIR."
-                        .to_string(),
+        Self::resolve(|name| std::env::var(name).ok())
+    }
+
+    /// The same, from any source of values.
+    ///
+    /// Everything is resolved here rather than looked up when each path is asked for, which is
+    /// what makes a `Layout` a snapshot of the configuration instead of a live view of the
+    /// process environment. The tests below construct one from a map and mutate nothing: an
+    /// earlier version set real environment variables and restored them afterwards, and other
+    /// tests running on other threads read them in between. `cargo test --lib` passed alone and
+    /// three `config` tests failed when the whole suite ran together.
+    pub fn resolve(get: impl Fn(&str) -> Option<String>) -> Self {
+        let value = |name: &str| -> Option<PathBuf> {
+            get(name)
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from)
+        };
+
+        let (root, root_explicit, root_note) = match value("DB_ROOT_DIR") {
+            Some(root) => (root, true, None),
+            None => match value("HOME") {
+                Some(home) => (home.join(ROOT_UNDER_HOME), false, None),
+                // `/nonexistent` under systemd's `DynamicUser=`, `/` in some images. Falling
+                // back to the working directory keeps the server usable and says why that is a
+                // poor place for it, rather than failing on a path nobody chose.
+                None => (
+                    PathBuf::from("."),
+                    false,
+                    Some(
+                        "no home directory, so data goes under the working directory — starting \
+                         the server elsewhere will open a different database. Set DB_ROOT_DIR."
+                            .to_string(),
+                    ),
                 ),
             },
+        };
+
+        Self {
+            root,
+            root_explicit,
+            root_note,
+            store: value("DB_WAL_DIR"),
+            backups: value("DB_BACKUP_ROOT"),
+            cache: value("DB_CACHE_DIR"),
+            ssd_cache: value("DB_SSD_CACHE_DIR"),
+            processes: value("DB_PROCESSES_DATA_DIR"),
         }
     }
 
@@ -103,6 +123,11 @@ impl Layout {
             root: root.into(),
             root_explicit: true,
             root_note: None,
+            store: None,
+            backups: None,
+            cache: None,
+            ssd_cache: None,
+            processes: None,
         }
     }
 
@@ -115,7 +140,7 @@ impl Layout {
     /// `DB_WAL_DIR` still names it, because that is what it has always been called from the
     /// outside and what every existing deployment sets.
     pub fn store(&self) -> Resolved {
-        match from_env("DB_WAL_DIR") {
+        match self.store.clone() {
             Some(path) => Resolved { path, note: None },
             None => Resolved {
                 path: self.root.join("store"),
@@ -144,7 +169,7 @@ impl Layout {
     /// rather than the environment — every test does. It has to reach the same answer as
     /// `prepare` does, or the directory checked at startup is not the directory written to.
     pub fn backups_for(&self, store: &Path) -> PathBuf {
-        if let Some(explicit) = from_env("DB_BACKUP_ROOT") {
+        if let Some(explicit) = self.backups.clone() {
             return explicit;
         }
         if self.root_explicit || store.starts_with(&self.root) {
@@ -158,15 +183,19 @@ impl Layout {
 
     /// Derived state that can be deleted. Nothing here is the only copy of anything.
     pub fn cache(&self) -> PathBuf {
-        from_env("DB_CACHE_DIR").unwrap_or_else(|| self.root.join("cache"))
+        self.cache
+            .clone()
+            .unwrap_or_else(|| self.root.join("cache"))
     }
 
     /// The tiered storage's warm tier.
     pub fn ssd_cache(&self) -> PathBuf {
-        from_env("DB_SSD_CACHE_DIR").unwrap_or_else(|| self.cache().join("ssd"))
+        self.ssd_cache
+            .clone()
+            .unwrap_or_else(|| self.cache().join("ssd"))
     }
 
-    /// Create everything this layout names, and prove each one can be written to.
+    /// Create the directories this server will use, and prove each one can be written to.
     ///
     /// Done once at startup, because the alternative is finding out on the first write — and
     /// the first write to `backups/` may be weeks after the server came up. `create_dir_all`
@@ -177,11 +206,18 @@ impl Layout {
     /// says only `Permission denied` is worth very little when the path was chosen by a
     /// default nobody typed.
     pub fn prepare(&self) -> Result<(), String> {
+        // Exactly the directories this server will use, which is not the same as every
+        // directory this layout can name. A server started with `DB_WAL_DIR` pointing outside
+        // the root does not touch the root — and creating `~/.dxmt/cache` for it anyway leaves
+        // a directory nobody asked for and proves the writability of something that will never
+        // be written. `cache/` is absent for its own reason: it is made by whatever fills it,
+        // if anything ever does.
+        //
+        // The root is not listed either. When the children are under it, creating them creates
+        // it; when they are not, it is not this server's business.
         for (path, variable) in [
-            (self.root.to_path_buf(), "DB_ROOT_DIR"),
             (self.store().path, "DB_WAL_DIR"),
             (self.backups(), "DB_BACKUP_ROOT"),
-            (self.cache(), "DB_CACHE_DIR"),
         ] {
             if let Err(reason) = Self::usable(&path) {
                 return Err(format!(
@@ -216,27 +252,41 @@ impl Layout {
 
     /// The process supervisor's state, when that is enabled at all.
     pub fn processes(&self) -> PathBuf {
-        from_env("DB_PROCESSES_DATA_DIR").unwrap_or_else(|| self.root.join("processes"))
+        self.processes
+            .clone()
+            .unwrap_or_else(|| self.root.join("processes"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+
+    /// A layout built from named values instead of the real environment.
+    ///
+    /// These tests used to `set_var`/`remove_var` and restore afterwards under `#[serial]`.
+    /// That is not enough: cargo runs one process on many threads, and the tests in other
+    /// modules that read these same variables are not in the serial group, so they saw `HOME`
+    /// cleared mid-flight. `cargo test --lib` passed on its own and three `config` tests failed
+    /// when the whole suite ran. Resolving from a map removes the shared mutable state rather
+    /// than scheduling around it.
+    fn layout(vars: &[(&str, &str)]) -> Layout {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Layout::resolve(move |name| {
+            vars.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+    }
 
     /// Every child hangs off the root, so one variable moves the lot.
-    ///
-    /// `#[serial]` on all of these: they set process-wide environment variables, and cargo runs
-    /// tests in one process on many threads. `tests/knn_graph_test.rs` learned that the noisy
-    /// way — a neighbouring test reading a variable this one had just changed.
     #[test]
-    #[serial]
     fn one_root_places_everything() {
-        let guard = Env::clear();
-        std::env::set_var("DB_ROOT_DIR", "/srv/dxmt");
+        let layout = layout(&[("DB_ROOT_DIR", "/srv/dxmt")]);
 
-        let layout = Layout::from_env();
         assert_eq!(layout.root(), Path::new("/srv/dxmt"));
         assert_eq!(layout.store().path, Path::new("/srv/dxmt/store"));
         assert_eq!(layout.backups(), Path::new("/srv/dxmt/backups"));
@@ -244,39 +294,32 @@ mod tests {
         assert_eq!(layout.ssd_cache(), Path::new("/srv/dxmt/cache/ssd"));
         assert_eq!(layout.processes(), Path::new("/srv/dxmt/processes"));
         assert!(layout.store().note.is_none());
-        drop(guard);
     }
 
     /// Under the user's home, not the working directory. That was the whole point: `./data/wal`
     /// meant `cd elsewhere && serve` opened a different, empty database.
     #[test]
-    #[serial]
     fn the_default_root_is_under_home() {
-        let guard = Env::clear();
-        std::env::set_var("HOME", "/home/someone");
+        let layout = layout(&[("HOME", "/home/someone")]);
 
-        let layout = Layout::from_env();
         assert_eq!(layout.root(), Path::new("/home/someone/.dxmt"));
         assert_eq!(layout.store().path, Path::new("/home/someone/.dxmt/store"));
-        drop(guard);
     }
 
     /// Each child can still be moved on its own, and does not drag the others with it.
     #[test]
-    #[serial]
     fn a_child_can_be_moved_without_moving_the_rest() {
-        let guard = Env::clear();
-        std::env::set_var("DB_ROOT_DIR", "/srv/dxmt");
-        std::env::set_var("DB_WAL_DIR", "/fast/nvme/store");
-        std::env::set_var("DB_SSD_CACHE_DIR", "/scratch");
+        let layout = layout(&[
+            ("DB_ROOT_DIR", "/srv/dxmt"),
+            ("DB_WAL_DIR", "/fast/nvme/store"),
+            ("DB_SSD_CACHE_DIR", "/scratch"),
+        ]);
 
-        let layout = Layout::from_env();
         assert_eq!(layout.store().path, Path::new("/fast/nvme/store"));
         assert_eq!(layout.ssd_cache(), Path::new("/scratch"));
         // Untouched children stay where the root puts them.
         assert_eq!(layout.backups(), Path::new("/srv/dxmt/backups"));
         assert_eq!(layout.cache(), Path::new("/srv/dxmt/cache"));
-        drop(guard);
     }
 
     /// A store moved out on its own takes the backups with it — but only when nobody named a
@@ -284,59 +327,52 @@ mod tests {
     /// `IntelligentIndexedStorage::backup_root`, which is how the directory checked at startup
     /// could differ from the directory written to.
     #[test]
-    #[serial]
     fn backups_follow_a_store_that_was_moved_out_alone() {
-        let guard = Env::clear();
-        std::env::set_var("HOME", "/home/someone");
-        std::env::set_var("DB_WAL_DIR", "/fast/nvme/store");
-
-        let layout = Layout::from_env();
+        let moved = layout(&[
+            ("HOME", "/home/someone"),
+            ("DB_WAL_DIR", "/fast/nvme/store"),
+        ]);
         assert_eq!(
-            layout.backups(),
+            moved.backups(),
             Path::new("/fast/nvme"),
             "with only the default root, backups belong beside the database"
         );
         // And the storage layer reaches the same answer for the same store.
         assert_eq!(
-            layout.backups_for(Path::new("/fast/nvme/store")),
-            layout.backups()
+            moved.backups_for(Path::new("/fast/nvme/store")),
+            moved.backups()
         );
 
         // Naming a root means it: the backups stay there.
-        std::env::set_var("DB_ROOT_DIR", "/srv/dxmt");
-        assert_eq!(Layout::from_env().backups(), Path::new("/srv/dxmt/backups"));
-        drop(guard);
+        let rooted = layout(&[
+            ("HOME", "/home/someone"),
+            ("DB_ROOT_DIR", "/srv/dxmt"),
+            ("DB_WAL_DIR", "/fast/nvme/store"),
+        ]);
+        assert_eq!(rooted.backups(), Path::new("/srv/dxmt/backups"));
     }
 
     /// No home and no `DB_ROOT_DIR` — `/nonexistent` under systemd's `DynamicUser=`, `/` in
     /// some images. Usable, and loud about why this is a poor place for a database.
     #[test]
-    #[serial]
     fn without_a_home_it_says_so() {
-        let guard = Env::clear();
-        std::env::remove_var("HOME");
+        let layout = layout(&[]);
 
-        let layout = Layout::from_env();
         assert_eq!(layout.root(), Path::new("."));
         let note = layout
             .store()
             .note
             .expect("a fallback root has to explain itself");
         assert!(note.contains("DB_ROOT_DIR"), "{note}");
-        drop(guard);
     }
 
     /// An empty value is not a value: `DB_ROOT_DIR=` falls through to the default rather than
     /// rooting the database at the empty path.
     #[test]
-    #[serial]
     fn an_empty_variable_is_ignored() {
-        let guard = Env::clear();
-        std::env::set_var("HOME", "/home/someone");
-        std::env::set_var("DB_ROOT_DIR", "   ");
+        let layout = layout(&[("HOME", "/home/someone"), ("DB_ROOT_DIR", "   ")]);
 
-        assert_eq!(Layout::from_env().root(), Path::new("/home/someone/.dxmt"));
-        drop(guard);
+        assert_eq!(layout.root(), Path::new("/home/someone/.dxmt"));
     }
 
     /// Creating the directories is not the check; being able to write to them is.
@@ -346,62 +382,110 @@ mod tests {
     /// when this fails, so the discovery happens before anything depends on it — an unwritable
     /// `backups/` would otherwise be found by whoever takes the first backup.
     #[test]
-    #[serial]
     fn prepare_makes_the_layout_and_proves_it_is_writable() {
-        let guard = Env::clear();
         let root = tempfile::TempDir::new().unwrap();
-        std::env::set_var("DB_ROOT_DIR", root.path());
 
-        let layout = Layout::from_env();
+        let layout = layout(&[("DB_ROOT_DIR", &root.path().display().to_string())]);
         layout.prepare().expect("a fresh writable root");
-        for child in ["store", "backups", "cache"] {
+
+        for child in ["store", "backups"] {
             assert!(root.path().join(child).is_dir(), "{child}/ was not created");
         }
+        // Not `cache/`: it is derived, it is made by whatever fills it, and creating it here
+        // would mean a server that never caches anything still leaves the directory behind.
+        assert!(!root.path().join("cache").exists());
         // And nothing is left behind by the probe.
         assert!(!root.path().join(".dxmt-write-test").exists());
-        drop(guard);
     }
 
+    /// A store outside the root means the root is not this server's business.
+    ///
+    /// The demo runs this way — an explicit `DB_WAL_DIR` and no `DB_ROOT_DIR` — and starting it
+    /// created an empty `~/.dxmt/` with a `cache/` in it, for a server that would never look
+    /// there. Checking a directory that will not be used is not a check, it is litter.
     #[test]
-    #[serial]
-    fn prepare_refuses_a_directory_it_cannot_write_to() {
+    fn prepare_leaves_the_default_root_alone_when_the_store_is_elsewhere() {
+        let home = tempfile::TempDir::new().unwrap();
+        let elsewhere = tempfile::TempDir::new().unwrap();
+
+        layout(&[
+            ("HOME", &home.path().display().to_string()),
+            (
+                "DB_WAL_DIR",
+                &elsewhere.path().join("store").display().to_string(),
+            ),
+        ])
+        .prepare()
+        .expect("a writable store elsewhere");
+
+        assert!(elsewhere.path().join("store").is_dir());
+        assert!(
+            !home.path().join(".dxmt").exists(),
+            "the default root was created for a server that will never use it"
+        );
+    }
+
+    /// Two distinct failures, and the message has to tell them apart.
+    ///
+    /// `create_dir_all` failing and a directory that exists but will not take a file are
+    /// different problems with different fixes, and the second is the one a permissions check
+    /// that only creates would miss entirely.
+    #[test]
+    fn prepare_refuses_what_it_cannot_create_and_what_it_cannot_write() {
         use std::os::unix::fs::PermissionsExt;
 
-        let guard = Env::clear();
-        let root = tempfile::TempDir::new().unwrap();
-        let readonly = root.path().join("readonly");
+        let outer = tempfile::TempDir::new().unwrap();
+        let readonly = outer.path().join("readonly");
         std::fs::create_dir(&readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
-        std::env::set_var("DB_ROOT_DIR", &readonly);
 
-        let error = Layout::from_env()
+        // Cannot be created: the store would go under a directory that takes no new entries.
+        let error = layout(&[("DB_ROOT_DIR", &readonly.display().to_string())])
             .prepare()
-            .expect_err("a read-only root is not usable");
-        assert!(error.contains(&readonly.display().to_string()), "{error}");
+            .expect_err("an unwritable root");
+        assert!(
+            error.contains(&readonly.join("store").display().to_string()),
+            "{error}"
+        );
+        assert!(error.contains("DB_WAL_DIR"), "{error}");
+        assert!(
+            error.contains("DB_ROOT_DIR"),
+            "it should offer to move everything: {error}"
+        );
+
+        // Exists and will not take a file. `create_dir_all` returns Ok for this, which is the
+        // whole reason `usable` writes a probe.
+        let error = layout(&[
+            ("HOME", &outer.path().display().to_string()),
+            ("DB_WAL_DIR", &readonly.display().to_string()),
+        ])
+        .prepare()
+        .expect_err("a read-only store");
         assert!(error.contains("not writable"), "{error}");
-        assert!(error.contains("DB_ROOT_DIR"), "{error}");
+        assert!(error.contains(&readonly.display().to_string()), "{error}");
 
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
-        drop(guard);
     }
 
     /// The message has to say which variable moves the thing that failed, not just the root.
     #[test]
-    #[serial]
     fn a_child_that_fails_names_its_own_variable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let guard = Env::clear();
         let root = tempfile::TempDir::new().unwrap();
         let readonly = root.path().join("readonly");
         std::fs::create_dir(&readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
-        std::env::set_var("DB_ROOT_DIR", root.path());
-        std::env::set_var("DB_BACKUP_ROOT", readonly.join("backups"));
 
-        let error = Layout::from_env()
-            .prepare()
-            .expect_err("an unwritable backup root");
+        let error = layout(&[
+            ("DB_ROOT_DIR", &root.path().display().to_string()),
+            (
+                "DB_BACKUP_ROOT",
+                &readonly.join("backups").display().to_string(),
+            ),
+        ])
+        .prepare()
+        .expect_err("an unwritable backup root");
         assert!(error.contains("DB_BACKUP_ROOT"), "{error}");
         assert!(
             error.contains("DB_ROOT_DIR"),
@@ -409,44 +493,19 @@ mod tests {
         );
 
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
-        drop(guard);
     }
 
-    /// Saves and restores every variable this module reads, so one test cannot leave the
-    /// environment changed under the next.
-    struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl Env {
-        const NAMES: [&'static str; 7] = [
-            "DB_ROOT_DIR",
-            "DB_WAL_DIR",
-            "DB_BACKUP_ROOT",
-            "DB_CACHE_DIR",
-            "DB_SSD_CACHE_DIR",
-            "DB_PROCESSES_DATA_DIR",
-            "HOME",
-        ];
-
-        fn clear() -> Self {
-            let saved = Self::NAMES
-                .iter()
-                .map(|name| (*name, std::env::var_os(name)))
-                .collect();
-            for name in Self::NAMES {
-                std::env::remove_var(name);
-            }
-            Env(saved)
-        }
-    }
-
-    impl Drop for Env {
-        fn drop(&mut self) {
-            for (name, value) in &self.0 {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
+    /// The real environment still reaches the same place — `from_env` is the only caller that
+    /// touches it, and this is the one test that proves the wiring is not inverted.
+    #[test]
+    fn from_env_reads_the_real_environment() {
+        let expected = match std::env::var("DB_ROOT_DIR") {
+            Ok(root) if !root.trim().is_empty() => PathBuf::from(root),
+            _ => match std::env::var("HOME") {
+                Ok(home) if !home.trim().is_empty() => PathBuf::from(home).join(ROOT_UNDER_HOME),
+                _ => PathBuf::from("."),
+            },
+        };
+        assert_eq!(Layout::from_env().root(), expected);
     }
 }

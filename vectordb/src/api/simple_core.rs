@@ -208,7 +208,17 @@ struct SimpleModeState {
 
 // ─── router factory ──────────────────────────────────────────────────────────
 
-pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
+/// Simple mode over `wal_dir`, or with no durable storage when that is `None`.
+///
+/// The directory is passed in rather than read from the environment here. It was read here,
+/// and `test_simple_mode_end_to_end` therefore created one in whatever `DB_WAL_DIR` resolved
+/// to while the unit tests ran — which since the default moved is the developer's home
+/// directory. A library constructor that reaches for the environment makes every one of its
+/// callers, tests included, depend on the environment.
+pub async fn create_simple_app(
+    memory_limit: usize,
+    wal_dir: Option<std::path::PathBuf>,
+) -> Result<Router> {
     info!(
         "Initializing simple mode with {} MB memory (BM25 sparse encoding enabled)",
         memory_limit
@@ -227,13 +237,8 @@ pub async fn create_simple_app(memory_limit: usize) -> Result<Router> {
     // Simple mode gets the same durability as standard mode, but in its own directory: both
     // modes name tables from user input, so sharing one log would let a collection here collide
     // with a table there and replay into the wrong shape.
-    let storage = Arc::new(
-        IntelligentIndexedStorage::new_with_wal(
-            &storage_config,
-            crate::api::server::wal_dir_from_env().map(|d| d.join("simple")),
-        )
-        .await?,
-    );
+    let storage =
+        Arc::new(IntelligentIndexedStorage::new_with_wal(&storage_config, wal_dir).await?);
     let server_health = Arc::new(crate::api::server_health::ServerHealth::default());
 
     let app_state = Arc::new(AppState {
@@ -796,7 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_mode_end_to_end() {
-        let router = create_simple_app(64).await.expect("create app");
+        let router = create_simple_app(64, None).await.expect("create app");
 
         // We can't easily drive HTTP through the router in a unit test without a test client,
         // so instead test the storage + encoding path directly.

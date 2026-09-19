@@ -322,7 +322,18 @@ impl FullTextSearchEngine {
         // Create or open index
         // Check if meta.json exists to determine if this is an existing index
         let meta_path = Path::new(&config.index_path).join("meta.json");
-        let index = if meta_path.exists() {
+        // An empty path means no durable storage at all — embedded use, and most tests. The
+        // index then lives in memory and dies with the process, which is what "no durable
+        // storage" has to mean for it too.
+        //
+        // It used to fall back to a path under the temporary directory named after the table's
+        // id, and once that id became a function of the table's *name* the path stopped being
+        // unique to a process: two tests using the same table name shared an index, and a
+        // second `cargo test` found the documents left by the first. Three integration tests
+        // were failing with one more hit than they expected.
+        let index = if config.index_path.trim().is_empty() {
+            Index::create_in_ram(schema.clone())
+        } else if meta_path.exists() {
             Index::open_in_dir(&config.index_path)
                 .map_err(|e| crate::Error::Internal(format!("Failed to open index: {}", e)))?
         } else {

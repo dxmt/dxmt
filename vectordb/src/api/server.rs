@@ -45,7 +45,7 @@ use crate::{
 ///
 /// 只在服务端入口读环境变量，不放进 `IntelligentIndexedStorage::new`——那个构造函数有
 /// 四十多个调用点（单测、bench、example），让它们各自往磁盘写日志会互相回放污染。
-pub(crate) fn wal_dir_from_env() -> Option<std::path::PathBuf> {
+pub fn wal_dir_from_env() -> Option<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("DB_WAL_DIR") {
         if dir.trim().is_empty() {
             tracing::warn!("DB_WAL_DIR is empty: WAL disabled, data will not survive a restart");
