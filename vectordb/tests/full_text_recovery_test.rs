@@ -13,7 +13,7 @@
 //! different, empty directory each time. On the demo machine that had left **135 orphaned index
 //! directories behind five tables**.
 //!
-//! These also cover where that index lives: `{DB_WAL_DIR}/fulltext/{table_id}`, a sibling of
+//! These also cover where that index lives: `{DXMT_WAL_DIR}/fulltext/{table_id}`, a sibling of
 //! `records/` and `vectors/`. It used to default to `/tmp` — outside the directory the backup
 //! procedure copies, and inside the one the operating system empties.
 //!
@@ -49,17 +49,17 @@ fn free_port() -> u16 {
 
 /// Start a server over `dir`, waiting until it answers.
 ///
-/// The index lands under this temporary directory because that is where `DB_WAL_DIR` puts it,
-/// and there is no second way to say otherwise. `DB_STORAGE_PATH` was that second way, and it
+/// The index lands under this temporary directory because that is where `DXMT_WAL_DIR` puts it,
+/// and there is no second way to say otherwise. `DXMT_STORAGE_PATH` was that second way, and it
 /// defaulted to `/tmp`.
 fn start(dir: &std::path::Path, port: u16) -> Server {
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", dir.join("wal"))
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_WAL_DIR", dir.join("wal"))
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -286,7 +286,7 @@ fn a_lost_index_directory_is_rebuilt_from_the_records() {
 fn the_index_lives_beside_the_wal_not_in_tmp() {
     // It is data — the only copy of the term postings — and it used to default to `/tmp`, which
     // `systemd-tmpfiles` clears on a schedule and many images wipe on boot. It also sat outside
-    // `DB_WAL_DIR`, so the backup procedure in `docs/operations/backup-restore.md`, which copies
+    // `DXMT_WAL_DIR`, so the backup procedure in `docs/operations/backup-restore.md`, which copies
     // that directory, never included it.
     //
     // The table name is unique to this run on purpose. A table id is a function of its name, so
@@ -340,7 +340,7 @@ fn the_index_lives_beside_the_wal_not_in_tmp() {
 
 #[test]
 fn the_index_follows_the_wal_and_nothing_else_moves_it() {
-    // `DB_STORAGE_PATH` used to point the text index somewhere of its own, defaulting to
+    // `DXMT_STORAGE_PATH` used to point the text index somewhere of its own, defaulting to
     // `/tmp`. It is gone: one directory holds a table's durable state, and a second way to say
     // where part of it lives is a second place for that part to be lost -- which is exactly
     // what happened while the default was `/tmp`.
@@ -351,11 +351,11 @@ fn the_index_follows_the_wal_and_nothing_else_moves_it() {
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", dir.path().join("wal"))
+        .env("DXMT_WAL_DIR", dir.path().join("wal"))
         // Set, and ignored. Nothing reads it any more.
-        .env("DB_STORAGE_PATH", "/tmp/somewhere-else")
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_STORAGE_PATH", "/tmp/somewhere-else")
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -377,6 +377,6 @@ fn the_index_follows_the_wal_and_nothing_else_moves_it() {
     );
     assert!(
         !std::path::Path::new("/tmp/somewhere-else").exists(),
-        "DB_STORAGE_PATH moved the index; it should read as nothing at all"
+        "DXMT_STORAGE_PATH moved the index; it should read as nothing at all"
     );
 }

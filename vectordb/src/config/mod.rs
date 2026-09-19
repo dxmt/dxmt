@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod dynamic_config;
+pub mod env;
 pub mod layout;
 // pub mod eight_core_optimization; // Removed - redundant
 pub mod large_memory_optimization;
@@ -210,24 +211,24 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         // 从环境变量获取主机地址，如果不存在则使用默认值0.0.0.0
-        let host = std::env::var("DB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host = crate::config::env::var("DXMT_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
         // 从环境变量获取端口，如果不存在则使用默认值9999
-        let port = std::env::var("DB_PORT")
+        let port = crate::config::env::var("DXMT_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(9999);
 
         // 工作线程数
-        let workers = std::env::var("DB_WORKER_THREADS")
+        let workers = crate::config::env::var("DXMT_WORKER_THREADS")
             .ok()
             .and_then(|w| w.parse::<usize>().ok());
 
         // 存储配置
         let storage_type =
-            std::env::var("DB_STORAGE_TYPE").unwrap_or_else(|_| "tiered".to_string());
+            crate::config::env::var("DXMT_STORAGE_TYPE").unwrap_or_else(|_| "tiered".to_string());
 
-        let memory_cache_size = std::env::var("DB_MEMORY_CACHE_SIZE")
+        let memory_cache_size = crate::config::env::var("DXMT_MEMORY_CACHE_SIZE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(512);
@@ -239,120 +240,127 @@ impl Default for AppConfig {
             .to_string_lossy()
             .into_owned();
 
-        let ssd_cache_size = std::env::var("DB_SSD_CACHE_SIZE")
+        let ssd_cache_size = crate::config::env::var("DXMT_SSD_CACHE_SIZE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10);
 
-        let compression = std::env::var("DB_COMPRESSION").unwrap_or_else(|_| "zstd".to_string());
+        let compression =
+            crate::config::env::var("DXMT_COMPRESSION").unwrap_or_else(|_| "zstd".to_string());
 
         // 对象存储配置
-        let object_storage = if let Ok(s3_provider) = std::env::var("DB_OBJECT_STORAGE_PROVIDER") {
-            let s3_bucket =
-                std::env::var("DB_S3_BUCKET").unwrap_or_else(|_| "vectordb".to_string());
+        let object_storage =
+            if let Ok(s3_provider) = crate::config::env::var("DXMT_OBJECT_STORAGE_PROVIDER") {
+                let s3_bucket = crate::config::env::var("DXMT_S3_BUCKET")
+                    .unwrap_or_else(|_| "vectordb".to_string());
 
-            let s3_region = std::env::var("DB_S3_REGION").ok();
+                let s3_region = crate::config::env::var("DXMT_S3_REGION").ok();
 
-            let s3_endpoint = std::env::var("DB_S3_ENDPOINT").ok();
+                let s3_endpoint = crate::config::env::var("DXMT_S3_ENDPOINT").ok();
 
-            let aws_access_key = std::env::var("DB_AWS_ACCESS_KEY_ID").ok();
+                let aws_access_key = crate::config::env::var("DXMT_AWS_ACCESS_KEY_ID").ok();
 
-            let aws_secret_key = std::env::var("DB_AWS_SECRET_ACCESS_KEY").ok();
+                let aws_secret_key = crate::config::env::var("DXMT_AWS_SECRET_ACCESS_KEY").ok();
 
-            Some(ObjectStorageConfig {
-                provider: s3_provider,
-                bucket: s3_bucket,
-                region: s3_region.or_else(|| Some("us-east-1".to_string())),
-                endpoint: s3_endpoint,
-                access_key_id: aws_access_key,
-                secret_access_key: aws_secret_key,
-            })
-        } else {
-            None
-        };
+                Some(ObjectStorageConfig {
+                    provider: s3_provider,
+                    bucket: s3_bucket,
+                    region: s3_region.or_else(|| Some("us-east-1".to_string())),
+                    endpoint: s3_endpoint,
+                    access_key_id: aws_access_key,
+                    secret_access_key: aws_secret_key,
+                })
+            } else {
+                None
+            };
 
         // 表默认配置
-        let default_dimension = std::env::var("DB_DEFAULT_DIMENSION")
+        let default_dimension = crate::config::env::var("DXMT_DEFAULT_DIMENSION")
             .ok()
             .and_then(|d| d.parse::<usize>().ok())
             .unwrap_or(1536);
 
-        let default_distance_metric =
-            std::env::var("DB_DEFAULT_DISTANCE_METRIC").unwrap_or_else(|_| "cosine".to_string());
+        let default_distance_metric = crate::config::env::var("DXMT_DEFAULT_DISTANCE_METRIC")
+            .unwrap_or_else(|_| "cosine".to_string());
 
-        let max_records_per_table = std::env::var("DB_MAX_RECORDS_PER_TABLE")
+        let max_records_per_table = crate::config::env::var("DXMT_MAX_RECORDS_PER_TABLE")
             .ok()
             .and_then(|r| r.parse::<usize>().ok())
             .unwrap_or(1_000_000);
 
         // 内存优化配置（默认启用）
-        let default_memory_optimization = std::env::var("DB_MEMORY_OPTIMIZATION")
+        let default_memory_optimization = crate::config::env::var("DXMT_MEMORY_OPTIMIZATION")
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true);
 
         // 集群配置
-        let cluster = if std::env::var("DB_CLUSTER_ENABLED").unwrap_or_default() == "true" {
-            let node_id = std::env::var("DB_NODE_ID").ok();
-            let node_name = std::env::var("DB_NODE_NAME").ok();
-            let cluster_name =
-                std::env::var("DB_CLUSTER_NAME").unwrap_or_else(|_| "dxmt-cluster".to_string());
-            let seed_nodes = std::env::var("DB_SEED_NODES")
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
-            let is_seed = std::env::var("DB_IS_SEED").unwrap_or_default() == "true";
-            let heartbeat_interval_secs = std::env::var("DB_HEARTBEAT_INTERVAL")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(5);
-            let node_timeout_secs = std::env::var("DB_NODE_TIMEOUT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(30);
-            let replication_factor = std::env::var("DB_REPLICATION_FACTOR")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(2);
+        let cluster =
+            if crate::config::env::var("DXMT_CLUSTER_ENABLED").unwrap_or_default() == "true" {
+                let node_id = crate::config::env::var("DXMT_NODE_ID").ok();
+                let node_name = crate::config::env::var("DXMT_NODE_NAME").ok();
+                let cluster_name = crate::config::env::var("DXMT_CLUSTER_NAME")
+                    .unwrap_or_else(|_| "dxmt-cluster".to_string());
+                let seed_nodes = crate::config::env::var("DXMT_SEED_NODES")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                let is_seed = crate::config::env::var("DXMT_IS_SEED").unwrap_or_default() == "true";
+                let heartbeat_interval_secs = crate::config::env::var("DXMT_HEARTBEAT_INTERVAL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5);
+                let node_timeout_secs = crate::config::env::var("DXMT_NODE_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30);
+                let replication_factor = crate::config::env::var("DXMT_REPLICATION_FACTOR")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(2);
 
-            Some(ClusterConfig {
-                enabled: true,
-                nodeid: node_id,
-                node_name,
-                cluster_name,
-                seed_nodes,
-                is_seed,
-                heartbeat_interval_secs,
-                node_timeout_secs,
-                replication_factor,
-            })
-        } else {
-            None
-        };
+                Some(ClusterConfig {
+                    enabled: true,
+                    nodeid: node_id,
+                    node_name,
+                    cluster_name,
+                    seed_nodes,
+                    is_seed,
+                    heartbeat_interval_secs,
+                    node_timeout_secs,
+                    replication_factor,
+                })
+            } else {
+                None
+            };
 
         // 进程管理配置
-        let processes = if std::env::var("DB_PROCESSES_ENABLED").unwrap_or_default() == "true" {
+        let processes = if crate::config::env::var("DXMT_PROCESSES_ENABLED").unwrap_or_default()
+            == "true"
+        {
             let data_dir = layout::Layout::from_env()
                 .processes()
                 .to_string_lossy()
                 .into_owned();
 
-            // 默认不启用 Consul，除非 ENABLE_CONSUL=true
-            let consul_enabled =
-                std::env::var("ENABLE_CONSUL").unwrap_or_else(|_| "false".to_string()) == "true"
-                    || std::env::var("DB_CONSUL_ENABLED").unwrap_or_else(|_| "false".to_string())
-                        == "true";
+            // 默认不启用 Consul，除非 DXMT_ENABLE_CONSUL=true
+            let consul_enabled = crate::config::env::var("DXMT_ENABLE_CONSUL")
+                .unwrap_or_else(|_| "false".to_string())
+                == "true"
+                || crate::config::env::var("DXMT_CONSUL_ENABLED")
+                    .unwrap_or_else(|_| "false".to_string())
+                    == "true";
 
             let consul = if consul_enabled {
                 Some(ConsulConfig {
                     enabled: true,
-                    executable: std::env::var("DB_CONSUL_EXECUTABLE")
+                    executable: crate::config::env::var("DXMT_CONSUL_EXECUTABLE")
                         .unwrap_or_else(|_| "/usr/local/bin/consul".to_string()),
-                    bind_addr: std::env::var("DB_CONSUL_BIND_ADDR")
+                    bind_addr: crate::config::env::var("DXMT_CONSUL_BIND_ADDR")
                         .unwrap_or_else(|_| "127.0.0.1".to_string()),
-                    httpport: std::env::var("DB_CONSUL_HTTP_PORT")
+                    httpport: crate::config::env::var("DXMT_CONSUL_HTTP_PORT")
                         .ok()
                         .and_then(|p| p.parse().ok())
                         .unwrap_or(8500),
@@ -361,19 +369,20 @@ impl Default for AppConfig {
                 None
             };
 
-            let minio = if std::env::var("DB_MINIO_ENABLED").unwrap_or_default() == "true" {
-                Some(MinioConfig {
-                    enabled: true,
-                    executable: std::env::var("DB_MINIO_EXECUTABLE")
-                        .unwrap_or_else(|_| "/usr/local/bin/minio".to_string()),
-                    address: std::env::var("DB_MINIO_ADDRESS")
-                        .unwrap_or_else(|_| "127.0.0.1:9000".to_string()),
-                    console_address: std::env::var("DB_MINIO_CONSOLE_ADDRESS")
-                        .unwrap_or_else(|_| "127.0.0.1:9001".to_string()),
-                })
-            } else {
-                None
-            };
+            let minio =
+                if crate::config::env::var("DXMT_MINIO_ENABLED").unwrap_or_default() == "true" {
+                    Some(MinioConfig {
+                        enabled: true,
+                        executable: crate::config::env::var("DXMT_MINIO_EXECUTABLE")
+                            .unwrap_or_else(|_| "/usr/local/bin/minio".to_string()),
+                        address: crate::config::env::var("DXMT_MINIO_ADDRESS")
+                            .unwrap_or_else(|_| "127.0.0.1:9000".to_string()),
+                        console_address: crate::config::env::var("DXMT_MINIO_CONSOLE_ADDRESS")
+                            .unwrap_or_else(|_| "127.0.0.1:9001".to_string()),
+                    })
+                } else {
+                    None
+                };
 
             Some(ProcessesConfig {
                 enabled: true,
@@ -430,8 +439,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除环境变量以确保测试的一致性
-        std::env::remove_var("DB_PORT");
-        std::env::remove_var("DB_HOST");
+        std::env::remove_var("DXMT_PORT");
+        std::env::remove_var("DXMT_HOST");
 
         let config = AppConfig::default();
         assert_eq!(config.server.port, 9999);
@@ -445,18 +454,18 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除所有环境变量以确保测试的一致性
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT");
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
 
         // 设置环境变量
-        std::env::set_var("DB_PORT", "9999");
+        std::env::set_var("DXMT_PORT", "9999");
 
         let config = AppConfig::default();
         assert_eq!(config.server.port, 9999);
         assert_eq!(config.server.bind_address, "0.0.0.0:9999");
 
         // 清理环境变量
-        std::env::remove_var("DB_PORT")
+        std::env::remove_var("DXMT_PORT")
     }
 
     #[test]
@@ -464,17 +473,17 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除所有环境变量以确保测试的一致性
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT");
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
 
         // 设置环境变量
-        std::env::set_var("DB_HOST", "192.168.1.100");
+        std::env::set_var("DXMT_HOST", "192.168.1.100");
 
         let config = AppConfig::default();
         assert_eq!(config.server.bind_address, "192.168.1.100:9999");
 
         // 清理环境变量
-        std::env::remove_var("DB_HOST")
+        std::env::remove_var("DXMT_HOST")
     }
 
     #[test]
@@ -482,20 +491,20 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除所有环境变量以确保测试的一致性
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT");
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
 
         // 设置两个环境变量
-        std::env::set_var("DB_HOST", "10.0.0.1");
-        std::env::set_var("DB_PORT", "7777");
+        std::env::set_var("DXMT_HOST", "10.0.0.1");
+        std::env::set_var("DXMT_PORT", "7777");
 
         let config = AppConfig::default();
         assert_eq!(config.server.port, 7777);
         assert_eq!(config.server.bind_address, "10.0.0.1:7777");
 
         // 清理环境变量
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT")
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT")
     }
 
     #[test]
@@ -503,11 +512,11 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除所有环境变量以确保测试的一致性
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT");
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
 
         // 设置无效的环境变量
-        std::env::set_var("DB_PORT", "invalid");
+        std::env::set_var("DXMT_PORT", "invalid");
 
         let config = AppConfig::default();
         // 应该回退到默认值
@@ -515,7 +524,7 @@ mod tests {
         assert_eq!(config.server.bind_address, "0.0.0.0:9999");
 
         // 清理环境变量
-        std::env::remove_var("DB_PORT")
+        std::env::remove_var("DXMT_PORT")
     }
 
     #[test]
@@ -523,8 +532,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         // 清除环境变量确保使用默认值
-        std::env::remove_var("DB_HOST");
-        std::env::remove_var("DB_PORT");
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
 
         let config = AppConfig::default();
         assert!(config.validate().is_ok());
@@ -542,11 +551,11 @@ mod tests {
         clear_all_env_vars();
 
         // 设置存储相关环境变量
-        std::env::set_var("DB_STORAGE_TYPE", "memory");
-        std::env::set_var("DB_MEMORY_CACHE_SIZE", "1024");
-        std::env::set_var("DB_SSD_CACHE_DIR", "/tmp/cache");
-        std::env::set_var("DB_SSD_CACHE_SIZE", "20");
-        std::env::set_var("DB_COMPRESSION", "lz4");
+        std::env::set_var("DXMT_STORAGE_TYPE", "memory");
+        std::env::set_var("DXMT_MEMORY_CACHE_SIZE", "1024");
+        std::env::set_var("DXMT_SSD_CACHE_DIR", "/tmp/cache");
+        std::env::set_var("DXMT_SSD_CACHE_SIZE", "20");
+        std::env::set_var("DXMT_COMPRESSION", "lz4");
 
         let config = AppConfig::default();
         assert_eq!(config.storage.r#type, "memory");
@@ -568,12 +577,12 @@ mod tests {
         clear_all_env_vars();
 
         // 设置S3相关环境变量
-        std::env::set_var("DB_OBJECT_STORAGE_PROVIDER", "minio");
-        std::env::set_var("DB_S3_BUCKET", "my-test-bucket");
-        std::env::set_var("DB_S3_REGION", "eu-west-1");
-        std::env::set_var("DB_S3_ENDPOINT", "http://localhost:9000");
-        std::env::set_var("DB_AWS_ACCESS_KEY_ID", "test_key");
-        std::env::set_var("DB_AWS_SECRET_ACCESS_KEY", "test_secret");
+        std::env::set_var("DXMT_OBJECT_STORAGE_PROVIDER", "minio");
+        std::env::set_var("DXMT_S3_BUCKET", "my-test-bucket");
+        std::env::set_var("DXMT_S3_REGION", "eu-west-1");
+        std::env::set_var("DXMT_S3_ENDPOINT", "http://localhost:9000");
+        std::env::set_var("DXMT_AWS_ACCESS_KEY_ID", "test_key");
+        std::env::set_var("DXMT_AWS_SECRET_ACCESS_KEY", "test_secret");
 
         let config = AppConfig::default();
         let object_storage = config
@@ -607,9 +616,9 @@ mod tests {
         clear_all_env_vars();
 
         // 设置表配置相关环境变量
-        std::env::set_var("DB_DEFAULT_DIMENSION", "768");
-        std::env::set_var("DB_DEFAULT_DISTANCE_METRIC", "euclidean");
-        std::env::set_var("DB_MAX_RECORDS_PER_TABLE", "500000");
+        std::env::set_var("DXMT_DEFAULT_DIMENSION", "768");
+        std::env::set_var("DXMT_DEFAULT_DISTANCE_METRIC", "euclidean");
+        std::env::set_var("DXMT_MAX_RECORDS_PER_TABLE", "500000");
 
         let config = AppConfig::default();
         assert_eq!(config.tables.default_dimension, 768);
@@ -628,7 +637,7 @@ mod tests {
         clear_all_env_vars();
 
         // 设置工作线程数
-        std::env::set_var("DB_WORKER_THREADS", "8");
+        std::env::set_var("DXMT_WORKER_THREADS", "8");
 
         let config = AppConfig::default();
         assert_eq!(config.server.workers, Some(8));
@@ -652,7 +661,7 @@ mod tests {
         clear_all_env_vars()
     }
 
-    // No unit test here sets DB_MEMORY_OPTIMIZATION. `ENV_LOCK` only orders the tests in this
+    // No unit test here sets DXMT_MEMORY_OPTIMIZATION. `ENV_LOCK` only orders the tests in this
     // module, and `IntelligentIndexedStorage::new` reads the same variable: a storage unit test
     // constructed while one of these held it at "false" would silently get the size-based index
     // selector. The `true`/`false` cases are covered by tests/memory_optimization_config_test.rs,
@@ -661,24 +670,24 @@ mod tests {
     // 辅助函数：清除所有测试相关的环境变量
     fn clear_all_env_vars() {
         let env_vars = [
-            "DB_HOST",
-            "DB_PORT",
-            "DB_WORKER_THREADS",
-            "DB_STORAGE_TYPE",
-            "DB_MEMORY_CACHE_SIZE",
-            "DB_SSD_CACHE_DIR",
-            "DB_SSD_CACHE_SIZE",
-            "DB_COMPRESSION",
-            "DB_OBJECT_STORAGE_PROVIDER",
-            "DB_S3_BUCKET",
-            "DB_S3_REGION",
-            "DB_S3_ENDPOINT",
-            "DB_AWS_ACCESS_KEY_ID",
-            "DB_AWS_SECRET_ACCESS_KEY",
-            "DB_DEFAULT_DIMENSION",
-            "DB_DEFAULT_DISTANCE_METRIC",
-            "DB_MAX_RECORDS_PER_TABLE",
-            "DB_MEMORY_OPTIMIZATION",
+            "DXMT_HOST",
+            "DXMT_PORT",
+            "DXMT_WORKER_THREADS",
+            "DXMT_STORAGE_TYPE",
+            "DXMT_MEMORY_CACHE_SIZE",
+            "DXMT_SSD_CACHE_DIR",
+            "DXMT_SSD_CACHE_SIZE",
+            "DXMT_COMPRESSION",
+            "DXMT_OBJECT_STORAGE_PROVIDER",
+            "DXMT_S3_BUCKET",
+            "DXMT_S3_REGION",
+            "DXMT_S3_ENDPOINT",
+            "DXMT_AWS_ACCESS_KEY_ID",
+            "DXMT_AWS_SECRET_ACCESS_KEY",
+            "DXMT_DEFAULT_DIMENSION",
+            "DXMT_DEFAULT_DISTANCE_METRIC",
+            "DXMT_MAX_RECORDS_PER_TABLE",
+            "DXMT_MEMORY_OPTIMIZATION",
         ];
 
         for var in &env_vars {

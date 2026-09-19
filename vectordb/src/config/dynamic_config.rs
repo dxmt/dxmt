@@ -50,16 +50,16 @@ pub fn apply_dynamic_memory_config(config: &mut AppConfig) -> MemoryConfig {
 
 /// Get memory configuration environment variable overrides
 pub fn get_memory_env_overrides() -> Option<(u64, u64, u64)> {
-    let max_memory_gb = std::env::var("DB_MAX_MEMORY_GB")
+    let max_memory_gb = crate::config::env::var("DXMT_MAX_MEMORY_GB")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())?;
 
-    let cache_percent = std::env::var("DB_CACHE_MEMORY_PERCENT")
+    let cache_percent = crate::config::env::var("DXMT_CACHE_MEMORY_PERCENT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.35);
 
-    let index_percent = std::env::var("DB_INDEX_MEMORY_PERCENT")
+    let index_percent = crate::config::env::var("DXMT_INDEX_MEMORY_PERCENT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.50);

@@ -1,22 +1,22 @@
 //! Where everything this server writes goes, decided in one place.
 //!
-//! It used to be decided in five, with no relationship between them: `DB_WAL_DIR` (which held
-//! the whole database despite its name), `DB_BACKUP_ROOT`, `DB_SSD_CACHE_DIR` and
-//! `DB_PROCESSES_DATA_DIR` — three of those relative to the *working directory*, so starting
-//! the server from elsewhere silently used different ones — plus `DB_STORAGE_PATH`, and a
+//! It used to be decided in five, with no relationship between them: `DXMT_WAL_DIR` (which held
+//! the whole database despite its name), `DXMT_BACKUP_ROOT`, `DXMT_SSD_CACHE_DIR` and
+//! `DXMT_PROCESSES_DATA_DIR` — three of those relative to the *working directory*, so starting
+//! the server from elsewhere silently used different ones — plus `DXMT_STORAGE_PATH`, and a
 //! `VECTORDB_ROOT_DIR` in the Dockerfile that no code has ever read.
 //!
 //! One root now, and everything hangs off it:
 //!
 //! ```text
-//! ~/.dxmt/                DB_ROOT_DIR
+//! ~/.dxmt/                DXMT_ROOT_DIR
 //! ├── store/              the database. Losing this loses the data
 //! │   ├── wal.log
 //! │   ├── records/
 //! │   ├── vectors/
 //! │   ├── snapshot/
 //! │   └── fulltext/
-//! ├── backups/            DB_BACKUP_ROOT — the only place POST /backup may write
+//! ├── backups/            DXMT_BACKUP_ROOT — the only place POST /backup may write
 //! └── cache/              derived. Deleting it costs time, not data
 //!     └── ssd/
 //! ```
@@ -26,7 +26,7 @@
 //! WAL started being compacted behind it, at which point it became the only copy of everything
 //! it covered.
 //!
-//! Each child can still be set on its own. Setting only `DB_ROOT_DIR` sets all of them, which
+//! Each child can still be set on its own. Setting only `DXMT_ROOT_DIR` sets all of them, which
 //! is the point — one variable for "put this somewhere else".
 //!
 //! # Why `store/` and not `wal/`
@@ -46,7 +46,7 @@ pub struct Resolved {
     pub note: Option<String>,
 }
 
-/// The directory layout, rooted at `DB_ROOT_DIR`.
+/// The directory layout, rooted at `DXMT_ROOT_DIR`.
 pub struct Layout {
     root: PathBuf,
     /// Whether the operator named the root, as opposed to it being defaulted for them. It
@@ -62,13 +62,13 @@ pub struct Layout {
     processes: Option<PathBuf>,
 }
 
-/// What `DB_ROOT_DIR` defaults to under the user's home.
+/// What `DXMT_ROOT_DIR` defaults to under the user's home.
 const ROOT_UNDER_HOME: &str = ".dxmt";
 
 impl Layout {
     /// Read the whole layout from the environment, once.
     pub fn from_env() -> Self {
-        Self::resolve(|name| std::env::var(name).ok())
+        Self::resolve(|name| crate::config::env::var(name).ok())
     }
 
     /// The same, from any source of values.
@@ -86,7 +86,7 @@ impl Layout {
                 .map(PathBuf::from)
         };
 
-        let (root, root_explicit, root_note) = match value("DB_ROOT_DIR") {
+        let (root, root_explicit, root_note) = match value("DXMT_ROOT_DIR") {
             Some(root) => (root, true, None),
             None => match value("HOME") {
                 Some(home) => (home.join(ROOT_UNDER_HOME), false, None),
@@ -98,7 +98,7 @@ impl Layout {
                     false,
                     Some(
                         "no home directory, so data goes under the working directory — starting \
-                         the server elsewhere will open a different database. Set DB_ROOT_DIR."
+                         the server elsewhere will open a different database. Set DXMT_ROOT_DIR."
                             .to_string(),
                     ),
                 ),
@@ -109,11 +109,11 @@ impl Layout {
             root,
             root_explicit,
             root_note,
-            store: value("DB_WAL_DIR"),
-            backups: value("DB_BACKUP_ROOT"),
-            cache: value("DB_CACHE_DIR"),
-            ssd_cache: value("DB_SSD_CACHE_DIR"),
-            processes: value("DB_PROCESSES_DATA_DIR"),
+            store: value("DXMT_WAL_DIR"),
+            backups: value("DXMT_BACKUP_ROOT"),
+            cache: value("DXMT_CACHE_DIR"),
+            ssd_cache: value("DXMT_SSD_CACHE_DIR"),
+            processes: value("DXMT_PROCESSES_DATA_DIR"),
         }
     }
 
@@ -137,7 +137,7 @@ impl Layout {
 
     /// The database: the WAL and everything the WAL protects.
     ///
-    /// `DB_WAL_DIR` still names it, because that is what it has always been called from the
+    /// `DXMT_WAL_DIR` still names it, because that is what it has always been called from the
     /// outside and what every existing deployment sets.
     pub fn store(&self) -> Resolved {
         match self.store.clone() {
@@ -152,10 +152,10 @@ impl Layout {
     /// Where `POST /backup` may write, and nowhere else.
     ///
     /// Beside the store rather than under the root when the store was moved out on its own
-    /// *and nobody named a root*: `DB_WAL_DIR=/fast/nvme/store` with no `DB_ROOT_DIR` says
+    /// *and nobody named a root*: `DXMT_WAL_DIR=/fast/nvme/store` with no `DXMT_ROOT_DIR` says
     /// where the database is and nothing about `~/.dxmt`, so backups belong near the database
     /// rather than under a default root that would then hold nothing else. An operator who
-    /// did name a root meant it, and gets `$DB_ROOT_DIR/backups` wherever the store went.
+    /// did name a root meant it, and gets `$DXMT_ROOT_DIR/backups` wherever the store went.
     ///
     /// A backup may not go *inside* the store — the copy would include itself — so the
     /// store's parent is the nearest place that is allowed.
@@ -207,7 +207,7 @@ impl Layout {
     /// default nobody typed.
     pub fn prepare(&self) -> Result<(), String> {
         // Exactly the directories this server will use, which is not the same as every
-        // directory this layout can name. A server started with `DB_WAL_DIR` pointing outside
+        // directory this layout can name. A server started with `DXMT_WAL_DIR` pointing outside
         // the root does not touch the root — and creating `~/.dxmt/cache` for it anyway leaves
         // a directory nobody asked for and proves the writability of something that will never
         // be written. `cache/` is absent for its own reason: it is made by whatever fills it,
@@ -216,18 +216,18 @@ impl Layout {
         // The root is not listed either. When the children are under it, creating them creates
         // it; when they are not, it is not this server's business.
         for (path, variable) in [
-            (self.store().path, "DB_WAL_DIR"),
-            (self.backups(), "DB_BACKUP_ROOT"),
+            (self.store().path, "DXMT_WAL_DIR"),
+            (self.backups(), "DXMT_BACKUP_ROOT"),
         ] {
             if let Err(reason) = Self::usable(&path) {
                 return Err(format!(
                     "cannot use {}: {reason}. Set {variable} to a writable directory\
                      {}",
                     path.display(),
-                    if variable == "DB_ROOT_DIR" {
+                    if variable == "DXMT_ROOT_DIR" {
                         String::new()
                     } else {
-                        ", or DB_ROOT_DIR to move all of them at once".to_string()
+                        ", or DXMT_ROOT_DIR to move all of them at once".to_string()
                     }
                 ));
             }
@@ -285,7 +285,7 @@ mod tests {
     /// Every child hangs off the root, so one variable moves the lot.
     #[test]
     fn one_root_places_everything() {
-        let layout = layout(&[("DB_ROOT_DIR", "/srv/dxmt")]);
+        let layout = layout(&[("DXMT_ROOT_DIR", "/srv/dxmt")]);
 
         assert_eq!(layout.root(), Path::new("/srv/dxmt"));
         assert_eq!(layout.store().path, Path::new("/srv/dxmt/store"));
@@ -310,9 +310,9 @@ mod tests {
     #[test]
     fn a_child_can_be_moved_without_moving_the_rest() {
         let layout = layout(&[
-            ("DB_ROOT_DIR", "/srv/dxmt"),
-            ("DB_WAL_DIR", "/fast/nvme/store"),
-            ("DB_SSD_CACHE_DIR", "/scratch"),
+            ("DXMT_ROOT_DIR", "/srv/dxmt"),
+            ("DXMT_WAL_DIR", "/fast/nvme/store"),
+            ("DXMT_SSD_CACHE_DIR", "/scratch"),
         ]);
 
         assert_eq!(layout.store().path, Path::new("/fast/nvme/store"));
@@ -330,7 +330,7 @@ mod tests {
     fn backups_follow_a_store_that_was_moved_out_alone() {
         let moved = layout(&[
             ("HOME", "/home/someone"),
-            ("DB_WAL_DIR", "/fast/nvme/store"),
+            ("DXMT_WAL_DIR", "/fast/nvme/store"),
         ]);
         assert_eq!(
             moved.backups(),
@@ -346,13 +346,13 @@ mod tests {
         // Naming a root means it: the backups stay there.
         let rooted = layout(&[
             ("HOME", "/home/someone"),
-            ("DB_ROOT_DIR", "/srv/dxmt"),
-            ("DB_WAL_DIR", "/fast/nvme/store"),
+            ("DXMT_ROOT_DIR", "/srv/dxmt"),
+            ("DXMT_WAL_DIR", "/fast/nvme/store"),
         ]);
         assert_eq!(rooted.backups(), Path::new("/srv/dxmt/backups"));
     }
 
-    /// No home and no `DB_ROOT_DIR` — `/nonexistent` under systemd's `DynamicUser=`, `/` in
+    /// No home and no `DXMT_ROOT_DIR` — `/nonexistent` under systemd's `DynamicUser=`, `/` in
     /// some images. Usable, and loud about why this is a poor place for a database.
     #[test]
     fn without_a_home_it_says_so() {
@@ -363,14 +363,14 @@ mod tests {
             .store()
             .note
             .expect("a fallback root has to explain itself");
-        assert!(note.contains("DB_ROOT_DIR"), "{note}");
+        assert!(note.contains("DXMT_ROOT_DIR"), "{note}");
     }
 
-    /// An empty value is not a value: `DB_ROOT_DIR=` falls through to the default rather than
+    /// An empty value is not a value: `DXMT_ROOT_DIR=` falls through to the default rather than
     /// rooting the database at the empty path.
     #[test]
     fn an_empty_variable_is_ignored() {
-        let layout = layout(&[("HOME", "/home/someone"), ("DB_ROOT_DIR", "   ")]);
+        let layout = layout(&[("HOME", "/home/someone"), ("DXMT_ROOT_DIR", "   ")]);
 
         assert_eq!(layout.root(), Path::new("/home/someone/.dxmt"));
     }
@@ -385,7 +385,7 @@ mod tests {
     fn prepare_makes_the_layout_and_proves_it_is_writable() {
         let root = tempfile::TempDir::new().unwrap();
 
-        let layout = layout(&[("DB_ROOT_DIR", &root.path().display().to_string())]);
+        let layout = layout(&[("DXMT_ROOT_DIR", &root.path().display().to_string())]);
         layout.prepare().expect("a fresh writable root");
 
         for child in ["store", "backups"] {
@@ -400,7 +400,7 @@ mod tests {
 
     /// A store outside the root means the root is not this server's business.
     ///
-    /// The demo runs this way — an explicit `DB_WAL_DIR` and no `DB_ROOT_DIR` — and starting it
+    /// The demo runs this way — an explicit `DXMT_WAL_DIR` and no `DXMT_ROOT_DIR` — and starting it
     /// created an empty `~/.dxmt/` with a `cache/` in it, for a server that would never look
     /// there. Checking a directory that will not be used is not a check, it is litter.
     #[test]
@@ -411,7 +411,7 @@ mod tests {
         layout(&[
             ("HOME", &home.path().display().to_string()),
             (
-                "DB_WAL_DIR",
+                "DXMT_WAL_DIR",
                 &elsewhere.path().join("store").display().to_string(),
             ),
         ])
@@ -440,16 +440,16 @@ mod tests {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         // Cannot be created: the store would go under a directory that takes no new entries.
-        let error = layout(&[("DB_ROOT_DIR", &readonly.display().to_string())])
+        let error = layout(&[("DXMT_ROOT_DIR", &readonly.display().to_string())])
             .prepare()
             .expect_err("an unwritable root");
         assert!(
             error.contains(&readonly.join("store").display().to_string()),
             "{error}"
         );
-        assert!(error.contains("DB_WAL_DIR"), "{error}");
+        assert!(error.contains("DXMT_WAL_DIR"), "{error}");
         assert!(
-            error.contains("DB_ROOT_DIR"),
+            error.contains("DXMT_ROOT_DIR"),
             "it should offer to move everything: {error}"
         );
 
@@ -457,7 +457,7 @@ mod tests {
         // whole reason `usable` writes a probe.
         let error = layout(&[
             ("HOME", &outer.path().display().to_string()),
-            ("DB_WAL_DIR", &readonly.display().to_string()),
+            ("DXMT_WAL_DIR", &readonly.display().to_string()),
         ])
         .prepare()
         .expect_err("a read-only store");
@@ -478,17 +478,17 @@ mod tests {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let error = layout(&[
-            ("DB_ROOT_DIR", &root.path().display().to_string()),
+            ("DXMT_ROOT_DIR", &root.path().display().to_string()),
             (
-                "DB_BACKUP_ROOT",
+                "DXMT_BACKUP_ROOT",
                 &readonly.join("backups").display().to_string(),
             ),
         ])
         .prepare()
         .expect_err("an unwritable backup root");
-        assert!(error.contains("DB_BACKUP_ROOT"), "{error}");
+        assert!(error.contains("DXMT_BACKUP_ROOT"), "{error}");
         assert!(
-            error.contains("DB_ROOT_DIR"),
+            error.contains("DXMT_ROOT_DIR"),
             "it should also offer to move everything: {error}"
         );
 
@@ -499,7 +499,7 @@ mod tests {
     /// touches it, and this is the one test that proves the wiring is not inverted.
     #[test]
     fn from_env_reads_the_real_environment() {
-        let expected = match std::env::var("DB_ROOT_DIR") {
+        let expected = match crate::config::env::var("DXMT_ROOT_DIR") {
             Ok(root) if !root.trim().is_empty() => PathBuf::from(root),
             _ => match std::env::var("HOME") {
                 Ok(home) if !home.trim().is_empty() => PathBuf::from(home).join(ROOT_UNDER_HOME),

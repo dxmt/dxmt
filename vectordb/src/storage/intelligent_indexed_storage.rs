@@ -502,12 +502,12 @@ struct IntelligentTableData {
     /// 而 10M 条 × 9.5 KB 就是 90 GB 的临时拷贝叠在 90 GB 常驻之上 —— 实测在 125 GB 的机器上
     /// 被内核杀掉(design doc §34.3)。记录从不原地修改、只整体替换,所以引用计数就够,
     /// 一次快照的拷贝从每条 9.5 KB 降到 8 字节。
-    /// Where the records live: the map, or a row file on disk (`DB_RECORD_STORE=disk`,
+    /// Where the records live: the map, or a row file on disk (`DXMT_RECORD_STORE=disk`,
     /// phase 3 of design/DISK_INDEX.md). Same interface either way; `get` decodes from
     /// disk when that is where the record is.
     records: crate::storage::record_store::RecordStore,
 
-    /// Full vectors on disk (`DB_VECTOR_STORE=disk`, design/DISK_INDEX.md section 4, phase 2).
+    /// Full vectors on disk (`DXMT_VECTOR_STORE=disk`, design/DISK_INDEX.md section 4, phase 2).
     /// When set, the `Record`s in `records` carry an empty `vector` and `vector_rows` says
     /// which row of the file holds each id's; the vector index still gets the vector on
     /// insert (it plans and encodes from it), and everything that reads a full vector
@@ -818,12 +818,12 @@ fn extract_text_from_record(table: &Table, record: &Record) -> Option<HashMap<St
 /// Slots below which a graph is not worth rebuilding for its tombstones, whatever the ratio.
 /// A rebuild is O(n) and a small table's garbage is measured in megabytes.
 ///
-/// `DB_INDEX_COMPACTION_MIN_SLOTS` overrides it, for tests: reaching a hundred thousand slots
+/// `DXMT_INDEX_COMPACTION_MIN_SLOTS` overrides it, for tests: reaching a hundred thousand slots
 /// honestly means a hundred thousand insertions, which says nothing about the behaviour under
 /// test that a thousand does not.
 fn min_compaction_slots() -> usize {
     const DEFAULT: usize = 100_000;
-    std::env::var("DB_INDEX_COMPACTION_MIN_SLOTS")
+    crate::config::env::var("DXMT_INDEX_COMPACTION_MIN_SLOTS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT)
@@ -847,12 +847,12 @@ const MIN_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
 /// the space is worth, and a table that has just crossed a few thousand updates does not need
 /// its file walked every ten minutes.
 ///
-/// `DB_ROW_RECLAIM_MIN_BYTES` overrides it. That exists for the tests: reaching 64 MB of dead
+/// `DXMT_ROW_RECLAIM_MIN_BYTES` overrides it. That exists for the tests: reaching 64 MB of dead
 /// rows honestly takes tens of thousands of insertions, which is a five-minute test in a debug
 /// build to assert something that has nothing to do with the size of the number.
 fn min_reclaim_bytes() -> u64 {
     const DEFAULT: u64 = 64 * 1024 * 1024;
-    std::env::var("DB_ROW_RECLAIM_MIN_BYTES")
+    crate::config::env::var("DXMT_ROW_RECLAIM_MIN_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT)
@@ -1403,7 +1403,7 @@ impl IntelligentIndexedStorage {
         };
 
         // 读取全局默认内存优化配置
-        let default_memory_optimization = std::env::var("DB_MEMORY_OPTIMIZATION")
+        let default_memory_optimization = crate::config::env::var("DXMT_MEMORY_OPTIMIZATION")
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true); // 默认启用内存优化
@@ -2172,7 +2172,7 @@ impl IntelligentIndexedStorage {
     ///
     /// 先强制快照再拷贝，顺序不能反：快照会把内存里尚未落盘的写入固定下来，并把日志压到
     /// 快照点。反过来拷的话，拿到的是一份旧快照配一段与之不匹配的日志。
-    /// Where backups may be written: `DB_BACKUP_ROOT`, or the WAL directory's parent.
+    /// Where backups may be written: `DXMT_BACKUP_ROOT`, or the WAL directory's parent.
     ///
     /// The parent rather than the WAL directory itself, because a backup inside it is refused
     /// for a separate reason -- so the default is the nearest place that is both obvious and
@@ -2211,8 +2211,8 @@ impl IntelligentIndexedStorage {
             ));
         };
 
-        // A backup must be a separate tree. Writing it into DB_WAL_DIR would make the source
-        // and destination overlap (`snapshot/snapshot/...`), and writing it below DB_WAL_DIR
+        // A backup must be a separate tree. Writing it into DXMT_WAL_DIR would make the source
+        // and destination overlap (`snapshot/snapshot/...`), and writing it below DXMT_WAL_DIR
         // would make a later recursive copy increasingly self-referential. Reject both before
         // taking a snapshot so an operator gets a deterministic configuration error instead of
         // a partially written backup.
@@ -2236,13 +2236,13 @@ impl IntelligentIndexedStorage {
         // wrong filesystem is a mistake rather than an attack and deserves an error either way.
         //
         // The root defaults to the WAL directory's parent, which is where a backup taken with
-        // no configuration at all should land. `DB_BACKUP_ROOT` moves it -- to the mount the
+        // no configuration at all should land. `DXMT_BACKUP_ROOT` moves it -- to the mount the
         // backups actually belong on, usually.
         let root = Self::backup_root(wal_dir);
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         if !destination.starts_with(&root) {
             return Err(crate::Error::InvalidInput(format!(
-                "backup destination {} is outside {}; set DB_BACKUP_ROOT to the directory \
+                "backup destination {} is outside {}; set DXMT_BACKUP_ROOT to the directory \
                  backups may be written to",
                 dest.display(),
                 root.display()
@@ -2323,7 +2323,7 @@ impl IntelligentIndexedStorage {
             "tables": tables,
             "files": copied,
             "bytes": bytes,
-            "restore": "Stop the server, replace the contents of DB_WAL_DIR with this \
+            "restore": "Stop the server, replace the contents of DXMT_WAL_DIR with this \
                         directory, and start it again.",
         });
         std::fs::write(
@@ -2390,16 +2390,16 @@ impl IntelligentIndexedStorage {
         // memory: a million 1536-dimension vectors is 6 GB, a million 64-dimension vectors is
         // 256 MB, and only one of those needs to leave memory.
         //
-        // `DB_PARTITION_THRESHOLD` (a row count) is still read so existing configurations do
+        // `DXMT_PARTITION_THRESHOLD` (a row count) is still read so existing configurations do
         // not silently change meaning, but it is deprecated.
         let vector_bytes = record_count * dimension * std::mem::size_of::<f32>();
-        let threshold_bytes = std::env::var("DB_PARTITION_THRESHOLD_MB")
+        let threshold_bytes = crate::config::env::var("DXMT_PARTITION_THRESHOLD_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(512 * 1024 * 1024);
 
-        let by_rows = std::env::var("DB_PARTITION_THRESHOLD")
+        let by_rows = crate::config::env::var("DXMT_PARTITION_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .is_some_and(|rows| record_count >= rows);
@@ -2432,10 +2432,10 @@ impl IntelligentIndexedStorage {
         wal_dir.join("records").join(format!("{table_name}.rec"))
     }
 
-    /// Where a store lives, from `DB_RECORD_STORE` / `DB_VECTOR_STORE`: `disk` unless the
+    /// Where a store lives, from `DXMT_RECORD_STORE` / `DXMT_VECTOR_STORE`: `disk` unless the
     /// variable says `memory`. Anything else is reported and treated as the default.
     fn store_on_disk_wanted(var: &str) -> bool {
-        match std::env::var(var).ok().as_deref() {
+        match crate::config::env::var(var).ok().as_deref() {
             None | Some("disk") => true,
             Some("memory") => false,
             Some(other) => {
@@ -2445,9 +2445,9 @@ impl IntelligentIndexedStorage {
         }
     }
 
-    /// Records live in a row file under the WAL directory (`DB_RECORD_STORE=disk`, the
+    /// Records live in a row file under the WAL directory (`DXMT_RECORD_STORE=disk`, the
     /// default since design/DISK_INDEX.md phase 3 was accepted) or in memory
-    /// (`DB_RECORD_STORE=memory`, and always when there is no WAL directory to put a file
+    /// (`DXMT_RECORD_STORE=memory`, and always when there is no WAL directory to put a file
     /// in). Like the vector file: keyed by table name, wiped by a fresh `CREATE TABLE`,
     /// reused by a restore or replay. A reopened table keeps the store it already has: a
     /// row file on disk is that table's data, whatever the environment says today.
@@ -2457,7 +2457,7 @@ impl IntelligentIndexedStorage {
         fresh: bool,
     ) -> crate::Result<crate::storage::record_store::RecordStore> {
         use crate::storage::record_store::{RecordStore, RowStore};
-        let wanted = Self::store_on_disk_wanted("DB_RECORD_STORE");
+        let wanted = Self::store_on_disk_wanted("DXMT_RECORD_STORE");
         let Some(wal_dir) = self.wal_dir.as_ref() else {
             return Ok(RecordStore::memory());
         };
@@ -2475,7 +2475,7 @@ impl IntelligentIndexedStorage {
                 return Ok(RecordStore::memory());
             }
             info!(
-                "table '{}': DB_RECORD_STORE=memory, but its records are on disk at {}; keeping them there",
+                "table '{}': DXMT_RECORD_STORE=memory, but its records are on disk at {}; keeping them there",
                 table.name,
                 path.display()
             );
@@ -2500,13 +2500,13 @@ impl IntelligentIndexedStorage {
             .join(format!("{table_name}.{}", format.extension()))
     }
 
-    /// Full vectors live in a row file under the WAL directory (`DB_VECTOR_STORE=disk`, the
+    /// Full vectors live in a row file under the WAL directory (`DXMT_VECTOR_STORE=disk`, the
     /// default since design/DISK_INDEX.md phase 2 was accepted) or inside the records
-    /// (`DB_VECTOR_STORE=memory`, and always without a WAL directory). As with the record
+    /// (`DXMT_VECTOR_STORE=memory`, and always without a WAL directory). As with the record
     /// store, a reopened table keeps the file it already has.
     fn open_vector_file(&self, table: &Table, fresh: bool) -> crate::Result<OpenedVectorFile> {
         use crate::storage::vector_file::{VectorFile, VectorFormat};
-        let wanted = Self::store_on_disk_wanted("DB_VECTOR_STORE");
+        let wanted = Self::store_on_disk_wanted("DXMT_VECTOR_STORE");
         let Some(wal_dir) = self.wal_dir.as_ref() else {
             return Ok((None, HashMap::new()));
         };
@@ -2528,18 +2528,19 @@ impl IntelligentIndexedStorage {
                 return Ok((None, HashMap::new()));
             };
             info!(
-                "table '{}': DB_VECTOR_STORE=memory, but its vectors are on disk at {}; keeping them there",
+                "table '{}': DXMT_VECTOR_STORE=memory, but its vectors are on disk at {}; keeping them there",
                 table.name,
                 Self::vector_file_path_for(wal_dir, &table.name, found).display()
             );
         }
-        // A fresh table takes the format the environment asks for (`DB_VECTOR_F16=1` for
+        // A fresh table takes the format the environment asks for (`DXMT_VECTOR_F16=1` for
         // half precision); a reopened one keeps whichever file it already has.
-        let wanted_format = if std::env::var("DB_VECTOR_F16").ok().as_deref() == Some("1") {
-            VectorFormat::F16
-        } else {
-            VectorFormat::F32
-        };
+        let wanted_format =
+            if crate::config::env::var("DXMT_VECTOR_F16").ok().as_deref() == Some("1") {
+                VectorFormat::F16
+            } else {
+                VectorFormat::F32
+            };
         let format = existing.unwrap_or(wanted_format);
         let path = Self::vector_file_path_for(wal_dir, &table.name, format);
         let (file, ids) = VectorFile::open_with(&path, table.dimension, format)?;
@@ -2555,21 +2556,24 @@ impl IntelligentIndexedStorage {
     }
 
     /// The table's own memory-optimization setting, else the global default
-    /// (`DB_MEMORY_OPTIMIZATION`, on unless set to `false`).
+    /// (`DXMT_MEMORY_OPTIMIZATION`, on unless set to `false`).
     fn memory_optimization_of(&self, table: &Table) -> bool {
         table
             .memory_optimization
             .unwrap_or(self.default_memory_optimization)
     }
 
-    /// `DB_INDEX_ALGORITHM=hnsw|hnsw-pq` pins the index family for every table, at creation
+    /// `DXMT_INDEX_ALGORITHM=hnsw|hnsw-pq` pins the index family for every table, at creation
     /// and at re-evaluation alike, so the periodic re-check does not rebuild it back.
     ///
     /// For measuring one index against another on the same data without touching the
     /// selector's size thresholds -- the HNSW-PQ acceptance runs in DISK_INDEX.md section 4
     /// are made this way. Unset, the selector decides as before.
     fn forced_algorithm(dimension: usize) -> Option<IndexAlgorithm> {
-        match std::env::var("DB_INDEX_ALGORITHM").ok()?.as_str() {
+        match crate::config::env::var("DXMT_INDEX_ALGORITHM")
+            .ok()?
+            .as_str()
+        {
             "hnsw" => Some(IndexAlgorithm::HNSW {
                 m: 16,
                 ef_construction: Self::default_ef_construction(),
@@ -2584,7 +2588,7 @@ impl IntelligentIndexedStorage {
                 enable_reranking: true,
             }),
             other => {
-                warn!("DB_INDEX_ALGORITHM={other} is not hnsw or hnsw-pq; ignoring it");
+                warn!("DXMT_INDEX_ALGORITHM={other} is not hnsw or hnsw-pq; ignoring it");
                 None
             }
         }
@@ -2760,7 +2764,7 @@ impl IntelligentIndexedStorage {
     /// 400,000-row key space: 5.2 GB of vector file holding 1.2 GB of live rows after 2.4
     /// hours, climbing at about 52 GB a day regardless of the table's size.
     ///
-    /// This runs on its own timer (`DB_ROW_COMPACTION_INTERVAL_SECS`) rather than inside the
+    /// This runs on its own timer (`DXMT_ROW_COMPACTION_INTERVAL_SECS`) rather than inside the
     /// eviction or re-index sweep: it is cheap, it wants to run more often than a rebuild, and
     /// folding it into a sweep that also snapshots would tie giving back disk to a decision
     /// about memory.
@@ -3836,7 +3840,7 @@ impl IntelligentIndexedStorage {
         // runs to completion before the caller's write returns, so triggering it from the write
         // path hands the entire cost to whichever request happened to cross a size threshold —
         // and `reevaluate_indexes` sweeps every table, not just this one. The sweep spawned by
-        // `spawn_index_reevaluation` (DB_REINDEX_INTERVAL_SECS, default 900) already owns this
+        // `spawn_index_reevaluation` (DXMT_REINDEX_INTERVAL_SECS, default 900) already owns this
         // job, off the serving path.
 
         Ok(inserted)
@@ -4427,7 +4431,7 @@ impl IntelligentIndexedStorage {
             if candidates > cap {
                 return Err(crate::Error::InvalidInput(format!(
                     "search_mode \"exact\" would have to score {candidates} rows, over the \
-                     {cap}-row limit. Narrow it with a filter, raise DB_EXACT_SCAN_MAX, or use \
+                     {cap}-row limit. Narrow it with a filter, raise DXMT_EXACT_SCAN_MAX, or use \
                      search_mode \"accurate\""
                 )));
             }
@@ -4581,7 +4585,7 @@ impl IntelligentIndexedStorage {
         if sample > cap {
             return Err(crate::Error::InvalidInput(format!(
                 "a {sample}-node graph is over the {cap}-node limit; the computation is \
-                 quadratic in the node count. Lower `sample`, or raise DB_KNN_GRAPH_MAX_NODES"
+                 quadratic in the node count. Lower `sample`, or raise DXMT_KNN_GRAPH_MAX_NODES"
             )));
         }
 
@@ -4745,7 +4749,7 @@ impl IntelligentIndexedStorage {
     /// better than one that takes a minute, because a caller cannot tell a slow answer from a
     /// hung one.
     fn knn_graph_max_nodes() -> usize {
-        std::env::var("DB_KNN_GRAPH_MAX_NODES")
+        crate::config::env::var("DXMT_KNN_GRAPH_MAX_NODES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(4_000)
@@ -6333,12 +6337,12 @@ impl IntelligentIndexedStorage {
     /// built at less than a third of the effort the rest of the codebase had settled on.
     const DEFAULT_EF_CONSTRUCTION: usize = 200;
 
-    /// `DB_HNSW_EF_CONSTRUCTION` overrides the build effort for tables created from here on.
+    /// `DXMT_HNSW_EF_CONSTRUCTION` overrides the build effort for tables created from here on.
     /// It exists to measure the trade: on Cohere 1M the neighbour search at 200 is 88% of the
     /// insert time (design doc section 24.4.3), and the only way to know what 100 costs in
     /// recall is to build at 100. Rebuilds do not read it; skip the rebuild when comparing.
     fn default_ef_construction() -> usize {
-        std::env::var("DB_HNSW_EF_CONSTRUCTION")
+        crate::config::env::var("DXMT_HNSW_EF_CONSTRUCTION")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n| n > 0)
@@ -6371,11 +6375,11 @@ impl IntelligentIndexedStorage {
     /// a reasonable thing to ask for deliberately and an unreasonable thing to trigger from a
     /// button, which is why the number is here rather than unbounded: at 100M rows the same
     /// request is minutes of full-file reads, and the caller has no way to tell the difference
-    /// from a hang. `DB_EXACT_SCAN_MAX` raises it for anyone who means it.
+    /// from a hang. `DXMT_EXACT_SCAN_MAX` raises it for anyone who means it.
     const EXACT_SCAN_MAX_DEFAULT: usize = 1_000_000;
 
     fn exact_scan_max() -> usize {
-        std::env::var("DB_EXACT_SCAN_MAX")
+        crate::config::env::var("DXMT_EXACT_SCAN_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(Self::EXACT_SCAN_MAX_DEFAULT)
@@ -6401,12 +6405,12 @@ impl IntelligentIndexedStorage {
     /// looked up in `id_to_idx`, per query. Below the cap the sets are small enough that this
     /// is cheap; above it, over-fetching wins.
     ///
-    /// `DB_IN_GRAPH_FILTER_MAX_IDS` overrides it, which is how both paths get exercised from
+    /// `DXMT_IN_GRAPH_FILTER_MAX_IDS` overrides it, which is how both paths get exercised from
     /// one test.
     const IN_GRAPH_FILTER_MAX_IDS: usize = 10_000;
 
     fn in_graph_filter_max_ids() -> usize {
-        std::env::var("DB_IN_GRAPH_FILTER_MAX_IDS")
+        crate::config::env::var("DXMT_IN_GRAPH_FILTER_MAX_IDS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(Self::IN_GRAPH_FILTER_MAX_IDS)
@@ -7364,7 +7368,7 @@ impl IntelligentIndexedStorage {
     /// way whatever the storage mode. That is the whole reason the parameter exists: this used
     /// to hand back the record's own `vector` field, which holds the vector for an in-memory
     /// table and nothing at all once the vectors live in a row file — so the same call answered
-    /// `[1.0, 0.0, ...]` or `[]` depending on `DB_VECTOR_STORE`, with no way for the caller to
+    /// `[1.0, 0.0, ...]` or `[]` depending on `DXMT_VECTOR_STORE`, with no way for the caller to
     /// tell that from a record that genuinely has no vector.
     pub async fn list_records(
         &self,
@@ -7489,12 +7493,12 @@ impl IntelligentIndexedStorage {
     ///
     /// # It used to default to `/tmp`
     ///
-    /// The old default was `{DB_STORAGE_PATH:-/tmp}/dxmt_full_text_{id}`, which put a real
+    /// The old default was `{DXMT_STORAGE_PATH:-/tmp}/dxmt_full_text_{id}`, which put a real
     /// index — data, not a cache; the only copy of the term postings — in the one directory an
     /// operating system feels free to empty. `systemd-tmpfiles` clears `/tmp` on a schedule on
     /// most distributions and many images wipe it on boot, so a server could come back with its
     /// WAL, its row files and its snapshots all intact and its text search silently answering
-    /// nothing. It also sat outside `DB_WAL_DIR`, so a backup of that directory — which is what
+    /// nothing. It also sat outside `DXMT_WAL_DIR`, so a backup of that directory — which is what
     /// `docs/operations/backup-restore.md` tells you to take — never contained it.
     ///
     /// Beside the WAL is where the rest of a table's durable state already lives: `records/`,
@@ -7505,12 +7509,12 @@ impl IntelligentIndexedStorage {
     /// name, so two servers on one machine — two instances, a test suite, a staging copy — with
     /// a table of the same name derived the *same* id and, under `/tmp`, opened the *same*
     /// index: one holding the other's documents, and contending for Tantivy's writer lock.
-    /// Under `DB_WAL_DIR` they are as separate as the rest of their state. Reverting this
+    /// Under `DXMT_WAL_DIR` they are as separate as the rest of their state. Reverting this
     /// function to the old path turns five of the six tests in
     /// `tests/full_text_recovery_test.rs` red, and that is how.
     ///
-    /// Moving it is `DB_WAL_DIR`, or `DB_ROOT_DIR` to move everything at once. There is no
-    /// separate override: `DB_STORAGE_PATH` used to be one, defaulting to `/tmp`, and a second
+    /// Moving it is `DXMT_WAL_DIR`, or `DXMT_ROOT_DIR` to move everything at once. There is no
+    /// separate override: `DXMT_STORAGE_PATH` used to be one, defaulting to `/tmp`, and a second
     /// way to say where an index lives is a second place for it to be lost.
     #[cfg(feature = "text-bm25")]
     fn full_text_index_path(&self, table_id: &uuid::Uuid) -> PathBuf {
@@ -8050,7 +8054,7 @@ mod tests {
     /// at 768 dimensions on a 121 GB box, about 2M on a 16 GB one. So a default table growing
     /// past that line was rebuilt, O(n), onto an index with no delete support and no test of its
     /// own, and the only reason the 100M acceptance run did not hit it is that
-    /// `DB_INDEX_ALGORITHM=hnsw-pq` was pinned; the server log still carries the sweep's
+    /// `DXMT_INDEX_ALGORITHM=hnsw-pq` was pinned; the server log still carries the sweep's
     /// "Selecting Enhanced DiskANN: dataset_size=21115700". The sweep now asks with the table's
     /// own setting, so a memory-optimized table stays HNSW-PQ at every size.
     #[tokio::test]

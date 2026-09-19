@@ -169,10 +169,10 @@ fn start_server() -> Server {
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", dir.path().join("wal"))
+        .env("DXMT_WAL_DIR", dir.path().join("wal"))
         // Background tasks would only add noise to a routing check.
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

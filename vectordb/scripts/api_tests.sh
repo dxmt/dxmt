@@ -70,26 +70,26 @@ for mode in $MODES; do
   port=$(free_port)
   # A fresh WAL directory per mode is not optional. A table keeps the store it already has:
   # `open_record_store` finds an existing row file and keeps using it *even under*
-  # `DB_RECORD_STORE=memory`, logging an info line as it does. Share a directory between the two
+  # `DXMT_RECORD_STORE=memory`, logging an info line as it does. Share a directory between the two
   # runs and let one table name collide, and the memory run silently exercises the disk path and
   # passes.
   wal_dir=$(mktemp -d)
   backup_root=$(mktemp -d)
   log=$(mktemp)
 
-  # `DB_WAL_DIR` must be set. Without one, *both* stores fall back to memory whatever these
+  # `DXMT_WAL_DIR` must be set. Without one, *both* stores fall back to memory whatever these
   # variables say, so "disk mode" would silently test memory and go green.
   #
-  # `DB_INDEX_ALGORITHM` must be pinned. `create_table` ignores the caller's `index_type` and
+  # `DXMT_INDEX_ALGORITHM` must be pinned. `create_table` ignores the caller's `index_type` and
   # lets `select_optimal_index` choose from `available_memory_gb`, so a CI runner and a laptop
   # can select different indexes and the recall invariant would be measuring different things.
-  DB_RECORD_STORE="$mode" \
-  DB_VECTOR_STORE="$mode" \
-  DB_WAL_DIR="$wal_dir" \
-  DB_BACKUP_ROOT="$backup_root" \
-  DB_INDEX_ALGORITHM=hnsw-pq \
-  DB_SNAPSHOT_INTERVAL_SECS=0 \
-  DB_EVICTION_INTERVAL_SECS=0 \
+  DXMT_RECORD_STORE="$mode" \
+  DXMT_VECTOR_STORE="$mode" \
+  DXMT_WAL_DIR="$wal_dir" \
+  DXMT_BACKUP_ROOT="$backup_root" \
+  DXMT_INDEX_ALGORITHM=hnsw-pq \
+  DXMT_SNAPSHOT_INTERVAL_SECS=0 \
+  DXMT_EVICTION_INTERVAL_SECS=0 \
   RUST_LOG=${RUST_LOG:-info} \
     setsid "$BIN" serve --host 127.0.0.1 --port "$port" $SERVE_FLAGS > "$log" 2>&1 &
   server_pid=$!
@@ -112,10 +112,13 @@ for mode in $MODES; do
     # durable state -- `POST /backup` refusing a destination inside it, for one. Tests that need
     # it skip when it is absent, so attaching to someone else's server still works.
     #
-    # `DXMT_BACKUP_ROOT` mirrors the `DB_BACKUP_ROOT` the server was started with: a backup may
-    # only be written inside it, so a test that takes one has to know where that is. It used to
-    # work by accident -- the WAL lives under `/tmp`, so the default root was `/tmp` and any
-    # `mkdtemp` landed inside it -- and an accident is not coverage.
+    # `DXMT_BACKUP_ROOT` is the same value the server was started with, in the pytest process
+    # this time: a backup may only be written inside it, so a test that takes one has to know
+    # where that is. It used to work by accident -- the WAL lives under `/tmp`, so the default
+    # root was `/tmp` and any `mkdtemp` landed inside it -- and an accident is not coverage.
+    #
+    # Server and tests used to spell these differently (`DB_*` / `DXMT_*`); the prefix rename
+    # collapsed the pair into one name, which is what they always meant.
     DXMT_URL="http://127.0.0.1:$port" DXMT_STORAGE_MODE="$mode" DXMT_WAL_DIR="$wal_dir" \
     DXMT_BACKUP_ROOT="$backup_root" \
       $PYTEST tests/api "$@"

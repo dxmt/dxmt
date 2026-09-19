@@ -11,20 +11,20 @@ W7 给 WAL 加了截断——快照校验通过后，它所覆盖的那段日志
 
 | 路径 | 内容 | 必须备份 |
 |---|---|---|
-| `$DB_WAL_DIR/snapshot/` | 表元数据、索引段;内存表的记录 | **是** |
-| `$DB_WAL_DIR/records/` | 盘表的记录(`<表>.rec` + `.rec.log`),默认每张表都是盘表 | **是** |
-| `$DB_WAL_DIR/vectors/` | 盘表的全量向量(`<表>.f32` 或 `.f16` + `.rows`) | **是** |
-| `$DB_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
-| `$DB_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
+| `$DXMT_WAL_DIR/snapshot/` | 表元数据、索引段;内存表的记录 | **是** |
+| `$DXMT_WAL_DIR/records/` | 盘表的记录(`<表>.rec` + `.rec.log`),默认每张表都是盘表 | **是** |
+| `$DXMT_WAL_DIR/vectors/` | 盘表的全量向量(`<表>.f32` 或 `.f16` + `.rows`) | **是** |
+| `$DXMT_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
+| `$DXMT_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
 | 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**(等价于上面几项:配了对象存储时,盘表的快照会把记录连同向量一起带上,所以一台没有行文件的新机器也能从它恢复;代价是快照又回到按记录数计时) |
 
-服务器写的所有东西都在一个根下面，`DB_ROOT_DIR`，默认 `~/.dxmt`：
+服务器写的所有东西都在一个根下面，`DXMT_ROOT_DIR`，默认 `~/.dxmt`：
 
 ```text
 ~/.dxmt/
-├── store/      数据本身。备份指的就是这个目录        DB_WAL_DIR
-├── backups/    POST /backup 只能写这里面             DB_BACKUP_ROOT
-└── cache/      派生物，整个删掉只会变慢              DB_CACHE_DIR
+├── store/      数据本身。备份指的就是这个目录        DXMT_WAL_DIR
+├── backups/    POST /backup 只能写这里面             DXMT_BACKUP_ROOT
+└── cache/      派生物，整个删掉只会变慢              DXMT_CACHE_DIR
 ```
 
 三个子目录的生命周期不同，所以是三个目录 —— 看名字就知道哪个能删。每个可以单独搬，设根则一次搬完。
@@ -32,7 +32,7 @@ W7 给 WAL 加了截断——快照校验通过后，它所覆盖的那段日志
 
 放在家目录下而不是工作目录下，否则换个目录启动就会打开另一个空数据库。
 
-**生产环境请显式设 `DB_WAL_DIR`**，有两个理由，都和"家目录在哪"有关：
+**生产环境请显式设 `DXMT_WAL_DIR`**，有两个理由，都和"家目录在哪"有关：
 
 - 家目录通常在根分区上。这个库在 1 亿行时实测 44.7 GB，撑满的是 `/` 而不只是数据库。
 - 家目录常常是 NFS。行文件走 `mmap`、WAL 每批 `fsync`，这两样在 NFS 上的语义都不可靠——
@@ -63,7 +63,7 @@ curl -sX POST http://localhost:9999/api/v1/backup \
             "records/docs.rec.log", "records/docs.rec",
             "vectors/docs.f32.rows", "vectors/docs.f32", "wal.log"],
   "bytes": 5387421,
-  "restore": "Stop the server, replace the contents of DB_WAL_DIR with this directory, and start it again."
+  "restore": "Stop the server, replace the contents of DXMT_WAL_DIR with this directory, and start it again."
 }
 ```
 
@@ -88,7 +88,7 @@ cp -a /backups/dxmt-2026-08-15/records  /var/lib/dxmt/wal/   # 盘表的记录
 cp -a /backups/dxmt-2026-08-15/vectors  /var/lib/dxmt/wal/   # 盘表的向量
 cp -a /backups/dxmt-2026-08-15/wal.log  /var/lib/dxmt/wal/   # 如果备份里有
 
-DB_WAL_DIR=/var/lib/dxmt/wal systemctl start dxmt-vectordb
+DXMT_WAL_DIR=/var/lib/dxmt/wal systemctl start dxmt-vectordb
 ```
 
 启动日志里应当看到：
@@ -106,11 +106,11 @@ Snapshot loaded: 3 tables; replaying WAL from sequence 41
 
 | 触发 | 配置 |
 |---|---|
-| 定期 | `DB_SNAPSHOT_INTERVAL_SECS`，默认 300 秒，0 关闭 |
+| 定期 | `DXMT_SNAPSHOT_INTERVAL_SECS`，默认 300 秒，0 关闭 |
 | 优雅停机 | SIGTERM / Ctrl-C，drain 之后 |
 | `POST /api/v1/tables/{name}/index/rebuild` 之后 | 自动 |
 | `POST /api/v1/snapshot` | 手动 |
-| 冷表驱逐前 | `DB_EVICTION_INTERVAL_SECS`，默认 600 秒 |
+| 冷表驱逐前 | `DXMT_EVICTION_INTERVAL_SECS`，默认 600 秒 |
 
 快照间隔决定了**最坏情况下需要回放多少 WAL**，也决定了单机部署（没配对象存储时）
 一次崩溃可能丢多少——不会丢已确认的写入，但恢复要多花时间。
@@ -132,7 +132,7 @@ the loss and start from whatever the WAL still has.
 两个选择：
 
 1. **从备份恢复**（推荐）——按上面的步骤。
-2. **接受损失**：`rm -rf $DB_WAL_DIR/snapshot`，然后启动。剩下的日志能回放多少算多少。
+2. **接受损失**：`rm -rf $DXMT_WAL_DIR/snapshot`，然后启动。剩下的日志能回放多少算多少。
 
 写快照时会先完整读回来校验（manifest、每个 `.meta`、每个声称有索引的 `.idx`），
 校验不过就不替换、也不截断日志，所以正常情况下不该出现这个错误。

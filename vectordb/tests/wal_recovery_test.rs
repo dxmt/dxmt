@@ -6,7 +6,7 @@
 //! `wal_sync_interval_ms` / `wal_consistency_mode`, and a `WalConsistencyMode` type. None of
 //! those exist any more, so there was nothing to re-enable — only something to rewrite.
 //!
-//! Several of these tests set `DB_PARTITION_THRESHOLD_MB` and friends to force a decision.
+//! Several of these tests set `DXMT_PARTITION_THRESHOLD_MB` and friends to force a decision.
 //! Environment variables are process-global while cargo runs a binary's tests in parallel
 //! threads, so those tests carry `#[serial_test::serial]` — without it one test's threshold
 //! silently changes another's outcome, which is the kind of flake that only shows up under a
@@ -1137,9 +1137,9 @@ async fn a_large_table_is_partitioned_on_rebuild_and_still_answers() {
 
     // Below the default threshold nothing should change; force it down instead of inserting
     // a hundred thousand rows in a unit test.
-    std::env::set_var("DB_PARTITION_THRESHOLD", "100");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD", "100");
     storage.rebuild_index("t").await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD");
 
     let table_meta = storage.get_table("t").await.unwrap();
     assert_eq!(
@@ -1523,7 +1523,7 @@ async fn re_evaluation_settles_instead_of_rebuilding_forever() {
     storage.insert_records("t", rows).await.unwrap();
 
     // Low enough that this table partitions, as a large one would in production.
-    std::env::set_var("DB_PARTITION_THRESHOLD", "100");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD", "100");
     storage.rebuild_index("t").await.unwrap();
     assert_eq!(
         storage.get_table("t").await.unwrap().index_type.to_string(),
@@ -1535,7 +1535,7 @@ async fn re_evaluation_settles_instead_of_rebuilding_forever() {
     // a partitioned index back, and does it again on the next sweep. Forever, at O(n) each.
     let first = storage.reevaluate_indexes().await.unwrap();
     let second = storage.reevaluate_indexes().await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD");
 
     assert!(
         first.is_empty() && second.is_empty(),
@@ -1574,11 +1574,11 @@ async fn partitioning_triggers_on_bytes_not_row_count() {
         storage.insert_records(name, rows).await.unwrap();
     }
 
-    std::env::remove_var("DB_PARTITION_THRESHOLD");
-    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "1");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "1");
     storage.rebuild_index("narrow").await.unwrap();
     storage.rebuild_index("wide").await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
 
     assert_ne!(
         storage
@@ -1686,7 +1686,7 @@ async fn a_partitioned_table_gets_maintained_not_rebuilt() {
     storage.insert_records("t", rows).await.unwrap();
 
     // 500 x 64 x 4 = 128 KB, so a 0 MB threshold partitions it.
-    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "0");
     storage.rebuild_index("t").await.unwrap();
     assert_eq!(
         storage.get_table("t").await.unwrap().index_type.to_string(),
@@ -1705,7 +1705,7 @@ async fn a_partitioned_table_gets_maintained_not_rebuilt() {
     storage.insert_records("t", more).await.unwrap();
 
     let rebuilt = storage.reevaluate_indexes().await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
 
     assert!(
         rebuilt.is_empty(),
@@ -1932,9 +1932,9 @@ async fn dropping_a_partitioned_table_removes_its_segments() {
         .collect();
     storage.insert_records("t", rows).await.unwrap();
 
-    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "0");
     storage.rebuild_index("t").await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
 
     let segments = shared.join("ssd").join("test-bucket").join("partitions");
     assert!(segments.exists(), "no segments were written");
@@ -2045,9 +2045,9 @@ async fn a_selective_filter_works_on_a_partitioned_table() {
     // Now partition the table and ask again. The partitioned index does not implement in-graph
     // filtering, so this exercises whatever the storage layer falls back to — a combination
     // nothing else covers.
-    std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+    std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "0");
     storage.rebuild_index("t").await.unwrap();
-    std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+    std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
     assert_eq!(
         storage.get_table("t").await.unwrap().index_type.to_string(),
         "partitioned_ivf"
@@ -2102,9 +2102,9 @@ async fn a_partitioned_table_is_still_partitioned_after_a_restart() {
             .collect();
         storage.insert_records("t", rows).await.unwrap();
 
-        std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+        std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "0");
         storage.rebuild_index("t").await.unwrap();
-        std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+        std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
         assert_eq!(
             storage.get_table("t").await.unwrap().index_type.to_string(),
             "partitioned_ivf"
@@ -2165,7 +2165,7 @@ async fn maintenance_after_a_snapshot_does_not_strand_that_snapshot() {
 
         // Held for the whole block: without it re-evaluation decides the table is too small to
         // partition and rebuilds it as HNSW, so maintenance never runs and this tests nothing.
-        std::env::set_var("DB_PARTITION_THRESHOLD_MB", "0");
+        std::env::set_var("DXMT_PARTITION_THRESHOLD_MB", "0");
         storage.rebuild_index("t").await.unwrap();
 
         // A snapshot pins this shape of the index: its metadata names the partition ids that
@@ -2188,7 +2188,7 @@ async fn maintenance_after_a_snapshot_does_not_strand_that_snapshot() {
             .collect();
         storage.insert_records("t", more).await.unwrap();
         storage.reevaluate_indexes().await.unwrap();
-        std::env::remove_var("DB_PARTITION_THRESHOLD_MB");
+        std::env::remove_var("DXMT_PARTITION_THRESHOLD_MB");
     }
 
     // Crash here: recovery uses the snapshot taken before maintenance ran.

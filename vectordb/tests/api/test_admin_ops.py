@@ -26,8 +26,8 @@ from .helpers.client import call, get, post
 from .helpers.corpus import BY_ID, CORPUS, ORDER_FROM_R1, ids_of, query_at
 
 #: The *server* writes the backup, so the destination has to be a path it can write: outside
-#: `DB_WAL_DIR`, which `backup_to` rejects as an overlapping destination, and *inside*
-#: `DB_BACKUP_ROOT`, which bounds where a request may have the database copied to at all.
+#: `DXMT_WAL_DIR`, which `backup_to` rejects as an overlapping destination, and *inside*
+#: `DXMT_BACKUP_ROOT`, which bounds where a request may have the database copied to at all.
 #:
 #: This was `/tmp/dxmt_api_backup` and passed because the root defaulted to the WAL directory's
 #: parent, which is `/tmp` under this script. Reading the root the server was actually given is
@@ -162,7 +162,7 @@ def test_a_backup_is_written_and_describes_itself(table):
         assert manifest["tables"] >= 1
         assert manifest["files"], "a backup that copied no files is not a backup"
         assert manifest["bytes"] > 0
-        assert "DB_WAL_DIR" in manifest["restore"], "the manifest must say how to restore it"
+        assert "DXMT_WAL_DIR" in manifest["restore"], "the manifest must say how to restore it"
         assert os.path.isdir(dest), f"the server reported a backup it did not write: {dest}"
     finally:
         shutil.rmtree(dest, ignore_errors=True)
@@ -172,7 +172,7 @@ def test_a_backup_is_written_and_describes_itself(table):
 def test_a_backup_refuses_a_destination_inside_the_wal_directory():
     """Source and destination must not overlap.
 
-    A backup written under `DB_WAL_DIR` makes a later recursive copy self-referential, so it is
+    A backup written under `DXMT_WAL_DIR` makes a later recursive copy self-referential, so it is
     refused before anything is written rather than left half-done.
     """
     response = post("/backup", {"path": os.path.join(WAL_DIR, "inside")}, expect_ok=False)

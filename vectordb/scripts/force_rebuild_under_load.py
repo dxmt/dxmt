@@ -36,9 +36,9 @@ def vec(seed):
 subprocess.run(["pkill", "-9", "-f", f"vectordb serve --host 127.0.0.1 --port {PORT}"], check=False)
 subprocess.run(["rm", "-rf", WAL], check=False)
 os.makedirs(WAL, exist_ok=True)
-env = dict(os.environ, DB_WAL_DIR=WAL, DB_PORT=str(PORT),
-           DB_SNAPSHOT_INTERVAL_SECS="5", DB_EVICTION_INTERVAL_SECS="7",
-           DB_REINDEX_INTERVAL_SECS="0",  # no automatic rebuild; we trigger it ourselves
+env = dict(os.environ, DXMT_WAL_DIR=WAL, DXMT_PORT=str(PORT),
+           DXMT_SNAPSHOT_INTERVAL_SECS="5", DXMT_EVICTION_INTERVAL_SECS="7",
+           DXMT_REINDEX_INTERVAL_SECS="0",  # no automatic rebuild; we trigger it ourselves
            RUST_LOG="info")
 log = open(f"{SD}/force.log", "w")
 srv = subprocess.Popen([BIN, "serve", "--host", "127.0.0.1", "--port", str(PORT)],

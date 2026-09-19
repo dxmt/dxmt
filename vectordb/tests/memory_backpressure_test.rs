@@ -10,7 +10,7 @@
 //! that the guard is actually consulted on the write path and that the caller is told the
 //! write did not happen, rather than finding out when the machine stops answering.
 //!
-//! `DB_MIN_FREE_MEMORY_MB` is process-global, so this is the only test in this binary. A
+//! `DXMT_MIN_FREE_MEMORY_MB` is process-global, so this is the only test in this binary. A
 //! second one would race it however carefully it were written.
 
 use dxmt_vectordb::{
@@ -64,12 +64,12 @@ async fn a_write_is_refused_when_free_memory_is_under_the_floor() {
     // A floor no machine can satisfy. An explicitly configured floor is honoured as given --
     // the fraction-of-total cap applies only to the default -- which is what makes this
     // testable at all.
-    std::env::set_var("DB_MIN_FREE_MEMORY_MB", "1000000000");
+    std::env::set_var("DXMT_MIN_FREE_MEMORY_MB", "1000000000");
     let storage =
         IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(tmp.path().join("wal")))
             .await
             .unwrap();
-    std::env::remove_var("DB_MIN_FREE_MEMORY_MB");
+    std::env::remove_var("DXMT_MIN_FREE_MEMORY_MB");
 
     storage.create_table(table("t", 4)).await.unwrap();
 
@@ -84,7 +84,7 @@ async fn a_write_is_refused_when_free_memory_is_under_the_floor() {
         "the caller should be told why the write was refused, got: {message}"
     );
     assert!(
-        message.contains("DB_MIN_FREE_MEMORY_MB"),
+        message.contains("DXMT_MIN_FREE_MEMORY_MB"),
         "and how to change it, got: {message}"
     );
 

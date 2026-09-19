@@ -15,7 +15,7 @@
 //! comes back short -- the retry in phase 3 only covers post-filtering -- so both must return
 //! a full k, both must return only rows that pass, and neither may be the less accurate.
 //!
-//! `DB_IN_GRAPH_FILTER_MAX_IDS` is process-global, so this is the only test in this binary.
+//! `DXMT_IN_GRAPH_FILTER_MAX_IDS` is process-global, so this is the only test in this binary.
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
@@ -157,7 +157,7 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
     let truth = brute_force(&vs, &query);
 
     // Cap 1 forces the fallback: an unfiltered walk with an amplified fetch, then a filter.
-    std::env::set_var("DB_IN_GRAPH_FILTER_MAX_IDS", "1");
+    std::env::set_var("DXMT_IN_GRAPH_FILTER_MAX_IDS", "1");
     let fallback = storage
         .search("t", selective_query(query.clone()))
         .await
@@ -165,12 +165,12 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
     // Raised so this matching set is admitted and the filter is applied during traversal.
     // The shipped default is 10,000, which this table's 2,400 matching rows sit under anyway;
     // setting it explicitly keeps the test honest about which path it is exercising.
-    std::env::set_var("DB_IN_GRAPH_FILTER_MAX_IDS", "100000");
+    std::env::set_var("DXMT_IN_GRAPH_FILTER_MAX_IDS", "100000");
     let in_graph = storage
         .search("t", selective_query(query.clone()))
         .await
         .unwrap();
-    std::env::remove_var("DB_IN_GRAPH_FILTER_MAX_IDS");
+    std::env::remove_var("DXMT_IN_GRAPH_FILTER_MAX_IDS");
 
     for (name, hits) in [("fallback", &fallback), ("in-graph", &in_graph)] {
         assert_eq!(

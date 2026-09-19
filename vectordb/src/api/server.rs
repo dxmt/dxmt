@@ -37,7 +37,7 @@ use crate::{
     embeddings::EmbeddingManager,
 };
 
-/// WAL 目录：`DB_WAL_DIR` 覆盖，默认 `$DB_ROOT_DIR/store`（`DB_ROOT_DIR` 默认 `~/.dxmt`），
+/// WAL 目录：`DXMT_WAL_DIR` 覆盖，默认 `$DXMT_ROOT_DIR/store`（`DXMT_ROOT_DIR` 默认 `~/.dxmt`），
 /// 显式设为空串关闭持久化。
 ///
 /// 层次由 [`crate::config::layout::Layout`] 决定，不在这里各算各的——五处路径配置互不相干、
@@ -46,12 +46,12 @@ use crate::{
 /// 只在服务端入口读环境变量，不放进 `IntelligentIndexedStorage::new`——那个构造函数有
 /// 四十多个调用点（单测、bench、example），让它们各自往磁盘写日志会互相回放污染。
 pub fn wal_dir_from_env() -> Option<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("DB_WAL_DIR") {
+    if let Ok(dir) = crate::config::env::var("DXMT_WAL_DIR") {
         if dir.trim().is_empty() {
-            tracing::warn!("DB_WAL_DIR is empty: WAL disabled, data will not survive a restart");
+            tracing::warn!("DXMT_WAL_DIR is empty: WAL disabled, data will not survive a restart");
             return None;
         }
-        tracing::info!("data directory: {dir} (DB_WAL_DIR)");
+        tracing::info!("data directory: {dir} (DXMT_WAL_DIR)");
         return Some(std::path::PathBuf::from(dir));
     }
 
@@ -132,7 +132,7 @@ fn spawn_stall_detector(threshold: std::time::Duration) {
 
 /// How late a one-second tick has to be before it is reported, in seconds; 0 disables. Default 3.
 fn stall_threshold_from_env() -> std::time::Duration {
-    let secs = std::env::var("DB_STALL_WARN_SECS")
+    let secs = crate::config::env::var("DXMT_STALL_WARN_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
@@ -144,7 +144,7 @@ fn stall_threshold_from_env() -> std::time::Duration {
 /// Without a periodic snapshot the WAL only shrinks when someone calls POST /snapshot, so
 /// recovery time grows without bound on a long-lived server.
 fn snapshot_interval_from_env() -> u64 {
-    std::env::var("DB_SNAPSHOT_INTERVAL_SECS")
+    crate::config::env::var("DXMT_SNAPSHOT_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(300)
@@ -152,7 +152,7 @@ fn snapshot_interval_from_env() -> u64 {
 
 /// Eviction sweep interval in seconds; 0 disables. Default 600.
 fn eviction_interval_from_env() -> u64 {
-    std::env::var("DB_EVICTION_INTERVAL_SECS")
+    crate::config::env::var("DXMT_EVICTION_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600)
@@ -165,7 +165,7 @@ fn eviction_interval_from_env() -> u64 {
 /// query.
 fn spawn_eviction_sweep(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
-        tracing::info!("Cold-table eviction disabled (DB_EVICTION_INTERVAL_SECS=0)");
+        tracing::info!("Cold-table eviction disabled (DXMT_EVICTION_INTERVAL_SECS=0)");
         return;
     }
     tokio::spawn(async move {
@@ -189,7 +189,7 @@ fn spawn_eviction_sweep(storage: Arc<IntelligentIndexedStorage>, interval: u64) 
 
 /// Row-file reclamation interval in seconds; 0 disables. Default 600.
 fn row_compaction_interval_from_env() -> u64 {
-    std::env::var("DB_ROW_COMPACTION_INTERVAL_SECS")
+    crate::config::env::var("DXMT_ROW_COMPACTION_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600)
@@ -204,7 +204,7 @@ fn row_compaction_interval_from_env() -> u64 {
 /// else.
 fn spawn_row_reclamation(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
-        tracing::info!("Row-file reclamation disabled (DB_ROW_COMPACTION_INTERVAL_SECS=0)");
+        tracing::info!("Row-file reclamation disabled (DXMT_ROW_COMPACTION_INTERVAL_SECS=0)");
         return;
     }
     tokio::spawn(async move {
@@ -233,7 +233,7 @@ fn spawn_row_reclamation(storage: Arc<IntelligentIndexedStorage>, interval: u64)
 
 /// Index re-evaluation interval in seconds; 0 disables. Default 900.
 fn reindex_interval_from_env() -> u64 {
-    std::env::var("DB_REINDEX_INTERVAL_SECS")
+    crate::config::env::var("DXMT_REINDEX_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(900)
@@ -246,7 +246,7 @@ fn reindex_interval_from_env() -> u64 {
 /// to.
 fn spawn_index_reevaluation(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
-        tracing::info!("Automatic index re-evaluation disabled (DB_REINDEX_INTERVAL_SECS=0)");
+        tracing::info!("Automatic index re-evaluation disabled (DXMT_REINDEX_INTERVAL_SECS=0)");
         return;
     }
     tokio::spawn(async move {
@@ -273,7 +273,7 @@ fn spawn_index_reevaluation(storage: Arc<IntelligentIndexedStorage>, interval: u
 /// Snapshot every `interval` seconds for as long as the process runs.
 fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u64) {
     if interval == 0 {
-        tracing::info!("Periodic snapshots disabled (DB_SNAPSHOT_INTERVAL_SECS=0)");
+        tracing::info!("Periodic snapshots disabled (DXMT_SNAPSHOT_INTERVAL_SECS=0)");
         return;
     }
     tokio::spawn(async move {
@@ -359,10 +359,10 @@ pub async fn create_app_with_storage(
     // would otherwise be discovered by whoever takes the first backup, which may be weeks
     // after the server came up and is the worst moment to learn it.
     //
-    // Skipped when the WAL is explicitly off -- `DB_WAL_DIR=""` says this instance keeps
+    // Skipped when the WAL is explicitly off -- `DXMT_WAL_DIR=""` says this instance keeps
     // nothing, and demanding a writable directory for it would be asking for something it
     // will never use.
-    if std::env::var("DB_WAL_DIR")
+    if crate::config::env::var("DXMT_WAL_DIR")
         .map(|dir| !dir.trim().is_empty())
         .unwrap_or(true)
     {
@@ -375,7 +375,7 @@ pub async fn create_app_with_storage(
     let config = AppConfig::load()?;
 
     // 创建优化的存储实例。带 WAL：进程重启后要能恢复。
-    // DB_WAL_DIR 可覆盖目录；设成空串则彻底关掉持久化（只建议用于压测对比）。
+    // DXMT_WAL_DIR 可覆盖目录；设成空串则彻底关掉持久化（只建议用于压测对比）。
     let storage = Arc::new(
         IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?,
     );

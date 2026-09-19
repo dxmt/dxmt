@@ -283,7 +283,7 @@ async fn exact_refuses_rather_than_scanning_past_its_cap() {
     // The cap is what makes the mode safe to put behind a button: at 100M rows the same
     // request is minutes of full-file reads, and a caller cannot tell that from a hang.
     const ROWS: usize = 300;
-    std::env::set_var("DB_EXACT_SCAN_MAX", "100");
+    std::env::set_var("DXMT_EXACT_SCAN_MAX", "100");
 
     let storage = open(None).await;
     storage.create_table(table("t")).await.unwrap();
@@ -318,7 +318,7 @@ async fn exact_refuses_rather_than_scanning_past_its_cap() {
     );
     assert_eq!(hits.hits.len(), 5);
 
-    std::env::remove_var("DB_EXACT_SCAN_MAX");
+    std::env::remove_var("DXMT_EXACT_SCAN_MAX");
 }
 
 #[tokio::test]

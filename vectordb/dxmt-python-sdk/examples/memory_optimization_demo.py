@@ -28,7 +28,7 @@ def main():
     # Scenario 1: Using Global Configuration
     # ========================================
     print("📋 Scenario 1: Using Global Configuration")
-    print("   DB_MEMORY_OPTIMIZATION=true (default)")
+    print("   DXMT_MEMORY_OPTIMIZATION=true (default)")
     print()
 
     # Create table without specifying memory_optimization

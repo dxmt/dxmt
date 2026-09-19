@@ -1,4 +1,4 @@
-//! Half-precision vector rows (`DB_VECTOR_F16=1`) with records and vectors on disk, end to end.
+//! Half-precision vector rows (`DXMT_VECTOR_F16=1`) with records and vectors on disk, end to end.
 //!
 //! A quantized table keeps its graph on codes and its records without vectors; the row
 //! file is what the rerank, `get_record` and `with_vector` read, and what a restart rebuilds
@@ -109,10 +109,10 @@ fn assert_close(a: &[f32], b: &[f32]) {
 
 #[tokio::test]
 async fn a_table_with_half_precision_vectors_searches_serves_and_restarts() {
-    std::env::set_var("DB_INDEX_ALGORITHM", "hnsw-pq");
-    std::env::set_var("DB_VECTOR_STORE", "disk");
-    std::env::set_var("DB_RECORD_STORE", "disk");
-    std::env::set_var("DB_VECTOR_F16", "1");
+    std::env::set_var("DXMT_INDEX_ALGORITHM", "hnsw-pq");
+    std::env::set_var("DXMT_VECTOR_STORE", "disk");
+    std::env::set_var("DXMT_RECORD_STORE", "disk");
+    std::env::set_var("DXMT_VECTOR_F16", "1");
     let tmp = TempDir::new().unwrap();
     let wal = tmp.path().join("wal");
     let vs = vectors();

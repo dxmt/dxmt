@@ -1,4 +1,4 @@
-//! Full vectors on disk (`DB_VECTOR_STORE=disk`), end to end through the storage layer.
+//! Full vectors on disk (`DXMT_VECTOR_STORE=disk`), end to end through the storage layer.
 //!
 //! A quantized table keeps its graph on codes and its records without vectors; the row
 //! file is what the rerank, `get_record` and `with_vector` read, and what a restart rebuilds
@@ -101,8 +101,8 @@ async fn top_ids(storage: &IntelligentIndexedStorage, q: &[f32]) -> Vec<String> 
 
 #[tokio::test]
 async fn a_table_with_vectors_on_disk_searches_serves_and_restarts() {
-    std::env::set_var("DB_INDEX_ALGORITHM", "hnsw-pq");
-    std::env::set_var("DB_VECTOR_STORE", "disk");
+    std::env::set_var("DXMT_INDEX_ALGORITHM", "hnsw-pq");
+    std::env::set_var("DXMT_VECTOR_STORE", "disk");
     let tmp = TempDir::new().unwrap();
     let wal = tmp.path().join("wal");
     let vs = vectors();

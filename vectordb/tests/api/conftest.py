@@ -24,7 +24,7 @@ Verified rather than assumed, because two of these are silent failure modes:
 * Without a WAL directory *both* stores fall back to memory whatever the variables say, so a
   "disk" run without one goes green having tested memory.
 * A table keeps the store it already has: an existing row file is used even under
-  `DB_RECORD_STORE=memory`. Hence a fresh WAL directory per mode.
+  `DXMT_RECORD_STORE=memory`. Hence a fresh WAL directory per mode.
 
 The evidence that the two modes really are two paths: after one insert, a memory-mode WAL
 directory holds only `wal.log`, and a disk-mode one also holds `vectors/<t>.f32` and

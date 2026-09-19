@@ -3,7 +3,7 @@
 The handler returned whatever the record's own `vector` field held. For an in-memory table that
 is the vector; once the vectors live in a row file — the default as soon as there is a WAL
 directory — the record's field is empty and the API returned `[]`. So the same request answered
-differently depending on `DB_VECTOR_STORE`, a server setting the caller cannot see, and `[]` was
+differently depending on `DXMT_VECTOR_STORE`, a server setting the caller cannot see, and `[]` was
 indistinguishable from "this record has no vector". Meanwhile `GET /records/{id}` and `POST
 /search` with `with_vector` both read through the row file and always answered with the vector.
 

@@ -52,13 +52,13 @@ def req(method, path, body=None, timeout=30):
 def start(tag):
     env = dict(os.environ)
     env.update({
-        "DB_WAL_DIR": WAL,
-        "DB_PORT": str(PORT),
+        "DXMT_WAL_DIR": WAL,
+        "DXMT_PORT": str(PORT),
         # Mutually prime, so the three sweeps drift in and out of phase with each other
         # instead of always firing on the same tick.
-        "DB_SNAPSHOT_INTERVAL_SECS": "5",
-        "DB_EVICTION_INTERVAL_SECS": "7",
-        "DB_REINDEX_INTERVAL_SECS": "11",
+        "DXMT_SNAPSHOT_INTERVAL_SECS": "5",
+        "DXMT_EVICTION_INTERVAL_SECS": "7",
+        "DXMT_REINDEX_INTERVAL_SECS": "11",
         "RUST_LOG": "info",
     })
     log = open(f"{WAL}.{tag}.log", "w")

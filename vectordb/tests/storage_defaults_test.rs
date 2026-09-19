@@ -1,6 +1,6 @@
 //! What a table gets without any `DB_*` store variable set: records and full vectors in row
 //! files under the WAL directory, and an HNSW-PQ index (exact until it has 65,536 rows).
-//! `DB_RECORD_STORE=memory` / `DB_VECTOR_STORE=memory` opt a fresh table out; a table that
+//! `DXMT_RECORD_STORE=memory` / `DXMT_VECTOR_STORE=memory` opt a fresh table out; a table that
 //! already has its files keeps them whatever the environment says at restart.
 //!
 //! The variables are process-global, so every test here is serial and clears what it set.
@@ -88,10 +88,10 @@ fn logs() {
 
 fn clear_env() {
     for v in [
-        "DB_RECORD_STORE",
-        "DB_VECTOR_STORE",
-        "DB_VECTOR_F16",
-        "DB_INDEX_ALGORITHM",
+        "DXMT_RECORD_STORE",
+        "DXMT_VECTOR_STORE",
+        "DXMT_VECTOR_F16",
+        "DXMT_INDEX_ALGORITHM",
     ] {
         std::env::remove_var(v);
     }
@@ -192,8 +192,8 @@ async fn by_default_a_table_puts_records_and_vectors_on_disk_under_an_hnsw_pq_in
 #[tokio::test]
 async fn memory_opts_a_fresh_table_out_and_a_table_without_a_wal_directory_is_always_in_memory() {
     clear_env();
-    std::env::set_var("DB_RECORD_STORE", "memory");
-    std::env::set_var("DB_VECTOR_STORE", "memory");
+    std::env::set_var("DXMT_RECORD_STORE", "memory");
+    std::env::set_var("DXMT_VECTOR_STORE", "memory");
     let tmp = TempDir::new().unwrap();
     let wal = tmp.path().join("wal");
 
@@ -234,8 +234,8 @@ async fn a_table_with_files_on_disk_keeps_them_when_the_environment_says_memory(
 
     // The snapshot of a disk table carries no records; they are in the row file. Coming back
     // under `memory` must still find them.
-    std::env::set_var("DB_RECORD_STORE", "memory");
-    std::env::set_var("DB_VECTOR_STORE", "memory");
+    std::env::set_var("DXMT_RECORD_STORE", "memory");
+    std::env::set_var("DXMT_VECTOR_STORE", "memory");
     let storage = open(&wal).await;
     assert_eq!(
         storage.get_table("t").await.unwrap().record_count,
@@ -306,8 +306,8 @@ async fn a_fresh_create_does_not_inherit_a_dropped_tables_files() {
     );
 
     // Same name, memory mode: nothing on disk to resurrect, and none created.
-    std::env::set_var("DB_RECORD_STORE", "memory");
-    std::env::set_var("DB_VECTOR_STORE", "memory");
+    std::env::set_var("DXMT_RECORD_STORE", "memory");
+    std::env::set_var("DXMT_VECTOR_STORE", "memory");
     storage.create_table(table("t")).await.unwrap();
     assert_eq!(storage.get_table("t").await.unwrap().record_count, 0);
     assert!(files(&wal.join("records")).is_empty());

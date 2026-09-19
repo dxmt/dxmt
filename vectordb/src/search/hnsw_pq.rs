@@ -52,7 +52,7 @@ impl HnswPqConfig {
     pub const DEFAULT_RERANK_FACTOR: usize = 5;
     pub const DEFAULT_RERANK_MIN: usize = 100;
 
-    /// `DB_RERANK_FACTOR` and `DB_RERANK_MIN` override how many candidates a search reranks.
+    /// `DXMT_RERANK_FACTOR` and `DXMT_RERANK_MIN` override how many candidates a search reranks.
     ///
     /// This is the one knob that trades recall against single-query latency, and it was a
     /// constant, so measuring the trade meant recompiling. Milvus at a matched recall of
@@ -60,7 +60,12 @@ impl HnswPqConfig {
     /// many candidates, which makes the size of our rerank the first thing to measure rather
     /// than the last. Out of range or unparsable values are reported and ignored.
     fn env_usize(var: &str, default: usize, min: usize) -> usize {
-        Self::parse_override(var, std::env::var(var).ok().as_deref(), default, min)
+        Self::parse_override(
+            var,
+            crate::config::env::var(var).ok().as_deref(),
+            default,
+            min,
+        )
     }
 
     /// The parsing half, separated from the environment so it can be tested without
@@ -86,8 +91,8 @@ impl Default for HnswPqConfig {
             hnsw_config: HnswConfig::default(),
             num_subvectors: 192,
             num_centroids: 256,
-            rerank_factor: Self::env_usize("DB_RERANK_FACTOR", Self::DEFAULT_RERANK_FACTOR, 1),
-            rerank_min: Self::env_usize("DB_RERANK_MIN", Self::DEFAULT_RERANK_MIN, 1),
+            rerank_factor: Self::env_usize("DXMT_RERANK_FACTOR", Self::DEFAULT_RERANK_FACTOR, 1),
+            rerank_min: Self::env_usize("DXMT_RERANK_MIN", Self::DEFAULT_RERANK_MIN, 1),
             quantize_at_rows: Self::DEFAULT_QUANTIZE_AT_ROWS,
         }
     }
@@ -516,7 +521,7 @@ mod tests {
     /// is how the first version of this broke `a_phased_batch_insert_lets_hnsw_pq_quantize`.
     #[test]
     fn a_rerank_override_is_parsed_or_refused() {
-        let p = |raw: Option<&str>| HnswPqConfig::parse_override("DB_RERANK_FACTOR", raw, 5, 1);
+        let p = |raw: Option<&str>| HnswPqConfig::parse_override("DXMT_RERANK_FACTOR", raw, 5, 1);
         assert_eq!(p(None), 5, "unset keeps the default");
         assert_eq!(p(Some("2")), 2);
         assert_eq!(p(Some("20")), 20);
@@ -524,7 +529,7 @@ mod tests {
             assert_eq!(p(Some(bad)), 5, "{bad:?} should have been refused");
         }
         assert_eq!(
-            HnswPqConfig::parse_override("DB_RERANK_MIN", Some("50"), 100, 1),
+            HnswPqConfig::parse_override("DXMT_RERANK_MIN", Some("50"), 100, 1),
             50
         );
     }

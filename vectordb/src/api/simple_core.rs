@@ -211,7 +211,7 @@ struct SimpleModeState {
 /// Simple mode over `wal_dir`, or with no durable storage when that is `None`.
 ///
 /// The directory is passed in rather than read from the environment here. It was read here,
-/// and `test_simple_mode_end_to_end` therefore created one in whatever `DB_WAL_DIR` resolved
+/// and `test_simple_mode_end_to_end` therefore created one in whatever `DXMT_WAL_DIR` resolved
 /// to while the unit tests ran — which since the default moved is the developer's home
 /// directory. A library constructor that reaches for the environment makes every one of its
 /// callers, tests included, depend on the environment.

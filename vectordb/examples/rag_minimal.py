@@ -67,7 +67,7 @@ DOCUMENTS = [
             "the tail. A crash costs at most the entries written since the last snapshot."),
     ("rowfiles", "Records and full vectors live in row files next to the log rather than inside "
                  "the snapshot, which is why a snapshot of ten million rows takes seconds. "
-                 "DB_RECORD_STORE and DB_VECTOR_STORE choose between those files and memory."),
+                 "DXMT_RECORD_STORE and DXMT_VECTOR_STORE choose between those files and memory."),
 ]
 
 

@@ -20,7 +20,7 @@ releases. Everything below is unreleased work on `main`.
 - **Records and vectors on disk.** With a WAL directory configured, a table's records and full
   vectors live in row files beside it and only the graph, the PQ codes and the id map stay
   resident — about 0.5 KB per 768-dimension row, against 8.3 KB when everything was in the map.
-  `DB_RECORD_STORE=memory` / `DB_VECTOR_STORE=memory` put a new table back in memory.
+  `DXMT_RECORD_STORE=memory` / `DXMT_VECTOR_STORE=memory` put a new table back in memory.
 - **Backup and restore**, replacing two earlier paths that never worked, with a test that proves
   a backup restores rather than that it reported success.
 - **Object storage as the durable home for snapshots and WAL chunks**, plus table eviction:
@@ -36,10 +36,16 @@ releases. Everything below is unreleased work on `main`.
 - **A functional HTTP test suite** (`tests/api/`) that runs the same assertions against a server
   with records in memory and again with them in row files, plus property invariants over a
   generated corpus.
-- `DB_HNSW_EF_CONSTRUCTION` to set the build effort of new tables; `search_mode` so a caller can
+- `DXMT_HNSW_EF_CONSTRUCTION` to set the build effort of new tables; `search_mode` so a caller can
   ask for more search effort without a rebuild.
 
 ### Changed
+
+- **Every server-side environment variable is now `DXMT_*`.** `DB_` is not a namespace — it is
+  the word "database", and `DB_HOST`, this server's bind address, is also what almost every
+  compose file calls its Postgres. Qdrant namespaces its variables and so does Weaviate; this
+  follows the convention while renaming is still free. The old `DB_*` name is still read, warns
+  once at startup naming its replacement, and will be removed before the first release.
 
 - **The default feature set is now the minimal supported surface**: `tokio-runtime` +
   `basic-storage`. Full-text search (`text-bm25`), Swagger, GraphQL, WebSocket, S3, LMDB,
@@ -78,7 +84,7 @@ releases. Everything below is unreleased work on `main`.
   sweep that rebuilds an index fires on a change of algorithm, which a table of constant size
   never has. Measured in a soak at 200 rows/s over a fixed 400,000-row key space: 5.2 GB of
   vector file holding 1.2 GB of live rows after 2.4 hours, growing at about 52 GB a day
-  whatever the table's size. A new sweep (`DB_ROW_COMPACTION_INTERVAL_SECS`, default 600)
+  whatever the table's size. A new sweep (`DXMT_ROW_COMPACTION_INTERVAL_SECS`, default 600)
   releases the blocks behind dead rows. Row numbers are unchanged, so nothing above the file
   layer moves; the file's apparent length still grows, and its allocated size no longer does.
 - **Quantizing a table stopped every insert in the process for the length of the training.**

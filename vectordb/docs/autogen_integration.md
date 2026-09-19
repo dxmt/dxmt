@@ -383,25 +383,25 @@ DXMT server can be configured via environment variables in `.env`:
 
 ```bash
 # Server settings
-DB_HOST=0.0.0.0
-DB_PORT=9999
+DXMT_HOST=0.0.0.0
+DXMT_PORT=9999
 
 # Storage settings
-DB_STORAGE_TYPE=tiered          # memory, indexed, object, tiered
-DB_MEMORY_CACHE_SIZE=512        # Memory cache size in MB
+DXMT_STORAGE_TYPE=tiered          # memory, indexed, object, tiered
+DXMT_MEMORY_CACHE_SIZE=512        # Memory cache size in MB
 
 # Object storage (S3)
-DB_OBJECT_STORAGE_PROVIDER=s3
-DB_S3_BUCKET=dxmt-vectordb
-DB_S3_REGION=us-east-1
-DB_S3_ACCESS_KEY=your_access_key
-DB_S3_SECRET_KEY=your_secret_key
+DXMT_OBJECT_STORAGE_PROVIDER=s3
+DXMT_S3_BUCKET=dxmt-vectordb
+DXMT_S3_REGION=us-east-1
+DXMT_S3_ACCESS_KEY=your_access_key
+DXMT_S3_SECRET_KEY=your_secret_key
 
 # Compression
-DB_COMPRESSION=zstd             # zstd, lz4, none
+DXMT_COMPRESSION=zstd             # zstd, lz4, none
 
 # Performance
-DB_WORKER_THREADS=8             # Number of worker threads
+DXMT_WORKER_THREADS=8             # Number of worker threads
 ```
 
 ---
@@ -869,17 +869,17 @@ config = HttpDXMTVectorMemoryConfig(
 
 ```python
 # DXMT server .env
-DB_WORKER_THREADS=16        # More workers
-DB_MEMORY_CACHE_SIZE=2048   # Larger cache
+DXMT_WORKER_THREADS=16        # More workers
+DXMT_MEMORY_CACHE_SIZE=2048   # Larger cache
 ```
 
 #### Optimize for Cost
 
 ```python
 # Use tiered storage
-DB_STORAGE_TYPE=tiered
-DB_MEMORY_CACHE_SIZE=512
-DB_S3_BUCKET=my-bucket
+DXMT_STORAGE_TYPE=tiered
+DXMT_MEMORY_CACHE_SIZE=512
+DXMT_S3_BUCKET=my-bucket
 ```
 
 ### DXMT Server Tuning
@@ -888,7 +888,7 @@ DB_S3_BUCKET=my-bucket
 
 ```bash
 # .env
-DB_MEMORY_CACHE_SIZE=1024  # MB
+DXMT_MEMORY_CACHE_SIZE=1024  # MB
 ```
 
 **Guidelines:**
@@ -899,7 +899,7 @@ DB_MEMORY_CACHE_SIZE=1024  # MB
 #### Storage Type
 
 ```bash
-DB_STORAGE_TYPE=tiered
+DXMT_STORAGE_TYPE=tiered
 ```
 
 **Options:**
@@ -911,7 +911,7 @@ DB_STORAGE_TYPE=tiered
 #### Compression
 
 ```bash
-DB_COMPRESSION=zstd
+DXMT_COMPRESSION=zstd
 ```
 
 **Options:**
@@ -1043,8 +1043,8 @@ print(f"Results: {len(results.results)}")
 3. **Enable tiered storage:**
    ```bash
    # .env
-   DB_STORAGE_TYPE=tiered
-   DB_MEMORY_CACHE_SIZE=1024
+   DXMT_STORAGE_TYPE=tiered
+   DXMT_MEMORY_CACHE_SIZE=1024
    ```
 
 ### Memory Leaks

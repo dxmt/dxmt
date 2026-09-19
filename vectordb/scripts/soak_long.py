@@ -148,14 +148,14 @@ def free_disk_mb(path):
 def start(tag):
     env = dict(os.environ)
     env.update({
-        "DB_WAL_DIR": WAL,
-        "DB_SNAPSHOT_INTERVAL_SECS": str(SNAPSHOT_SECS),
-        "DB_EVICTION_INTERVAL_SECS": str(EVICTION_SECS),
-        "DB_REINDEX_INTERVAL_SECS": str(REINDEX_SECS),
+        "DXMT_WAL_DIR": WAL,
+        "DXMT_SNAPSHOT_INTERVAL_SECS": str(SNAPSHOT_SECS),
+        "DXMT_EVICTION_INTERVAL_SECS": str(EVICTION_SECS),
+        "DXMT_REINDEX_INTERVAL_SECS": str(REINDEX_SECS),
         # The fourth sweep: releases the disk behind row-file rows that updates left behind.
         # An upsert-heavy soak is the workload that needs it, and interleaving it with the
         # other three is the combination worth exercising.
-        "DB_ROW_COMPACTION_INTERVAL_SECS": str(RECLAIM_SECS),
+        "DXMT_ROW_COMPACTION_INTERVAL_SECS": str(RECLAIM_SECS),
         "RUST_LOG": "info",
     })
     cmd = [BIN, "serve", "--host", "127.0.0.1", "--port", str(PORT)]

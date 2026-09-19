@@ -16,7 +16,7 @@
 //! * **Reproducible.** The same request twice is the same graph, or a shared URL shows someone
 //!   else a different picture.
 //!
-//! Every test here is `#[serial]`. The node cap is read from `DB_KNN_GRAPH_MAX_NODES`, and an
+//! Every test here is `#[serial]`. The node cap is read from `DXMT_KNN_GRAPH_MAX_NODES`, and an
 //! environment variable is process-global while cargo runs a binary's tests in parallel threads
 //! — so without this the cap test's `set_var` reaches whichever tests happen to be running
 //! beside it, and they fail for a reason that has nothing to do with them. It cost one
@@ -249,7 +249,7 @@ async fn it_refuses_a_graph_too_big_to_build() {
     // The work is quadratic in the node count, so doubling the request quadruples the wait. A
     // ceiling that refuses beats one that takes a minute, because a caller cannot tell a slow
     // answer from a hung one.
-    std::env::set_var("DB_KNN_GRAPH_MAX_NODES", "50");
+    std::env::set_var("DXMT_KNN_GRAPH_MAX_NODES", "50");
     let storage = filled(200).await;
 
     let error = storage
@@ -275,7 +275,7 @@ async fn it_refuses_a_graph_too_big_to_build() {
             .sampled,
         50
     );
-    std::env::remove_var("DB_KNN_GRAPH_MAX_NODES");
+    std::env::remove_var("DXMT_KNN_GRAPH_MAX_NODES");
 }
 
 #[tokio::test]

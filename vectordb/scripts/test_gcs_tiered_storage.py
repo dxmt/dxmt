@@ -401,7 +401,7 @@ def main():
             print_error("\nGCS connectivity test failed. Check your credentials and bucket configuration.")
             print_info("Make sure environment variables are set:")
             print_info("  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
-            print_info("  DB_S3_BUCKET, DB_S3_ENDPOINT")
+            print_info("  DXMT_S3_BUCKET, DXMT_S3_ENDPOINT")
             return 1
 
         results["three_tier_flow"] = test_three_tier_flow()

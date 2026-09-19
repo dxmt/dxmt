@@ -22,7 +22,7 @@ use std::time::Instant;
 /// checks, which is why the floor is measured in hundreds of megabytes rather than tens.
 const CACHE_MILLIS: u64 = 500;
 
-/// Default floor as a fraction of total memory, overridable with `DB_MIN_FREE_MEMORY_MB`.
+/// Default floor as a fraction of total memory, overridable with `DXMT_MIN_FREE_MEMORY_MB`.
 ///
 /// It was a flat 1 GB, and 1 GB is not a floor on a large machine: a single batch insert into
 /// a 10M-node graph allocates a `Visited` buffer of one `u32` per node per rayon thread --
@@ -45,7 +45,7 @@ pub(crate) struct MemoryGuard {
 
 impl MemoryGuard {
     pub(crate) fn from_env() -> Self {
-        let configured = std::env::var("DB_MIN_FREE_MEMORY_MB")
+        let configured = crate::config::env::var("DXMT_MIN_FREE_MEMORY_MB")
             .ok()
             .and_then(|v| v.parse::<u64>().ok());
         let floor_bytes = match configured {
@@ -60,7 +60,7 @@ impl MemoryGuard {
             tracing::info!("Write-side memory floor disabled");
         } else {
             tracing::info!(
-                "Writes are refused below {} MB of available memory (DB_MIN_FREE_MEMORY_MB)",
+                "Writes are refused below {} MB of available memory (DXMT_MIN_FREE_MEMORY_MB)",
                 floor_bytes / 1024 / 1024
             );
         }
@@ -98,7 +98,7 @@ impl MemoryGuard {
         Err(crate::Error::ServiceUnavailable {
             message: format!(
                 "{} MB of memory available, under the {} MB floor; writes are refused until \
-                 memory frees up (set DB_MIN_FREE_MEMORY_MB to change or 0 to disable)",
+                 memory frees up (set DXMT_MIN_FREE_MEMORY_MB to change or 0 to disable)",
                 available / 1024 / 1024,
                 self.floor_bytes / 1024 / 1024
             ),
@@ -244,7 +244,7 @@ mod tests {
         // The cache starts populated. With it empty, the first CACHE_MILLIS of the guard's
         // life reported u64::MAX and every write in that window sailed through.
         //
-        // Not through `from_env` with `DB_MIN_FREE_MEMORY_MB` set. The environment is
+        // Not through `from_env` with `DXMT_MIN_FREE_MEMORY_MB` set. The environment is
         // process-wide and the unit tests share one process: while this test held the variable
         // at a billion MB, any test constructing an `IntelligentIndexedStorage` in parallel got
         // that floor and had its inserts refused -- a different victim each run. Reading the

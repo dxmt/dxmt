@@ -1,6 +1,6 @@
 //! HNSW-PQ end to end: the graph walks on codes, the storage layer reranks on the records.
 //!
-//! `DB_INDEX_ALGORITHM=hnsw-pq` pins the family for this process; the table is created,
+//! `DXMT_INDEX_ALGORITHM=hnsw-pq` pins the family for this process; the table is created,
 //! filled past the quantizer's training minimum, rebuilt (which trains and quantizes), and
 //! searched. What the caller sees must be exact-distance ordered even though the index's own
 //! scores are approximate.
@@ -84,7 +84,7 @@ fn recall(found: &[String], truth: &[String]) -> f64 {
 
 #[tokio::test]
 async fn a_quantized_table_answers_with_exact_order() {
-    std::env::set_var("DB_INDEX_ALGORITHM", "hnsw-pq");
+    std::env::set_var("DXMT_INDEX_ALGORITHM", "hnsw-pq");
     let tmp = TempDir::new().unwrap();
     let storage = IntelligentIndexedStorage::new_with_wal(&config(), Some(tmp.path().join("wal")))
         .await

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Swap the system allocator for jemalloc when the `jemalloc` feature is on.
 ///
@@ -82,7 +82,7 @@ enum Commands {
         dashboard: bool,
         /// Serve gRPC on this port, alongside HTTP (standard mode only; requires `api-grpc`).
         /// 0 disables, which is the default.
-        #[arg(long, default_value = "0", env = "DB_GRPC_PORT")]
+        #[arg(long, default_value = "0", env = "DXMT_GRPC_PORT")]
         grpc_port: u16,
     },
     /// Speak the Model Context Protocol over stdin/stdout
@@ -126,6 +126,9 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before `Cli::parse`, because clap reads some variables itself and takes one name each.
+    let legacy = dxmt_vectordb::config::env::adopt_legacy_names();
+
     let cli = Cli::parse();
 
     // MCP owns stdout: it is the JSON-RPC channel. A log line written there lands in the middle
@@ -136,6 +139,19 @@ async fn main() -> Result<()> {
             .init();
     } else {
         tracing_subscriber::fmt::init();
+    }
+
+    // After the subscriber exists, or the warning goes nowhere.
+    if !legacy.is_empty() {
+        for (was, now) in &legacy {
+            warn!("{was} is deprecated and will be removed; use {now} instead");
+        }
+        warn!(
+            "{} environment variable(s) still use the DB_ prefix. It is not a namespace — \
+             DB_HOST is this server's bind address and also what every compose file calls its \
+             Postgres.",
+            legacy.len()
+        );
     }
 
     match cli.command {

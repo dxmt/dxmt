@@ -420,7 +420,7 @@ impl ConfigurationLoader {
         let mut config = EnhancedStorageConfig::default();
 
         // Override with environment variables if present
-        if let Ok(backend) = std::env::var("DXMT_STORAGE_BACKEND") {
+        if let Ok(backend) = crate::config::env::var("DXMT_STORAGE_BACKEND") {
             config.optimization.backend = match backend.as_str() {
                 "memory" => StorageBackend::Memory,
                 "intelligent" => StorageBackend::IntelligentIndexed,
@@ -431,7 +431,7 @@ impl ConfigurationLoader {
             };
         }
 
-        if let Ok(latency) = std::env::var("DXMT_TARGET_LATENCY_MS") {
+        if let Ok(latency) = crate::config::env::var("DXMT_TARGET_LATENCY_MS") {
             if let Ok(latency_val) = latency.parse::<f64>() {
                 config
                     .optimization
@@ -440,7 +440,7 @@ impl ConfigurationLoader {
             }
         }
 
-        if let Ok(budget) = std::env::var("DXMT_BUDGET_LIMIT") {
+        if let Ok(budget) = crate::config::env::var("DXMT_BUDGET_LIMIT") {
             if let Ok(budget_val) = budget.parse::<f64>() {
                 config.optimization.cost_constraints.total_budget_limit = budget_val;
             }

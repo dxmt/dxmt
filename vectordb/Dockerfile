@@ -122,8 +122,8 @@ WORKDIR /data
 # 设置环境变量
 # `VECTORDB_ROOT_DIR`, `VECTORDB_CONFIG_DIR` and `VECTORDB_LOG_DIR` used to be set here and
 # were read by no code at all -- three variables that looked like configuration and were
-# decoration. `DB_ROOT_DIR` is the one the server actually reads; everything else hangs off it.
-ENV DB_ROOT_DIR=/data \
+# decoration. `DXMT_ROOT_DIR` is the one the server actually reads; everything else hangs off it.
+ENV DXMT_ROOT_DIR=/data \
     RUST_LOG=info \
     PORT=9999
 

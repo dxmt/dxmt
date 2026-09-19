@@ -995,7 +995,7 @@ pub async fn delete_records(
 /// corpus, not 1.0. **`exact` scores every live row**, which is the only way to find out what
 /// recall your index is actually giving you on your own data: run the same query twice and
 /// compare. It costs a full pass over the table's vectors and is refused above
-/// `DB_EXACT_SCAN_MAX` rows (default 1,000,000); a filter narrows what it has to read.
+/// `DXMT_EXACT_SCAN_MAX` rows (default 1,000,000); a filter narrows what it has to read.
 ///
 /// `POST /api/v1/tables/{table_name}/batch_search` is an alias for this route and answers
 /// identically; it does not batch anything.
@@ -1442,7 +1442,7 @@ pub async fn insert_records_optimized(
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct KnnGraphRequest {
-    /// How many records to sample as nodes. Default 1,000, capped by `DB_KNN_GRAPH_MAX_NODES`.
+    /// How many records to sample as nodes. Default 1,000, capped by `DXMT_KNN_GRAPH_MAX_NODES`.
     pub sample: Option<usize>,
     /// Neighbours per node. Default 15.
     pub neighbours: Option<usize>,

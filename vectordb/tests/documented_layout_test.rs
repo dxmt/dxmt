@@ -3,7 +3,8 @@
 //! `src/config/layout.rs` decides where everything goes; `README.md` tells an operator, and
 //! `.env.example` is what they copy. Those two drift silently — the README carried
 //! `DB_WAL_DIR=./data/wal` for a while after the default had moved to `~/.dxmt/store`, and
-//! `.env.example` still *assigned* `DB_SSD_CACHE_DIR=./cache`, so copying the file as
+//! `.env.example` still *assigned* `DB_SSD_CACHE_DIR=./cache` (both under the pre-rename
+//! prefix), so copying the file as
 //! instructed re-introduced the working-directory-relative path the layout exists to avoid.
 //!
 //! These read the source rather than restate it, so adding a variable to `layout.rs` and not
@@ -20,7 +21,7 @@ fn crate_file(relative: &str) -> String {
 fn variables_layout_reads() -> Vec<String> {
     let source = crate_file("src/config/layout.rs");
     let mut found: Vec<String> = source
-        .match_indices("\"DB_")
+        .match_indices("\"DXMT_")
         .filter_map(|(at, _)| {
             let rest = &source[at + 1..];
             rest.find('"').map(|end| rest[..end].to_string())
@@ -57,11 +58,11 @@ fn the_readme_names_every_layout_variable() {
 #[test]
 fn the_readme_prints_the_defaults_the_code_uses() {
     let readme = crate_file("README.md");
-    for claim in ["~/.dxmt", "$DB_ROOT_DIR/store", "$DB_ROOT_DIR/backups"] {
+    for claim in ["~/.dxmt", "$DXMT_ROOT_DIR/store", "$DXMT_ROOT_DIR/backups"] {
         assert!(readme.contains(claim), "README.md no longer says {claim:?}");
     }
     assert!(
-        !readme.contains("DB_WAL_DIR=./data/wal"),
+        !readme.contains("DXMT_WAL_DIR=./data/wal"),
         "the README still advertises the pre-~/.dxmt default"
     );
 }

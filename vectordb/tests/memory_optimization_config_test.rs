@@ -10,7 +10,7 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn clear_env_vars() {
-    std::env::remove_var("DB_MEMORY_OPTIMIZATION");
+    std::env::remove_var("DXMT_MEMORY_OPTIMIZATION");
 }
 
 #[test]
@@ -34,12 +34,12 @@ fn test_global_config_memory_optimization_true() {
     clear_env_vars();
 
     // 设置为 true
-    std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
+    std::env::set_var("DXMT_MEMORY_OPTIMIZATION", "true");
 
     let config = AppConfig::default();
     assert!(
         config.tables.default_memory_optimization,
-        "memory_optimization should be true when DB_MEMORY_OPTIMIZATION=true"
+        "memory_optimization should be true when DXMT_MEMORY_OPTIMIZATION=true"
     );
 
     clear_env_vars();
@@ -51,12 +51,12 @@ fn test_global_config_memory_optimization_false() {
     clear_env_vars();
 
     // 设置为 false
-    std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
+    std::env::set_var("DXMT_MEMORY_OPTIMIZATION", "false");
 
     let config = AppConfig::default();
     assert!(
         !config.tables.default_memory_optimization,
-        "memory_optimization should be false when DB_MEMORY_OPTIMIZATION=false"
+        "memory_optimization should be false when DXMT_MEMORY_OPTIMIZATION=false"
     );
 
     clear_env_vars();
@@ -139,7 +139,7 @@ fn test_config_hierarchy_table_overrides_global() {
     clear_env_vars();
 
     // 设置全局配置为 true
-    std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
+    std::env::set_var("DXMT_MEMORY_OPTIMIZATION", "true");
     let global_config = AppConfig::default();
     assert!(global_config.tables.default_memory_optimization);
 
@@ -177,7 +177,7 @@ fn test_config_hierarchy_uses_global_when_none() {
     clear_env_vars();
 
     // 设置全局配置为 false
-    std::env::set_var("DB_MEMORY_OPTIMIZATION", "false");
+    std::env::set_var("DXMT_MEMORY_OPTIMIZATION", "false");
     let global_config = AppConfig::default();
     assert!(!global_config.tables.default_memory_optimization);
 
@@ -215,7 +215,7 @@ fn test_mixed_table_configurations() {
     clear_env_vars();
 
     // 设置全局配置为 true
-    std::env::set_var("DB_MEMORY_OPTIMIZATION", "true");
+    std::env::set_var("DXMT_MEMORY_OPTIMIZATION", "true");
     let global_config = AppConfig::default();
 
     // 表1：使用全局配置（None）

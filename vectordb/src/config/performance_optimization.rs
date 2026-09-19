@@ -171,43 +171,43 @@ impl PerformanceConfig {
         let mut config = Self::default();
 
         // CPU核心分配
-        if let Ok(query_cores) = std::env::var("PERF_QUERY_CORES") {
+        if let Ok(query_cores) = crate::config::env::var("DXMT_PERF_QUERY_CORES") {
             if let Ok(cores) = query_cores.parse::<usize>() {
                 config.cpu_allocation.query_cores = cores
             }
         }
 
-        if let Ok(index_cores) = std::env::var("PERF_INDEX_CORES") {
+        if let Ok(index_cores) = crate::config::env::var("DXMT_PERF_INDEX_CORES") {
             if let Ok(cores) = index_cores.parse::<usize>() {
                 config.cpu_allocation.index_cores = cores
             }
         }
 
-        if let Ok(system_cores) = std::env::var("PERF_SYSTEM_CORES") {
+        if let Ok(system_cores) = crate::config::env::var("DXMT_PERF_SYSTEM_CORES") {
             if let Ok(cores) = system_cores.parse::<usize>() {
                 config.cpu_allocation.system_cores = cores
             }
         }
 
         // 内存配置
-        if let Ok(vector_cache) = std::env::var("PERF_VECTOR_CACHE_GB") {
+        if let Ok(vector_cache) = crate::config::env::var("DXMT_PERF_VECTOR_CACHE_GB") {
             if let Ok(gb) = vector_cache.parse::<usize>() {
                 config.memory_tiers.vector_cache_gb = gb
             }
         }
 
-        if let Ok(index_memory) = std::env::var("PERF_INDEX_MEMORY_GB") {
+        if let Ok(index_memory) = crate::config::env::var("DXMT_PERF_INDEX_MEMORY_GB") {
             if let Ok(gb) = index_memory.parse::<usize>() {
                 config.memory_tiers.index_memory_gb = gb
             }
         }
 
         // SIMD配置
-        if let Ok(enable_avx512) = std::env::var("PERF_ENABLE_AVX512") {
+        if let Ok(enable_avx512) = crate::config::env::var("DXMT_PERF_ENABLE_AVX512") {
             config.simd_optimization.enable_avx512 = enable_avx512 == "true"
         }
 
-        if let Ok(batch_size) = std::env::var("PERF_VECTOR_BATCH_SIZE") {
+        if let Ok(batch_size) = crate::config::env::var("DXMT_PERF_VECTOR_BATCH_SIZE") {
             if let Ok(size) = batch_size.parse::<usize>() {
                 config.simd_optimization.vector_batch_size = size
             }

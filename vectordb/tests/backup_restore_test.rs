@@ -1,7 +1,7 @@
 //! A backup has to restore. Anything short of that is a directory of files.
 //!
 //! `POST /backup` answers with a manifest listing what it wrote and a `restore` string telling
-//! the operator to replace `DB_WAL_DIR` with the directory. Nothing checked that following
+//! the operator to replace `DXMT_WAL_DIR` with the directory. Nothing checked that following
 //! those instructions produces a working server with the data still in it, and "the backup
 //! reported success" is the kind of assurance that holds until the day it matters. This is the
 //! same failure shape as `deleted_count` reporting the requested count rather than the deleted
@@ -33,7 +33,7 @@ impl Drop for Server {
 
 /// A server over `wal_dir`, so a restore can be pointed at a backup directory.
 ///
-/// `DB_BACKUP_ROOT` is `/tmp` here because these tests write their backups to their own
+/// `DXMT_BACKUP_ROOT` is `/tmp` here because these tests write their backups to their own
 /// temporary directories, which are nowhere near the WAL. A backup destination has to be inside
 /// the root the server was told about -- the default being the WAL directory's parent -- and
 /// this is what an operator does when the backups belong on another mount. The refusal itself
@@ -46,12 +46,12 @@ fn start_server_on(wal_dir: &Path) -> Server {
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", wal_dir)
-        .env("DB_BACKUP_ROOT", std::env::temp_dir())
-        .env("DB_INDEX_ALGORITHM", "hnsw-pq")
+        .env("DXMT_WAL_DIR", wal_dir)
+        .env("DXMT_BACKUP_ROOT", std::env::temp_dir())
+        .env("DXMT_INDEX_ALGORITHM", "hnsw-pq")
         // A sweep mid-test would make a failure hard to attribute.
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -189,13 +189,13 @@ fn a_backup_restores_into_a_working_server() {
             parsed["data"]["bytes"].as_u64().unwrap() > 0,
             "a backup of zero bytes is not a backup"
         );
-        // The manifest tells the operator to replace DB_WAL_DIR with this directory. The test
+        // The manifest tells the operator to replace DXMT_WAL_DIR with this directory. The test
         // below does exactly that, so the instruction is what is under test, not a paraphrase.
         assert!(
             parsed["data"]["restore"]
                 .as_str()
                 .unwrap()
-                .contains("DB_WAL_DIR"),
+                .contains("DXMT_WAL_DIR"),
             "the manifest should say how to restore"
         );
         before
@@ -335,7 +335,7 @@ fn the_manifest_lists_the_files_that_are_there() {
 /// a caller who *is* authorised and points a backup at the wrong filesystem has made a mistake,
 /// and a mistake deserves an error.
 ///
-/// The bound is a root directory — `DB_BACKUP_ROOT`, defaulting to the WAL directory's parent.
+/// The bound is a root directory — `DXMT_BACKUP_ROOT`, defaulting to the WAL directory's parent.
 /// Checked after the destination is resolved, so neither `..` nor a symlink steps outside it.
 #[test]
 fn a_backup_outside_the_root_is_refused() {
@@ -350,10 +350,10 @@ fn a_backup_outside_the_root_is_refused() {
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", wal.path().join("wal"))
-        .env("DB_BACKUP_ROOT", allowed.path())
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_WAL_DIR", wal.path().join("wal"))
+        .env("DXMT_BACKUP_ROOT", allowed.path())
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -395,7 +395,7 @@ fn a_backup_outside_the_root_is_refused() {
         assert_eq!(answer["success"], false, "{what} was accepted: {answer}");
         let message = answer["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains("DB_BACKUP_ROOT"),
+            message.contains("DXMT_BACKUP_ROOT"),
             "{what} was refused without saying what to change: {message}"
         );
         assert!(

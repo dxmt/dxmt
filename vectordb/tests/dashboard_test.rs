@@ -44,9 +44,9 @@ fn start(with_dashboard: bool) -> Server {
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
-        .env("DB_WAL_DIR", dir.path().join("wal"))
-        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .env("DXMT_WAL_DIR", dir.path().join("wal"))
+        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if with_dashboard {

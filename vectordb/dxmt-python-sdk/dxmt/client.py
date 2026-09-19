@@ -283,7 +283,7 @@ class DXMTClient:
             enable_full_text_search: Enable full-text search.
             text_fields: Text field configurations.
             memory_optimization: Enable memory optimization (optional).
-                - None: Use global config (DB_MEMORY_OPTIMIZATION)
+                - None: Use global config (DXMT_MEMORY_OPTIMIZATION)
                 - True: Enable memory optimization (Phase 4 Hybrid), saves 85-90% memory, 87-95% recall
                 - False: High accuracy mode (HNSW/Phase 3), maintains 95-99% recall
 

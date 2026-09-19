@@ -61,11 +61,13 @@ const PARALLEL_CHUNK: usize = 16;
 
 fn io_mode() -> IoMode {
     static MODE: std::sync::OnceLock<IoMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("DB_VECTOR_IO").ok().as_deref() {
-        Some("mmap") => IoMode::Mmap,
-        Some("parallel") => IoMode::Parallel,
-        _ => IoMode::Adaptive,
-    })
+    *MODE.get_or_init(
+        || match crate::config::env::var("DXMT_VECTOR_IO").ok().as_deref() {
+            Some("mmap") => IoMode::Mmap,
+            Some("parallel") => IoMode::Parallel,
+            _ => IoMode::Adaptive,
+        },
+    )
 }
 
 /// Major page faults taken by the calling thread so far, or `None` where that is not
@@ -103,12 +105,17 @@ fn major_faults() -> Option<i64> {
     }
 }
 
-/// `DB_VECTOR_PREFETCH=1` issues a `madvise(WILLNEED)` per row before touching the mapping.
+/// `DXMT_VECTOR_PREFETCH=1` issues a `madvise(WILLNEED)` per row before touching the mapping.
 /// Off by default: on 1M rows it cost 13% of warm QPS in syscalls and, cold, the advised
 /// reads still arrived one at a time (p99 80 ms). The parallel path is what serves cold rows.
 fn prefetch_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("DB_VECTOR_PREFETCH").ok().as_deref() == Some("1"))
+    *ON.get_or_init(|| {
+        crate::config::env::var("DXMT_VECTOR_PREFETCH")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
 }
 
 /// How a row is stored: four bytes a dimension, or two.
@@ -538,7 +545,7 @@ impl VectorFile {
     /// candidates made 500 `Vec<f32>`s of 3 KB per query through `read_rows`, which is what
     /// this exists to avoid.
     ///
-    /// `DB_VECTOR_PREFETCH=0` skips the `madvise` pass, for measuring what it costs.
+    /// `DXMT_VECTOR_PREFETCH=0` skips the `madvise` pass, for measuring what it costs.
     pub fn with_rows(&self, rows: &[u64], f: impl FnMut(usize, Option<&[f32]>)) {
         match io_mode() {
             IoMode::Mmap => self.with_rows_mapped(rows, f),

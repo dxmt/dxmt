@@ -92,9 +92,9 @@ async fn write_pass(storage: &IntelligentIndexedStorage, pass: usize) {
 
 #[tokio::test]
 async fn upserts_give_their_disk_back_and_every_live_row_survives() {
-    std::env::set_var("DB_VECTOR_STORE", "disk");
-    std::env::set_var("DB_RECORD_STORE", "disk");
-    std::env::set_var("DB_ROW_RECLAIM_MIN_BYTES", RECLAIM_FLOOR);
+    std::env::set_var("DXMT_VECTOR_STORE", "disk");
+    std::env::set_var("DXMT_RECORD_STORE", "disk");
+    std::env::set_var("DXMT_ROW_RECLAIM_MIN_BYTES", RECLAIM_FLOOR);
     let tmp = TempDir::new().expect("tempdir");
     let wal = tmp.path().join("wal");
 
@@ -203,9 +203,9 @@ async fn upserts_give_their_disk_back_and_every_live_row_survives() {
 
 #[tokio::test]
 async fn a_reclaimed_table_still_recovers_from_its_row_files() {
-    std::env::set_var("DB_VECTOR_STORE", "disk");
-    std::env::set_var("DB_RECORD_STORE", "disk");
-    std::env::set_var("DB_ROW_RECLAIM_MIN_BYTES", RECLAIM_FLOOR);
+    std::env::set_var("DXMT_VECTOR_STORE", "disk");
+    std::env::set_var("DXMT_RECORD_STORE", "disk");
+    std::env::set_var("DXMT_ROW_RECLAIM_MIN_BYTES", RECLAIM_FLOOR);
     let tmp = TempDir::new().expect("tempdir");
     let wal = tmp.path().join("wal");
 

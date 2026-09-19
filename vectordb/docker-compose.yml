@@ -8,9 +8,9 @@ services:
     ports:
       - "9999:9999"
     environment:
-      DB_WAL_DIR: /data/wal
-      DB_SNAPSHOT_INTERVAL_SECS: "300"
-      DB_EVICTION_INTERVAL_SECS: "600"
+      DXMT_WAL_DIR: /data/wal
+      DXMT_SNAPSHOT_INTERVAL_SECS: "300"
+      DXMT_EVICTION_INTERVAL_SECS: "600"
       RUST_LOG: info
     volumes:
       - dxmt-vectordb-data:/data

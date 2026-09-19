@@ -8,18 +8,18 @@ supported single-node server and nothing more.
 
 > **Status: Alpha development, not production-ready.** Records are held in memory and made durable by a write-ahead log,
 > replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
-> `~/.dxmt/store` — everything the server writes lives under one root, `DB_ROOT_DIR`, which
+> `~/.dxmt/store` — everything the server writes lives under one root, `DXMT_ROOT_DIR`, which
 > defaults to `~/.dxmt`. Under the home directory rather than the working directory, so
 > starting the server from somewhere else does not open a different, empty database. **Set
-> `DB_ROOT_DIR` for anything real**: a home directory is usually on the root filesystem, this
+> `DXMT_ROOT_DIR` for anything real**: a home directory is usually on the root filesystem, this
 > table can be tens of gigabytes, and it is often NFS, where `mmap` and `fsync` do not mean
 > what a WAL needs them to mean.
 >
 > ```text
-> ~/.dxmt/                DB_ROOT_DIR
-> ├── store/              the database — back this up      (DB_WAL_DIR)
-> ├── backups/            where POST /backup may write     (DB_BACKUP_ROOT)
-> └── cache/              derived; deleting it costs time, not data  (DB_CACHE_DIR)
+> ~/.dxmt/                DXMT_ROOT_DIR
+> ├── store/              the database — back this up      (DXMT_WAL_DIR)
+> ├── backups/            where POST /backup may write     (DXMT_BACKUP_ROOT)
+> └── cache/              derived; deleting it costs time, not data  (DXMT_CACHE_DIR)
 > ```
 >
 > The three have three different lifetimes, which is why they are three directories. Each can
@@ -166,9 +166,9 @@ When object storage is configured, the write-ahead log and snapshots are also mi
 table nothing has queried for a while can be dropped from memory entirely — records and index —
 leaving its snapshot segments as the recovery source. The next query rehydrates it
 transparently. Without object storage, the durable source remains the local WAL and snapshot
-directory. This behavior is tuned by `DB_EVICTION_INTERVAL_SECS`.
+directory. This behavior is tuned by `DXMT_EVICTION_INTERVAL_SECS`.
 
-A table whose vectors exceed `DB_PARTITION_THRESHOLD_MB` (default 512) switches to a partitioned
+A table whose vectors exceed `DXMT_PARTITION_THRESHOLD_MB` (default 512) switches to a partitioned
 IVF index
 — on its next `index/rebuild`, or automatically at the next re-evaluation sweep: centroids stay in memory and each partition is an immutable segment
 in object storage, fetched only when a query probes it. That bounds memory for a single table
@@ -176,7 +176,7 @@ larger than RAM, which table-level eviction cannot do.
 
 This path is still experimental.
 
-Index selection is re-checked on a timer (`DB_REINDEX_INTERVAL_SECS`, default 900) and the
+Index selection is re-checked on a timer (`DXMT_REINDEX_INTERVAL_SECS`, default 900) and the
 index is rebuilt when a table's size no longer suits the algorithm it has:
 
 | Dataset size | Algorithm         |
@@ -186,7 +186,7 @@ index is rebuilt when a table's size no longer suits the algorithm it has:
 | 100K–1M      | HNSW-PQ           |
 | ≥ 1M         | DiskANN Enhanced  |
 
-One caveat: this table applies when `DB_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
+One caveat: this table applies when `DXMT_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
 a separate path that yields HNSW below 100K and HNSW-PQ above it.
 
 The same sweep also rebuilds a table whose graph has accumulated tombstones. An update cannot
@@ -207,22 +207,25 @@ under the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
 
 ## Configuration
 
-Configuration is read from the environment. Copy `.env.example` and adjust:
+Configuration is read from the environment. Every variable this server reads is `DXMT_*`.
+The `DB_*` names it used to use are still accepted and warn once at startup — `DB_` is not a
+namespace, it is the word "database", and `DB_HOST` is both this server's bind address and
+what nearly every compose file calls its Postgres. Copy `.env.example` and adjust:
 
 ```bash
-DB_HOST=0.0.0.0
-DB_PORT=9999
-DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
-DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
-DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
-DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
-DB_ROW_COMPACTION_INTERVAL_SECS=600 # release the disk behind dead row-file rows; 0 disables
-DB_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
-DB_MEMORY_CACHE_SIZE=512    # MB
-DB_COMPRESSION=zstd         # zstd | lz4 | none
+DXMT_HOST=0.0.0.0
+DXMT_PORT=9999
+DXMT_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
+DXMT_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
+DXMT_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
+DXMT_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
+DXMT_ROW_COMPACTION_INTERVAL_SECS=600 # release the disk behind dead row-file rows; 0 disables
+DXMT_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
+DXMT_MEMORY_CACHE_SIZE=512    # MB
+DXMT_COMPRESSION=zstd         # zstd | lz4 | none
 ```
 
-`DB_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
+`DXMT_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
 `IntelligentIndexedStorage` unconditionally.
 
 ### Where the data goes
@@ -231,16 +234,16 @@ One variable moves everything, and each directory can still be moved on its own:
 
 | variable | default | what lives there |
 | --- | --- | --- |
-| `DB_ROOT_DIR` | `~/.dxmt` | the root the rest hang off |
-| `DB_WAL_DIR` | `$DB_ROOT_DIR/store` | WAL, snapshots and row files — **this is the database** |
-| `DB_BACKUP_ROOT` | `$DB_ROOT_DIR/backups` | the only place `POST /backup` may write |
-| `DB_CACHE_DIR` | `$DB_ROOT_DIR/cache` | regenerable; safe to delete while stopped |
-| `DB_SSD_CACHE_DIR` | `$DB_CACHE_DIR/ssd` | the SSD tier |
-| `DB_PROCESSES_DATA_DIR` | `$DB_ROOT_DIR/processes` | per-process scratch |
+| `DXMT_ROOT_DIR` | `~/.dxmt` | the root the rest hang off |
+| `DXMT_WAL_DIR` | `$DXMT_ROOT_DIR/store` | WAL, snapshots and row files — **this is the database** |
+| `DXMT_BACKUP_ROOT` | `$DXMT_ROOT_DIR/backups` | the only place `POST /backup` may write |
+| `DXMT_CACHE_DIR` | `$DXMT_ROOT_DIR/cache` | regenerable; safe to delete while stopped |
+| `DXMT_SSD_CACHE_DIR` | `$DXMT_CACHE_DIR/ssd` | the SSD tier |
+| `DXMT_PROCESSES_DATA_DIR` | `$DXMT_ROOT_DIR/processes` | per-process scratch |
 
-Setting `DB_WAL_DIR` alone moves the database and takes the backups with it, on the reasoning
-that backups belong beside what they back up; naming `DB_ROOT_DIR` explicitly means it, and the
-backups stay under the root. `DB_WAL_DIR=` — set but empty — disables persistence entirely: the
+Setting `DXMT_WAL_DIR` alone moves the database and takes the backups with it, on the reasoning
+that backups belong beside what they back up; naming `DXMT_ROOT_DIR` explicitly means it, and the
+backups stay under the root. `DXMT_WAL_DIR=` — set but empty — disables persistence entirely: the
 server runs from memory and loses everything on restart, which is occasionally what you want in
 a test and never what you want otherwise.
 
@@ -252,17 +255,17 @@ leaves nothing behind.
 
 With no home directory to find — `/nonexistent` under systemd's `DynamicUser=`, `/` in some
 images — the root falls back to the working directory and the server says so on startup. Set
-`DB_ROOT_DIR` there, or `cd` elsewhere and you have opened a different, empty database.
+`DXMT_ROOT_DIR` there, or `cd` elsewhere and you have opened a different, empty database.
 
 Object storage credentials come from the environment only — never commit them. They are read
 into the configuration. Object-storage mirroring is opt-in and best effort:
 
 ```bash
-export DB_OBJECT_STORAGE_PROVIDER=s3
-export DB_S3_BUCKET=<your-bucket>
-export DB_S3_ENDPOINT=<your-endpoint>
-export DB_AWS_ACCESS_KEY_ID=<your-access-key>
-export DB_AWS_SECRET_ACCESS_KEY=<your-secret-key>
+export DXMT_OBJECT_STORAGE_PROVIDER=s3
+export DXMT_S3_BUCKET=<your-bucket>
+export DXMT_S3_ENDPOINT=<your-endpoint>
+export DXMT_AWS_ACCESS_KEY_ID=<your-access-key>
+export DXMT_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 ```
 
 ### Feature Flags
@@ -354,7 +357,7 @@ curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 
 # recall@10 = |overlap| / 10
 ```
 
-It costs a full pass over the table's vectors, so it is refused above `DB_EXACT_SCAN_MAX` rows
+It costs a full pass over the table's vectors, so it is refused above `DXMT_EXACT_SCAN_MAX` rows
 (default 1,000,000) rather than running for minutes; a filter narrows what it has to read.
 
 Four things the table does not say on its own:
@@ -422,7 +425,7 @@ half a minute, and a server that restarts often and filters immediately will fee
 
 These are real gaps, not roadmap aspirations:
 
-- **A backup may only be written inside `DB_BACKUP_ROOT`**, which defaults to the WAL
+- **A backup may only be written inside `DXMT_BACKUP_ROOT`**, which defaults to the WAL
   directory's parent. `POST /backup` takes the destination from the request body, and this
   server has no authentication — so without a bound, anything that can reach the port can name
   any directory the process can write to and have a copy of the database put there. The root is

@@ -679,7 +679,7 @@ def _(table):
     import shutil
     import tempfile
 
-    # A backup may only be written inside `DB_BACKUP_ROOT`, so the probe has to write inside the
+    # A backup may only be written inside `DXMT_BACKUP_ROOT`, so the probe has to write inside the
     # one the server was started with. `scripts/api_tests.sh` passes it; without it the default
     # root is the WAL directory's parent, which this test has no reliable way to guess.
     root = os.environ.get("DXMT_BACKUP_ROOT")

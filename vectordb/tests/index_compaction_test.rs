@@ -105,7 +105,7 @@ async fn nearest(storage: &IntelligentIndexedStorage, i: usize) -> String {
 
 #[tokio::test]
 async fn upserts_leave_tombstones_and_the_sweep_rebuilds_them_away() {
-    std::env::set_var("DB_INDEX_COMPACTION_MIN_SLOTS", MIN_SLOTS);
+    std::env::set_var("DXMT_INDEX_COMPACTION_MIN_SLOTS", MIN_SLOTS);
     let tmp = TempDir::new().expect("tempdir");
     let storage = IntelligentIndexedStorage::new_with_wal(&config(), Some(tmp.path().join("wal")))
         .await

@@ -32,7 +32,7 @@ const DEFAULT_NUM_QUERIES: usize = 100;
 
 /// Which index-selection path to measure.
 ///
-/// `DB_MEMORY_OPTIMIZATION` defaults to true, so a table created without an explicit setting
+/// `DXMT_MEMORY_OPTIMIZATION` defaults to true, so a table created without an explicit setting
 /// goes through `select_memory_optimized_index` (m=16, ef_construction=200, ef_search=50).
 /// Setting this to `false` measures `select_optimal_index` instead (m=8, ef_construction=100,
 /// ef_search=100 below 100K). The two paths produce materially different recall, so a benchmark

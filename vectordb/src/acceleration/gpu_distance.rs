@@ -50,19 +50,19 @@ impl GpuDistanceConfig {
     /// Load configuration from environment variables with sensible defaults.
     pub fn from_env() -> Self {
         Self {
-            device_id: std::env::var("DB_GPU_DEVICE_ID")
+            device_id: crate::config::env::var("DXMT_GPU_DEVICE_ID")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            memory_fraction: std::env::var("DB_GPU_MEMORY_FRACTION")
+            memory_fraction: crate::config::env::var("DXMT_GPU_MEMORY_FRACTION")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.8),
-            batch_threshold: std::env::var("DB_GPU_BATCH_THRESHOLD")
+            batch_threshold: crate::config::env::var("DXMT_GPU_BATCH_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
-            max_batch_size: std::env::var("DB_GPU_MAX_BATCH_SIZE")
+            max_batch_size: crate::config::env::var("DXMT_GPU_MAX_BATCH_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500_000),
