@@ -257,6 +257,32 @@ With no home directory to find — `/nonexistent` under systemd's `DynamicUser=`
 images — the root falls back to the working directory and the server says so on startup. Set
 `DXMT_ROOT_DIR` there, or `cd` elsewhere and you have opened a different, empty database.
 
+### Authentication
+
+Off by default, like Qdrant, Chroma and Weaviate. Set `DXMT_API_KEY` and every route but the
+health probes answers 401 without it:
+
+```bash
+DXMT_API_KEY=$(openssl rand -hex 32) ./target/release/vectordb serve
+curl -H "api-key: $DXMT_API_KEY" localhost:9999/api/v1/tables
+curl -H "Authorization: Bearer $DXMT_API_KEY" localhost:9999/api/v1/tables   # also accepted
+```
+
+`api-key` is Qdrant's header name, so a client already shaped for that needs no new code. The
+key is compared in constant time and never appears in a log or an error body.
+
+**`/health`, `/live` and `/ready` stay open.** A Kubernetes liveness probe cannot carry a
+header, and a server that fails its own health check because authentication was switched on is
+a worse outage than the one the key prevents. They report liveness and durability state, not
+data. `/status` and `/health/metrics` are *not* exempt — those name tables.
+
+**Know what this is.** One static key, no rotation, no accounts, no per-table scoping, and it
+does nothing about anyone who can read the process environment. It is a seatbelt, not a vault:
+it turns an accidentally-reachable port from "anyone who finds it owns the data" into "anyone
+who finds it gets 401", which is the case that actually happens — a demo box that outlived its
+firewall rule. Put TLS in front of it; sending a key over plain HTTP hands it to every hop on
+the way, which is worse than sending none.
+
 Object storage credentials come from the environment only — never commit them. They are read
 into the configuration. Object-storage mirroring is opt-in and best effort:
 
@@ -291,10 +317,10 @@ Off at both levels by default: not in the default feature set, and not served wi
 
 **It is read-only, and the server is not.** The console issues only GETs and the search-shaped
 POSTs; the port it is served on still accepts writes, snapshots and backups from anything that
-can reach it, because this server has no authentication of its own (see
-[SECURITY.md](SECURITY.md)). What the dashboard changes is discoverability — it turns an exposed
-port into a browsable console — so bind it to a private interface or put an authenticating proxy
-in front.
+can reach it. What the dashboard changes is discoverability — it turns an exposed port into a
+browsable console — so bind it to a private interface, set `DXMT_API_KEY` (below), or put an
+authenticating proxy in front. With a key set, the console asks for it once per tab and sends
+it on every request; its static files stay reachable without one, because they carry no data.
 
 ## Client SDKs
 
@@ -427,8 +453,9 @@ These are real gaps, not roadmap aspirations:
 
 - **A backup may only be written inside `DXMT_BACKUP_ROOT`**, which defaults to the WAL
   directory's parent. `POST /backup` takes the destination from the request body, and this
-  server has no authentication — so without a bound, anything that can reach the port can name
-  any directory the process can write to and have a copy of the database put there. The root is
+  server has no authentication unless `DXMT_API_KEY` is set — so without a bound, anything that
+  can reach the port can name any directory the process can write to and have a copy of the
+  database put there. The root is
   checked after symlinks and `..` are resolved. Point it at the mount backups belong on.
 - **A snapshot is the only copy of what it covers**, so back it up — see
   [docs/operations/backup-restore.md](docs/operations/backup-restore.md).

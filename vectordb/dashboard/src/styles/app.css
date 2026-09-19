@@ -422,3 +422,31 @@ tr.clickable:focus-visible { outline-offset: -2px; }
 ul.routes { margin: 0; padding: 0; list-style: none; font-size: 12.5px; }
 ul.routes li { padding: 2px 0; }
 ul.routes button { text-align: left; display: block; padding: 2px 0; }
+
+/* The API key gate. It replaces the page, so it needs to stand on its own. */
+.gate {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+}
+.gate h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.75rem;
+}
+.gate form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin: 1.25rem 0;
+}
+.gate label {
+  display: block;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+.gate input {
+  flex: 1 1 16rem;
+  min-width: 0;
+}

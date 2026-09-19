@@ -25,6 +25,7 @@
  */
 
 import { ApiFailure, unwrap } from './envelope';
+import { keyHeader, reportUnauthorized } from './key';
 import type { Parsed } from '../lib/console';
 import type {
   FullTextQuery,
@@ -91,7 +92,10 @@ async function request<T>(
     response = await fetch(apiBase() + path, {
       method,
       signal,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...keyHeader(),
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (cause) {
@@ -103,6 +107,9 @@ async function request<T>(
       message: cause instanceof Error ? cause.message : String(cause),
     });
   }
+  // Before `unwrap` throws: the gate needs to know, and every caller of this would otherwise
+  // have to remember to tell it.
+  if (response.status === 401) reportUnauthorized();
   const { value, bytes } = await unwrap<T>(response);
   return { value, ms: performance.now() - started, bytes };
 }
@@ -202,7 +209,10 @@ export async function sendRead(request: Parsed, signal?: AbortSignal): Promise<R
     response = await fetch(apiBase() + request.path, {
       method: request.method,
       signal,
-      headers: request.body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...keyHeader(),
+        ...(request.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
       body: request.body === undefined ? undefined : JSON.stringify(request.body),
     });
   } catch (cause) {
@@ -227,4 +237,28 @@ export async function sendRead(request: Parsed, signal?: AbortSignal): Promise<R
     ms: performance.now() - started,
     bytes: text.length,
   };
+}
+
+/**
+ * Does this server want a key, and is the one we hold accepted?
+ *
+ * `/status` is the probe because it needs the key — an endpoint that reports whether
+ * authentication is on would be answering a question to someone who has not authenticated.
+ *
+ * It lives here rather than in the gate that calls it for the same reason everything else
+ * does: `fetch` appears in exactly one file, which is what makes "nothing else can reach the
+ * network" a checkable property rather than a convention. The eslint rule caught the first
+ * version of this sitting in the component.
+ */
+export async function keyIsAccepted(): Promise<boolean> {
+  try {
+    const response = await fetch(apiBase() + '/status', {
+      headers: keyHeader(),
+    });
+    return response.status !== 401;
+  } catch {
+    // Unreachable is not unauthorized. The network banner covers that case, and returning
+    // false here would put a key form in front of a server that is simply down.
+    return true;
+  }
 }

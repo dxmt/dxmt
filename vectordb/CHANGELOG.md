@@ -12,6 +12,12 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **An optional API key.** `DXMT_API_KEY` puts a shared secret in front of every route but the
+  health probes, sent as `api-key` (Qdrant's header name) or `Authorization: Bearer`. Off by
+  default, as it is in Qdrant, Chroma and Weaviate. One static key, no rotation and no accounts
+  — a seatbelt for a port that outlived its firewall rule, not a substitute for TLS and a
+  private network.
+
 - **Durability.** A write-ahead log on the write path, replayed at startup: `kill -9` and
   restart preserves acknowledged writes. Per-table snapshots of records and index carry recovery
   past the log they cover, taken periodically, on shutdown, and after a rebuild; the log is

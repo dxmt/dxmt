@@ -1,3 +1,4 @@
+pub mod auth;
 #[cfg(feature = "api-dashboard")]
 pub mod dashboard;
 #[cfg(feature = "api-graphql")]

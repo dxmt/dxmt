@@ -246,12 +246,15 @@ async fn main() -> Result<()> {
                 } else {
                     // These are off unless asked for: each one widens the exposed surface,
                     // and `create_app()` passes the default, which is all of them off.
-                    let (app, storage) = create_app_with_storage(Interfaces {
-                        swagger,
-                        graphql,
-                        websocket,
-                        dashboard,
-                    })
+                    let (app, storage) = create_app_with_storage(
+                        Interfaces {
+                            swagger,
+                            graphql,
+                            websocket,
+                            dashboard,
+                        },
+                        dxmt_vectordb::api::auth::ApiKey::from_env(),
+                    )
                     .await?;
                     (app, Some(storage))
                 };

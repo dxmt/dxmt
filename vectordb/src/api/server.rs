@@ -89,7 +89,7 @@ pub struct Interfaces {
 
 /// 创建应用程序路由器
 pub async fn create_app() -> Result<Router> {
-    create_app_with_features(Interfaces::default()).await
+    create_app_with_features(Interfaces::default(), None).await
 }
 
 /// Warn when the runtime cannot get round to a one-second timer.
@@ -295,8 +295,11 @@ fn spawn_periodic_snapshots(storage: Arc<IntelligentIndexedStorage>, interval: u
 }
 
 /// 创建带有功能开关的应用程序路由器
-pub async fn create_app_with_features(interfaces: Interfaces) -> Result<Router> {
-    create_app_with_storage(interfaces)
+pub async fn create_app_with_features(
+    interfaces: Interfaces,
+    api_key: Option<crate::api::auth::ApiKey>,
+) -> Result<Router> {
+    create_app_with_storage(interfaces, api_key)
         .await
         .map(|(router, _)| router)
 }
@@ -305,8 +308,13 @@ pub async fn create_app_with_features(interfaces: Interfaces) -> Result<Router> 
 ///
 /// `main` needs it to snapshot on shutdown. Returning only a `Router` left no way to reach it,
 /// which is why a clean SIGTERM used to leave the next start replaying the entire log.
+/// The key is a parameter rather than something this function reads for itself. Every test
+/// that builds a router would otherwise inherit whatever the developer happens to have in
+/// their shell, and a `DXMT_API_KEY` left over from an afternoon of manual testing would turn
+/// every one of them red for a reason none of them mention.
 pub async fn create_app_with_storage(
     interfaces: Interfaces,
+    api_key: Option<crate::api::auth::ApiKey>,
 ) -> Result<(Router, Arc<IntelligentIndexedStorage>)> {
     let Interfaces {
         swagger: enable_swagger,
@@ -503,9 +511,33 @@ pub async fn create_app_with_storage(
         app = app.merge(websocket_routes);
     }
 
+    match &api_key {
+        Some(key) => tracing::info!(
+            "API key required ({}); /health, /live and /ready stay open for probes",
+            key.describe()
+        ),
+        None => tracing::info!(
+            "no API key configured: every endpoint is open. Set {} to require one.",
+            crate::api::auth::KEY_VARIABLE
+        ),
+    }
+
     let app = app
         // 增加请求体大小限制到500MB
         .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+        // Authentication, and the position is the whole of it. `layer` wraps inward-out, so
+        // the last one applied is the outermost: written after `CorsLayer` this ran *before*
+        // it, and a browser's `OPTIONS` preflight got a bare 401 with no CORS headers on it.
+        // The real request then never leaves the browser, and the failure looks like a CORS
+        // misconfiguration rather than a missing key. Manual verification found that; the
+        // unit and integration tests, which use curl and send no preflight, did not.
+        //
+        // Inside the body limit too, so an unauthenticated client cannot make us buffer 500 MB
+        // before we tell it no.
+        .layer(axum::middleware::from_fn_with_state(
+            api_key,
+            crate::api::auth::require_key,
+        ))
         // 添加安全中间件
         .layer(
             CorsLayer::new()
@@ -528,6 +560,7 @@ pub async fn create_app_with_storage(
                 .allow_headers([
                     axum::http::header::CONTENT_TYPE,
                     axum::http::header::AUTHORIZATION,
+                    axum::http::HeaderName::from_static(crate::api::auth::HEADER),
                 ])
                 .max_age(std::time::Duration::from_secs(3600)),
         )

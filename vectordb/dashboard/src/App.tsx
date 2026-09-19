@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Boundary } from './components/Boundary';
+import { KeyGate } from './components/KeyGate';
 import { Sidebar } from './components/Sidebar';
 import { Overview } from './pages/Overview';
 import { Tables } from './pages/Tables';
@@ -13,6 +14,7 @@ import { RecordDetail } from './pages/RecordDetail';
 
 export function App() {
   return (
+    <KeyGate>
     <div className="shell">
       <a className="skip" href="#main">
         Skip to content
@@ -39,5 +41,6 @@ export function App() {
         </Boundary>
       </main>
     </div>
+    </KeyGate>
   );
 }
