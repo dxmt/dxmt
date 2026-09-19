@@ -213,7 +213,6 @@ Configuration is read from the environment. Copy `.env.example` and adjust:
 DB_HOST=0.0.0.0
 DB_PORT=9999
 DB_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
-DB_WAL_DIR=./data/wal       # write-ahead log + snapshots; empty string disables persistence
 DB_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
 DB_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
 DB_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 disables
@@ -225,6 +224,35 @@ DB_COMPRESSION=zstd         # zstd | lz4 | none
 
 `DB_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
 `IntelligentIndexedStorage` unconditionally.
+
+### Where the data goes
+
+One variable moves everything, and each directory can still be moved on its own:
+
+| variable | default | what lives there |
+| --- | --- | --- |
+| `DB_ROOT_DIR` | `~/.dxmt` | the root the rest hang off |
+| `DB_WAL_DIR` | `$DB_ROOT_DIR/store` | WAL, snapshots and row files — **this is the database** |
+| `DB_BACKUP_ROOT` | `$DB_ROOT_DIR/backups` | the only place `POST /backup` may write |
+| `DB_CACHE_DIR` | `$DB_ROOT_DIR/cache` | regenerable; safe to delete while stopped |
+| `DB_SSD_CACHE_DIR` | `$DB_CACHE_DIR/ssd` | the SSD tier |
+| `DB_PROCESSES_DATA_DIR` | `$DB_ROOT_DIR/processes` | per-process scratch |
+
+Setting `DB_WAL_DIR` alone moves the database and takes the backups with it, on the reasoning
+that backups belong beside what they back up; naming `DB_ROOT_DIR` explicitly means it, and the
+backups stay under the root. `DB_WAL_DIR=` — set but empty — disables persistence entirely: the
+server runs from memory and loses everything on restart, which is occasionally what you want in
+a test and never what you want otherwise.
+
+At startup the server creates `store/` and `backups/` and **writes a probe file into each**,
+refusing to serve if either fails. Creating a directory is not the check: `create_dir_all`
+succeeds against a directory that already exists with `r-x` and every write after it fails. It
+does not touch `cache/` — that is made by whatever fills it, so a server that never caches
+leaves nothing behind.
+
+With no home directory to find — `/nonexistent` under systemd's `DynamicUser=`, `/` in some
+images — the root falls back to the working directory and the server says so on startup. Set
+`DB_ROOT_DIR` there, or `cd` elsewhere and you have opened a different, empty database.
 
 Object storage credentials come from the environment only — never commit them. They are read
 into the configuration. Object-storage mirroring is opt-in and best effort:
