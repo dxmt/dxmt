@@ -32,6 +32,12 @@ impl Drop for Server {
 }
 
 /// A server over `wal_dir`, so a restore can be pointed at a backup directory.
+///
+/// `DB_BACKUP_ROOT` is `/tmp` here because these tests write their backups to their own
+/// temporary directories, which are nowhere near the WAL. A backup destination has to be inside
+/// the root the server was told about -- the default being the WAL directory's parent -- and
+/// this is what an operator does when the backups belong on another mount. The refusal itself
+/// is checked by `a_backup_outside_the_root_is_refused`.
 fn start_server_on(wal_dir: &Path) -> Server {
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
@@ -41,6 +47,7 @@ fn start_server_on(wal_dir: &Path) -> Server {
         .arg("--port")
         .arg(port.to_string())
         .env("DB_WAL_DIR", wal_dir)
+        .env("DB_BACKUP_ROOT", std::env::temp_dir())
         .env("DB_INDEX_ALGORITHM", "hnsw-pq")
         // A sweep mid-test would make a failure hard to attribute.
         .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
@@ -317,4 +324,95 @@ fn the_manifest_lists_the_files_that_are_there() {
         .read_to_end(&mut contents)
         .unwrap();
     assert!(!contents.is_empty(), "the snapshot manifest is empty");
+}
+
+/// `path` comes off the wire, and until this it bounded nothing.
+///
+/// A request could name any directory the process can write to and the handler would create it
+/// and fill it with a copy of the database — the records, the vectors, the snapshot and the WAL
+/// tail. That is an exfiltration route and a write primitive at once, and on this server it
+/// needs no credentials because there are none. It is worth closing on its own terms even so:
+/// a caller who *is* authorised and points a backup at the wrong filesystem has made a mistake,
+/// and a mistake deserves an error.
+///
+/// The bound is a root directory — `DB_BACKUP_ROOT`, defaulting to the WAL directory's parent.
+/// Checked after the destination is resolved, so neither `..` nor a symlink steps outside it.
+#[test]
+fn a_backup_outside_the_root_is_refused() {
+    let wal = tempfile::TempDir::new().unwrap();
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let allowed = tempfile::TempDir::new().unwrap();
+
+    let port = free_port();
+    let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .arg("serve")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("DB_WAL_DIR", wal.path().join("wal"))
+        .env("DB_BACKUP_ROOT", allowed.path())
+        .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
+        .env("DB_EVICTION_INTERVAL_SECS", "0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn the vectordb binary");
+    let server = Server { child, port };
+    for _ in 0..160 {
+        if curl(server.port, "GET", "/health", None).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let backup = |destination: String| -> serde_json::Value {
+        let (_status, body) = curl(
+            server.port,
+            "POST",
+            "/backup",
+            Some(&format!(r#"{{"path":"{destination}"}}"#)),
+        )
+        .expect("the server answered");
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"))
+    };
+
+    // Inside the root: allowed, and it really writes.
+    let inside = allowed.path().join("good");
+    let answer = backup(inside.to_string_lossy().to_string());
+    assert_eq!(answer["success"], true, "{answer}");
+    assert!(inside.join("BACKUP.json").exists());
+
+    // Outside it: refused, and the message names the variable to change.
+    for (what, destination) in [
+        ("a directory elsewhere", elsewhere.path().join("out")),
+        (
+            "an escape with ..",
+            allowed.path().join("..").join("escaped-backup"),
+        ),
+    ] {
+        let answer = backup(destination.to_string_lossy().to_string());
+        assert_eq!(answer["success"], false, "{what} was accepted: {answer}");
+        let message = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("DB_BACKUP_ROOT"),
+            "{what} was refused without saying what to change: {message}"
+        );
+        assert!(
+            !destination.exists(),
+            "{what} was refused and written anyway, at {}",
+            destination.display()
+        );
+    }
+
+    // A symlink inside the root pointing out of it is resolved before the check, not after.
+    let link = allowed.path().join("link");
+    std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+    let through_link = link.join("via-symlink");
+    let answer = backup(through_link.to_string_lossy().to_string());
+    assert_eq!(
+        answer["success"], false,
+        "a symlink out of the root was followed: {answer}"
+    );
+    assert!(!elsewhere.path().join("via-symlink").exists());
 }

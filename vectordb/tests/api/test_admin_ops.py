@@ -25,9 +25,14 @@ import pytest
 from .helpers.client import call, get, post
 from .helpers.corpus import BY_ID, CORPUS, ORDER_FROM_R1, ids_of, query_at
 
-#: The *server* writes the backup, so the destination has to be a path it can write, and one
-#: outside `DB_WAL_DIR` -- `backup_to` rejects an overlapping destination outright.
-BACKUP_ROOT = "/tmp/dxmt_api_backup"
+#: The *server* writes the backup, so the destination has to be a path it can write: outside
+#: `DB_WAL_DIR`, which `backup_to` rejects as an overlapping destination, and *inside*
+#: `DB_BACKUP_ROOT`, which bounds where a request may have the database copied to at all.
+#:
+#: This was `/tmp/dxmt_api_backup` and passed because the root defaulted to the WAL directory's
+#: parent, which is `/tmp` under this script. Reading the root the server was actually given is
+#: the difference between testing the rule and happening not to trip over it.
+BACKUP_ROOT = os.environ.get("DXMT_BACKUP_ROOT")
 
 #: Set by `scripts/api_tests.sh`. Absent when attaching to a server someone else started.
 WAL_DIR = os.environ.get("DXMT_WAL_DIR")
@@ -145,8 +150,12 @@ def test_a_snapshot_leaves_the_data_readable(fresh_table):
 # ---- POST /backup ----------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not os.environ.get("DXMT_BACKUP_ROOT"),
+    reason="DXMT_BACKUP_ROOT is only set when this suite starts the server",
+)
 def test_a_backup_is_written_and_describes_itself(table):
-    dest = f"{BACKUP_ROOT}_{uuid.uuid4().hex[:8]}"
+    dest = os.path.join(BACKUP_ROOT or "", f"out_{uuid.uuid4().hex[:8]}")
     try:
         manifest = post("/backup", {"path": dest}).json()["data"]
 

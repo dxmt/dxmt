@@ -678,7 +678,14 @@ def _(table, alterable=None):
 def _(table):
     import shutil
     import tempfile
-    destination = tempfile.mkdtemp(prefix="dxmt-backup-probe-")
+
+    # A backup may only be written inside `DB_BACKUP_ROOT`, so the probe has to write inside the
+    # one the server was started with. `scripts/api_tests.sh` passes it; without it the default
+    # root is the WAL directory's parent, which this test has no reliable way to guess.
+    root = os.environ.get("DXMT_BACKUP_ROOT")
+    if not root:
+        pytest.skip("DXMT_BACKUP_ROOT is not set; run through scripts/api_tests.sh")
+    destination = tempfile.mkdtemp(prefix="dxmt-backup-probe-", dir=root)
     try:
         response = post("/backup", {"path": destination}, expect_ok=False)
         if not response.json().get("success"):

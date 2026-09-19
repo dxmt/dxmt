@@ -2172,6 +2172,43 @@ impl IntelligentIndexedStorage {
     ///
     /// 先强制快照再拷贝，顺序不能反：快照会把内存里尚未落盘的写入固定下来，并把日志压到
     /// 快照点。反过来拷的话，拿到的是一份旧快照配一段与之不匹配的日志。
+    /// Where backups may be written: `DB_BACKUP_ROOT`, or the WAL directory's parent.
+    ///
+    /// The parent rather than the WAL directory itself, because a backup inside it is refused
+    /// for a separate reason -- so the default is the nearest place that is both obvious and
+    /// allowed.
+    fn backup_root(wal_dir: &std::path::Path) -> PathBuf {
+        match std::env::var("DB_BACKUP_ROOT") {
+            Ok(root) if !root.trim().is_empty() => PathBuf::from(root),
+            _ => wal_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        }
+    }
+
+    /// The destination as it will actually be resolved, with symlinks followed.
+    ///
+    /// A directory that does not exist yet cannot be canonicalised, so its parent is resolved
+    /// instead and the final component appended -- which is also what stops `../` and a symlink
+    /// in the parent chain from stepping outside the root checked against it.
+    fn resolve_backup_destination(dest: &std::path::Path) -> crate::Result<PathBuf> {
+        if dest.exists() {
+            return Ok(std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()));
+        }
+        let parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let parent = std::fs::canonicalize(parent).map_err(|e| {
+            crate::Error::InvalidInput(format!(
+                "backup destination {}: its parent directory does not exist ({e})",
+                dest.display()
+            ))
+        })?;
+        let name = dest.file_name().ok_or_else(|| {
+            crate::Error::InvalidInput("backup destination must name a directory".to_string())
+        })?;
+        Ok(parent.join(name))
+    }
+
     pub async fn backup_to(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(
@@ -2186,20 +2223,35 @@ impl IntelligentIndexedStorage {
         // taking a snapshot so an operator gets a deterministic configuration error instead of
         // a partially written backup.
         let source = std::fs::canonicalize(wal_dir).unwrap_or_else(|_| wal_dir.clone());
-        let destination = if dest.exists() {
-            std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf())
-        } else {
-            let parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            parent.join(dest.file_name().ok_or_else(|| {
-                crate::Error::InvalidInput("backup destination must name a directory".to_string())
-            })?)
-        };
+        let destination = Self::resolve_backup_destination(dest)?;
         if destination == source || destination.starts_with(&source) {
             return Err(crate::Error::InvalidInput(format!(
                 "backup destination {} must not be inside WAL directory {}",
                 dest.display(),
                 wal_dir.display()
+            )));
+        }
+
+        // And it must be somewhere this server was told it may write.
+        //
+        // `path` comes off the wire, and nothing else bounded it: a request could name any
+        // directory the process can write to, and the handler would create it and fill it with
+        // a copy of the database. That is a write primitive as well as an exfiltration route,
+        // and it needs no authentication because this server has none -- but it is worth
+        // closing on its own terms, because an authenticated caller pointing a backup at the
+        // wrong filesystem is a mistake rather than an attack and deserves an error either way.
+        //
+        // The root defaults to the WAL directory's parent, which is where a backup taken with
+        // no configuration at all should land. `DB_BACKUP_ROOT` moves it -- to the mount the
+        // backups actually belong on, usually.
+        let root = Self::backup_root(wal_dir);
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !destination.starts_with(&root) {
+            return Err(crate::Error::InvalidInput(format!(
+                "backup destination {} is outside {}; set DB_BACKUP_ROOT to the directory \
+                 backups may be written to",
+                dest.display(),
+                root.display()
             )));
         }
 

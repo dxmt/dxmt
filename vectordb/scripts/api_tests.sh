@@ -74,6 +74,7 @@ for mode in $MODES; do
   # runs and let one table name collide, and the memory run silently exercises the disk path and
   # passes.
   wal_dir=$(mktemp -d)
+  backup_root=$(mktemp -d)
   log=$(mktemp)
 
   # `DB_WAL_DIR` must be set. Without one, *both* stores fall back to memory whatever these
@@ -85,6 +86,7 @@ for mode in $MODES; do
   DB_RECORD_STORE="$mode" \
   DB_VECTOR_STORE="$mode" \
   DB_WAL_DIR="$wal_dir" \
+  DB_BACKUP_ROOT="$backup_root" \
   DB_INDEX_ALGORITHM=hnsw-pq \
   DB_SNAPSHOT_INTERVAL_SECS=0 \
   DB_EVICTION_INTERVAL_SECS=0 \
@@ -109,7 +111,13 @@ for mode in $MODES; do
     # `DXMT_WAL_DIR` is passed so a test can assert something about where the server keeps its
     # durable state -- `POST /backup` refusing a destination inside it, for one. Tests that need
     # it skip when it is absent, so attaching to someone else's server still works.
+    #
+    # `DXMT_BACKUP_ROOT` mirrors the `DB_BACKUP_ROOT` the server was started with: a backup may
+    # only be written inside it, so a test that takes one has to know where that is. It used to
+    # work by accident -- the WAL lives under `/tmp`, so the default root was `/tmp` and any
+    # `mkdtemp` landed inside it -- and an accident is not coverage.
     DXMT_URL="http://127.0.0.1:$port" DXMT_STORAGE_MODE="$mode" DXMT_WAL_DIR="$wal_dir" \
+    DXMT_BACKUP_ROOT="$backup_root" \
       $PYTEST tests/api "$@"
     rc=$?
     if [ "$rc" = 0 ]; then

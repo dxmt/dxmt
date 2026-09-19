@@ -377,6 +377,11 @@ half a minute, and a server that restarts often and filters immediately will fee
 
 These are real gaps, not roadmap aspirations:
 
+- **A backup may only be written inside `DB_BACKUP_ROOT`**, which defaults to the WAL
+  directory's parent. `POST /backup` takes the destination from the request body, and this
+  server has no authentication — so without a bound, anything that can reach the port can name
+  any directory the process can write to and have a copy of the database put there. The root is
+  checked after symlinks and `..` are resolved. Point it at the mount backups belong on.
 - **A snapshot is the only copy of what it covers**, so back it up — see
   [docs/operations/backup-restore.md](docs/operations/backup-restore.md).
   Briefly: The WAL is compacted once a snapshot
