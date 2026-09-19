@@ -37,7 +37,53 @@ use crate::{
     embeddings::EmbeddingManager,
 };
 
-/// WAL 目录：`DB_WAL_DIR` 覆盖，默认 `./data/wal`，显式设为空串关闭持久化。
+/// The directory a default installation keeps its data in.
+///
+/// Relative to the user rather than to the process's working directory, which is what
+/// `./data/wal` was: start the server from somewhere else and it opens a *different, empty*
+/// database, leaving the real one on disk. Nothing is lost and everything looks lost, which is
+/// the worst way for this to go wrong.
+const DEFAULT_WAL_UNDER_HOME: &str = ".dxmt/wal";
+
+/// What `./data/wal` used to be, kept so an existing installation is not stranded.
+const LEGACY_WAL_DIR: &str = "./data/wal";
+
+/// Where the WAL goes when `DB_WAL_DIR` says nothing, and what to say about it.
+///
+/// Three cases, and the third is the one that matters. A server that already has data at the
+/// old default must not quietly start empty beside it just because the default moved — so the
+/// old directory wins when it holds anything, and says so. Setting `DB_WAL_DIR`, or moving the
+/// directory, ends the message.
+fn default_wal_dir(
+    home: Option<std::path::PathBuf>,
+    legacy: &std::path::Path,
+) -> (std::path::PathBuf, Option<String>) {
+    let legacy_has_data =
+        std::fs::read_dir(legacy).is_ok_and(|mut entries| entries.next().is_some());
+
+    match home {
+        Some(home) if !legacy_has_data => (home.join(DEFAULT_WAL_UNDER_HOME), None),
+        Some(_) if legacy_has_data => (
+            legacy.to_path_buf(),
+            Some(format!(
+                "using {} because it already holds data; the default moved to \
+                 ~/{DEFAULT_WAL_UNDER_HOME}, which does not depend on where the server is \
+                 started from. Move the directory or set DB_WAL_DIR to silence this.",
+                legacy.display()
+            )),
+        ),
+        _ => (
+            legacy.to_path_buf(),
+            Some(format!(
+                "no home directory, so the WAL is {} — relative to the working directory, so \
+                 starting the server elsewhere opens a different database. Set DB_WAL_DIR.",
+                legacy.display()
+            )),
+        ),
+    }
+}
+
+/// WAL 目录：`DB_WAL_DIR` 覆盖，默认 `~/.dxmt/wal`，显式设为空串关闭持久化。
 ///
 /// 只在服务端入口读环境变量，不放进 `IntelligentIndexedStorage::new`——那个构造函数有
 /// 四十多个调用点（单测、bench、example），让它们各自往磁盘写日志会互相回放污染。
@@ -47,8 +93,34 @@ pub(crate) fn wal_dir_from_env() -> Option<std::path::PathBuf> {
             tracing::warn!("DB_WAL_DIR is empty: WAL disabled, data will not survive a restart");
             None
         }
-        Ok(dir) => Some(std::path::PathBuf::from(dir)),
-        Err(_) => Some(std::path::PathBuf::from("./data/wal")),
+        Ok(dir) => {
+            tracing::info!("data directory: {dir} (DB_WAL_DIR)");
+            Some(std::path::PathBuf::from(dir))
+        }
+        Err(_) => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let (dir, note) = default_wal_dir(home, std::path::Path::new(LEGACY_WAL_DIR));
+            if let Some(note) = note {
+                tracing::warn!("{note}");
+            }
+            // A default nobody chose has to explain itself when it cannot be used. `HOME` is
+            // `/nonexistent` under systemd's `DynamicUser=`, and `/` for some container
+            // images, and what came out of that was `Error: Io(Os { code: 13 })` with no path
+            // and no hint -- for a directory the operator never named. Whoever set `DB_WAL_DIR`
+            // gets the plain io error, because they know which path they chose.
+            // Which database this process is about to open, said once and plainly. The point
+            // of moving the default off the working directory is that the answer stops
+            // depending on where you were standing; it is worth being able to read it.
+            tracing::info!("data directory: {}", dir.display());
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::error!(
+                    "cannot create the default data directory {}: {e}. Set DB_WAL_DIR to a \
+                     writable path, or DB_WAL_DIR=\"\" to run without durable storage.",
+                    dir.display()
+                );
+            }
+            Some(dir)
+        }
     }
 }
 
@@ -538,3 +610,44 @@ pub async fn create_app_with_storage(
 }
 
 // integration tests live in tests/
+
+#[cfg(test)]
+mod wal_default_tests {
+    use super::*;
+
+    /// The three cases, and the ordering between them.
+    ///
+    /// The third is the reason this function exists rather than a string literal: moving a
+    /// default is a way to lose data that nobody notices, because the old data is still there
+    /// and the new database is merely empty.
+    #[test]
+    fn where_the_wal_goes_when_nothing_says() {
+        let empty = tempfile::TempDir::new().unwrap();
+        let home = std::path::PathBuf::from("/home/someone");
+
+        // A home directory and no legacy data: the new default, quietly.
+        let (dir, note) = default_wal_dir(Some(home.clone()), &empty.path().join("absent"));
+        assert_eq!(dir, home.join(".dxmt/wal"));
+        assert!(note.is_none(), "{note:?}");
+
+        // An existing `./data/wal`: keep using it, and say why and how to stop.
+        let legacy = tempfile::TempDir::new().unwrap();
+        std::fs::write(legacy.path().join("wal.log"), b"x").unwrap();
+        let (dir, note) = default_wal_dir(Some(home.clone()), legacy.path());
+        assert_eq!(dir, legacy.path());
+        let note = note.expect("a moved default that did not move has to be explained");
+        assert!(note.contains("DB_WAL_DIR"), "{note}");
+        assert!(note.contains(".dxmt/wal"), "{note}");
+
+        // An empty one does not count as data.
+        let (dir, note) = default_wal_dir(Some(home.clone()), empty.path());
+        assert_eq!(dir, home.join(".dxmt/wal"));
+        assert!(note.is_none(), "{note:?}");
+
+        // No home at all -- a daemon user, some containers. Fall back, and warn that the
+        // fallback depends on the working directory.
+        let (dir, note) = default_wal_dir(None, std::path::Path::new(LEGACY_WAL_DIR));
+        assert_eq!(dir, std::path::Path::new(LEGACY_WAL_DIR));
+        assert!(note.is_some_and(|n| n.contains("DB_WAL_DIR")));
+    }
+}
