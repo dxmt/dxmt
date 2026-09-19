@@ -120,10 +120,10 @@ USER vectordb
 WORKDIR /data
 
 # 设置环境变量
-ENV VECTORDB_DATA_DIR=/data \
-    VECTORDB_CONFIG_DIR=/config \
-    VECTORDB_LOG_DIR=/logs \
-    DB_WAL_DIR=/data/wal \
+# `VECTORDB_ROOT_DIR`, `VECTORDB_CONFIG_DIR` and `VECTORDB_LOG_DIR` used to be set here and
+# were read by no code at all -- three variables that looked like configuration and were
+# decoration. `DB_ROOT_DIR` is the one the server actually reads; everything else hangs off it.
+ENV DB_ROOT_DIR=/data \
     RUST_LOG=info \
     PORT=9999
 

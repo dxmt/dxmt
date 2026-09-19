@@ -8,11 +8,24 @@ supported single-node server and nothing more.
 
 > **Status: Alpha development, not production-ready.** Records are held in memory and made durable by a write-ahead log,
 > replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
-> `~/.dxmt/wal` — under your home directory rather than the working directory, so starting the
-> server from somewhere else does not open a different, empty database. **Set `DB_WAL_DIR` for
-> anything real**: a home directory is usually on the root filesystem, and this table can be
-> tens of gigabytes, and it is often NFS, where `mmap` and `fsync` do not mean what a WAL needs
-> them to mean. When configured, snapshots, WAL chunks and
+> `~/.dxmt/store` — everything the server writes lives under one root, `DB_ROOT_DIR`, which
+> defaults to `~/.dxmt`. Under the home directory rather than the working directory, so
+> starting the server from somewhere else does not open a different, empty database. **Set
+> `DB_ROOT_DIR` for anything real**: a home directory is usually on the root filesystem, this
+> table can be tens of gigabytes, and it is often NFS, where `mmap` and `fsync` do not mean
+> what a WAL needs them to mean.
+>
+> ```text
+> ~/.dxmt/                DB_ROOT_DIR
+> ├── store/              the database — back this up      (DB_WAL_DIR)
+> ├── backups/            where POST /backup may write     (DB_BACKUP_ROOT)
+> └── cache/              derived; deleting it costs time, not data  (DB_CACHE_DIR)
+> ```
+>
+> The three have three different lifetimes, which is why they are three directories. Each can
+> be moved on its own; the root moves all of them. All four are created and checked for
+> writability at startup, so an unwritable `backups/` is a refusal to start rather than a
+> surprise for whoever takes the first backup. When configured, snapshots, WAL chunks and
 > partition segments are mirrored to object storage, but that mirror is still experimental and
 > local WAL remains the readiness boundary. Distributed/cluster code exists but is not
 > production-ready. See [Known Limitations](#known-limitations).
@@ -117,7 +130,7 @@ The database also speaks the Model Context Protocol over stdio, backed by the sa
 storage as the HTTP server:
 
 ```bash
-./target/release/vectordb mcp --wal-dir ~/.dxmt/wal
+./target/release/vectordb mcp --wal-dir ~/.dxmt/store
 ```
 
 Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_vector`,
@@ -144,8 +157,8 @@ serve           →  /api/v1/*
                         ↓
              IntelligentIndexedStorage
                ├─ records: in-process HashMap      ← all data lives here
-               ├─ wal:     ~/.dxmt/wal             ← durability; replayed on startup
-               ├─ snapshot: ~/.dxmt/wal/snapshot   ← every 300s, on SIGTERM, after a rebuild
+               ├─ store:   ~/.dxmt/store           ← durability; replayed on startup
+               ├─ snapshot: ~/.dxmt/store/snapshot ← every 300s, on SIGTERM, after a rebuild
                └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
 ```
 

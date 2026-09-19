@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod dynamic_config;
+pub mod layout;
 // pub mod eight_core_optimization; // Removed - redundant
 pub mod large_memory_optimization;
 pub mod memory_detector;
@@ -231,8 +232,12 @@ impl Default for AppConfig {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(512);
 
-        let ssd_cache_dir =
-            std::env::var("DB_SSD_CACHE_DIR").unwrap_or_else(|_| "./cache".to_string());
+        // `./cache`, relative to wherever the process happened to start, until the layout
+        // gave it a home. See `config::layout`.
+        let ssd_cache_dir = layout::Layout::from_env()
+            .ssd_cache()
+            .to_string_lossy()
+            .into_owned();
 
         let ssd_cache_size = std::env::var("DB_SSD_CACHE_SIZE")
             .ok()
@@ -329,8 +334,10 @@ impl Default for AppConfig {
 
         // 进程管理配置
         let processes = if std::env::var("DB_PROCESSES_ENABLED").unwrap_or_default() == "true" {
-            let data_dir =
-                std::env::var("DB_PROCESSES_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+            let data_dir = layout::Layout::from_env()
+                .processes()
+                .to_string_lossy()
+                .into_owned();
 
             // 默认不启用 Consul，除非 ENABLE_CONSUL=true
             let consul_enabled =

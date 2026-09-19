@@ -2178,13 +2178,7 @@ impl IntelligentIndexedStorage {
     /// for a separate reason -- so the default is the nearest place that is both obvious and
     /// allowed.
     fn backup_root(wal_dir: &std::path::Path) -> PathBuf {
-        match std::env::var("DB_BACKUP_ROOT") {
-            Ok(root) if !root.trim().is_empty() => PathBuf::from(root),
-            _ => wal_dir
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(".")),
-        }
+        crate::config::layout::Layout::from_env().backups_for(wal_dir)
     }
 
     /// The destination as it will actually be resolved, with symlinks followed.
@@ -7515,24 +7509,16 @@ impl IntelligentIndexedStorage {
     /// function to the old path turns five of the six tests in
     /// `tests/full_text_recovery_test.rs` red, and that is how.
     ///
-    /// `DB_STORAGE_PATH` still wins when it is set, in its original shape, so a deployment that
-    /// pointed it somewhere deliberate keeps that placement and finds its index where it left
-    /// it. Without a WAL directory at all — embedded use, most tests — `/tmp` remains, because
-    /// nothing in that configuration survives the process anyway.
-    ///
-    /// Moving is safe without a migration step: a table whose index is not where this now looks
-    /// comes back with an empty one, and `restore_table` rebuilds it from the rows. That costs
-    /// one re-index on the first start after upgrading and nothing afterwards.
+    /// Moving it is `DB_WAL_DIR`, or `DB_ROOT_DIR` to move everything at once. There is no
+    /// separate override: `DB_STORAGE_PATH` used to be one, defaulting to `/tmp`, and a second
+    /// way to say where an index lives is a second place for it to be lost.
     #[cfg(feature = "text-bm25")]
     fn full_text_index_path(&self, table_id: &uuid::Uuid) -> PathBuf {
-        if let Ok(explicit) = std::env::var("DB_STORAGE_PATH") {
-            if !explicit.is_empty() {
-                return PathBuf::from(explicit).join(format!("dxmt_full_text_{table_id}"));
-            }
-        }
         match &self.wal_dir {
             Some(wal_dir) => wal_dir.join("fulltext").join(table_id.to_string()),
-            None => PathBuf::from("/tmp").join(format!("dxmt_full_text_{table_id}")),
+            // No durable storage at all -- embedded use, most tests. Nothing in this
+            // configuration survives the process, so neither does the index.
+            None => std::env::temp_dir().join(format!("dxmt_full_text_{table_id}")),
         }
     }
 

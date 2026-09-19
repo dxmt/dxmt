@@ -49,16 +49,15 @@ fn free_port() -> u16 {
 
 /// Start a server over `dir`, waiting until it answers.
 ///
-/// Deliberately **without** `DB_STORAGE_PATH`: the index landing under this temporary
-/// directory rather than in `/tmp` is now the default, and is part of what these tests check.
-/// Setting the override would have exercised the escape hatch instead.
+/// The index lands under this temporary directory because that is where `DB_WAL_DIR` puts it,
+/// and there is no second way to say otherwise. `DB_STORAGE_PATH` was that second way, and it
+/// defaulted to `/tmp`.
 fn start(dir: &std::path::Path, port: u16) -> Server {
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
         .env("DB_WAL_DIR", dir.join("wal"))
-        .env_remove("DB_STORAGE_PATH")
         .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
         .env("DB_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
@@ -340,12 +339,12 @@ fn the_index_lives_beside_the_wal_not_in_tmp() {
 }
 
 #[test]
-fn db_storage_path_still_wins_when_it_is_set() {
-    // The escape hatch keeps its original shape, so a deployment that pointed it somewhere
-    // deliberate finds its index exactly where it left it rather than silently starting a new
-    // one beside the WAL.
+fn the_index_follows_the_wal_and_nothing_else_moves_it() {
+    // `DB_STORAGE_PATH` used to point the text index somewhere of its own, defaulting to
+    // `/tmp`. It is gone: one directory holds a table's durable state, and a second way to say
+    // where part of it lives is a second place for that part to be lost -- which is exactly
+    // what happened while the default was `/tmp`.
     let dir = tempfile::TempDir::new().unwrap();
-    let elsewhere = tempfile::TempDir::new().unwrap();
     let port = free_port();
 
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
@@ -353,7 +352,8 @@ fn db_storage_path_still_wins_when_it_is_set() {
         .arg("--port")
         .arg(port.to_string())
         .env("DB_WAL_DIR", dir.path().join("wal"))
-        .env("DB_STORAGE_PATH", elsewhere.path())
+        // Set, and ignored. Nothing reads it any more.
+        .env("DB_STORAGE_PATH", "/tmp/somewhere-else")
         .env("DB_SNAPSHOT_INTERVAL_SECS", "0")
         .env("DB_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
@@ -370,23 +370,13 @@ fn db_storage_path_still_wins_when_it_is_set() {
 
     seed(server.port);
     assert_eq!(text_hits(server.port, "quasar"), 1);
-
-    let named: Vec<_> = std::fs::read_dir(elsewhere.path())
-        .unwrap()
-        .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("dxmt_full_text_")
-        })
-        .collect();
     assert_eq!(
-        named.len(),
+        std::fs::read_dir(index_root(dir.path())).unwrap().count(),
         1,
-        "DB_STORAGE_PATH was set and nothing was written there"
+        "the index is beside the WAL"
     );
     assert!(
-        !index_root(dir.path()).exists(),
-        "the override was set, so nothing should have been written beside the WAL"
+        !std::path::Path::new("/tmp/somewhere-else").exists(),
+        "DB_STORAGE_PATH moved the index; it should read as nothing at all"
     );
 }
