@@ -15,9 +15,10 @@
 //! This checks the endpoints a user calls against the records themselves: every record is
 //! fetched unfiltered and `matches_filter` decides which should come back.
 //!
-//! Not covered, deliberately: a filter whose *target* is an array or an object
-//! (`tags == ["a","b"]`). The index holds no such values and cannot answer it; making it able
-//! to would mean serialising every array in every payload into a key.
+//! A filter whose *target* is an array or an object (`tags == ["a","b"]`) is refused rather
+//! than compared: the index holds no such values, so it answered one way and `matches_filter`
+//! another. `every_endpoint_refuses_an_array_target` below checks that the refusal is the same
+//! everywhere.
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
@@ -269,5 +270,58 @@ async fn check(storage: &IntelligentIndexedStorage) {
         disagreements.is_empty(),
         "the endpoints disagree with the records:\n  {}",
         disagreements.join("\n  ")
+    );
+}
+
+/// Refused, and refused identically, by every storage entry point that takes a filter — before
+/// any route is chosen, which is the point: the answer used to depend on the route.
+#[tokio::test]
+async fn every_endpoint_refuses_an_array_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = loaded(Some(dir.path().join("wal"))).await;
+    let filter = one(
+        "tags",
+        FilterOperation::Equal(serde_json::json!(["a", "b"])),
+    );
+
+    let refused = |name: &str, result: Result<(), dxmt_vectordb::Error>| match result {
+        Err(dxmt_vectordb::Error::InvalidInput(message)) => {
+            assert!(message.contains("\"tags\""), "{name}: {message}")
+        }
+        other => panic!("{name} did not refuse an array target: {other:?}"),
+    };
+
+    refused(
+        "records/list",
+        storage
+            .list_records("t", Some(&filter), 10, 0, false)
+            .await
+            .map(|_| ()),
+    );
+    for mode in [SearchMode::Normal, SearchMode::Exact] {
+        refused(
+            &format!("search {mode:?}"),
+            storage
+                .search(
+                    "t",
+                    SearchQuery {
+                        vector: vector(1),
+                        top_k: 10,
+                        limit: 10,
+                        filter: Some(filter.clone()),
+                        search_mode: mode,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ()),
+        );
+    }
+    refused(
+        "knn graph",
+        storage
+            .knn_graph("t", 50, 5, Some(&filter), 1, false)
+            .await
+            .map(|_| ()),
     );
 }

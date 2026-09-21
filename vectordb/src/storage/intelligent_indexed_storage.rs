@@ -3870,7 +3870,16 @@ impl IntelligentIndexedStorage {
     }
 
     /// 搜索向量
+    /// Every entry point that takes a filter checks it here first. See [`Filter::validate`].
+    fn check_filter(filter: Option<&crate::types::Filter>) -> crate::Result<()> {
+        match filter {
+            Some(filter) => filter.validate().map_err(crate::Error::InvalidInput),
+            None => Ok(()),
+        }
+    }
+
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
         let start_time = std::time::Instant::now();
         // 优先使用 limit，如果 limit 未设置或为默认值则使用 top_k
@@ -4590,6 +4599,7 @@ impl IntelligentIndexedStorage {
         seed: u64,
         with_payload: bool,
     ) -> crate::Result<KnnGraph> {
+        Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
 
         let cap = Self::knn_graph_max_nodes();
@@ -5072,6 +5082,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
+        Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
         // The engine is behind an Arc, so take it out of the map and drop the guard rather than
         // running a BM25 query with every other table's reads and writes queued behind it.
@@ -5365,6 +5376,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
+        Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
 
         let fetch_limit = if request.filter.is_some() {
@@ -7396,6 +7408,7 @@ impl IntelligentIndexedStorage {
         offset: usize,
         with_vector: bool,
     ) -> crate::Result<(Vec<Record>, usize)> {
+        Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("list_records").await;
         let table_data = tables

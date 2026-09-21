@@ -92,3 +92,43 @@ def test_a_string_condition_on_a_numeric_field_matches_nothing(table):
 def test_a_filtered_search_still_orders_by_distance(table):
     hits = search(table, must(cond("tag", "Equal", "alpha")))
     assert ids_of(hits) == ["r1", "r3", "r6"]
+
+
+# A whole array or object as the target of an equality. The payload index keys scalars only, so
+# which endpoint answered decided the result: `records/list` and a selective search returned
+# nothing while a broad search returned the right records. It is refused now, the same way from
+# every endpoint, rather than answered differently by each.
+COMPOSITE_TARGETS = [
+    ("Equal", ["alpha", "beta"]),
+    ("NotEqual", {"a": 1}),
+    ("In", [["alpha"]]),
+    ("NotIn", [{"a": 1}]),
+]
+
+
+def test_an_array_or_object_target_is_refused_everywhere(table):
+    from .helpers.client import succeeded
+
+    for op, value in COMPOSITE_TARGETS:
+        filt = must(cond("tag", op, value))
+        endpoints = {
+            "search": (f"/tables/{table}/search", {"vector": query_at("r1"), "top_k": 8, "filter": filt}),
+            "exact search": (
+                f"/tables/{table}/search",
+                {"vector": query_at("r1"), "top_k": 8, "filter": filt, "search_mode": "exact"},
+            ),
+            "records/list": (f"/tables/{table}/records/list", {"limit": 8, "filter": filt}),
+        }
+        for name, (path, body) in endpoints.items():
+            response = post(path, body, expect_ok=False)
+            assert not succeeded(response), f"{name} accepted {op} {value!r}"
+            assert response.status_code == 400, f"{name}: {response.status_code} {response.text}"
+            error = response.json()["error"]
+            assert error["code"] == "INVALID_INPUT", error
+            assert "tag" in error["message"], f"the message should name the field: {error}"
+
+
+def test_a_scalar_target_in_the_same_operations_still_works(table):
+    # The refusal is about the target's shape, not the operations: these are the same four.
+    assert sorted(ids_of(search(table, must(cond("tag", "In", ["gamma"]))))) == ["r4", "r7"]
+    assert search(table, must(cond("tag", "NotIn", ["alpha", "beta", "gamma"]))) == []

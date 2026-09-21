@@ -47,6 +47,12 @@ releases. Everything below is unreleased work on `main`.
 
 ### Changed
 
+- **A filter comparing against an array or an object is refused** with `INVALID_INPUT`, from
+  every endpoint. `tags == ["a", "b"]` used to return no records from `records/list`, a
+  selective search or `search_mode: "exact"`, and the right ones from a broad or full-text
+  search, depending on which path answered. `Equal`, `NotEqual`, `In` and `NotIn` take strings,
+  numbers, booleans and null, which is what Qdrant's match accepts too.
+
 - **A filtered page no longer costs the whole match.** `records/list` with a filter matching
   2.5M of 10M rows took 2.9 s a page, almost none of it filtering: every match became an owned
   id, was hashed back to its row to read a timestamp, and was freed, to return five. The index

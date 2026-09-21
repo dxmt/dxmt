@@ -2347,8 +2347,8 @@ mod tests {
 /// `records/list` than from a search that walks the graph. Widened to every operation, it
 /// found five kinds, fixed with it: `NotEqual` missing records that lack the field, `NotIn` and
 /// arrays, `id` answered from the payload, numbers keyed at six decimals and saturating, and
-/// `5` against `5.0`. The one shape left out is a filter whose *target* is an array or object,
-/// which the index holds no values for; see `tests/filter_agreement_test.rs`.
+/// `5` against `5.0`. A filter whose *target* is an array or object is not generated: it is
+/// refused before it reaches the index (`Filter::validate`).
 ///
 /// The postings and the id bookkeeping under churn, checked against the record's own answer.
 ///

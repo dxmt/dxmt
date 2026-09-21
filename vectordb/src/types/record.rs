@@ -441,6 +441,43 @@ pub struct Filter {
     pub should: Option<Vec<Condition>>,
 }
 
+impl Filter {
+    /// Refuse a condition whose target is an array or an object.
+    ///
+    /// `Equal`, `NotEqual`, `In` and `NotIn` compare a field against scalar values. The payload
+    /// index keys scalars only, so it cannot answer `tags == ["a", "b"]`, while
+    /// [`Record::matches_filter`] compares whole JSON values and can. Which one answered decided
+    /// the result: `records/list`, a selective search and `search_mode: "exact"` returned no
+    /// records, a broad search and full-text search returned the right ones. Answering it
+    /// exactly would mean keying every array of every payload, for a query shape Qdrant refuses
+    /// too — its match takes a keyword, an integer or a bool.
+    ///
+    /// So it is refused here, before any path is chosen, and every endpoint says the same
+    /// thing: that this filter is not supported, rather than an answer that depends on routing.
+    pub fn validate(&self) -> Result<(), String> {
+        let all = [&self.must, &self.must_not, &self.should];
+        for condition in all.into_iter().flatten().flatten() {
+            let composite = |v: &serde_json::Value| v.is_array() || v.is_object();
+            let (operation, bad) = match &condition.operation {
+                FilterOperation::Equal(v) => ("Equal", composite(v)),
+                FilterOperation::NotEqual(v) => ("NotEqual", composite(v)),
+                FilterOperation::In(vs) => ("In", vs.iter().any(composite)),
+                FilterOperation::NotIn(vs) => ("NotIn", vs.iter().any(composite)),
+                _ => continue,
+            };
+            if bad {
+                return Err(format!(
+                    "filter on \"{}\": {operation} compares against strings, numbers, booleans \
+                     or null, and was given an array or an object. Matching a whole array or \
+                     object is not supported; filter on a scalar field instead.",
+                    condition.key
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 单个过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
@@ -449,21 +486,37 @@ pub struct Condition {
     pub operation: FilterOperation,
 }
 
-/// 过滤操作
+/// A test applied to one payload field — or, under the key `id`, to the record's own id.
+///
+/// Numbers compare as numbers, so `5` and `5.0` are equal. The targets of `Equal`, `NotEqual`,
+/// `In` and `NotIn` must be strings, numbers, booleans or null: an array or an object is refused
+/// with `INVALID_INPUT`.
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub enum FilterOperation {
+    /// The field equals this value. A record lacking the field does not match.
     Equal(serde_json::Value),
+    /// The field does not equal this value. A record lacking the field matches.
     NotEqual(serde_json::Value),
+    /// The field is a number greater than this one.
     GreaterThan(serde_json::Value),
+    /// The field is a number greater than or equal to this one.
     GreaterThanOrEqual(serde_json::Value),
+    /// The field is a number less than this one.
     LessThan(serde_json::Value),
+    /// The field is a number less than or equal to this one.
     LessThanOrEqual(serde_json::Value),
+    /// The field equals one of these values. A record lacking the field does not match.
     In(Vec<serde_json::Value>),
+    /// The field is present and equals none of these values. A record lacking the field does
+    /// *not* match — unlike `NotEqual`.
     NotIn(Vec<serde_json::Value>),
+    /// The field is a string containing this one.
     Contains(String),
+    /// The field is a string starting with this one.
     StartsWith(String),
+    /// The field is a string ending with this one.
     EndsWith(String),
 }
 
@@ -1014,5 +1067,83 @@ mod serialize_borrow_tests {
         assert_eq!(back.vector, record.vector);
         assert_eq!(back.payload, record.payload);
         assert_eq!(back.version, record.version);
+    }
+}
+
+#[cfg(test)]
+mod filter_validation {
+    use super::*;
+    use serde_json::json;
+
+    fn with(op: FilterOperation) -> Condition {
+        Condition {
+            key: "tags".into(),
+            operation: op,
+        }
+    }
+
+    #[test]
+    fn an_array_or_object_target_is_refused_in_every_list() {
+        let composite = [
+            FilterOperation::Equal(json!(["a", "b"])),
+            FilterOperation::NotEqual(json!({"a": 1})),
+            FilterOperation::In(vec![json!("a"), json!(["a"])]),
+            FilterOperation::NotIn(vec![json!({"a": 1})]),
+        ];
+        for op in composite {
+            for filter in [
+                Filter {
+                    must: Some(vec![with(op.clone())]),
+                    must_not: None,
+                    should: None,
+                },
+                Filter {
+                    must: None,
+                    must_not: Some(vec![with(op.clone())]),
+                    should: None,
+                },
+                Filter {
+                    must: None,
+                    must_not: None,
+                    should: Some(vec![with(op.clone())]),
+                },
+            ] {
+                let error = filter
+                    .validate()
+                    .expect_err(&format!("{op:?} was accepted"));
+                assert!(
+                    error.contains("\"tags\""),
+                    "the message names the field: {error}"
+                );
+            }
+        }
+    }
+
+    /// Scalars, null included, and every operation that does not compare whole values.
+    #[test]
+    fn everything_else_is_accepted() {
+        for op in [
+            FilterOperation::Equal(json!("a")),
+            FilterOperation::Equal(json!(5.0)),
+            FilterOperation::Equal(json!(null)),
+            FilterOperation::NotEqual(json!(true)),
+            FilterOperation::In(vec![json!("a"), json!(1), json!(null)]),
+            FilterOperation::NotIn(vec![]),
+            FilterOperation::Contains("a".into()),
+            FilterOperation::GreaterThan(json!(1)),
+        ] {
+            let filter = Filter {
+                must: Some(vec![with(op.clone())]),
+                must_not: None,
+                should: None,
+            };
+            assert_eq!(filter.validate(), Ok(()), "{op:?} was refused");
+        }
+        let empty = Filter {
+            must: None,
+            must_not: None,
+            should: None,
+        };
+        assert_eq!(empty.validate(), Ok(()));
     }
 }

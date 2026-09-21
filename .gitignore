@@ -25,6 +25,10 @@ target
 # this project in terms of theirs.
 reference/
 **/reference/
+# A renamed or backed-up copy of it too (`reference.1/` once came within one `git add -A`
+# of committing two third-party repositories as gitlinks).
+reference.*/
+**/reference.*/
 
 # Internal design notes, release plans and anything else not meant to ship with
 # the source. Keep it here rather than scattering ignore rules by filename —
