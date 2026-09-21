@@ -601,7 +601,7 @@ impl IntelligentTableData {
     fn derived(&self) -> parking_lot::MappedRwLockReadGuard<'_, DerivedIndexes> {
         if self.derived.read().is_none() {
             let mut built = DerivedIndexes::default();
-            built.payload.begin_bulk();
+            built.payload.begin_bulk(self.records.len());
             let mut records = 0usize;
             self.records.for_each(|record| {
                 records += 1;

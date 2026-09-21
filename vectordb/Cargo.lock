@@ -1956,6 +1956,7 @@ name = "dxmt-vectordb"
 version = "0.2.0"
 dependencies = [
  "aes-gcm",
+ "ahash",
  "anyhow",
  "argon2",
  "arrow",
@@ -1986,6 +1987,7 @@ dependencies = [
  "flate2",
  "futures",
  "hash_ring",
+ "hashbrown 0.15.5",
  "hyper 0.14.32",
  "image",
  "itertools 0.12.1",

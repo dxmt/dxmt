@@ -250,6 +250,12 @@ utoipa = { version = "4.2", features = ["axum_extras"], optional = true }
 rust-embed = { version = "8.7", features = ["mime-guess", "debug-embed"], optional = true }
 ordered-float = "5.0.0"
 roaring = "0.11.2"
+# Already in the graph through hashbrown; declared so the payload index can name its hasher.
+# See `FastMap` in `src/storage/payload_index.rs` for why it is keyed rather than FxHash.
+ahash = "0.8"
+# Already in the graph through indexmap. `HashTable` lets the payload index keep each record id
+# once instead of twice -- see `Ids` in `src/storage/payload_index.rs`.
+hashbrown = { version = "0.15", default-features = false }
 # axum 0.6 is built on hyper 0.14; keeping this dependency on the same
 # version avoids two incompatible `tower_service` traits in the server binary.
 hyper = "0.14.32"

@@ -12,6 +12,23 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// The maps and sets this index keeps for itself, with a faster hasher than std's.
+///
+/// std's `SipHash` is chosen for resistance to deliberately colliding keys, and it pays for
+/// that on every lookup. Measured on a 10M-row rebuild, before this: 8.4 s and 1.37 GB went on
+/// assigning ordinals with *no fields at all*, and a four-valued field cost 5.3 s — hashing ten
+/// million `u32`s into four sets.
+///
+/// `ahash::RandomState`, not `FxHash` or a fixed seed. The keys here are payload values and
+/// record ids, which arrive from clients, and an unkeyed hash would let a client choose values
+/// that all land in one bucket and turn every insert into a scan of it. `RandomState` draws its
+/// keys at runtime, which keeps that protection at a fraction of the cost.
+///
+/// Internal only. What leaves this module — `get_matching_ids` — is still a std `HashSet`, so
+/// no caller sees the change.
+type FastMap<K, V> = HashMap<K, V, ahash::RandomState>;
+type FastSet<T> = HashSet<T, ahash::RandomState>;
+
 /// A record's place in this index. Postings hold one of these instead of the record's id.
 ///
 /// The id is a `String`, and every posting used to hold its own clone of one. A field with a
@@ -25,16 +42,11 @@ type Ordinal = u32;
 #[derive(Debug, Clone)]
 pub struct PayloadIndex {
     /// 字段名 -> 字段索引
-    field_indices: HashMap<String, FieldIndex>,
+    field_indices: FastMap<String, FieldIndex>,
     /// 总记录数
     total_records: usize,
-    /// Each indexed record's id, once, addressed by its ordinal. A removed record leaves its
-    /// slot empty and the ordinal on `free`, so ids do not accumulate across churn.
-    by_ordinal: Vec<Option<RecordId>>,
-    /// `id -> ordinal`, for the writes that arrive with an id and for `remove_record`.
-    ordinals: HashMap<RecordId, Ordinal>,
-    /// Ordinals whose record was removed, ready to be handed out again.
-    free: Vec<Ordinal>,
+    /// Which record each ordinal stands for, and back.
+    ids: Ids,
     /// Set while the index is being rebuilt from the records in one pass. See
     /// [`PayloadIndex::begin_bulk`].
     bulk: bool,
@@ -51,8 +63,15 @@ impl PayloadIndex {
     ///
     /// Nothing may query the index between these two calls. The only caller builds it privately
     /// and publishes it afterwards.
-    pub fn begin_bulk(&mut self) {
+    ///
+    /// `expected_records` sizes the id bookkeeping up front. Grown one insert at a time the
+    /// `id -> ordinal` map doubles two dozen times on the way to ten million entries, and every
+    /// doubling rehashes every id already in it — each one a pointer chase to a string on the
+    /// heap. It is a hint: more records than expected still work, and fewer waste only the
+    /// difference.
+    pub fn begin_bulk(&mut self, expected_records: usize) {
         self.bulk = true;
+        self.ids.reserve(expected_records);
     }
 
     /// Sort what `begin_bulk` left unsorted, once per field.
@@ -66,42 +85,148 @@ impl PayloadIndex {
 
     /// This record's ordinal, assigning one if it has none.
     fn ordinal_for(&mut self, record_id: &RecordId) -> Ordinal {
-        if let Some(&existing) = self.ordinals.get(record_id) {
-            return existing;
-        }
-        let ordinal = match self.free.pop() {
-            Some(reused) => {
-                self.by_ordinal[reused as usize] = Some(record_id.clone());
-                reused
-            }
-            None => {
-                self.by_ordinal.push(Some(record_id.clone()));
-                (self.by_ordinal.len() - 1) as Ordinal
-            }
-        };
-        self.ordinals.insert(record_id.clone(), ordinal);
-        ordinal
-    }
-
-    /// The id behind an ordinal, or `None` if the record has since been removed.
-    fn id_of(&self, ordinal: Ordinal) -> Option<&RecordId> {
-        self.by_ordinal.get(ordinal as usize)?.as_ref()
+        self.ids.assign(record_id)
     }
 
     /// Give an ordinal back once nothing references it.
     fn release(&mut self, record_id: &RecordId) {
-        if let Some(ordinal) = self.ordinals.remove(record_id) {
-            self.by_ordinal[ordinal as usize] = None;
-            self.free.push(ordinal);
-        }
+        self.ids.release(record_id);
     }
 
     /// Turn a set of ordinals into the ids the caller asked for.
     fn ids_of(&self, ordinals: impl IntoIterator<Item = Ordinal>) -> HashSet<RecordId> {
         ordinals
             .into_iter()
-            .filter_map(|ordinal| self.id_of(ordinal).cloned())
+            .filter_map(|ordinal| self.ids.id_of(ordinal).map(str::to_string))
             .collect()
+    }
+}
+
+/// Record ids and the ordinals standing for them, with each id stored exactly once.
+///
+/// This was a `Vec<Option<String>>` one way and a `HashMap<String, Ordinal>` the other, which
+/// is two copies of every id and a map whose buckets are 32 bytes each. A 10M-row rebuild with
+/// *no payload fields at all* spent 7.6 s and 915 MB here — more than any single field. Taken
+/// apart on the same machine: cloning ten million ids costs 0.43 s, and inserting them into
+/// the `String`-keyed map 2.87 s, against 0.98 s for the same map keyed by `u64`. The strings
+/// in the buckets were the cost, not the hashing.
+///
+/// So the table holds only the ordinal — four bytes — and reads the id it stands for out of
+/// `by_ordinal` when it needs to hash or compare one. `hashbrown::HashTable` is the std map's
+/// own engine with the key/value split left to the caller, which is exactly that shape.
+///
+/// The invariant everything relies on: **an ordinal is in `table` if and only if its slot in
+/// `by_ordinal` holds an id.** `assign` fills the slot before inserting, and `release` removes
+/// from the table before emptying it, so the rehash closure — which may run on any insert and
+/// reads every stored ordinal's id — never meets an empty slot.
+#[derive(Debug, Clone, Default)]
+struct Ids {
+    /// Each indexed record's id, addressed by its ordinal. A removed record leaves its slot
+    /// empty and the ordinal on `free`, so ids do not accumulate across churn.
+    by_ordinal: Vec<Option<Box<str>>>,
+    /// `id -> ordinal`, holding only the ordinal.
+    table: hashbrown::HashTable<Ordinal>,
+    /// Keyed per process, for the same reason as [`FastMap`]: ids come from clients.
+    hasher: ahash::RandomState,
+    /// Ordinals whose record was removed, ready to be handed out again.
+    free: Vec<Ordinal>,
+}
+
+impl Ids {
+    fn hash(hasher: &ahash::RandomState, id: &str) -> u64 {
+        hasher.hash_one(id)
+    }
+
+    /// The id in a slot the table refers to. The invariant above makes this infallible.
+    fn stored(by_ordinal: &[Option<Box<str>>], ordinal: Ordinal) -> &str {
+        by_ordinal[ordinal as usize]
+            .as_deref()
+            .expect("an ordinal in the table always has an id")
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        let Ids {
+            by_ordinal,
+            table,
+            hasher,
+            ..
+        } = self;
+        by_ordinal.reserve(additional);
+        table.reserve(additional, |&o| {
+            Self::hash(hasher, Self::stored(by_ordinal, o))
+        });
+    }
+
+    fn get(&self, id: &str) -> Option<Ordinal> {
+        let hash = Self::hash(&self.hasher, id);
+        self.table
+            .find(hash, |&o| Self::stored(&self.by_ordinal, o) == id)
+            .copied()
+    }
+
+    /// The ordinal for `id`, handing out a new one if it has none. One probe either way.
+    fn assign(&mut self, id: &str) -> Ordinal {
+        let hash = Self::hash(&self.hasher, id);
+        let Ids {
+            by_ordinal,
+            table,
+            hasher,
+            free,
+        } = self;
+        match table.entry(
+            hash,
+            |&o| Self::stored(by_ordinal, o) == id,
+            |&o| Self::hash(hasher, Self::stored(by_ordinal, o)),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(existing) => *existing.get(),
+            hashbrown::hash_table::Entry::Vacant(slot) => {
+                // The slot is filled *before* the insert, because inserting may grow the table
+                // and growing rehashes every ordinal in it — including, after this line, this
+                // one. The vacant entry has already reserved room, so this insert cannot
+                // rehash; filling first keeps the invariant true regardless.
+                let ordinal = match free.pop() {
+                    Some(reused) => {
+                        by_ordinal[reused as usize] = Some(id.into());
+                        reused
+                    }
+                    None => {
+                        by_ordinal.push(Some(id.into()));
+                        (by_ordinal.len() - 1) as Ordinal
+                    }
+                };
+                slot.insert(ordinal);
+                ordinal
+            }
+        }
+    }
+
+    /// Forget `id` and put its ordinal up for reuse.
+    fn release(&mut self, id: &str) -> Option<Ordinal> {
+        let hash = Self::hash(&self.hasher, id);
+        let Ids {
+            by_ordinal,
+            table,
+            free,
+            ..
+        } = self;
+        let entry = table
+            .find_entry(hash, |&o| Self::stored(by_ordinal, o) == id)
+            .ok()?;
+        let (ordinal, _) = entry.remove();
+        // Out of the table first, then out of the slot: see the invariant on the type.
+        by_ordinal[ordinal as usize] = None;
+        free.push(ordinal);
+        Some(ordinal)
+    }
+
+    /// The id behind an ordinal, or `None` if the record has since been removed.
+    fn id_of(&self, ordinal: Ordinal) -> Option<&str> {
+        self.by_ordinal.get(ordinal as usize)?.as_deref()
+    }
+
+    /// Every ordinal currently standing for a record.
+    fn live(&self) -> impl Iterator<Item = Ordinal> + '_ {
+        self.table.iter().copied()
     }
 }
 
@@ -112,7 +237,7 @@ struct FieldIndex {
     ///
     /// Strings, bools and nulls only. Numbers go to `numeric` instead -- see [`NumericIndex`]
     /// for what one set per distinct number costs on a field with a value per row.
-    value_to_ids: HashMap<ValueKey, HashSet<Ordinal>>,
+    value_to_ids: FastMap<ValueKey, Postings>,
     /// Numeric values, sorted. A field can hold both: the value decides, not the field.
     numeric: NumericIndex,
     /// 字段类型（推断）
@@ -122,6 +247,85 @@ struct FieldIndex {
     distinct_count: usize,
     /// 字段统计信息（用于更准确的基数估计）
     stats: FieldStats,
+}
+
+/// The records holding one value of a field.
+///
+/// This was a `HashSet<Ordinal>` per distinct value, which is wrong at both ends of the range
+/// a field can have, measured on a 10M-row rebuild:
+///
+/// * **A value per row** — a text field, a UUID, a title. Ten million sets of one element
+///   each: an allocation apiece, a hasher state apiece (16 bytes under SipHash, 32 under
+///   `ahash`, which is how switching hashers made this field *bigger*), and 20.7 s of the
+///   rebuild. `One` holds the ordinal inline and allocates nothing.
+/// * **A handful of values** — a four-valued `topic`. Four sets of 2.5M hashed integers,
+///   inserted at random positions: 4.5 s, for a field that says one of four things. A roaring
+///   bitmap takes the same ordinals as appends, because a rebuild hands them out in order, and
+///   is what Qdrant, tantivy and Milvus keep for exactly this.
+///
+/// `One` is the common case and `Many` the general one; a stored entry is never empty, because
+/// removal reports when it would be and the caller drops the key instead.
+#[derive(Debug, Clone)]
+enum Postings {
+    One(Ordinal),
+    Many(roaring::RoaringBitmap),
+}
+
+impl Postings {
+    fn insert(&mut self, ordinal: Ordinal) {
+        match self {
+            Postings::One(existing) if *existing == ordinal => {}
+            Postings::One(existing) => {
+                let mut many = roaring::RoaringBitmap::new();
+                many.insert(*existing);
+                many.insert(ordinal);
+                *self = Postings::Many(many);
+            }
+            Postings::Many(many) => {
+                many.insert(ordinal);
+            }
+        }
+    }
+
+    /// Take `ordinal` out, and say whether nothing is left — in which case the caller removes
+    /// the whole entry, which is what keeps `distinct_count` honest.
+    fn remove(&mut self, ordinal: Ordinal) -> bool {
+        match self {
+            Postings::One(existing) => *existing == ordinal,
+            Postings::Many(many) => {
+                many.remove(ordinal);
+                match many.len() {
+                    0 => true,
+                    // Back to inline once one is left, so a value that was popular and is not
+                    // any more does not keep a bitmap for a single record.
+                    1 => {
+                        let last = many.min().expect("len is 1");
+                        *self = Postings::One(last);
+                        false
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Postings::One(_) => 1,
+            Postings::Many(many) => many.len() as usize,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn for_each(&self, mut visit: impl FnMut(Ordinal)) {
+        match self {
+            Postings::One(ordinal) => visit(*ordinal),
+            Postings::Many(many) => many.iter().for_each(visit),
+        }
+    }
 }
 
 /// A field's numeric values, one entry per record, kept sorted so a range is a binary search.
@@ -468,11 +672,9 @@ impl PayloadIndex {
     /// 创建新的PayloadIndex
     pub fn new() -> Self {
         Self {
-            field_indices: HashMap::new(),
+            field_indices: FastMap::default(),
             total_records: 0,
-            by_ordinal: Vec::new(),
-            ordinals: HashMap::new(),
-            free: Vec::new(),
+            ids: Ids::default(),
             bulk: false,
         }
     }
@@ -509,7 +711,7 @@ impl PayloadIndex {
         if self.total_records > 0 {
             self.total_records -= 1;
         }
-        let Some(ordinal) = self.ordinals.get(record_id).copied() else {
+        let Some(ordinal) = self.ids.get(record_id) else {
             return;
         };
 
@@ -521,8 +723,7 @@ impl PayloadIndex {
                             Some(number) => field_index.numeric.remove(number, ordinal),
                             None => {
                                 if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
-                                    ids.remove(&ordinal);
-                                    if ids.is_empty() {
+                                    if ids.remove(ordinal) {
                                         field_index.value_to_ids.remove(&value_key);
                                     }
                                 }
@@ -836,9 +1037,9 @@ impl PayloadIndex {
     /// So: `must` intersects, `should` intersects a union, neither constrains anything when
     /// absent or empty, and if nothing positive was named at all then every indexed record is a
     /// candidate for `must_not` to subtract from.
-    fn matching_ordinals(&self, filter: &Filter) -> HashSet<Ordinal> {
+    fn matching_ordinals(&self, filter: &Filter) -> FastSet<Ordinal> {
         // `None` means "nothing has narrowed this yet", which is not the same as an empty set.
-        let mut narrowed: Option<HashSet<Ordinal>> = None;
+        let mut narrowed: Option<FastSet<Ordinal>> = None;
 
         if let Some(conditions) = &filter.must {
             for condition in conditions {
@@ -848,14 +1049,14 @@ impl PayloadIndex {
                     Some(current) => current.intersection(&ids).copied().collect(),
                 });
                 if narrowed.as_ref().is_some_and(HashSet::is_empty) {
-                    return HashSet::new();
+                    return FastSet::default();
                 }
             }
         }
 
         if let Some(conditions) = &filter.should {
             if !conditions.is_empty() {
-                let mut any = HashSet::new();
+                let mut any = FastSet::default();
                 for condition in conditions {
                     any.extend(self.get_condition_ids(condition));
                 }
@@ -866,7 +1067,7 @@ impl PayloadIndex {
             }
         }
 
-        let mut result = narrowed.unwrap_or_else(|| self.ordinals.values().copied().collect());
+        let mut result = narrowed.unwrap_or_else(|| self.ids.live().collect());
 
         if let Some(conditions) = &filter.must_not {
             for condition in conditions {
@@ -1111,13 +1312,13 @@ impl PayloadIndex {
     /// differences it performs are then over four-byte integers rather than over hashed heap
     /// strings, and only the survivors are turned back into ids. A filter matching 2.5M records
     /// used to hash and clone 2.5M `String`s per condition on the way in as well as out.
-    fn get_condition_ids(&self, condition: &Condition) -> HashSet<Ordinal> {
+    fn get_condition_ids(&self, condition: &Condition) -> FastSet<Ordinal> {
         let field_index = match self.field_indices.get(&condition.key) {
             Some(idx) => idx,
-            None => return HashSet::new(),
+            None => return FastSet::default(),
         };
 
-        let mut result = HashSet::new();
+        let mut result = FastSet::default();
 
         // The numeric half. A range names bounds, so the walk visits the rows that can match
         // instead of every distinct value of the field -- which is the whole point of the
@@ -1148,7 +1349,9 @@ impl PayloadIndex {
                 if let Some(ids) =
                     Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
                 {
-                    result.extend(ids.iter().copied());
+                    ids.for_each(|id| {
+                        result.insert(id);
+                    });
                 }
             }
             FilterOperation::In(values) => {
@@ -1156,14 +1359,18 @@ impl PayloadIndex {
                     if let Some(ids) =
                         Self::to_value_key(value).and_then(|key| field_index.value_to_ids.get(&key))
                     {
-                        result.extend(ids.iter().copied());
+                        ids.for_each(|id| {
+                            result.insert(id);
+                        });
                     }
                 }
             }
             _ => {
                 for (value_key, ids) in &field_index.value_to_ids {
                     if Self::value_key_matches(value_key, &condition.operation) {
-                        result.extend(ids.iter().copied());
+                        ids.for_each(|id| {
+                            result.insert(id);
+                        });
                     }
                 }
             }
@@ -1218,7 +1425,7 @@ impl PayloadIndex {
             self.field_indices.insert(
                 key.to_string(),
                 FieldIndex {
-                    value_to_ids: HashMap::new(),
+                    value_to_ids: FastMap::default(),
                     numeric: NumericIndex::default(),
                     field_type: Self::infer_field_type(value),
                     distinct_count: 0,
@@ -1235,13 +1442,14 @@ impl PayloadIndex {
         match Self::as_ordered(&value_key) {
             Some(number) if bulk => field_index.numeric.push(number, ordinal),
             Some(number) => field_index.numeric.insert(number, ordinal),
-            None => {
-                field_index
-                    .value_to_ids
-                    .entry(value_key)
-                    .or_default()
-                    .insert(ordinal);
-            }
+            None => match field_index.value_to_ids.get_mut(&value_key) {
+                Some(postings) => postings.insert(ordinal),
+                None => {
+                    field_index
+                        .value_to_ids
+                        .insert(value_key, Postings::One(ordinal));
+                }
+            },
         }
 
         field_index.distinct_count =
@@ -1910,5 +2118,234 @@ mod tests {
         assert!(matching_ids.contains("rec_0"));
         assert!(matching_ids.contains("rec_4"));
         assert!(!matching_ids.contains("rec_5"));
+    }
+}
+
+/// The postings and the id bookkeeping under churn, checked against the record's own answer.
+///
+/// Both representations changed shape for the 10M-row rebuild — postings became `One` or a
+/// roaring bitmap instead of a `HashSet`, and ids are stored once behind a table of ordinals —
+/// and both have states a fixed example does not reach: a bitmap shrinking back to `One`, an
+/// entry removed when its last record goes, an ordinal handed out again after a delete, a table
+/// rehashed while the free list is non-empty. Random churn reaches them; `Record::matches_filter`
+/// is the other implementation of "does this match" and is the oracle.
+#[cfg(test)]
+mod churn {
+    use super::*;
+    use crate::types::record::{Record, RecordStatus};
+
+    /// xorshift, so the sequence is the same on every run and a failure names a seed.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    const TOPICS: [&str; 3] = ["alpha", "beta", "gamma"];
+
+    /// Four shapes on purpose: a few repeated strings (bitmaps), a string per record (`One`),
+    /// a number, and a bool — which lives in the map beside the strings.
+    fn random_payload(rng: &mut Rng, serial: u64) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        if rng.below(10) > 0 {
+            map.insert("topic".into(), TOPICS[rng.below(3) as usize].into());
+        }
+        if rng.below(10) > 0 {
+            map.insert("title".into(), format!("title {serial}").into());
+        }
+        if rng.below(10) > 0 {
+            map.insert("n".into(), (rng.below(20) as i64).into());
+        }
+        if rng.below(10) > 0 {
+            map.insert("flag".into(), (rng.below(2) == 0).into());
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// Only conditions the index calls exact ([`PayloadIndex::condition_is_exact`]). `NotEqual`
+    /// and `NotIn` are left out because the index knows it cannot answer them: a record that
+    /// lacks the field satisfies `topic != "alpha"` by `Record::matches_filter`, and the index,
+    /// which holds only fields that are present, never sees it. That disagreement predates the
+    /// representation this module tests — it fails identically on the `HashSet` version — and
+    /// it is not harmless: `list_records` returns `get_matching_ids` without re-checking, so
+    /// `records/list` with a `NotEqual` omits exactly those records while a filtered search
+    /// includes them. Left out here so this test pins what changed, and reported separately.
+    fn random_condition(rng: &mut Rng, serial: u64) -> Condition {
+        let (key, operation) = match rng.below(6) {
+            0 => (
+                "topic",
+                FilterOperation::Equal(TOPICS[rng.below(3) as usize].into()),
+            ),
+            1 => (
+                "topic",
+                FilterOperation::In(vec![
+                    TOPICS[rng.below(3) as usize].into(),
+                    TOPICS[rng.below(3) as usize].into(),
+                ]),
+            ),
+            2 => (
+                "title",
+                FilterOperation::Equal(format!("title {}", rng.below(serial.max(1))).into()),
+            ),
+            3 => ("title", FilterOperation::StartsWith("title 1".into())),
+            4 => (
+                "n",
+                FilterOperation::GreaterThanOrEqual((rng.below(20) as i64).into()),
+            ),
+            _ => ("flag", FilterOperation::Equal((rng.below(2) == 0).into())),
+        };
+        Condition {
+            key: key.into(),
+            operation,
+        }
+    }
+
+    fn record(id: &str, payload: &serde_json::Value) -> Record {
+        Record {
+            id: id.to_string(),
+            vector: vec![0.0],
+            sparse_vector: None,
+            named_vectors: None,
+            payload: payload.clone(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+            status: RecordStatus::Active,
+        }
+    }
+
+    #[test]
+    fn the_index_agrees_with_the_records_through_inserts_updates_and_deletes() {
+        for seed in 1..=20u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut index = PayloadIndex::new();
+            let mut live: std::collections::BTreeMap<String, serde_json::Value> =
+                Default::default();
+            let mut serial = 0u64;
+
+            for step in 0..600 {
+                // A small id space, so the same ids come and go and ordinals are reused.
+                let id = format!("id{}", rng.below(60));
+                match (live.get(&id).cloned(), rng.below(3)) {
+                    (None, _) => {
+                        serial += 1;
+                        let p = random_payload(&mut rng, serial);
+                        index.insert_record(&id, &p);
+                        live.insert(id, p);
+                    }
+                    (Some(old), 0) => {
+                        index.remove_record(&id, &old);
+                        live.remove(&id);
+                    }
+                    (Some(old), _) => {
+                        serial += 1;
+                        let new = random_payload(&mut rng, serial);
+                        index.update_record(&id, &old, &new);
+                        live.insert(id, new);
+                    }
+                }
+
+                if step % 20 == 0 {
+                    for _ in 0..8 {
+                        let mut must = vec![random_condition(&mut rng, serial)];
+                        if rng.below(2) == 0 {
+                            must.push(random_condition(&mut rng, serial));
+                        }
+                        let must_not =
+                            (rng.below(3) == 0).then(|| vec![random_condition(&mut rng, serial)]);
+                        let filter = Filter {
+                            must: Some(must),
+                            must_not,
+                            should: None,
+                        };
+                        let mut got: Vec<String> =
+                            index.get_matching_ids(&filter).into_iter().collect();
+                        got.sort();
+                        let want: Vec<String> = live
+                            .iter()
+                            .filter(|(id, p)| record(id, p).matches_filter(&filter))
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        assert_eq!(
+                            got, want,
+                            "seed {seed}, step {step}: the index and the records disagree on \
+                             {filter:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_posting_list_moves_between_its_two_shapes_both_ways() {
+        let mut p = Postings::One(7);
+        p.insert(7);
+        assert!(
+            matches!(p, Postings::One(7)),
+            "inserting the same ordinal twice is one"
+        );
+        p.insert(9);
+        assert!(matches!(p, Postings::Many(_)));
+        assert_eq!(p.len(), 2);
+
+        // Removing something that is not there leaves it alone and is not "now empty".
+        assert!(!Postings::One(7).remove(8));
+
+        // Down to one: back to inline, so a formerly popular value does not keep a bitmap.
+        assert!(!p.remove(9));
+        assert!(matches!(p, Postings::One(7)), "{p:?}");
+        // And the last one out says so, which is the caller's signal to drop the entry.
+        assert!(p.remove(7));
+    }
+
+    /// The table only holds ordinals and reads the ids back out of `by_ordinal` to hash them,
+    /// so a rehash with a slot emptied or refilled in the wrong order would hash nothing, or the
+    /// wrong id, and lose entries without failing. Growing from nothing forces many rehashes,
+    /// and the deletes in between put ordinals on the free list for the next inserts to reuse.
+    #[test]
+    fn ids_survive_growth_and_reuse() {
+        let mut ids = Ids::default();
+        for i in 0..5_000 {
+            assert_eq!(ids.assign(&format!("r{i}")), i as Ordinal);
+        }
+        for i in (0..5_000).step_by(3) {
+            assert_eq!(ids.release(&format!("r{i}")), Some(i as Ordinal));
+        }
+        // New ids take the freed ordinals before any fresh ones.
+        let reused = ids.assign("new-0");
+        assert!(
+            reused % 3 == 0 && reused < 5_000,
+            "{reused} was not a freed ordinal"
+        );
+        for i in 1..20_000 {
+            ids.assign(&format!("new-{i}"));
+        }
+        for i in 0..5_000u32 {
+            let id = format!("r{i}");
+            if i % 3 == 0 {
+                assert_eq!(ids.get(&id), None, "{id} was released");
+            } else {
+                let o = ids
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("{id} was lost in a rehash"));
+                assert_eq!(ids.id_of(o), Some(id.as_str()));
+            }
+        }
+        assert_eq!(
+            ids.get("new-19999").and_then(|o| ids.id_of(o)),
+            Some("new-19999")
+        );
+        // Assigning an id that already has an ordinal returns that one.
+        let o = ids.get("r1").unwrap();
+        assert_eq!(ids.assign("r1"), o);
+        assert_eq!(ids.live().count(), 5_000 - 1667 + 20_000);
     }
 }
