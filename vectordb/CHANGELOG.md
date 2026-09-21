@@ -79,6 +79,17 @@ releases. Everything below is unreleased work on `main`.
 
 ### Fixed
 
+- **A filter now returns the same records from every endpoint.** `records/list`, a selective
+  filtered search, `search_mode: "exact"` and the k-NN graph take the payload index's answer
+  as final, while other searches check each record; the two disagreed in five ways. `NotEqual`
+  dropped records lacking the field or holding an array; `NotIn` missed arrays; `id` was
+  answered from a payload field of that name rather than the record's id; numbers were keyed
+  at six decimal places and saturated at ±9.2e12, so every microsecond timestamp was one value;
+  and `5` and `5.0` were equal to one and not the other. On a 400-row table, 12 of 14 filters
+  returned wrong records through both `records/list` and exact search.
+- **`5` now equals `5.0` in a filter**, everywhere. JSON has one kind of number, and a
+  JavaScript client cannot send `5.0` at all.
+
 - **Filtered search returned almost nothing below 5% selectivity.** The graph walk put the
   exploration queue and the result set behind the same filter test, so a non-matching entry point
   left nothing to explore: at 2% selectivity, 97.65% of queries returned zero rows.

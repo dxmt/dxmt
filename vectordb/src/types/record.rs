@@ -598,8 +598,8 @@ impl Record {
         let text = || value.and_then(serde_json::Value::as_str);
 
         match &condition.operation {
-            FilterOperation::Equal(target) => value == Some(target),
-            FilterOperation::NotEqual(target) => value != Some(target),
+            FilterOperation::Equal(target) => value.is_some_and(|v| same_json(v, target)),
+            FilterOperation::NotEqual(target) => !value.is_some_and(|v| same_json(v, target)),
             FilterOperation::GreaterThan(target) => {
                 matches!((number(), target.as_f64()), (Some(v), Some(t)) if v > t)
             }
@@ -612,8 +612,12 @@ impl Record {
             FilterOperation::LessThanOrEqual(target) => {
                 matches!((number(), target.as_f64()), (Some(v), Some(t)) if v <= t)
             }
-            FilterOperation::In(targets) => value.is_some_and(|v| targets.contains(v)),
-            FilterOperation::NotIn(targets) => value.is_some_and(|v| !targets.contains(v)),
+            FilterOperation::In(targets) => {
+                value.is_some_and(|v| targets.iter().any(|t| same_json(v, t)))
+            }
+            FilterOperation::NotIn(targets) => {
+                value.is_some_and(|v| !targets.iter().any(|t| same_json(v, t)))
+            }
             FilterOperation::Contains(substr) => {
                 text().is_some_and(|s| s.contains(substr.as_str()))
             }
@@ -659,6 +663,21 @@ impl Default for SearchQuery {
             search_mode: SearchMode::Normal,
             vector_name: None,
         }
+    }
+}
+
+/// Equality between a stored value and a filter's target, with numbers compared as numbers.
+///
+/// `serde_json::Value`'s own equality keeps integers and floats apart, so `5 == 5.0` was false
+/// here — while the payload index, which keys every number as an `f64`, said true, and the
+/// range operations below have always compared as `f64`. The same filter then answered one way
+/// in `records/list` and another in a search. Numbers are numbers: JSON has one kind, and a
+/// JavaScript client cannot send `5.0` at all (`JSON.stringify(5.0)` is `"5"`) while a Python
+/// one sends exactly that, so strict equality made the same query depend on which SDK asked.
+fn same_json(value: &serde_json::Value, target: &serde_json::Value) -> bool {
+    match (value.as_f64(), target.as_f64()) {
+        (Some(a), Some(b)) if value.is_number() && target.is_number() => a == b,
+        _ => value == target,
     }
 }
 

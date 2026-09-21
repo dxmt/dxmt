@@ -47,6 +47,17 @@ pub struct PayloadIndex {
     total_records: usize,
     /// Which record each ordinal stands for, and back.
     ids: Ids,
+    /// For each key, the records holding a value the index cannot key — an array or an object.
+    ///
+    /// `NotIn` needs to know every record that *has* the field: `Record::matches_filter` says a
+    /// record lacking it does not satisfy `NotIn` (`is_some_and`), while one holding an array
+    /// does. For scalar values that set is already here, as the union of the field's postings.
+    /// Only these are missing from it, so only these are recorded.
+    ///
+    /// The first version kept a bitmap of every record per field instead, and it cost the
+    /// 10M-row rebuild two seconds — 13.8 s to 15.8 s — to support one operator. `NotEqual`
+    /// needs none of this: a missing field satisfies it, so it is answered against every record.
+    unindexed: FastMap<String, roaring::RoaringBitmap>,
     /// Set while the index is being rebuilt from the records in one pass. See
     /// [`PayloadIndex::begin_bulk`].
     bulk: bool,
@@ -497,22 +508,45 @@ enum ValueKey {
     Null,
 }
 
-/// 可排序的浮点数包装器
-/// `Ord` as well as `Eq`: the type is named for an ordering it could not perform, and the
-/// sorted numeric index needs it. The representation is already a scaled `i64`, so the
-/// derived order is the numeric one.
+/// A number as the index keys it: every `f64`, exactly, in numeric order.
+///
+/// This was `(f * 1_000_000.0) as i64` — six decimal places, truncated, and saturating at
+/// ±9.2e12. Both halves of that were wrong for real payloads. A microsecond timestamp is about
+/// 1.7e15, so every one of them became `i64::MAX` and `Equal` on a timestamp matched every
+/// record that had one — 426 of 426 comparisons against `Record::matches_filter` disagreed, and
+/// `GreaterThan` 318 of 398. Below a millionth, values merged the same way.
+///
+/// The encoding is the standard one: a non-negative float's bits with the sign bit set, a
+/// negative float's bits inverted, so unsigned order is numeric order and nothing is lost.
+/// `-0.0` is folded into `0.0` first, because they are one number and have to be one key.
+/// JSON cannot carry NaN or an infinity, so there is no ordering question about those.
+///
+/// Integers above 2^53 are keyed as the nearest `f64`, which is what `matches_filter` compares
+/// them as too — agreement matters more here than a precision JSON clients mostly cannot
+/// represent anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct OrderedFloat(i64); // 将f64转为i64存储（乘以1000000保留6位小数）
+struct OrderedFloat(u64);
 
 impl From<f64> for OrderedFloat {
     fn from(f: f64) -> Self {
-        OrderedFloat((f * 1_000_000.0) as i64)
+        let f = if f == 0.0 { 0.0 } else { f };
+        let bits = f.to_bits();
+        OrderedFloat(if bits >> 63 == 0 {
+            bits | (1 << 63)
+        } else {
+            !bits
+        })
     }
 }
 
 impl From<OrderedFloat> for f64 {
     fn from(of: OrderedFloat) -> Self {
-        of.0 as f64 / 1_000_000.0
+        let bits = of.0;
+        f64::from_bits(if bits >> 63 == 1 {
+            bits & !(1 << 63)
+        } else {
+            !bits
+        })
     }
 }
 
@@ -675,6 +709,7 @@ impl PayloadIndex {
             field_indices: FastMap::default(),
             total_records: 0,
             ids: Ids::default(),
+            unindexed: FastMap::default(),
             bulk: false,
         }
     }
@@ -683,10 +718,11 @@ impl PayloadIndex {
     pub fn insert_record(&mut self, record_id: &RecordId, payload: &serde_json::Value) {
         self.total_records += 1;
 
+        // Every record gets an ordinal, including one whose payload is not an object. It has no
+        // fields, but `matches_filter` still answers for it — `NotEqual` is true, and `id`
+        // conditions read its own id — so the index has to know it exists.
+        let ordinal = self.ordinal_for(record_id);
         if let Some(obj) = payload.as_object() {
-            // One id clone for the record, however many fields it has, instead of one per
-            // field per posting.
-            let ordinal = self.ordinal_for(record_id);
             for (key, value) in obj {
                 self.index_field(key, value, ordinal);
             }
@@ -717,6 +753,14 @@ impl PayloadIndex {
 
         if let Some(obj) = payload.as_object() {
             for (key, value) in obj {
+                if Self::to_value_key(value).is_none() {
+                    if let Some(held) = self.unindexed.get_mut(key.as_str()) {
+                        held.remove(ordinal);
+                        if held.is_empty() {
+                            self.unindexed.remove(key.as_str());
+                        }
+                    }
+                }
                 if let Some(field_index) = self.field_indices.get_mut(key) {
                     if let Some(value_key) = Self::to_value_key(value) {
                         match Self::as_ordered(&value_key) {
@@ -1313,6 +1357,92 @@ impl PayloadIndex {
     /// strings, and only the survivors are turned back into ids. A filter matching 2.5M records
     /// used to hash and clone 2.5M `String`s per condition on the way in as well as out.
     fn get_condition_ids(&self, condition: &Condition) -> FastSet<Ordinal> {
+        let key = condition.key.as_str();
+        match &condition.operation {
+            // The negations are complements of the positive answer, and the complement has to
+            // be taken against the right universe. Asking each indexed value "are you not
+            // `t`?" instead — which this did — can only find records that *have* the field as
+            // a scalar, so `NotEqual` silently dropped every record lacking it and every record
+            // holding an array. `records/list` returns this set without re-checking, so the
+            // same filter gave a different answer there than in a search, which walks the graph
+            // with `Record::matches_filter`.
+            FilterOperation::NotEqual(target) => {
+                // `value != Some(target)`: true when the field is missing, so every record is
+                // in the universe.
+                let equal = self.positive_ids(key, &FilterOperation::Equal(target.clone()));
+                return self.ids.live().filter(|o| !equal.contains(o)).collect();
+            }
+            FilterOperation::NotIn(targets) => {
+                // `value.is_some_and(..)`: false when the field is missing, so only the records
+                // that carry it — any type of value, arrays included — are in the universe.
+                let within = self.positive_ids(key, &FilterOperation::In(targets.clone()));
+                let mut result = FastSet::default();
+                let mut keep = |o: Ordinal| {
+                    if !within.contains(&o) {
+                        result.insert(o);
+                    }
+                };
+                if key == "id" {
+                    self.ids.live().for_each(&mut keep);
+                } else {
+                    if let Some(field) = self.field_indices.get(key) {
+                        for postings in field.value_to_ids.values() {
+                            postings.for_each(&mut keep);
+                        }
+                        field.numeric.select(None, None, |_| true, &mut keep);
+                    }
+                    if let Some(held) = self.unindexed.get(key) {
+                        held.iter().for_each(&mut keep);
+                    }
+                }
+                return result;
+            }
+            _ => {}
+        }
+        self.positive_ids(key, &condition.operation)
+    }
+
+    /// `id` means the record's own id, not a payload field of that name.
+    ///
+    /// That is how [`crate::types::record::Record::matches_filter`] reads it, and the index
+    /// answered from the payload instead: measured in a randomised comparison, 984 of 990
+    /// `id` filters disagreed. The index already holds every record's id, so it answers from
+    /// those. An id is a string, so the numeric comparisons match nothing, as they do there.
+    fn id_ordinals(&self, operation: &FilterOperation) -> FastSet<Ordinal> {
+        let by_id = |value: &serde_json::Value| value.as_str().and_then(|id| self.ids.get(id));
+        let scan = |test: &dyn Fn(&str) -> bool| -> FastSet<Ordinal> {
+            self.ids
+                .live()
+                .filter(|&o| self.ids.id_of(o).is_some_and(test))
+                .collect()
+        };
+        match operation {
+            FilterOperation::Equal(value) => by_id(value).into_iter().collect(),
+            FilterOperation::In(values) => values.iter().filter_map(by_id).collect(),
+            FilterOperation::Contains(s) => scan(&|id| id.contains(s.as_str())),
+            FilterOperation::StartsWith(s) => scan(&|id| id.starts_with(s.as_str())),
+            FilterOperation::EndsWith(s) => scan(&|id| id.ends_with(s.as_str())),
+            FilterOperation::GreaterThan(_)
+            | FilterOperation::GreaterThanOrEqual(_)
+            | FilterOperation::LessThan(_)
+            | FilterOperation::LessThanOrEqual(_) => FastSet::default(),
+            // Complements, answered by the caller from the positive forms above.
+            FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => {
+                unreachable!("negations are taken as complements in get_condition_ids")
+            }
+        }
+    }
+
+    /// The records satisfying a condition that is not a negation.
+    fn positive_ids(&self, key: &str, operation: &FilterOperation) -> FastSet<Ordinal> {
+        if key == "id" {
+            return self.id_ordinals(operation);
+        }
+        let condition = Condition {
+            key: key.to_string(),
+            operation: operation.clone(),
+        };
+        let condition = &condition;
         let field_index = match self.field_indices.get(&condition.key) {
             Some(idx) => idx,
             None => return FastSet::default(),
@@ -1415,7 +1545,21 @@ impl PayloadIndex {
     fn index_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
         let value_key = match Self::to_value_key(value) {
             Some(vk) => vk,
-            None => return, // 无法索引的类型（如数组、对象）
+            // An array or an object: no key to file it under, but the record does have the
+            // field, which `NotIn` needs to know. See `unindexed`.
+            None => {
+                match self.unindexed.get_mut(key) {
+                    Some(held) => {
+                        held.insert(ordinal);
+                    }
+                    None => {
+                        let mut held = roaring::RoaringBitmap::new();
+                        held.insert(ordinal);
+                        self.unindexed.insert(key.to_string(), held);
+                    }
+                }
+                return;
+            }
         };
 
         // `entry(key.to_string())` allocated a copy of the field's name for every record, to
@@ -2121,6 +2265,15 @@ mod tests {
     }
 }
 
+/// The index under churn, checked against the record's own answer for every operation.
+///
+/// Every disagreement this found is a filter that returned different records from
+/// `records/list` than from a search that walks the graph. Widened to every operation, it
+/// found five kinds, fixed with it: `NotEqual` missing records that lack the field, `NotIn` and
+/// arrays, `id` answered from the payload, numbers keyed at six decimals and saturating, and
+/// `5` against `5.0`. The one shape left out is a filter whose *target* is an array or object,
+/// which the index holds no values for; see `tests/filter_agreement_test.rs`.
+///
 /// The postings and the id bookkeeping under churn, checked against the record's own answer.
 ///
 /// Both representations changed shape for the 10M-row rebuild — postings became `One` or a
@@ -2150,9 +2303,17 @@ mod churn {
 
     const TOPICS: [&str; 3] = ["alpha", "beta", "gamma"];
 
-    /// Four shapes on purpose: a few repeated strings (bitmaps), a string per record (`One`),
-    /// a number, and a bool — which lives in the map beside the strings.
+    /// Shapes on purpose: a few repeated strings (bitmaps), a string per record (`One`), a
+    /// number that is sometimes an integer and sometimes a float, a bool — which lives in the
+    /// map beside the strings — an array, which the index cannot hold at all, and a payload
+    /// field called `id`, which is not the record's id. Every field is sometimes absent.
     fn random_payload(rng: &mut Rng, serial: u64) -> serde_json::Value {
+        // Not every payload is an object. A record whose payload is `null` has no fields at
+        // all, which `matches_filter` answers for — `NotEqual` true, `id` its own id — and an
+        // index that only numbers records with object payloads never sees.
+        if rng.below(20) == 0 {
+            return serde_json::Value::Null;
+        }
         let mut map = serde_json::Map::new();
         if rng.below(10) > 0 {
             map.insert("topic".into(), TOPICS[rng.below(3) as usize].into());
@@ -2161,45 +2322,93 @@ mod churn {
             map.insert("title".into(), format!("title {serial}").into());
         }
         if rng.below(10) > 0 {
-            map.insert("n".into(), (rng.below(20) as i64).into());
+            let n = rng.below(20);
+            let value: serde_json::Value = match rng.below(3) {
+                0 => (n as f64).into(),       // 5.0
+                1 => (n as f64 + 0.5).into(), // 5.5
+                _ => (n as i64).into(),       // 5
+            };
+            map.insert("n".into(), value);
         }
         if rng.below(10) > 0 {
             map.insert("flag".into(), (rng.below(2) == 0).into());
         }
+        if rng.below(4) == 0 {
+            map.insert("tags".into(), serde_json::json!(["a", "b"]));
+        }
+        if rng.below(10) > 0 {
+            // A microsecond timestamp, and a value that differs from its neighbours below a
+            // millionth — the two places a fixed-point numeric key cannot tell values apart.
+            map.insert(
+                "us".into(),
+                (1_700_000_000_000_000i64 + rng.below(5) as i64).into(),
+            );
+            map.insert("tiny".into(), (rng.below(5) as f64 * 1e-7).into());
+        }
+        if rng.below(4) == 0 {
+            map.insert("id".into(), format!("payload-{}", rng.below(3)).into());
+        }
         serde_json::Value::Object(map)
     }
 
-    /// Only conditions the index calls exact ([`PayloadIndex::condition_is_exact`]). `NotEqual`
-    /// and `NotIn` are left out because the index knows it cannot answer them: a record that
-    /// lacks the field satisfies `topic != "alpha"` by `Record::matches_filter`, and the index,
-    /// which holds only fields that are present, never sees it. That disagreement predates the
-    /// representation this module tests — it fails identically on the `HashSet` version — and
-    /// it is not harmless: `list_records` returns `get_matching_ids` without re-checking, so
-    /// `records/list` with a `NotEqual` omits exactly those records while a filtered search
-    /// includes them. Left out here so this test pins what changed, and reported separately.
+    fn topic(rng: &mut Rng) -> serde_json::Value {
+        TOPICS[rng.below(3) as usize].into()
+    }
+
+    /// Every operation, including the ones that negate — which is where a record *lacking*
+    /// the field gets an answer, and so where an index that only knows present fields can
+    /// disagree.
     fn random_condition(rng: &mut Rng, serial: u64) -> Condition {
-        let (key, operation) = match rng.below(6) {
-            0 => (
+        let number = |rng: &mut Rng| -> serde_json::Value {
+            let n = rng.below(20);
+            match rng.below(3) {
+                0 => (n as f64).into(),
+                1 => (n as f64 + 0.5).into(),
+                _ => (n as i64).into(),
+            }
+        };
+        let us = |rng: &mut Rng| -> serde_json::Value {
+            (1_700_000_000_000_000i64 + rng.below(5) as i64).into()
+        };
+        let tiny = |rng: &mut Rng| -> serde_json::Value { (rng.below(5) as f64 * 1e-7).into() };
+        let (key, operation) = match rng.below(20) {
+            16 => ("us", FilterOperation::Equal(us(rng))),
+            17 => ("us", FilterOperation::GreaterThan(us(rng))),
+            18 => ("tiny", FilterOperation::Equal(tiny(rng))),
+            19 => ("tiny", FilterOperation::LessThanOrEqual(tiny(rng))),
+            0 => ("topic", FilterOperation::Equal(topic(rng))),
+            1 => ("topic", FilterOperation::In(vec![topic(rng), topic(rng)])),
+            2 => ("topic", FilterOperation::NotEqual(topic(rng))),
+            3 => (
                 "topic",
-                FilterOperation::Equal(TOPICS[rng.below(3) as usize].into()),
+                FilterOperation::NotIn(vec![topic(rng), topic(rng)]),
             ),
-            1 => (
-                "topic",
-                FilterOperation::In(vec![
-                    TOPICS[rng.below(3) as usize].into(),
-                    TOPICS[rng.below(3) as usize].into(),
-                ]),
-            ),
-            2 => (
+            4 => (
                 "title",
                 FilterOperation::Equal(format!("title {}", rng.below(serial.max(1))).into()),
             ),
-            3 => ("title", FilterOperation::StartsWith("title 1".into())),
-            4 => (
-                "n",
-                FilterOperation::GreaterThanOrEqual((rng.below(20) as i64).into()),
+            5 => ("title", FilterOperation::StartsWith("title 1".into())),
+            6 => ("title", FilterOperation::EndsWith("7".into())),
+            7 => ("title", FilterOperation::Contains("1".into())),
+            8 => ("n", FilterOperation::GreaterThanOrEqual(number(rng))),
+            9 => ("n", FilterOperation::LessThan(number(rng))),
+            10 => ("n", FilterOperation::Equal(number(rng))),
+            11 => ("n", FilterOperation::NotEqual(number(rng))),
+            12 => ("flag", FilterOperation::Equal((rng.below(2) == 0).into())),
+            13 => match rng.below(2) {
+                0 => ("tags", FilterOperation::NotEqual("a".into())),
+                // A record holding an array has the field, so it satisfies `NotIn` — the one
+                // case `unindexed` is there for.
+                _ => ("tags", FilterOperation::NotIn(vec!["a".into()])),
+            },
+            14 => (
+                "id",
+                FilterOperation::Equal(format!("id{}", rng.below(60)).into()),
             ),
-            _ => ("flag", FilterOperation::Equal((rng.below(2) == 0).into())),
+            _ => (
+                "id",
+                FilterOperation::Equal(format!("payload-{}", rng.below(3)).into()),
+            ),
         };
         Condition {
             key: key.into(),
