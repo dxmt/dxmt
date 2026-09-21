@@ -605,7 +605,11 @@ impl IntelligentTableData {
             let mut records = 0usize;
             self.records.for_each(|record| {
                 records += 1;
-                built.payload.insert_record(&record.id, &record.payload);
+                built.payload.insert_record(
+                    &record.id,
+                    &record.payload,
+                    crate::storage::payload_index::created_key(&record.created_at),
+                );
                 if let Some(sparse) = &record.sparse_vector {
                     if let Err(e) = built.sparse.insert(record.id.clone(), sparse) {
                         warn!("Failed to index sparse vector for {}: {}", record.id, e);
@@ -1096,11 +1100,18 @@ async fn process_insert_group(
                         }
 
                         if let Some(old_payload) = old_payload.as_ref() {
-                            derived
-                                .payload
-                                .update_record(&record_id, old_payload, &record.payload);
+                            derived.payload.update_record(
+                                &record_id,
+                                old_payload,
+                                &record.payload,
+                                crate::storage::payload_index::created_key(&record.created_at),
+                            );
                         } else {
-                            derived.payload.insert_record(&record_id, &record.payload);
+                            derived.payload.insert_record(
+                                &record_id,
+                                &record.payload,
+                                crate::storage::payload_index::created_key(&record.created_at),
+                            );
                         }
                     }
                     // The caller gets the record as sent; the map keeps it without the
@@ -6919,11 +6930,18 @@ impl IntelligentIndexedStorage {
 
             if let Some(derived) = table_data.derived_mut().as_mut() {
                 if let Some(old_payload_val) = old_payload.as_ref() {
-                    derived
-                        .payload
-                        .update_record(record_id, old_payload_val, &record.payload);
+                    derived.payload.update_record(
+                        record_id,
+                        old_payload_val,
+                        &record.payload,
+                        crate::storage::payload_index::created_key(&record.created_at),
+                    );
                 } else {
-                    derived.payload.insert_record(record_id, &record.payload);
+                    derived.payload.insert_record(
+                        record_id,
+                        &record.payload,
+                        crate::storage::payload_index::created_key(&record.created_at),
+                    );
                 }
 
                 // Always remove the old sparse posting first. If the new record has no sparse
@@ -7399,14 +7417,26 @@ impl IntelligentIndexedStorage {
                     return Ok((page, total));
                 }
             }
+            // The index chooses the page and says how many match; only the page is fetched.
+            // Every match used to be turned into an owned id and hashed back to a row to be
+            // sorted — 2.9 s for a page of five out of 2.5M matches at 10M rows. See
+            // `PayloadIndex::page_of_matching`. For an in-memory table as well: its records
+            // are cheap to reach, but sorting 2.5M of them by timestamp is not.
+            //
+            // An id the index names that the store no longer has is skipped rather than
+            // failing the page. The index is mutated by deletes as well as rebuilt from the
+            // records, so a stale entry is possible, and a short page is the better answer.
             Some(filter) => {
-                let matching_ids = table_data.derived().payload.get_matching_ids(filter);
-                let total = matching_ids.len();
-                if let Some(page) = table_data.records.page_of_ids(&matching_ids, offset, limit) {
-                    let mut page: Vec<Record> = page.iter().map(|r| (**r).clone()).collect();
-                    Self::fill_vectors(table_data, &mut page, with_vector);
-                    return Ok((page, total));
-                }
+                let derived = table_data.derived();
+                let (ids, total) = derived.payload.page_of_matching(filter, offset, limit);
+                let mut page: Vec<Record> = ids
+                    .iter()
+                    .filter_map(|id| table_data.records.get(id))
+                    .map(|r| (*r).clone())
+                    .collect();
+                drop(derived);
+                Self::fill_vectors(table_data, &mut page, with_vector);
+                return Ok((page, total));
             }
         }
 
@@ -7414,13 +7444,8 @@ impl IntelligentIndexedStorage {
         // `serde_json::Value` and all -- to return a page of twenty-five, so a table of 120,000
         // paid 120,000 JSON clones for 25 rows. A refcount bump costs nothing and the page is
         // cloned at the end, where it is twenty-five of them.
-        let mut matching: Vec<std::sync::Arc<Record>> = if let Some(filter) = filter {
-            let matching_ids = table_data.derived().payload.get_matching_ids(filter);
-            matching_ids
-                .iter()
-                .filter_map(|id| table_data.records.get(id))
-                .collect()
-        } else {
+        // Unfiltered, on an in-memory table: every filtered list returned above.
+        let mut matching: Vec<std::sync::Arc<Record>> = {
             let mut out = Vec::with_capacity(table_data.records.len());
             table_data.records.for_each(|r| out.push(r));
             out

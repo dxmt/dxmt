@@ -47,6 +47,12 @@ releases. Everything below is unreleased work on `main`.
 
 ### Changed
 
+- **A filtered page no longer costs the whole match.** `records/list` with a filter matching
+  2.5M of 10M rows took 2.9 s a page, almost none of it filtering: every match became an owned
+  id, was hashed back to its row to read a timestamp, and was freed, to return five. The index
+  now keeps each record's `created_at` and chooses the page itself; 0.2 s. At 1M rows, 211 ms to
+  13 ms.
+
 - **The payload index rebuilds in half the time and memory.** The first filtered query after a
   restart rebuilds it, and at 10M rows that went from 40 s to 27 s end to end, with the server's
   peak memory from 8.7 GB to 7.2 GB and every answer unchanged. A value's records are held

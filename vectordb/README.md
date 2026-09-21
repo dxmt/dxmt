@@ -425,10 +425,10 @@ a 32-core machine, and its numbers are not comparable with these.
 
 | Rows | Restart to serving | First filtered query | Filtered page after it | Unfiltered page |
 | --- | --- | --- | --- | --- |
-| 10,000 | 0.3 s | 24 ms | 1.4 ms | 0.8 ms |
-| 100,000 | 0.3 s | 189 ms | 10 ms | 1.9 ms |
-| 1,000,000 | 1.8 s | 2.5 s | 211 ms | 24 ms |
-| 10,000,000 | 26 s | 27 s | 2.9 s | 269 ms |
+| 10,000 | 0.3 s | 24 ms | 0.9 ms | 1.2 ms |
+| 100,000 | 0.3 s | 187 ms | 1.4 ms | 1.4 ms |
+| 1,000,000 | 2.0 s | 2.3 s | 13 ms | 24 ms |
+| 10,000,000 | 26 s | 23 s | 0.2 s | 209 ms |
 
 A real corpus of 384-dimension sentence embeddings, filtering on a four-valued `topic`, after a
 restart:
@@ -440,16 +440,19 @@ restart:
 
 **The first filtered query is the one that is not like the others.** It rebuilds the payload
 index by reading every record, because that index is derived from them and is not persisted.
-At 10M rows on the machine above that is 27 s, down from 40 s, with the server's peak memory
-7.2 GB rather than 8.7 GB: a value's records are held inline when there is one and in a roaring
+At 10M rows on the machine above that is 23 s, down from 40 s, with the server's peak memory
+7.1 GB rather than 8.7 GB: a value's records are held inline when there is one and in a roaring
 bitmap when there are many, instead of a hash set per distinct value, and each record id is
 stored once instead of twice. What is left is mostly decoding ten million records from disk and
 keeping ten million distinct strings, which a field with a value per row genuinely has.
 
+Every filtered page after it is chosen by the index, which keeps each record's `created_at`
+beside it, so only the records on the page are looked up: 0.2 s at 10M for a filter matching
+2.5M rows, where it was 2.9 s when each match was turned into an id and hashed back to a row.
+
 At a hundred thousand rows none of this is visible. At ten million the first filtered query is
-still close to half a minute, and a server that restarts often and filters immediately will
-feel it. The filtered page after it — 2.9 s when the filter matches 2.5M rows — is the next
-cost: every matching id is still materialised as a string to find the page.
+still most of half a minute, and a server that restarts often and filters immediately will feel
+it.
 
 ## Known Limitations
 
@@ -477,8 +480,8 @@ These are real gaps, not roadmap aspirations:
 - **The first filtered query on a restored table rebuilds the index it filters with.** The
   payload index is derived from the records and is not written anywhere, so a restart has to
   build it again — and it is built on demand rather than at startup, so a server that never
-  filters never pays for it. That first query is proportional to the table: 189 ms at 100,000
-  rows, 27 s at 10M. Every query after it is proportional to what matches. See the numbers
+  filters never pays for it. That first query is proportional to the table: 187 ms at 100,000
+  rows, 23 s at 10M. Every query after it is proportional to what matches. See the numbers
   above.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures

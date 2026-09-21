@@ -372,7 +372,7 @@ impl RowStore {
                 self.tombstone[old as usize] = true;
             }
             if let Some(created) = created.as_mut() {
-                created.push(r.created_at.timestamp_nanos_opt().unwrap_or(i64::MIN));
+                created.push(crate::storage::payload_index::created_key(&r.created_at));
             }
             let row = self.ids.push(&r.id);
             debug_assert_eq!(row as usize + 1, self.file.ends.len());
@@ -441,33 +441,6 @@ impl RowStore {
         self.page_of(live, offset, limit)
     }
 
-    /// The same page, restricted to records a filter already selected.
-    ///
-    /// The filtered path had the problem `page_newest_first` was written for, one level down:
-    /// it took the matching ids and called `get` on every one of them to sort them by
-    /// `created_at`, so a filter matching 2.5M records decoded 2.5M of them to return five.
-    /// **7.8 s a page, measured at 10M rows.** The timestamps are already in `created`, and an
-    /// id's row comes from the id table, so neither the sort nor the selection needs the record.
-    ///
-    /// Ids that name no live row are skipped: the payload index is rebuilt from the records and
-    /// so cannot name one, but it is also mutated by deletes, and a set that has drifted should
-    /// return fewer records rather than panic.
-    pub fn page_of_ids<'a>(
-        &self,
-        ids: impl IntoIterator<Item = &'a RecordId>,
-        offset: usize,
-        limit: usize,
-    ) -> Vec<Arc<Record>> {
-        let created = self.created_index();
-        let matching: Vec<(i64, u32)> = ids
-            .into_iter()
-            .filter_map(|id| self.ids.row_of(id))
-            .filter(|&row| !self.tombstone[row as usize])
-            .map(|row| (created[row as usize], row))
-            .collect();
-        self.page_of(matching, offset, limit)
-    }
-
     /// Cut one page out of `(timestamp, row)` pairs and decode only that page.
     fn page_of(&self, mut rows: Vec<(i64, u32)>, offset: usize, limit: usize) -> Vec<Arc<Record>> {
         if offset >= rows.len() {
@@ -507,7 +480,7 @@ impl RowStore {
                     .file
                     .read(row)
                     .and_then(|bytes| rmp_serde::from_slice::<Record>(&bytes).ok())
-                    .and_then(|record| record.created_at.timestamp_nanos_opt())
+                    .map(|record| crate::storage::payload_index::created_key(&record.created_at))
                     // A dead row is never returned, and an undecodable one is already lost to
                     // `for_each`; either way it sorts last rather than failing the page.
                     .unwrap_or(i64::MIN);
@@ -555,7 +528,7 @@ impl RowStore {
                 at.push(
                     decoded
                         .as_ref()
-                        .and_then(|r| r.created_at.timestamp_nanos_opt())
+                        .map(|r| crate::storage::payload_index::created_key(&r.created_at))
                         .unwrap_or(i64::MIN),
                 );
             }
@@ -909,20 +882,6 @@ impl RecordStore {
         }
     }
 
-    /// One page out of a set of ids a filter selected, decoding only the page. `None` for an
-    /// in-memory table, whose records are `Arc`s already and need no decode.
-    pub fn page_of_ids<'a>(
-        &self,
-        ids: impl IntoIterator<Item = &'a RecordId>,
-        offset: usize,
-        limit: usize,
-    ) -> Option<Vec<Arc<Record>>> {
-        match self {
-            RecordStore::Memory(_) => None,
-            RecordStore::Disk(s) => Some(s.page_of_ids(ids, offset, limit)),
-        }
-    }
-
     pub fn values_cloned(&self) -> Vec<Record> {
         let mut out = Vec::with_capacity(self.len());
         self.for_each(|r| out.push((*r).clone()));
@@ -1058,63 +1017,6 @@ mod tests {
         let reopened = RowStore::open(&path).unwrap();
         agree(&reopened, "after a reopen");
         assert_eq!(page_ids(&reopened, 0, 10), vec!["c", "e", "a", "b"]);
-    }
-
-    /// A filtered page must agree with a filtered full sort, the same way the unfiltered one
-    /// does — and must not be confused by an id the filter names that no longer has a row.
-    #[test]
-    fn a_filtered_page_agrees_with_a_filtered_full_sort() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.rec");
-        let mut store = RowStore::open(&path).unwrap();
-        let seeded: Vec<Arc<Record>> = [("a", 50), ("b", 10), ("c", 90), ("d", 30), ("e", 70)]
-            .iter()
-            .map(|(id, at)| record_at(id, *at))
-            .collect();
-        store
-            .append(
-                &seeded
-                    .iter()
-                    .map(|r| (Arc::clone(r), None))
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
-
-        let wanted: Vec<RecordId> = ["a", "c", "e"].iter().map(|s| s.to_string()).collect();
-        let page: Vec<String> = store
-            .page_of_ids(&wanted, 0, 10)
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
-        assert_eq!(
-            page,
-            vec!["c", "e", "a"],
-            "newest first among the selected ids"
-        );
-        assert_eq!(
-            store
-                .page_of_ids(&wanted, 1, 1)
-                .iter()
-                .map(|r| r.id.clone())
-                .collect::<Vec<_>>(),
-            vec!["e"],
-            "offset applies within the filtered set, not the table"
-        );
-
-        // An id the set names that has since been deleted is skipped, not fatal: the index is
-        // mutated by deletes as well as built from the records, so a stale set is possible.
-        store.remove("c").unwrap();
-        assert_eq!(
-            store
-                .page_of_ids(&wanted, 0, 10)
-                .iter()
-                .map(|r| r.id.clone())
-                .collect::<Vec<_>>(),
-            vec!["e", "a"]
-        );
-        // And one that never existed.
-        let unknown: Vec<RecordId> = vec!["a".to_string(), "nope".to_string()];
-        assert_eq!(store.page_of_ids(&unknown, 0, 10).len(), 1);
     }
 
     /// Ties are broken by id, or which records land on a page is unspecified and a page can

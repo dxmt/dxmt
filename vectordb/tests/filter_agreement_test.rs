@@ -128,16 +128,18 @@ fn filters() -> Vec<(&'static str, Filter)> {
     ]
 }
 
-#[tokio::test]
-async fn list_and_exact_search_agree_with_the_records() {
-    let storage = IntelligentIndexedStorage::new(&StorageConfig {
-        r#type: "memory".to_string(),
-        memory: Some(MemoryConfig {
-            max_size_mb: 256,
-            eviction_policy: "lru".to_string(),
-        }),
-        ..Default::default()
-    })
+async fn loaded(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
+    let storage = IntelligentIndexedStorage::new_with_wal(
+        &StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ..Default::default()
+        },
+        wal,
+    )
     .await
     .unwrap();
     storage
@@ -156,17 +158,41 @@ async fn list_and_exact_search_agree_with_the_records() {
         })
         .await
         .unwrap();
-    let rows = (0..ROWS)
-        .map(|i| CreateRecordRequest {
-            id: i.to_string(),
-            vector: vector(i),
-            sparse_vector: None,
-            named_vectors: None,
-            payload: Some(payload(i)),
-        })
-        .collect();
-    storage.insert_records("t", rows).await.unwrap();
+    // Three batches. Every record still gets its own nanosecond timestamp, so the id tiebreak
+    // is never reached here — `the_index_agrees_with_the_records_through_inserts_updates_and_
+    // deletes` in `storage::payload_index` covers it, with timestamps drawn from a range of
+    // eight. What this checks is the order itself and that the pages join up.
+    for batch in 0..3 {
+        let rows = (batch * ROWS / 3..(batch + 1) * ROWS / 3)
+            .map(|i| CreateRecordRequest {
+                id: i.to_string(),
+                vector: vector(i),
+                sparse_vector: None,
+                named_vectors: None,
+                payload: Some(payload(i)),
+            })
+            .collect();
+        storage.insert_records("t", rows).await.unwrap();
+    }
+    storage
+}
 
+/// With the table's records in memory, and with them in row files on disk — the two stores
+/// page through different code, and the disk one is where the 10M-row page was slow.
+#[tokio::test]
+async fn list_and_exact_search_agree_with_the_records_in_memory() {
+    check(&loaded(None).await).await;
+}
+
+#[tokio::test]
+async fn list_and_exact_search_agree_with_the_records_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    check(&loaded(Some(dir.path().join("wal"))).await).await;
+}
+
+async fn check(storage: &IntelligentIndexedStorage) {
+    // Unfiltered, in list order: newest `created_at` first, ties by id. Filtering this with
+    // `matches_filter` gives both the set and the order every filtered page must follow.
     let (all, total) = storage
         .list_records("t", None, ROWS * 2, 0, false)
         .await
@@ -175,25 +201,47 @@ async fn list_and_exact_search_agree_with_the_records() {
 
     let mut disagreements = Vec::new();
     for (name, filter) in filters() {
-        let want: BTreeSet<String> = all
+        let in_order: Vec<String> = all
             .iter()
             .filter(|r| r.matches_filter(&filter))
             .map(|r| r.id.clone())
             .collect();
+        let want: BTreeSet<String> = in_order.iter().cloned().collect();
 
-        let (listed, listed_total) = storage
-            .list_records("t", Some(&filter), ROWS * 2, 0, false)
-            .await
-            .unwrap();
-        let listed: BTreeSet<String> = listed.into_iter().map(|r| r.id).collect();
-        if listed != want || listed_total != want.len() {
-            disagreements.push(format!(
-                "records/list  {name}: {} returned, {} expected",
-                listed.len(),
-                want.len()
-            ));
+        // Page through seven at a time: the pages must join up into exactly the filtered list,
+        // in order, with the same total on every one.
+        let mut paged = Vec::new();
+        let mut offset = 0;
+        loop {
+            let (page, page_total) = storage
+                .list_records("t", Some(&filter), 7, offset, false)
+                .await
+                .unwrap();
+            if page_total != want.len() {
+                disagreements.push(format!(
+                    "records/list  {name}: total {page_total} at offset {offset}, {} expected",
+                    want.len()
+                ));
+                break;
+            }
+            if page.is_empty() {
+                break;
+            }
+            offset += page.len();
+            paged.extend(page.into_iter().map(|r| r.id));
         }
-
+        if paged != in_order {
+            let set: BTreeSet<String> = paged.iter().cloned().collect();
+            disagreements.push(if set == want {
+                format!("records/list  {name}: the right records, in the wrong order")
+            } else {
+                format!(
+                    "records/list  {name}: {} returned, {} expected",
+                    set.len(),
+                    want.len()
+                )
+            });
+        }
         let searched = storage
             .search(
                 "t",
