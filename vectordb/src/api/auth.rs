@@ -58,8 +58,17 @@ impl ApiKey {
     /// Absent or blank means no authentication. A key made only of whitespace is a mistake, not
     /// a secret, and treating it as one would give a server that looks protected and is not.
     pub fn from_env() -> Option<Self> {
-        let key = crate::config::env::var(KEY_VARIABLE).ok()?;
-        let key = key.trim();
+        Self::parse(crate::config::env::var(KEY_VARIABLE).ok().as_deref())
+    }
+
+    /// The same, from a value rather than the environment, which is what the tests use.
+    ///
+    /// They used to set `DXMT_API_KEY` and read it back, two tests doing so on parallel threads
+    /// with nothing ordering them: one set `"  padded  "`, the other set `""` in between, and
+    /// the first found no key at all. It failed once in a full run and passed on every run
+    /// after, which is the shape of the same mistake `Layout` made and was fixed for.
+    pub fn parse(value: Option<&str>) -> Option<Self> {
+        let key = value?.trim();
         if key.is_empty() {
             return None;
         }
@@ -157,24 +166,21 @@ mod tests {
     #[test]
     fn a_blank_key_is_no_key() {
         for blank in ["", "   ", "\t\n"] {
-            std::env::set_var(KEY_VARIABLE, blank);
             assert!(
-                ApiKey::from_env().is_none(),
+                ApiKey::parse(Some(blank)).is_none(),
                 "{blank:?} was accepted as a key"
             );
         }
-        std::env::remove_var(KEY_VARIABLE);
+        assert!(ApiKey::parse(None).is_none());
     }
 
     /// Surrounding whitespace in the environment is almost always the shell's, not the
     /// operator's — but only the configured side is trimmed, never what a client sends.
     #[test]
     fn the_configured_key_is_trimmed() {
-        std::env::set_var(KEY_VARIABLE, "  padded  ");
-        let key = ApiKey::from_env().expect("a key");
+        let key = ApiKey::parse(Some("  padded  ")).expect("a key");
         assert!(key.matches("padded"));
         assert!(!key.matches("  padded  "));
-        std::env::remove_var(KEY_VARIABLE);
     }
 
     #[test]
