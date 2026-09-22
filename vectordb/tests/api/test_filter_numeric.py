@@ -103,3 +103,15 @@ def test_a_filtered_search_still_orders_by_distance(table):
 def test_top_k_applies_after_the_filter(table):
     hits = search(table, must(cond("rank", "GreaterThanOrEqual", 3)), k=2)
     assert ids_of(hits) == ["r3", "r4"]
+
+
+def test_contradictory_ranges_are_empty_and_the_server_survives(table):
+    # `rank >= 7 and rank <= 2` matches nothing. It used to panic while proving that — the two
+    # bounds became a slice starting past its end — and the release build aborts on panic, so one
+    # such search took the whole server down. Measured on the binary before the fix: the request
+    # got no response and neither did the next one.
+    contradictory = must(cond("rank", "GreaterThanOrEqual", 7), cond("rank", "LessThanOrEqual", 2))
+    assert search(table, contradictory) == []
+    assert post(f"/tables/{table}/records/list", {"limit": 8, "filter": contradictory}).json()["data"]["total"] == 0
+    # Still here.
+    assert len(search(table, None)) > 0

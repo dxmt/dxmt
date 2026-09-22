@@ -467,7 +467,11 @@ impl NumericIndex {
             Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
             None => self.sorted.len(),
         };
-        self.sorted[start..end]
+        // `start > end` when the bounds contradict each other — `n >= 40` with `n <= 5` on the
+        // same field. Slicing with them panicked, and `cannot_match_anything`, which every
+        // filtered search calls first, folds a field's ranges into exactly these two bounds, so
+        // one contradictory filter took the request down. Nothing lies between them.
+        self.sorted[start..end.max(start)]
             .iter()
             .any(|(value, _)| matches(*value))
             || self.pending.iter().any(|(value, _)| matches(*value))
@@ -493,7 +497,8 @@ impl NumericIndex {
             Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
             None => self.sorted.len(),
         };
-        for (value, id) in &self.sorted[start..end] {
+        // Contradictory bounds are an empty range, not a panic; see `any_matches`.
+        for (value, id) in &self.sorted[start..end.max(start)] {
             if matches(*value) {
                 visit(*id);
             }
@@ -2655,5 +2660,43 @@ mod churn {
         let o = ids.get("r1").unwrap();
         assert_eq!(ids.assign("r1", 0), o);
         assert_eq!(ids.live().count(), 5_000 - 1667 + 20_000);
+    }
+}
+
+#[cfg(test)]
+mod contradictory_ranges {
+    use super::*;
+
+    fn ranged(lo: i64, hi: i64) -> Filter {
+        Filter {
+            must: Some(vec![
+                Condition {
+                    key: "n".into(),
+                    operation: FilterOperation::GreaterThanOrEqual(lo.into()),
+                },
+                Condition {
+                    key: "n".into(),
+                    operation: FilterOperation::LessThanOrEqual(hi.into()),
+                },
+            ]),
+            must_not: None,
+            should: None,
+        }
+    }
+
+    /// `n >= 40 and n <= 5` is a filter nothing satisfies, and it panicked: the two bounds
+    /// became a slice whose start was past its end. A search calls `cannot_match_anything`
+    /// before anything else, so this was one request away from a crashed handler.
+    #[test]
+    fn a_lower_bound_above_the_upper_is_empty_not_a_panic() {
+        let mut index = PayloadIndex::new();
+        for i in 0..50 {
+            index.insert_record(&format!("r{i}"), &serde_json::json!({ "n": i }), 0);
+        }
+        assert!(index.cannot_match_anything(&ranged(40, 5)));
+        assert!(index.get_matching_ids(&ranged(40, 5)).is_empty());
+        // And an ordinary range still finds what it should.
+        assert!(!index.cannot_match_anything(&ranged(5, 40)));
+        assert_eq!(index.get_matching_ids(&ranged(5, 40)).len(), 36);
     }
 }
