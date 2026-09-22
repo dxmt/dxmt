@@ -22,6 +22,8 @@
 #                             api-dashboard with `--dashboard` -- compiling an interface in and
 #                             serving it are separate decisions, and the tests need both
 #   PYTEST=...                a specific interpreter's pytest
+#   DXMT_SKIP_STATEFUL=1      leave out the stateful walk (tests/stateful) that runs after both
+#                             modes
 
 # Deliberately not `set -e`: both modes must run, so the summary can say which one failed.
 set -uo pipefail
@@ -142,6 +144,20 @@ for mode in $MODES; do
   rm -rf "$wal_dir" "$log"
   wal_dir=""
 done
+
+# The stateful walk starts, kills and restarts its own servers, so it runs once, after the
+# per-mode loop, with the binary the loop used. Its seeds and length are the defaults in
+# tests/stateful/test_walk.py; DXMT_STATEFUL_SEEDS and DXMT_STATEFUL_STEPS lengthen it locally.
+if [ "${DXMT_SKIP_STATEFUL:-0}" != "1" ]; then
+  echo "### stateful walk (writes, restarts and crashes against a model)"
+  DXMT_BIN="$BIN" $PYTEST tests/stateful -q -p no:cacheprovider
+  if [ $? = 0 ]; then
+    summary="$summary\n  stateful walk: PASS"
+  else
+    summary="$summary\n  stateful walk: FAIL"
+    failed=1
+  fi
+fi
 
 printf "\nfunctional API tests:%b\n" "$summary"
 exit $failed

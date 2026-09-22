@@ -194,7 +194,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest httpx
-          DXMT_FEATURES=api-dashboard DXMT_MODES=memory scripts/api_tests.sh -q tests/api/test_dashboard.py
+          DXMT_FEATURES=api-dashboard DXMT_MODES=memory DXMT_SKIP_STATEFUL=1 scripts/api_tests.sh -q tests/api/test_dashboard.py
 
   sdk-live:
     name: Python and JavaScript SDK live contract
