@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import warnings
-from typing import Any, Optional
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Iterable, Iterator, Optional
 
 from urllib.parse import quote
 
@@ -81,6 +85,57 @@ def _seg(value: str) -> str:
     no encoding pass through unchanged, so this is safe on every id.
     """
     return quote(str(value), safe="")
+
+
+#: Statuses a retry can fix: the server is busy (429, 503) or momentarily wrong (5xx). A 4xx
+#: other than 429 says the request itself is wrong, and sending it again changes nothing.
+_RETRYABLE = frozenset({429, 500, 502, 503, 504})
+
+
+@dataclass
+class UploadFailure:
+    """One batch that did not go in, after every retry it was worth."""
+
+    ids: list[str]
+    error: str
+    status: Optional[int] = None
+
+
+@dataclass
+class UploadResult:
+    """What `upload` did. `failed` is empty when everything went in."""
+
+    uploaded: int = 0
+    batches: int = 0
+    retries: int = 0
+    failed: list[UploadFailure] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed
+
+
+def _payload_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`metadata` renamed to `payload`, copying only the records that need it."""
+    out = []
+    for record in records:
+        if "metadata" in record and "payload" not in record:
+            record = dict(record)
+            record["payload"] = record.pop("metadata")
+        out.append(record)
+    return out
+
+
+def _batches(records: Iterable[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
+    """Chunks of `size`, drawn lazily — so a generator of ten million records is never held."""
+    batch: list[dict[str, Any]] = []
+    for record in records:
+        batch.append(record)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 class DXMTClient:
@@ -493,6 +548,171 @@ class DXMTClient:
             raise DXMTConnectionError(msg) from e
 
     # Document Operations
+
+    def scroll(
+        self,
+        table_name: str,
+        *,
+        filter: Optional[dict[str, Any]] = None,
+        batch_size: int = 100,
+        with_vector: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Every record of a table, newest first, fetched a page at a time.
+
+        Pages by cursor, not offset: every record present for the whole scroll comes back
+        exactly once however the table is written to meanwhile, where an offset shifts with each
+        insert and repeats or skips records. For exporting a table, re-indexing it elsewhere, or
+        anything else that has to see all of it.
+
+        Args:
+            table_name: Name of the table.
+            filter: Only records matching this filter.
+            batch_size: Records per request, at most 1,000.
+            with_vector: Include each record's vector.
+
+        Yields:
+            Records, normalised the way `list_records` returns them.
+
+        Raises:
+            DXMTRecordError: If a page fails, or the server does not page by cursor.
+            DXMTConnectionError: On a connection error.
+        """
+        cursor: Optional[str] = None
+        while True:
+            body = self._scroll_body(filter, batch_size, with_vector, cursor)
+            try:
+                response = self._client.post(f"/tables/{_seg(table_name)}/records/list", json=body)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise DXMTRecordError(f"Failed to scroll '{table_name}': {e.response.text}") from e
+            except httpx.RequestError as e:
+                raise DXMTConnectionError(f"Connection error while scrolling: {e}") from e
+            records, cursor = self._scroll_page(response.json(), batch_size)
+            yield from records
+            if cursor is None:
+                return
+
+    async def ascroll(
+        self,
+        table_name: str,
+        *,
+        filter: Optional[dict[str, Any]] = None,
+        batch_size: int = 100,
+        with_vector: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Async version of :meth:`scroll`."""
+        cursor: Optional[str] = None
+        while True:
+            body = self._scroll_body(filter, batch_size, with_vector, cursor)
+            try:
+                response = await self.async_client.post(f"/tables/{_seg(table_name)}/records/list", json=body)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise DXMTRecordError(f"Failed to scroll '{table_name}': {e.response.text}") from e
+            except httpx.RequestError as e:
+                raise DXMTConnectionError(f"Connection error while scrolling: {e}") from e
+            records, cursor = self._scroll_page(response.json(), batch_size)
+            for record in records:
+                yield record
+            if cursor is None:
+                return
+
+    @staticmethod
+    def _scroll_body(filter, batch_size, with_vector, cursor) -> dict[str, Any]:
+        body: dict[str, Any] = {"limit": batch_size, "with_vector": with_vector}
+        if filter is not None:
+            body["filter"] = convert_simple_filter_to_dxmt(filter)
+        if cursor is not None:
+            body["cursor"] = cursor
+        return body
+
+    def _scroll_page(self, raw: Any, batch_size: int) -> tuple[list[dict[str, Any]], Optional[str]]:
+        data = self._response_data(raw)
+        records = data.get("records") or []
+        # A server from before cursors answers without the field. Taking that as "no next page"
+        # would end every scroll after one page, silently; a full page without it is an error.
+        if "next_cursor" not in data and len(records) >= batch_size:
+            raise DXMTRecordError("this server does not page by cursor; upgrade it to scroll")
+        return [self._normalize_record(r) for r in records], data.get("next_cursor")
+
+    def upload(
+        self,
+        table_name: str,
+        records: Iterable[dict[str, Any]],
+        *,
+        batch_size: int = 256,
+        parallel: int = 1,
+        max_retries: int = 3,
+        backoff: float = 0.5,
+    ) -> UploadResult:
+        """Insert many records, in batches, retrying what a retry can fix.
+
+        `records` may be any iterable, a generator included; it is drawn a batch at a time, so a
+        load larger than memory never has to be held at once. A batch that fails for a reason a
+        retry can fix — a dropped connection, a timeout, 429, a 5xx — is sent again after an
+        exponential backoff; one that fails because the request is wrong (a dimension mismatch,
+        a missing table) is not, and is reported. Inserts are upserts, so a retried batch that
+        had in fact landed does not duplicate anything.
+
+        It does not raise for a failed batch: every batch is attempted, and `result.failed`
+        says which ids did not go in and why, so one bad record does not abandon the rest.
+
+        Args:
+            table_name: Name of the table.
+            records: Records with `id`, `vector` and optional `payload` (or `metadata`).
+            batch_size: Records per request.
+            parallel: Requests in flight at once.
+            max_retries: Further attempts per batch after the first.
+            backoff: Seconds before the first retry, doubling after each.
+
+        Returns:
+            How many records went in, how many batches and retries it took, and what failed.
+        """
+        result = UploadResult()
+        path = f"/tables/{_seg(table_name)}/records"
+
+        def send(batch: list[dict[str, Any]]) -> tuple[int, Optional[UploadFailure], int]:
+            body = _encode_json({"records": _payload_records(batch), "mode": "standard"})
+            retries = 0
+            while True:
+                status: Optional[int] = None
+                try:
+                    response = self._client.post(path, content=body, headers=_JSON_HEADERS)
+                    if response.is_success:
+                        return len(batch), None, retries
+                    status, error = response.status_code, response.text
+                except httpx.RequestError as e:
+                    error = f"connection error: {e}"
+                retryable = status is None or status in _RETRYABLE
+                if not retryable or retries >= max_retries:
+                    ids = [str(r.get("id")) for r in batch]
+                    return 0, UploadFailure(ids=ids, error=error[:500], status=status), retries
+                time.sleep(backoff * (2 ** retries))
+                retries += 1
+
+        def record(outcome: tuple[int, Optional[UploadFailure], int]) -> None:
+            uploaded, failure, retries = outcome
+            result.uploaded += uploaded
+            result.batches += 1
+            result.retries += retries
+            if failure is not None:
+                result.failed.append(failure)
+
+        if parallel <= 1:
+            for batch in _batches(records, batch_size):
+                record(send(batch))
+            return result
+
+        # Bounded in flight, so a generator is still drawn only as fast as batches are sent.
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            pending: deque = deque()
+            for batch in _batches(records, batch_size):
+                pending.append(pool.submit(send, batch))
+                if len(pending) >= parallel * 2:
+                    record(pending.popleft().result())
+            while pending:
+                record(pending.popleft().result())
+        return result
 
     def insert_records(
         self,

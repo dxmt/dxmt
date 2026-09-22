@@ -193,6 +193,33 @@ await client.deleteRecords({
 });
 ```
 
+### Loading and Exporting a Table
+
+`upload()` inserts any iterable or async iterable of records in batches, several at once,
+retrying what a retry can fix (no answer, 429, 5xx) with exponential backoff. It does not throw
+for a batch that stays failed; `failed` lists the ids and why.
+
+```typescript
+const result = await client.upload('documents', records, {
+  batchSize: 256, // records per request
+  parallel: 4,    // requests in flight
+  maxRetries: 3,
+});
+if (result.failed.length) console.error(result.failed);
+```
+
+`scroll()` walks every record, newest first, a page at a time. It pages by cursor, so a record
+that exists for the whole scroll comes back exactly once even while the table is being written.
+
+```typescript
+for await (const record of client.scroll('documents', {
+  batchSize: 500,
+  filter: { must: [{ key: 'lang', operation: { type: 'Equal', value: 'en' } }] },
+})) {
+  console.log(record.id, record.metadata);
+}
+```
+
 ### Search Operations
 
 #### Vector Similarity Search

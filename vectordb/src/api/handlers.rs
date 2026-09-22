@@ -231,8 +231,13 @@ pub struct ListRecordsRequest {
     pub filter: Option<crate::types::Filter>,
     /// Maximum number of records to return (default: 100, max: 1000)
     pub limit: Option<usize>,
-    /// Number of records to skip for pagination (default: 0)
+    /// Number of records to skip for pagination (default: 0). Prefer `cursor`: an offset shifts
+    /// when records are inserted while you page, and the next page repeats or skips some.
     pub offset: Option<usize>,
+    /// Where to continue from: the `next_cursor` of the previous page. Every record present for
+    /// the whole scroll is returned exactly once, however the table is written to meanwhile.
+    /// Opaque; cannot be combined with `offset`.
+    pub cursor: Option<String>,
     /// Include each record's full vector. Default **false**.
     ///
     /// Off by default because a page of 100 rows at 768 dimensions is over a megabyte of JSON
@@ -1025,26 +1030,66 @@ pub async fn list_records(
     let offset = request.offset.unwrap_or(0);
     let with_vector = request.with_vector.unwrap_or(false);
 
-    match state
-        .storage
-        .list_records(
-            &table_name,
-            request.filter.as_ref(),
-            limit,
-            offset,
-            with_vector,
-        )
-        .await
-    {
-        Ok((records, total)) => {
-            let response = serde_json::json!({
+    // An offset past zero is the old way of paging and is answered the old way, without a
+    // cursor; everything else — the first page included — pages by cursor, so the first page
+    // hands back the cursor that continues it.
+    if offset > 0 {
+        if request.cursor.is_some() {
+            return error_response(crate::Error::InvalidInput(
+                "pass either `cursor` or `offset`, not both".to_string(),
+            ));
+        }
+        return match state
+            .storage
+            .list_records(
+                &table_name,
+                request.filter.as_ref(),
+                limit,
+                offset,
+                with_vector,
+            )
+            .await
+        {
+            Ok((records, total)) => ApiResponse::success(serde_json::json!({
                 "records": records,
                 "total": total,
                 "limit": limit,
                 "offset": offset,
-            });
-            ApiResponse::success(response).into_response()
-        }
+                "next_cursor": null,
+            }))
+            .into_response(),
+            Err(e) => error_response(e),
+        };
+    }
+
+    let cursor = match request
+        .cursor
+        .as_deref()
+        .map(crate::storage::payload_index::ListCursor::decode)
+        .transpose()
+    {
+        Ok(cursor) => cursor,
+        Err(message) => return error_response(crate::Error::InvalidInput(message)),
+    };
+    match state
+        .storage
+        .list_records_after(
+            &table_name,
+            request.filter.as_ref(),
+            cursor.as_ref(),
+            limit,
+            with_vector,
+        )
+        .await
+    {
+        Ok((records, total, next)) => ApiResponse::success(serde_json::json!({
+            "records": records,
+            "total": total,
+            "limit": limit,
+            "offset": 0,
+            "next_cursor": next.map(|c| c.encode()),
+        }))
+        .into_response(),
         Err(e) => error_response(e),
     }
 }

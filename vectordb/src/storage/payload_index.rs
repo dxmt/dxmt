@@ -38,6 +38,61 @@ pub fn created_key(at: &chrono::DateTime<chrono::Utc>) -> i64 {
     at.timestamp_nanos_opt().unwrap_or(i64::MIN)
 }
 
+/// A position in the list order — newest `created_at` first, ties by id — for paging by where the
+/// last page ended rather than by how many records came before it.
+///
+/// `offset` paging shifts under writes: the list is newest first, so every record inserted while
+/// a client pages through lands in front of it and pushes the rest back, and the next page
+/// repeats what the last one ended with. A cursor names a place in the order instead, and every
+/// record present for the whole scroll is returned exactly once: an insert lands before the
+/// cursor, a delete removes only itself, and an update keeps `created_at`. It holds the key, not
+/// the record, so it survives that record being deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListCursor {
+    pub created: i64,
+    pub id: String,
+}
+
+impl ListCursor {
+    /// The cursor just past a record.
+    pub fn after(created: i64, id: &str) -> Self {
+        Self {
+            created,
+            id: id.to_string(),
+        }
+    }
+
+    /// Whether a record at `(created, id)` comes after this cursor in list order.
+    pub fn precedes(&self, created: i64, id: &str) -> bool {
+        created < self.created || (created == self.created && id > self.id.as_str())
+    }
+
+    /// Opaque to a client: sixteen hex digits of the timestamp, then the id's bytes in hex. No
+    /// separator to escape, whatever the id contains.
+    pub fn encode(&self) -> String {
+        let mut out = format!("{:016x}", self.created as u64);
+        for byte in self.id.as_bytes() {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
+    pub fn decode(token: &str) -> Result<Self, String> {
+        let bad = || format!("not a cursor this server issued: {token:?}");
+        if token.len() < 16 || !token.len().is_multiple_of(2) || !token.is_ascii() {
+            return Err(bad());
+        }
+        let created = u64::from_str_radix(&token[..16], 16).map_err(|_| bad())? as i64;
+        let bytes = (16..token.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&token[i..i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| bad())?;
+        let id = String::from_utf8(bytes).map_err(|_| bad())?;
+        Ok(Self { created, id })
+    }
+}
+
 /// A record's place in this index. Postings hold one of these instead of the record's id.
 ///
 /// The id is a `String`, and every posting used to hold its own clone of one. A field with a
@@ -1103,17 +1158,40 @@ impl PayloadIndex {
         offset: usize,
         limit: usize,
     ) -> (Vec<&str>, usize) {
+        let (page, total) = self.page_matching(filter, None, offset, limit);
+        (page.into_iter().map(|(id, _)| id).collect(), total)
+    }
+
+    /// The same, starting after `cursor` rather than at an offset, with each id's timestamp so
+    /// the caller can say where the page ended. `total` still counts every match.
+    pub fn page_of_matching_after(
+        &self,
+        filter: &Filter,
+        cursor: Option<&ListCursor>,
+        limit: usize,
+    ) -> (Vec<(&str, i64)>, usize) {
+        self.page_matching(filter, cursor, 0, limit)
+    }
+
+    fn page_matching(
+        &self,
+        filter: &Filter,
+        cursor: Option<&ListCursor>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<(&str, i64)>, usize) {
         let matching = self.matching_ordinals(filter);
         let total = matching.len();
-        if offset >= total || limit == 0 {
-            return (Vec::new(), total);
-        }
-        let end = (offset + limit).min(total);
+        let id = |o: Ordinal| self.ids.id_of(o).unwrap_or("");
         let mut keyed: Vec<(i64, Ordinal)> = matching
             .into_iter()
             .map(|o| (self.ids.created[o as usize], o))
+            .filter(|&(created, o)| cursor.is_none_or(|c| c.precedes(created, id(o))))
             .collect();
-        let id = |o: Ordinal| self.ids.id_of(o).unwrap_or("");
+        if offset >= keyed.len() || limit == 0 {
+            return (Vec::new(), total);
+        }
+        let end = (offset + limit).min(keyed.len());
         let newest_first = |a: &(i64, Ordinal), b: &(i64, Ordinal)| {
             b.0.cmp(&a.0).then_with(|| id(a.1).cmp(id(b.1)))
         };
@@ -1123,7 +1201,7 @@ impl PayloadIndex {
         keyed[..end].sort_by(newest_first);
         let page = keyed[offset..end]
             .iter()
-            .filter_map(|&(_, o)| self.ids.id_of(o))
+            .filter_map(|&(created, o)| self.ids.id_of(o).map(|id| (id, created)))
             .collect();
         (page, total)
     }
@@ -2820,5 +2898,52 @@ mod contradictory_ranges {
         // And an ordinary range still finds what it should.
         assert!(!index.cannot_match_anything(&ranged(5, 40)));
         assert_eq!(index.get_matching_ids(&ranged(5, 40)).len(), 36);
+    }
+}
+
+#[cfg(test)]
+mod cursor {
+    use super::ListCursor;
+
+    #[test]
+    fn a_cursor_survives_its_own_encoding_whatever_the_id() {
+        for id in ["r1", "", "with.dots:and colons", "ünïcödé/🦀", "0000"] {
+            for created in [0, 1, -1, i64::MIN, i64::MAX, 1_700_000_000_123_456_789] {
+                let c = ListCursor::after(created, id);
+                assert_eq!(
+                    ListCursor::decode(&c.encode()),
+                    Ok(c.clone()),
+                    "{id:?} at {created}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_token_this_server_did_not_issue_is_refused() {
+        for bad in [
+            "",
+            "123",
+            "zzzzzzzzzzzzzzzz",
+            "0000000000000000f",
+            "0000000000000000ff",
+            "000000000000000g",
+        ] {
+            assert!(ListCursor::decode(bad).is_err(), "{bad:?} was accepted");
+        }
+    }
+
+    /// Newest first, ties by id: after the cursor means older, or as old with a larger id.
+    #[test]
+    fn precedes_is_the_list_order() {
+        let c = ListCursor::after(100, "m");
+        assert!(c.precedes(99, "a"));
+        assert!(c.precedes(100, "n"));
+        assert!(
+            !c.precedes(100, "m"),
+            "the record the cursor names is not after itself"
+        );
+        assert!(!c.precedes(100, "a"));
+        assert!(!c.precedes(101, "z"));
     }
 }

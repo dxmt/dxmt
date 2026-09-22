@@ -94,6 +94,28 @@ client = Client(host="db.example.com", ssl=True, api_key="your-key")
 The client reads no environment variable itself — pass `api_key=os.environ["DXMT_API_KEY"]` if that
 is where you keep it. Over plain HTTP to anything but localhost it warns.
 
+### Loading and Exporting a Table
+
+`upload` inserts any iterable of records — a generator included, drawn a batch at a time — in
+batches, in parallel if asked, retrying what a retry can fix (a dropped connection, a timeout,
+429, a 5xx) and reporting what could not go in rather than raising halfway:
+
+```python
+result = client.upload("docs", records, batch_size=256, parallel=4)
+if not result.ok:
+    for failure in result.failed:
+        print(failure.status, failure.error, failure.ids)
+```
+
+`scroll` reads every record back, newest first, a page at a time. It pages by cursor, so every
+record present for the whole scroll comes back exactly once even while the table is written to —
+where `list_records` with an offset shifts under inserts and repeats or skips records:
+
+```python
+for record in client.scroll("docs", batch_size=500, filter={"must": [...]}):
+    ...
+```
+
 ### Async Usage
 
 ```python

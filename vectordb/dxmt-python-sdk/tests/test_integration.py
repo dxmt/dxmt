@@ -237,6 +237,29 @@ class TestRecordOperations:
         assert record["metadata"] == {"v": 2}
 
 
+class TestScrollAndUpload:
+    """`upload` in parallel batches, then `scroll` everything back by cursor."""
+
+    def test_upload_then_scroll_returns_every_record_once(self, client: Client) -> None:
+        name = f"test_scroll_{random.randint(1000, 9999)}"
+        client.create_table(name=name, dimension=8)
+        try:
+            records = ({"id": f"s{i}", "vector": [random.random() for _ in range(8)],
+                        "payload": {"even": i % 2 == 0}} for i in range(250))
+            result = client.upload(name, records, batch_size=40, parallel=3)
+            assert result.ok, result.failed
+            assert (result.uploaded, result.batches) == (250, 7)
+
+            ids = [r["id"] for r in client.scroll(name, batch_size=33)]
+            assert len(ids) == 250 and len(set(ids)) == 250
+
+            evens = [r["id"] for r in client.scroll(name, batch_size=20,
+                     filter={"must": [{"key": "even", "operation": {"type": "Equal", "value": True}}]})]
+            assert sorted(evens) == sorted(f"s{i}" for i in range(0, 250, 2))
+        finally:
+            client.delete_table(name)
+
+
 class TestVectorSearch:
     """Test vector search operations."""
 

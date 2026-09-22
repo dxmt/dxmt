@@ -70,6 +70,10 @@ export type {
   UpdateRecordParams,
   DeleteParams,
   BatchOperationResult,
+  ScrollOptions,
+  UploadOptions,
+  UploadResult,
+  UploadFailure,
 
   // Filters
   Filter,

@@ -348,6 +348,16 @@ def _(table):
     assert first and second and not set(first) & set(second), f"{first} overlaps {second}"
 
 
+@probe("ListRecordsRequest", "cursor")
+def _(table):
+    # A cursor continues where the previous page ended, and ignoring it would return page one again.
+    first = listed(table, limit=2)
+    assert first["next_cursor"], f"a full first page should say how to continue: {first}"
+    second = listed(table, limit=2, cursor=first["next_cursor"])
+    ids = lambda page: [r["id"] for r in page["records"]]  # noqa: E731
+    assert ids(second) and not set(ids(first)) & set(ids(second)), f"{ids(first)} then {ids(second)}"
+
+
 @probe("ListRecordsRequest", "with_vector")
 def _(table):
     assert len(listed(table, limit=1, with_vector=True)["records"][0]["vector"]) == 4

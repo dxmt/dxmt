@@ -265,3 +265,41 @@ export interface HealthCheckResponse {
   metrics?: globalThis.Record<string, any>;
   storage?: globalThis.Record<string, any>;
 }
+
+/** Options for {@link DXMTClient.scroll}. */
+export interface ScrollOptions {
+  /** Only records matching this filter. */
+  filter?: Filter;
+  /** Records per request, at most 1,000. Default 100. */
+  batchSize?: number;
+  /** Include each record's vector. Default false. */
+  withVector?: boolean;
+}
+
+/** Options for {@link DXMTClient.upload}. */
+export interface UploadOptions {
+  /** Records per request. Default 256. */
+  batchSize?: number;
+  /** Requests in flight at once. Default 1. */
+  parallel?: number;
+  /** Further attempts per batch after the first. Default 3. */
+  maxRetries?: number;
+  /** Milliseconds before the first retry, doubling after each. Default 500. */
+  backoffMs?: number;
+}
+
+/** One batch that did not go in, after every retry it was worth. */
+export interface UploadFailure {
+  ids: string[];
+  error: string;
+  /** HTTP status, or undefined when the request never got an answer. */
+  status?: number;
+}
+
+/** What {@link DXMTClient.upload} did. `failed` is empty when everything went in. */
+export interface UploadResult {
+  uploaded: number;
+  batches: number;
+  retries: number;
+  failed: UploadFailure[];
+}

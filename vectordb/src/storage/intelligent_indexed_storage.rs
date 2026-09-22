@@ -7469,6 +7469,93 @@ impl IntelligentIndexedStorage {
     /// table and nothing at all once the vectors live in a row file — so the same call answered
     /// `[1.0, 0.0, ...]` or `[]` depending on `DXMT_VECTOR_STORE`, with no way for the caller to
     /// tell that from a record that genuinely has no vector.
+    /// One page of records after `cursor` (from the start when `None`), newest first with ties
+    /// by id, and the cursor for the next page — `None` on the last one.
+    ///
+    /// Paging by cursor rather than offset is what makes a scroll through a table that is being
+    /// written to return every record present throughout exactly once; see
+    /// `payload_index::ListCursor`. One more record than asked for is fetched, so the last page
+    /// says it is the last instead of sending the client for an empty one.
+    pub async fn list_records_after(
+        &self,
+        tablename: &str,
+        filter: Option<&crate::types::Filter>,
+        cursor: Option<&crate::storage::payload_index::ListCursor>,
+        limit: usize,
+        with_vector: bool,
+    ) -> crate::Result<(
+        Vec<Record>,
+        usize,
+        Option<crate::storage::payload_index::ListCursor>,
+    )> {
+        use crate::storage::payload_index::{created_key, ListCursor};
+        Self::check_filter(filter)?;
+        self.ensure_resident(tablename).await?;
+        let tables = self.read_tables("list_records_after").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let fetch = limit.saturating_add(1);
+
+        let (mut page, total): (Vec<Record>, usize) = match filter {
+            Some(filter) => {
+                let derived = table_data.derived();
+                let (ids, total) = derived
+                    .payload
+                    .page_of_matching_after(filter, cursor, fetch);
+                let page = ids
+                    .iter()
+                    .filter_map(|(id, _)| table_data.records.get(id))
+                    .map(|r| (*r).clone())
+                    .collect();
+                (page, total)
+            }
+            None => {
+                let total = table_data.records.len();
+                let from_disk = match cursor {
+                    Some(c) => table_data.records.page_newest_first_after(c, fetch),
+                    None => table_data.records.page_newest_first(0, fetch),
+                };
+                let page = match from_disk {
+                    Some(page) => page.iter().map(|r| (**r).clone()).collect(),
+                    // In memory: the records are `Arc`s already; sort the ones after the cursor.
+                    None => {
+                        let mut all = Vec::with_capacity(total);
+                        table_data.records.for_each(|r| {
+                            if cursor.is_none_or(|c| c.precedes(created_key(&r.created_at), &r.id))
+                            {
+                                all.push(r);
+                            }
+                        });
+                        let newest_first = |a: &Arc<Record>, b: &Arc<Record>| {
+                            created_key(&b.created_at)
+                                .cmp(&created_key(&a.created_at))
+                                .then_with(|| a.id.cmp(&b.id))
+                        };
+                        let end = fetch.min(all.len());
+                        if end > 0 && end < all.len() {
+                            all.select_nth_unstable_by(end - 1, newest_first);
+                        }
+                        all.truncate(end);
+                        all.sort_by(newest_first);
+                        all.iter().map(|r| (**r).clone()).collect()
+                    }
+                };
+                (page, total)
+            }
+        };
+
+        let next = if page.len() > limit {
+            page.truncate(limit);
+            page.last()
+                .map(|last| ListCursor::after(created_key(&last.created_at), &last.id))
+        } else {
+            None
+        };
+        Self::fill_vectors(table_data, &mut page, with_vector);
+        Ok((page, total, next))
+    }
+
     pub async fn list_records(
         &self,
         tablename: &str,

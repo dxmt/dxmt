@@ -360,7 +360,32 @@ def test_walk(mode, seed):
             server.start()
             return f"restart {sig.name}"
 
-        steps = [(step_insert, 30), (step_update, 30), (step_delete, 12), (step_snapshot, 4), (step_restart, 6)]
+        def step_scroll():
+            # Page through by cursor with a write between pages. Every record present for the
+            # whole scroll must come back exactly once; nothing may come back twice.
+            start, deleted, seen, cursor, pages = set(model.records), set(), {}, None, 0
+            while True:
+                body = {"limit": rng.randint(1, 6), **({"cursor": cursor} if cursor else {})}
+                status, response = server.call("POST", "/tables/t/records/list", body)
+                assert status == 200, f"scroll page {pages}: {status} {response}"
+                for r in response["data"]["records"]:
+                    seen[r["id"]] = seen.get(r["id"], 0) + 1
+                cursor = response["data"]["next_cursor"]
+                if cursor is None:
+                    break
+                before = set(model.records)
+                rng.choice([step_insert, step_update, step_delete, lambda: None])()
+                deleted |= before - set(model.records)
+                pages += 1
+                assert pages < 1000, "the cursor is not advancing"
+            twice = sorted(i for i, n in seen.items() if n > 1)
+            assert not twice, f"scroll returned {twice} more than once"
+            missing = sorted((start - deleted) - set(seen))
+            assert not missing, f"scroll never returned {missing}, present throughout"
+            return f"scroll over {pages + 1} pages"
+
+        steps = [(step_insert, 30), (step_update, 30), (step_delete, 12), (step_snapshot, 4), (step_restart, 6),
+                 (step_scroll, 3)]
         population, weights = zip(*steps)
         for n in range(STEPS):
             op = rng.choices(population, weights)[0]

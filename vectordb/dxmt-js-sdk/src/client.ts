@@ -22,6 +22,9 @@ import {
   FullTextSearchParams,
   HybridSearchParams,
   Metadata,
+  ScrollOptions,
+  UploadOptions,
+  UploadResult,
 } from './types';
 import {
   DXMTError,
@@ -82,6 +85,9 @@ const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'apiKey'>> = {
  * });
  * ```
  */
+/** Statuses a retry can fix: busy (429, 503) or momentarily wrong (5xx). */
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
 export class DXMTClient {
   private baseUrl: string;
   private timeout: number;
@@ -381,6 +387,157 @@ export class DXMTClient {
    * });
    * ```
    */
+  /**
+   * Every record of a table, newest first, fetched a page at a time.
+   *
+   * Pages by cursor rather than offset: every record present for the whole scroll comes back
+   * exactly once however the table is written to meanwhile, where an offset shifts with each
+   * insert and repeats or skips records.
+   *
+   * @example
+   * ```typescript
+   * for await (const record of client.scroll('documents', { batchSize: 500 })) {
+   *   console.log(record.id, record.metadata);
+   * }
+   * ```
+   */
+  async *scroll(tableName: string, options: ScrollOptions = {}): AsyncGenerator<VectorRecord> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    const batchSize = options.batchSize ?? 100;
+    let cursor: string | null = null;
+    for (;;) {
+      const page: {
+        records?: Array<VectorRecord & { payload?: Metadata; payload_json?: string }>;
+        next_cursor?: string | null;
+      } = await this.request('POST', `/tables/${encodeURIComponent(tableName)}/records/list`, {
+        limit: batchSize,
+        with_vector: options.withVector ?? false,
+        ...(options.filter === undefined ? {} : { filter: options.filter }),
+        ...(cursor === null ? {} : { cursor }),
+      });
+      const records = page.records ?? [];
+      // A server from before cursors answers without the field. Taking that as "no next page"
+      // would end every scroll after one page, silently; a full page without it is an error.
+      if (!Object.prototype.hasOwnProperty.call(page, 'next_cursor') && records.length >= batchSize) {
+        throw new DXMTRecordError('this server does not page by cursor; upgrade it to scroll');
+      }
+      for (const record of records) {
+        yield this.normalizeRecord(record);
+      }
+      cursor = page.next_cursor ?? null;
+      if (cursor === null) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * Insert many records, in batches, retrying what a retry can fix.
+   *
+   * `records` may be any iterable or async iterable; it is drawn a batch at a time. A batch
+   * that fails for a reason a retry can fix — no answer, 429, a 5xx — is sent again after an
+   * exponential backoff; one the server refuses as wrong (a dimension mismatch, a missing table)
+   * is not. Inserts are upserts, so a retried batch that had in fact landed duplicates nothing.
+   * It does not throw for a failed batch: `failed` says which ids did not go in and why.
+   *
+   * @example
+   * ```typescript
+   * const result = await client.upload('documents', records, { batchSize: 256, parallel: 4 });
+   * if (result.failed.length) console.error(result.failed);
+   * ```
+   */
+  async upload(
+    tableName: string,
+    records: Iterable<VectorRecord> | AsyncIterable<VectorRecord>,
+    options: UploadOptions = {}
+  ): Promise<UploadResult> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    const batchSize = options.batchSize ?? 256;
+    const parallel = Math.max(1, options.parallel ?? 1);
+    const maxRetries = options.maxRetries ?? 3;
+    const backoffMs = options.backoffMs ?? 500;
+    const path = `/tables/${encodeURIComponent(tableName)}/records`;
+    const result: UploadResult = { uploaded: 0, batches: 0, retries: 0, failed: [] };
+
+    const send = async (batch: VectorRecord[]): Promise<void> => {
+      const body = {
+        records: batch.map(({ metadata, ...record }) => ({
+          ...record,
+          ...(metadata === undefined ? {} : { payload: metadata }),
+        })),
+        mode: 'append',
+      };
+      for (let attempt = 0; ; attempt++) {
+        let status: number | undefined;
+        let error: string;
+        try {
+          const answer = await this.rawRequest('POST', path, body);
+          if (answer.status >= 200 && answer.status < 300) {
+            result.uploaded += batch.length;
+            break;
+          }
+          status = answer.status;
+          error = answer.text;
+        } catch (e) {
+          error = `no answer: ${(e as Error).message}`;
+        }
+        const retryable = status === undefined || RETRYABLE.has(status);
+        if (!retryable || attempt >= maxRetries) {
+          result.failed.push({ ids: batch.map((r) => String(r.id)), error: error.slice(0, 500), status });
+          break;
+        }
+        result.retries += 1;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs * 2 ** attempt));
+      }
+      result.batches += 1;
+    };
+
+    // At most `parallel` batches in flight, so the input is drawn only as fast as it is sent.
+    const inFlight = new Set<Promise<void>>();
+    let batch: VectorRecord[] = [];
+    const flush = async (): Promise<void> => {
+      const task = send(batch);
+      batch = [];
+      inFlight.add(task);
+      task.finally(() => inFlight.delete(task));
+      if (inFlight.size >= parallel) {
+        await Promise.race(inFlight);
+      }
+    };
+    for await (const record of records as AsyncIterable<VectorRecord>) {
+      batch.push(record);
+      if (batch.length === batchSize) {
+        await flush();
+      }
+    }
+    if (batch.length > 0) {
+      await flush();
+    }
+    await Promise.all(inFlight);
+    return result;
+  }
+
+  /** A request that reports the status instead of throwing on it; throws only on no answer. */
+  private async rawRequest(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: this.headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+      return { status: response.status, text: await response.text() };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   async insertRecords(
     params: InsertRecordsParams
   ): Promise<BatchOperationResult> {

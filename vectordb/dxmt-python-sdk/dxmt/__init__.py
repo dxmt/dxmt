@@ -26,7 +26,7 @@ Example:
     ... )
 """
 
-from .client import DXMTClient
+from .client import DXMTClient, UploadFailure, UploadResult
 from .client import DXMTClient as Client  # Alias for backward compatibility
 from .exceptions import (
     DXMTConnectionError,
@@ -115,6 +115,8 @@ except ImportError:
 __version__ = "0.1.0"
 
 __all__ = [
+    "UploadResult",
+    "UploadFailure",
     # Main client
     "Client",
     "DXMTClient",  # Also export under original name

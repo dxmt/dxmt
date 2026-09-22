@@ -12,6 +12,13 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **Paging by cursor.** `records/list` returns `next_cursor`, and takes it back as `cursor`. An
+  offset shifts under writes — the list is newest first, so each insert pushes the rest back and
+  the next page repeats a record — where a cursor names a place in the order: every record
+  present for a whole scroll is returned exactly once. The Python and JavaScript SDKs' `scroll`
+  pages by it, and their `upload` loads any iterable in batches, in parallel, retrying what a
+  retry can fix and reporting what it could not.
+
 - **Every client can send the API key.** `DXMT_API_KEY` (22fc06a) left the Python SDK, the
   LangChain and LlamaIndex packages, and the Rust and Go clients with no way to send it — against
   a keyed server they could not be used at all. Each takes a key now (`api_key=`,

@@ -441,6 +441,21 @@ impl RowStore {
         self.page_of(live, offset, limit)
     }
 
+    /// The page after a cursor. See `payload_index::ListCursor`.
+    pub fn page_newest_first_after(
+        &self,
+        cursor: &crate::storage::payload_index::ListCursor,
+        limit: usize,
+    ) -> Vec<Arc<Record>> {
+        let created = self.created_index();
+        let live: Vec<(i64, u32)> = (0..self.ids.rows() as u32)
+            .filter(|&row| !self.tombstone[row as usize])
+            .filter(|&row| cursor.precedes(created[row as usize], self.ids.id(row)))
+            .map(|row| (created[row as usize], row))
+            .collect();
+        self.page_of(live, 0, limit)
+    }
+
     /// Cut one page out of `(timestamp, row)` pairs and decode only that page.
     fn page_of(&self, mut rows: Vec<(i64, u32)>, offset: usize, limit: usize) -> Vec<Arc<Record>> {
         if offset >= rows.len() {
@@ -879,6 +894,18 @@ impl RecordStore {
         match self {
             RecordStore::Memory(_) => None,
             RecordStore::Disk(s) => Some(s.page_newest_first(offset, limit)),
+        }
+    }
+
+    /// The page after a cursor, decoding only that page. `None` for an in-memory table.
+    pub fn page_newest_first_after(
+        &self,
+        cursor: &crate::storage::payload_index::ListCursor,
+        limit: usize,
+    ) -> Option<Vec<Arc<Record>>> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.page_newest_first_after(cursor, limit)),
         }
     }
 
