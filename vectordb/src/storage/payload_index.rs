@@ -789,30 +789,7 @@ impl PayloadIndex {
 
         if let Some(obj) = payload.as_object() {
             for (key, value) in obj {
-                if Self::to_value_key(value).is_none() {
-                    if let Some(held) = self.unindexed.get_mut(key.as_str()) {
-                        held.remove(ordinal);
-                        if held.is_empty() {
-                            self.unindexed.remove(key.as_str());
-                        }
-                    }
-                }
-                if let Some(field_index) = self.field_indices.get_mut(key) {
-                    if let Some(value_key) = Self::to_value_key(value) {
-                        match Self::as_ordered(&value_key) {
-                            Some(number) => field_index.numeric.remove(number, ordinal),
-                            None => {
-                                if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
-                                    if ids.remove(ordinal) {
-                                        field_index.value_to_ids.remove(&value_key);
-                                    }
-                                }
-                            }
-                        }
-                        field_index.distinct_count =
-                            field_index.value_to_ids.len() + field_index.numeric.distinct_count();
-                    }
-                }
+                self.unindex_field(key, value, ordinal);
             }
         }
 
@@ -941,39 +918,50 @@ impl PayloadIndex {
                 // No record carries a scalar under this key, so none can match a condition
                 // that needs one.
                 None => true,
-                Some(field) => {
-                    let satisfied = |value_key: &ValueKey| {
-                        conditions
-                            .iter()
-                            .all(|c| Self::value_key_matches(value_key, &c.operation))
-                    };
-                    // Both halves have to be asked. Numbers live in the sorted index and
-                    // strings in the map, and a field can hold both; asking only the map is
-                    // how the first version of this decided a satisfiable numeric filter was
-                    // empty, which returns no rows rather than an error.
-                    let in_map = field
-                        .value_to_ids
-                        .iter()
-                        .any(|(value_key, ids)| !ids.is_empty() && satisfied(value_key));
-                    if in_map {
-                        return false;
-                    }
-                    let (lo, hi) = conditions
-                        .iter()
-                        .map(|c| Self::numeric_bounds(&c.operation))
-                        .fold((None, None), |(lo, hi), (l, h)| {
-                            (Self::tighter(lo, l, true), Self::tighter(hi, h, false))
-                        });
-                    // `any_matches`, not `select`: this asks whether anything matches, and
-                    // every filtered query asks it. Collecting the answer instead of
-                    // short-circuiting it walks the whole matching range, which for a filter
-                    // most rows pass is most of the table.
-                    !field
-                        .numeric
-                        .any_matches(lo, hi, |value| satisfied(&Self::from_ordered(value)))
-                }
+                // A record holding an array can satisfy `>= 400` with one element and `<= 600`
+                // with another — each condition asks whether *any* element passes — so on such
+                // a field no single value has to satisfy them all, and the joint proof below
+                // would call `[100, 700]` unmatchable. Each condition is proved on its own
+                // instead: one that nothing satisfies still empties the whole `must`.
+                Some(field) if self.unindexed.contains_key(key) => conditions
+                    .iter()
+                    .any(|c| Self::no_value_satisfies(field, std::slice::from_ref(c))),
+                Some(field) => Self::no_value_satisfies(field, &conditions),
             }
         })
+    }
+
+    /// Whether no indexed value of the field satisfies every one of `conditions` at once.
+    fn no_value_satisfies(field: &FieldIndex, conditions: &[&Condition]) -> bool {
+        let satisfied = |value_key: &ValueKey| {
+            conditions
+                .iter()
+                .all(|c| Self::value_key_matches(value_key, &c.operation))
+        };
+        // Both halves have to be asked. Numbers live in the sorted index and
+        // strings in the map, and a field can hold both; asking only the map is
+        // how the first version of this decided a satisfiable numeric filter was
+        // empty, which returns no rows rather than an error.
+        let in_map = field
+            .value_to_ids
+            .iter()
+            .any(|(value_key, ids)| !ids.is_empty() && satisfied(value_key));
+        if in_map {
+            return false;
+        }
+        let (lo, hi) = conditions
+            .iter()
+            .map(|c| Self::numeric_bounds(&c.operation))
+            .fold((None, None), |(lo, hi), (l, h)| {
+                (Self::tighter(lo, l, true), Self::tighter(hi, h, false))
+            });
+        // `any_matches`, not `select`: this asks whether anything matches, and
+        // every filtered query asks it. Collecting the answer instead of
+        // short-circuiting it walks the whole matching range, which for a filter
+        // most rows pass is most of the table.
+        !field
+            .numeric
+            .any_matches(lo, hi, |value| satisfied(&Self::from_ordered(value)))
     }
 
     /// The tighter of two optional bounds: the larger for a lower bound, the smaller for an
@@ -1622,24 +1610,102 @@ impl PayloadIndex {
     }
 
     /// 为字段建立索引
+    /// Index one field of a record. An array is indexed element by element, because a
+    /// condition on an array field is satisfied when any element satisfies it (see
+    /// `any_element` in `types::record`): `tags: ["a", "b"]` is filed under `"a"` and under
+    /// `"b"`, and `tags == "a"` finds it by the same lookup a scalar field uses.
     fn index_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
-        let value_key = match Self::to_value_key(value) {
-            Some(vk) => vk,
-            // An array or an object: no key to file it under, but the record does have the
-            // field, which `NotIn` needs to know. See `unindexed`.
-            None => {
-                match self.unindexed.get_mut(key) {
-                    Some(held) => {
-                        held.insert(ordinal);
-                    }
-                    None => {
-                        let mut held = roaring::RoaringBitmap::new();
-                        held.insert(ordinal);
-                        self.unindexed.insert(key.to_string(), held);
+        match value {
+            serde_json::Value::Array(elements) => {
+                // Also recorded as present, which the elements alone do not say for `[]` or an
+                // array of nothing but arrays and objects — and `NotIn` needs presence.
+                self.mark_unindexed(key, ordinal);
+                for element in elements {
+                    if !matches!(
+                        element,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        self.index_scalar(key, element, ordinal);
                     }
                 }
-                return;
             }
+            // Matched by shape, not by asking `to_value_key`: that clones a string to
+            // answer, and this runs for every field of every record in a rebuild.
+            serde_json::Value::Object(_) => self.mark_unindexed(key, ordinal),
+            _ => self.index_scalar(key, value, ordinal),
+        }
+    }
+
+    /// The reverse of [`Self::index_field`], for the payload the record was indexed with.
+    fn unindex_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
+        match value {
+            serde_json::Value::Array(elements) => {
+                self.unmark_unindexed(key, ordinal);
+                // A repeated element is removed once per occurrence. The postings drop the
+                // ordinal on the first and find nothing on the next; the numeric index holds
+                // one entry per occurrence and loses one each time.
+                for element in elements {
+                    if !matches!(
+                        element,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    ) {
+                        self.unindex_scalar(key, element, ordinal);
+                    }
+                }
+            }
+            serde_json::Value::Object(_) => self.unmark_unindexed(key, ordinal),
+            _ => self.unindex_scalar(key, value, ordinal),
+        }
+    }
+
+    /// Note that a record has `key` with a value the index cannot file — or an array. See
+    /// `unindexed`.
+    fn mark_unindexed(&mut self, key: &str, ordinal: Ordinal) {
+        match self.unindexed.get_mut(key) {
+            Some(held) => {
+                held.insert(ordinal);
+            }
+            None => {
+                let mut held = roaring::RoaringBitmap::new();
+                held.insert(ordinal);
+                self.unindexed.insert(key.to_string(), held);
+            }
+        }
+    }
+
+    fn unmark_unindexed(&mut self, key: &str, ordinal: Ordinal) {
+        if let Some(held) = self.unindexed.get_mut(key) {
+            held.remove(ordinal);
+            if held.is_empty() {
+                self.unindexed.remove(key);
+            }
+        }
+    }
+
+    fn unindex_scalar(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
+        let (Some(field_index), Some(value_key)) =
+            (self.field_indices.get_mut(key), Self::to_value_key(value))
+        else {
+            return;
+        };
+        match Self::as_ordered(&value_key) {
+            Some(number) => field_index.numeric.remove(number, ordinal),
+            None => {
+                if let Some(ids) = field_index.value_to_ids.get_mut(&value_key) {
+                    if ids.remove(ordinal) {
+                        field_index.value_to_ids.remove(&value_key);
+                    }
+                }
+            }
+        }
+        field_index.distinct_count =
+            field_index.value_to_ids.len() + field_index.numeric.distinct_count();
+    }
+
+    /// Index one scalar value under `key`.
+    fn index_scalar(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
+        let Some(value_key) = Self::to_value_key(value) else {
+            return;
         };
 
         // `entry(key.to_string())` allocated a copy of the field's name for every record, to
@@ -2414,8 +2480,29 @@ mod churn {
         if rng.below(10) > 0 {
             map.insert("flag".into(), (rng.below(2) == 0).into());
         }
-        if rng.below(4) == 0 {
-            map.insert("tags".into(), serde_json::json!(["a", "b"]));
+        if rng.below(3) == 0 {
+            // Arrays in every shape the element rule has an edge for: empty, one element, a
+            // repeat, a nested array (an element that matches nothing scalar), mixed types.
+            let tags = match rng.below(7) {
+                0 => serde_json::json!([]),
+                1 => serde_json::json!(["a"]),
+                2 => serde_json::json!(["a", "b"]),
+                3 => serde_json::json!(["b", "c"]),
+                4 => serde_json::json!(["a", "a"]),
+                5 => serde_json::json!([["a"], "c"]),
+                _ => serde_json::json!(["a", 1]),
+            };
+            map.insert("tags".into(), tags);
+        }
+        if rng.below(3) == 0 {
+            let scores = match rng.below(5) {
+                0 => serde_json::json!([]),
+                1 => serde_json::json!([1, 7]),
+                2 => serde_json::json!([3.5]),
+                3 => serde_json::json!([7, 7.0]),
+                _ => serde_json::json!([100, 700]),
+            };
+            map.insert("scores".into(), scores);
         }
         if rng.below(10) > 0 {
             // A microsecond timestamp, and a value that differs from its neighbours below a
@@ -2452,7 +2539,14 @@ mod churn {
             (1_700_000_000_000_000i64 + rng.below(5) as i64).into()
         };
         let tiny = |rng: &mut Rng| -> serde_json::Value { (rng.below(5) as f64 * 1e-7).into() };
-        let (key, operation) = match rng.below(20) {
+        let score = |rng: &mut Rng| -> serde_json::Value {
+            [1.0, 3.5, 7.0, 100.0, 400.0, 600.0, 700.0][rng.below(7) as usize].into()
+        };
+        let (key, operation) = match rng.below(24) {
+            20 => ("scores", FilterOperation::GreaterThanOrEqual(score(rng))),
+            21 => ("scores", FilterOperation::LessThanOrEqual(score(rng))),
+            22 => ("scores", FilterOperation::Equal(score(rng))),
+            23 => ("scores", FilterOperation::NotEqual(score(rng))),
             16 => ("us", FilterOperation::Equal(us(rng))),
             17 => ("us", FilterOperation::GreaterThan(us(rng))),
             18 => ("tiny", FilterOperation::Equal(tiny(rng))),
@@ -2476,12 +2570,17 @@ mod churn {
             10 => ("n", FilterOperation::Equal(number(rng))),
             11 => ("n", FilterOperation::NotEqual(number(rng))),
             12 => ("flag", FilterOperation::Equal((rng.below(2) == 0).into())),
-            13 => match rng.below(2) {
-                0 => ("tags", FilterOperation::NotEqual("a".into())),
-                // A record holding an array has the field, so it satisfies `NotIn` — the one
-                // case `unindexed` is there for.
-                _ => ("tags", FilterOperation::NotIn(vec!["a".into()])),
-            },
+            13 => {
+                let tag = ["a", "b", "c"][rng.below(3) as usize];
+                match rng.below(6) {
+                    0 => ("tags", FilterOperation::Equal(tag.into())),
+                    1 => ("tags", FilterOperation::NotEqual(tag.into())),
+                    2 => ("tags", FilterOperation::In(vec![tag.into(), "c".into()])),
+                    3 => ("tags", FilterOperation::NotIn(vec![tag.into()])),
+                    4 => ("tags", FilterOperation::StartsWith(tag.into())),
+                    _ => ("tags", FilterOperation::Equal(1.into())),
+                }
+            }
             14 => (
                 "id",
                 FilterOperation::Equal(format!("id{}", rng.below(60)).into()),
@@ -2552,6 +2651,20 @@ mod churn {
                         if rng.below(2) == 0 {
                             must.push(random_condition(&mut rng, serial));
                         }
+                        // Two ranges on one array field, which one element each can satisfy —
+                        // the case that breaks a proof testing them against a single value.
+                        if rng.below(4) == 0 {
+                            must = vec![
+                                Condition {
+                                    key: "scores".into(),
+                                    operation: FilterOperation::GreaterThanOrEqual(400.into()),
+                                },
+                                Condition {
+                                    key: "scores".into(),
+                                    operation: FilterOperation::LessThanOrEqual(600.into()),
+                                },
+                            ];
+                        }
                         let must_not =
                             (rng.below(3) == 0).then(|| vec![random_condition(&mut rng, serial)]);
                         let filter = Filter {
@@ -2568,6 +2681,15 @@ mod churn {
                             .map(|(id, (_, created))| (*created, id.clone()))
                             .collect();
                         let want_ids: Vec<String> = want.iter().map(|(_, id)| id.clone()).collect();
+                        // The shortcut a search takes before anything else: it may only say
+                        // "nothing matches" when nothing does.
+                        if index.cannot_match_anything(&filter) {
+                            assert!(
+                                want_ids.is_empty(),
+                                "seed {seed}, step {step}: cannot_match_anything said no record \
+                                 matches {filter:?}, and {want_ids:?} do"
+                            );
+                        }
                         assert_eq!(
                             got, want_ids,
                             "seed {seed}, step {step}: the index and the records disagree on \

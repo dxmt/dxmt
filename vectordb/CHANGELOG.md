@@ -12,6 +12,13 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **Filtering on array fields.** A condition on a field holding an array is satisfied when any
+  element satisfies it, so `tags == "rag"` finds `tags: ["rag", "llm"]` — Qdrant's rule, and
+  what Chroma's `$contains` and Weaviate's `ContainsAny` are for. It used to compare the whole
+  array with `"rag"` and match nothing. `NotEqual` and `NotIn` exclude a record when any element
+  matches; Qdrant's `except` on an array instead keeps it if any element does not match, which
+  lets `["spam", "x"]` through an exclusion of `"spam"`.
+
 - **An optional API key.** `DXMT_API_KEY` puts a shared secret in front of every route but the
   health probes, sent as `api-key` (Qdrant's header name) or `Authorization: Bearer`. Off by
   default, as it is in Qdrant, Chroma and Weaviate. One static key, no rotation and no accounts

@@ -132,3 +132,51 @@ def test_a_scalar_target_in_the_same_operations_still_works(table):
     # The refusal is about the target's shape, not the operations: these are the same four.
     assert sorted(ids_of(search(table, must(cond("tag", "In", ["gamma"]))))) == ["r4", "r7"]
     assert search(table, must(cond("tag", "NotIn", ["alpha", "beta", "gamma"]))) == []
+
+
+# An array field. A condition on it is satisfied when any element satisfies it — Qdrant's rule —
+# so `tags == "rag"` finds a record tagged ["rag", "llm"]. It used to compare the whole array with
+# "rag" and never match, on every endpoint. The negations are the complements: `tags != "rag"` and
+# `tags not in ["rag"]` exclude every record carrying the tag, not only those holding it alone.
+TAGGED = [
+    ("t1", ["rag", "llm"]),
+    ("t2", ["llm"]),
+    ("t3", "rag"),  # a scalar in the same field
+    ("t4", []),
+    ("t5", None),  # no tags field at all
+]
+
+
+def tagged_table(empty_table):
+    records = []
+    for i, (rid, tags) in enumerate(TAGGED):
+        payload = {} if tags is None else {"tags": tags}
+        records.append({"id": rid, "vector": [1.0, 0.1 * (i + 1), 0.0, 0.0], "payload": payload})
+    post(f"/tables/{empty_table}/records/bulk", {"records": records})
+    return empty_table
+
+
+def listed(table, filt):
+    body = post(f"/tables/{table}/records/list", {"limit": 50, "filter": filt}).json()["data"]
+    return sorted(r["id"] for r in body["records"])
+
+
+def searched(table, filt):
+    body = {"vector": [1.0, 0.2, 0.0, 0.0], "top_k": 50, "filter": filt, "search_mode": "exact"}
+    return sorted(h["id"] for h in post(f"/tables/{table}/search", body).json()["data"]["hits"])
+
+
+def test_a_condition_on_an_array_field_matches_any_element(empty_table):
+    table = tagged_table(empty_table)
+    expected = {
+        "Equal rag": (must(cond("tags", "Equal", "rag")), ["t1", "t3"]),
+        "In [llm]": (must(cond("tags", "In", ["llm"])), ["t1", "t2"]),
+        "StartsWith ll": (must(cond("tags", "StartsWith", "ll")), ["t1", "t2"]),
+        # Missing field counts for NotEqual, not for NotIn; an empty array is present.
+        "NotEqual rag": (must(cond("tags", "NotEqual", "rag")), ["t2", "t4", "t5"]),
+        "NotIn [rag]": (must(cond("tags", "NotIn", ["rag"])), ["t2", "t4"]),
+        "must_not Equal rag": (must_not(cond("tags", "Equal", "rag")), ["t2", "t4", "t5"]),
+    }
+    for name, (filt, ids) in expected.items():
+        assert listed(table, filt) == ids, f"records/list {name}"
+        assert searched(table, filt) == ids, f"exact search {name}"

@@ -51,8 +51,26 @@ fn payload(i: usize) -> serde_json::Value {
     if !i.is_multiple_of(7) {
         p.insert("topic".into(), ["alpha", "beta", "gamma"][i % 3].into());
     }
-    if i.is_multiple_of(5) {
-        p.insert("tags".into(), serde_json::json!(["a", "b"]));
+    // Arrays: a condition on one is satisfied when any element satisfies it.
+    match i % 6 {
+        0 => {
+            p.insert("tags".into(), serde_json::json!(["a", "b"]));
+        }
+        1 => {
+            p.insert("tags".into(), serde_json::json!(["c"]));
+        }
+        2 => {
+            p.insert("tags".into(), serde_json::json!([]));
+        }
+        3 => {
+            p.insert("tags".into(), "a".into()); // a scalar in the same field
+        }
+        _ => {}
+    }
+    if i.is_multiple_of(4) {
+        p.insert("scores".into(), serde_json::json!([100, 700]));
+    } else if i % 4 == 1 {
+        p.insert("scores".into(), serde_json::json!([500]));
     }
     // Alternately an integer and the same number as a float.
     let n = (i % 10) as i64;
@@ -93,6 +111,26 @@ fn filters() -> Vec<(&'static str, Filter)> {
         (
             "topic not in [alpha]",
             one("topic", NotIn(vec![json!("alpha")])),
+        ),
+        ("tags == a (array element)", one("tags", Equal(json!("a")))),
+        ("tags in [c]", one("tags", In(vec![json!("c")]))),
+        ("tags starts with b", one("tags", StartsWith("b".into()))),
+        (
+            "400 <= scores <= 600",
+            Filter {
+                must: Some(vec![
+                    Condition {
+                        key: "scores".into(),
+                        operation: GreaterThanOrEqual(json!(400)),
+                    },
+                    Condition {
+                        key: "scores".into(),
+                        operation: LessThanOrEqual(json!(600)),
+                    },
+                ]),
+                must_not: None,
+                should: None,
+            },
         ),
         ("tags != a", one("tags", NotEqual(json!("a")))),
         ("tags not in [a]", one("tags", NotIn(vec![json!("a")]))),

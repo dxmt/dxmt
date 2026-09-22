@@ -488,6 +488,10 @@ pub struct Condition {
 
 /// A test applied to one payload field — or, under the key `id`, to the record's own id.
 ///
+/// When the field holds an array, a test is satisfied if any element satisfies it, so
+/// `tags == "rag"` matches `tags: ["rag", "llm"]`. `NotEqual` and `NotIn` are the complements:
+/// they exclude a record if any element matches.
+///
 /// Numbers compare as numbers, so `5` and `5.0` are equal. The targets of `Equal`, `NotEqual`,
 /// `In` and `NotIn` must be strings, numbers, booleans or null: an array or an object is refused
 /// with `INVALID_INPUT`.
@@ -497,7 +501,8 @@ pub struct Condition {
 pub enum FilterOperation {
     /// The field equals this value. A record lacking the field does not match.
     Equal(serde_json::Value),
-    /// The field does not equal this value. A record lacking the field matches.
+    /// The field does not equal this value — for an array, no element does. A record lacking
+    /// the field matches.
     NotEqual(serde_json::Value),
     /// The field is a number greater than this one.
     GreaterThan(serde_json::Value),
@@ -509,8 +514,8 @@ pub enum FilterOperation {
     LessThanOrEqual(serde_json::Value),
     /// The field equals one of these values. A record lacking the field does not match.
     In(Vec<serde_json::Value>),
-    /// The field is present and equals none of these values. A record lacking the field does
-    /// *not* match — unlike `NotEqual`.
+    /// The field is present and equals none of these values — for an array, no element does. A
+    /// record lacking the field does *not* match, unlike `NotEqual`; an empty array is present.
     NotIn(Vec<serde_json::Value>),
     /// The field is a string containing this one.
     Contains(String),
@@ -645,41 +650,18 @@ impl Record {
     fn matches_condition(&self, condition: &Condition) -> bool {
         let owned = self.get_field_value(&condition.key);
         let value = owned.as_deref();
-        // `as_f64` on the field once, not once per branch: every numeric comparison below
-        // wants the same number.
-        let number = || value.and_then(serde_json::Value::as_f64);
-        let text = || value.and_then(serde_json::Value::as_str);
 
         match &condition.operation {
-            FilterOperation::Equal(target) => value.is_some_and(|v| same_json(v, target)),
-            FilterOperation::NotEqual(target) => !value.is_some_and(|v| same_json(v, target)),
-            FilterOperation::GreaterThan(target) => {
-                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v > t)
-            }
-            FilterOperation::GreaterThanOrEqual(target) => {
-                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v >= t)
-            }
-            FilterOperation::LessThan(target) => {
-                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v < t)
-            }
-            FilterOperation::LessThanOrEqual(target) => {
-                matches!((number(), target.as_f64()), (Some(v), Some(t)) if v <= t)
-            }
-            FilterOperation::In(targets) => {
-                value.is_some_and(|v| targets.iter().any(|t| same_json(v, t)))
+            // The negations are complements of the positive forms, so the array rule below
+            // carries over without a second definition: `tags != "a"` is true exactly when no
+            // element is `"a"`. A missing field satisfies `NotEqual` and not `NotIn`, as before.
+            FilterOperation::NotEqual(target) => {
+                !value.is_some_and(|v| any_element(v, |x| same_json(x, target)))
             }
             FilterOperation::NotIn(targets) => {
-                value.is_some_and(|v| !targets.iter().any(|t| same_json(v, t)))
+                value.is_some_and(|v| !any_element(v, |x| targets.iter().any(|t| same_json(x, t))))
             }
-            FilterOperation::Contains(substr) => {
-                text().is_some_and(|s| s.contains(substr.as_str()))
-            }
-            FilterOperation::StartsWith(prefix) => {
-                text().is_some_and(|s| s.starts_with(prefix.as_str()))
-            }
-            FilterOperation::EndsWith(suffix) => {
-                text().is_some_and(|s| s.ends_with(suffix.as_str()))
-            }
+            positive => value.is_some_and(|v| any_element(v, |x| scalar_matches(x, positive))),
         }
     }
 
@@ -715,6 +697,53 @@ impl Default for SearchQuery {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+        }
+    }
+}
+
+/// Whether a field satisfies a test: the value itself, or — when the field holds an array —
+/// any one of its elements.
+///
+/// `tags: ["a", "b"]` has to match `tags == "a"`. That is how Qdrant answers it (an array
+/// matches when any element does, `ValueChecker::_check`), Chroma and Weaviate offer it through
+/// `$contains` and `ContainsAny`, and it is what filtering on tags means to anyone doing it.
+/// This compared the whole array with `"a"` and never matched. One level only: an array inside
+/// an array is an element that is itself an array, and matches nothing scalar — Qdrant does not
+/// flatten either.
+fn any_element(value: &serde_json::Value, test: impl Fn(&serde_json::Value) -> bool) -> bool {
+    match value {
+        serde_json::Value::Array(elements) => elements.iter().any(test),
+        scalar => test(scalar),
+    }
+}
+
+/// A positive operation against one value.
+fn scalar_matches(value: &serde_json::Value, operation: &FilterOperation) -> bool {
+    let number = || value.as_f64();
+    let text = || value.as_str();
+    match operation {
+        FilterOperation::Equal(target) => same_json(value, target),
+        FilterOperation::In(targets) => targets.iter().any(|t| same_json(value, t)),
+        FilterOperation::GreaterThan(target) => {
+            matches!((number(), target.as_f64()), (Some(v), Some(t)) if v > t)
+        }
+        FilterOperation::GreaterThanOrEqual(target) => {
+            matches!((number(), target.as_f64()), (Some(v), Some(t)) if v >= t)
+        }
+        FilterOperation::LessThan(target) => {
+            matches!((number(), target.as_f64()), (Some(v), Some(t)) if v < t)
+        }
+        FilterOperation::LessThanOrEqual(target) => {
+            matches!((number(), target.as_f64()), (Some(v), Some(t)) if v <= t)
+        }
+        FilterOperation::Contains(substr) => text().is_some_and(|s| s.contains(substr.as_str())),
+        FilterOperation::StartsWith(prefix) => {
+            text().is_some_and(|s| s.starts_with(prefix.as_str()))
+        }
+        FilterOperation::EndsWith(suffix) => text().is_some_and(|s| s.ends_with(suffix.as_str())),
+        // Answered as complements in `matches_condition`, never per element.
+        FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => {
+            unreachable!("negations are complements of the positive forms")
         }
     }
 }
