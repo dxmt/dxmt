@@ -2681,3 +2681,93 @@ async fn a_missing_index_file_is_rebuilt_from_the_rows_rather_than_lost() {
         "the rebuilt-from-rows index must answer as well as the saved one"
     );
 }
+
+/// An update followed by a crash must leave a server that starts, with the update in it.
+///
+/// It did not. `update_record` logged the record as the map keeps it, and on a disk-backed
+/// table the map keeps it without its vector — that went to the row file. Replay then indexed
+/// an empty vector; the graph stores vectors in one flat array and appended nothing for it while
+/// still giving it a node, so every node after it pointed one vector past its data. In a
+/// release build — `panic = "abort"` — the first read of that node ended the process, on every
+/// start, because the log does not change: `kill -9` after a single payload-only update, and the
+/// database could not come back. Measured end to end before the fix: insert, update, SIGKILL,
+/// restart → `range end index 1204 out of range for slice of length 1200` and exit.
+///
+/// Dropping the storage without a snapshot is the crash: the reopened one has only the log.
+#[tokio::test]
+async fn an_update_is_replayed_with_its_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("wal");
+    let vector = |i: usize| vec![1.0, i as f32 / 50.0, (i % 7) as f32 / 7.0, 0.25];
+
+    {
+        let storage = open(&wal).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                (0..50)
+                    .map(|i| record(&format!("r{i}"), vector(i)))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        // Payload-only updates, the way the HTTP handler sends them: the stored vector is read
+        // back and passed through unchanged.
+        for i in (0..50).step_by(5) {
+            let id = format!("r{i}");
+            let current = storage.get_record("t", &id).await.unwrap();
+            storage
+                .update_record(
+                    "t",
+                    &id,
+                    CreateRecordRequest {
+                        id: id.clone(),
+                        vector: current.vector,
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload: Some(serde_json::json!({ "updated": i })),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        // Dropped here with no snapshot taken: the crash.
+    }
+
+    let storage = open(&wal).await;
+    let (all, total) = storage
+        .list_records("t", None, 100, 0, false)
+        .await
+        .unwrap();
+    assert_eq!(total, 50);
+    assert_eq!(all.len(), 50);
+
+    for i in (0..50).step_by(5) {
+        let id = format!("r{i}");
+        let restored = storage.get_record("t", &id).await.unwrap();
+        assert_eq!(
+            restored.payload,
+            serde_json::json!({ "updated": i }),
+            "{id}"
+        );
+        assert_eq!(restored.vector, vector(i), "{id} lost its vector in replay");
+
+        // And it is in the graph, where it belongs: its own vector finds it first.
+        let hits = storage.search("t", query(vector(i), 1)).await.unwrap().hits;
+        assert_eq!(hits.first().map(|h| h.id.as_str()), Some(id.as_str()));
+    }
+
+    // Every record is reachable and nothing extra is: a node without a vector would either
+    // panic here or come back as a hit with a garbage score.
+    let hits = storage
+        .search("t", query(vector(3), 50))
+        .await
+        .unwrap()
+        .hits;
+    assert_eq!(hits.len(), 50);
+    assert!(hits.iter().all(|h| h.score.is_finite()), "{hits:?}");
+}

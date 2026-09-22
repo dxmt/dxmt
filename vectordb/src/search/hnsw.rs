@@ -1893,6 +1893,9 @@ impl HnswIndex {
         // already in `id_to_idx`, and nothing in this batch is yet.
         let mut prepared: Vec<(RecordId, DenseVector, usize)> = Vec::with_capacity(items.len());
         let mut seen: HashSet<RecordId> = HashSet::with_capacity(items.len());
+        for (id, vector) in &items {
+            self.check_dimension(id, vector)?;
+        }
         for (id, vector) in items {
             if self.idx_of(&id).is_some() || !seen.insert(id.clone()) {
                 return Err(crate::Error::InvalidInput(format!(
@@ -2133,7 +2136,29 @@ impl HnswIndex {
         });
     }
 
+    /// Refuse a vector the graph cannot hold.
+    ///
+    /// `Nodes` stores every vector in one flat array and learns the dimension from the first
+    /// one; after that it appends without looking. An empty vector appended nothing but still
+    /// took a node, so from that node on every index pointed one vector past its data, and the
+    /// first read of the last one panicked. That happened on restart: `update_record` logged a
+    /// record whose vector had moved to the row file, replay handed the empty vector here, and
+    /// with `panic = "abort"` the server could no longer start after any update followed by a
+    /// crash. The log is fixed at the source; this is the boundary that keeps any other path
+    /// from doing the same.
+    fn check_dimension(&self, id: &str, vector: &[f32]) -> crate::Result<()> {
+        let expected = self.nodes.dim;
+        if vector.is_empty() || (expected != 0 && vector.len() != expected) {
+            return Err(crate::Error::InvalidVector(format!(
+                "record '{id}' has {} dimensions and the graph holds {expected}",
+                vector.len()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn insert(&mut self, id: RecordId, vector: DenseVector) -> crate::Result<()> {
+        self.check_dimension(&id, &vector)?;
         let vector = self.prepare(vector);
         if self.idx_of(&id).is_some() {
             return Err(crate::Error::InvalidInput(format!(

@@ -1188,10 +1188,17 @@ async fn process_insert_group(
             .iter()
             .map(|(id, _, named)| (id.clone(), named.clone()))
             .collect();
+        // A record with no dense vector has nothing to put in the dense index. The check above
+        // lets an empty vector through on purpose and the API refuses one at the door, so the
+        // only way one arrives is from inside — replay of an entry that lost its vector was
+        // one. Handed to the graph it used to take a node without data and corrupt every index
+        // after it; the graph refuses it now, and refusing it there would fail the whole batch,
+        // so it is left out here instead.
         index
             .insert_batch(
                 to_insert
                     .into_iter()
+                    .filter(|(_, vector, _)| !vector.is_empty())
                     .map(|(id, vector, _)| (id, vector))
                     .collect(),
             )
@@ -1659,9 +1666,29 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        // A log written before `update_record` recorded its vector holds update entries
+        // without one. The vector is still in the row file — the update wrote it there before it
+        // logged anything — so read it back rather than re-index nothing. If it is not there
+        // either, the record cannot be indexed and the entry is refused like any other bad one:
+        // replay skips it and carries on, instead of corrupting the graph for every entry after.
+        let vector = if record.vector.is_empty() {
+            let tables = self.read_tables("restore_record_from_wal").await;
+            tables
+                .get(table)
+                .map(|data| data.vector_for(&record))
+                .unwrap_or_default()
+        } else {
+            record.vector.clone()
+        };
+        if vector.is_empty() {
+            return Err(crate::Error::InvalidVector(format!(
+                "WAL entry for '{}' has no vector and none is stored for it",
+                record.id
+            )));
+        }
         let request = CreateRecordRequest {
             id: record.id.clone(),
-            vector: record.vector.clone(),
+            vector,
             sparse_vector: record.sparse_vector.clone(),
             named_vectors: record.named_vectors.clone(),
             payload: Some(record.payload.clone()),
@@ -6987,18 +7014,23 @@ impl IntelligentIndexedStorage {
         // Dense and named-vector index work can block, so it runs after the global table-map
         // lock is released. Search may briefly miss this record while the index catches up, the
         // same visibility model inserts already have.
-        if let Err(e) = artifacts.index.remove(record_id).await {
-            warn!("Failed to remove old vector for {}: {}", record_id, e);
-        }
-        if let Err(e) = artifacts
-            .index
-            .insert(record_id.clone(), artifacts.vector.clone())
-            .await
-        {
-            warn!(
-                "Failed to update vector index for record {}: {}",
-                record_id, e
-            );
+        // Without a vector there is nothing to re-index, and removing first would drop the
+        // record from search: the graph refuses an empty vector, so the insert that should
+        // follow the remove would fail and leave nothing behind.
+        if !artifacts.vector.is_empty() {
+            if let Err(e) = artifacts.index.remove(record_id).await {
+                warn!("Failed to remove old vector for {}: {}", record_id, e);
+            }
+            if let Err(e) = artifacts
+                .index
+                .insert(record_id.clone(), artifacts.vector.clone())
+                .await
+            {
+                warn!(
+                    "Failed to update vector index for record {}: {}",
+                    record_id, e
+                );
+            }
         }
 
         if let Some(collection) = &artifacts.named_indexes {
@@ -7056,9 +7088,19 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        // The entry has to be able to rebuild the record on its own. `artifacts.record` is the
+        // record as the map keeps it, and on a disk-backed table the map keeps it *without* its
+        // vector, which went to the row file. Logging that meant a replay re-indexed an empty
+        // vector, the graph's flat vector array fell one entry behind its nodes, and after any
+        // update followed by a crash the server panicked on its way up — every time, since the
+        // log does not change. The insert path logs the vector already.
+        let mut logged = artifacts.record.clone();
+        if logged.vector.is_empty() {
+            logged.vector = artifacts.vector.clone();
+        }
         self.wal_append(vec![WalEntry::UpsertRecordV2 {
             table: tablename.to_string(),
-            record: artifacts.record.clone(),
+            record: logged,
         }])
         .await?;
 
