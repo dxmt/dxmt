@@ -6844,7 +6844,8 @@ impl IntelligentIndexedStorage {
     /// lines of "which of these do we keep" is how two interfaces come to disagree about what
     /// an update means. It lives here so there is one answer.
     ///
-    /// `vector: None` keeps the stored dense vector, and the sparse and named vectors are kept
+    /// `vector: None` keeps the stored dense vector, `payload: None` keeps the stored payload,
+    /// and the sparse and named vectors are kept
     /// either way -- the update shape exposes only the dense one, and silently dropping the
     /// postings that hybrid and named-vector search rely on is not something a payload edit
     /// should do.
@@ -6886,7 +6887,11 @@ impl IntelligentIndexedStorage {
                 }
                 Some(merged)
             }
-            _ => payload,
+            // No payload given keeps the one stored, in replace mode as much as in merge mode:
+            // `{"vector": [...]}` is a request to change the vector. It used to replace the
+            // payload with nothing, so re-embedding a table erased every record's metadata.
+            // To clear a payload, send `"payload": {}`.
+            _ => payload.or_else(|| existing.as_ref().map(|r| r.payload.clone())),
         };
 
         self.update_record(

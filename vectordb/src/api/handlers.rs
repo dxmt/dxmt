@@ -869,68 +869,22 @@ pub async fn update_record(
         return (StatusCode::NOT_FOUND, ApiResponse::error(error)).into_response();
     }
 
-    // 3. Prepare payload (merge if needed) and resolve final vector
-    let existing_ok = existing_record.ok();
-    let final_vector = match request.vector {
-        Some(v) => v,
-        None => existing_ok
-            .as_ref()
-            .map(|r: &crate::types::record::Record| r.vector.clone())
-            .unwrap_or_default(),
-    };
-    // The public update shape currently exposes only the dense vector. Preserve auxiliary
-    // vectors when the caller updates metadata (or otherwise omits a replacement vector),
-    // instead of silently removing the postings that hybrid/named-vector search relies on.
-    let final_sparse_vector = existing_ok
-        .as_ref()
-        .and_then(|record| record.sparse_vector.clone());
-    let final_named_vectors = existing_ok
-        .as_ref()
-        .and_then(|record| record.named_vectors.clone());
-
-    let final_payload = match request.merge_mode {
-        PayloadUpdateMode::Merge => {
-            // If merge mode, read existing payload and merge
-            if let Some(existing) = &existing_ok {
-                let mut merged = existing.payload.clone();
-                if let Some(new_payload) = request.payload {
-                    // Merge new payload into existing
-                    if let (Some(merged_obj), Some(new_obj)) =
-                        (merged.as_object_mut(), new_payload.as_object())
-                    {
-                        for (key, value) in new_obj {
-                            merged_obj.insert(key.clone(), value.clone());
-                        }
-                    } else {
-                        // If not both objects, replace
-                        merged = new_payload;
-                    }
-                }
-                Some(merged)
-            } else {
-                // No existing record, use new payload as-is
-                request.payload
-            }
-        }
-        PayloadUpdateMode::Replace => {
-            // Replace mode: use new payload as-is
-            request.payload
-        }
-    };
-
-    // 4. Prepare final update request
-    let update_request = CreateRecordRequest {
-        id: record_id.clone(),
-        vector: final_vector,
-        sparse_vector: final_sparse_vector,
-        payload: final_payload,
-        named_vectors: final_named_vectors,
-    };
-
-    // 5. Perform update
+    // 3. Apply it. What an update keeps and what it replaces is decided in one place,
+    //    `IntelligentIndexedStorage::apply_update`, which gRPC calls too. This handler used to
+    //    carry its own sixty-line copy of that decision, and both copies had the same bug: a
+    //    replace-mode update without a payload -- `{"vector": [...]}`, re-embedding a record --
+    //    replaced the payload with nothing, and the record lost all of its metadata with a 200.
+    let merge = matches!(request.merge_mode, PayloadUpdateMode::Merge);
     match state
         .storage
-        .update_record(&table_name, &record_id, update_request)
+        .apply_update(
+            &table_name,
+            &record_id,
+            request.vector,
+            request.payload,
+            merge,
+            request.upsert,
+        )
         .await
     {
         Ok(updated_record) => {
