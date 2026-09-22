@@ -211,9 +211,9 @@ jobs:
 
       - name: Start server
         run: |
-          DB_WAL_DIR="$RUNNER_TEMP/dxmt-sdk-wal" \
-          DB_SNAPSHOT_INTERVAL_SECS=0 \
-          DB_EVICTION_INTERVAL_SECS=0 \
+          DXMT_WAL_DIR="$RUNNER_TEMP/dxmt-sdk-wal" \
+          DXMT_SNAPSHOT_INTERVAL_SECS=0 \
+          DXMT_EVICTION_INTERVAL_SECS=0 \
           target/debug/vectordb serve --host 127.0.0.1 --port 19999 >"$RUNNER_TEMP/dxmt-sdk-server.log" 2>&1 &
           for i in $(seq 1 60); do
             curl --fail --silent http://127.0.0.1:19999/health >/dev/null && exit 0

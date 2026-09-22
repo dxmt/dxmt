@@ -113,7 +113,7 @@ A few conventions this repository holds to, which reviewers will ask about:
 - **In `src/` means a binary can reach it; in `examples/` means a build touches it.** Code that
   nothing can reach does not belong in either.
 - **No credentials, ever, not even in a throwaway script.** Read them from the environment
-  (`DB_AWS_ACCESS_KEY_ID`, `OPENAI_API_KEY`, …).
+  (`DXMT_AWS_ACCESS_KEY_ID`, `OPENAI_API_KEY`, …).
 - **Paste real command output into the commit message.** Not "this should work".
 - **No progress-report markdown.** Files like `*_SUMMARY.md`, `*_REPORT.md`, `*_COMPLETE.md`
   accumulated to 89 of them once and were deleted. Durable knowledge goes in `docs/` or a

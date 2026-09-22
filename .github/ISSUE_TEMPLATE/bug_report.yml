@@ -69,8 +69,8 @@ body:
     attributes:
       label: Storage configuration
       description: >
-        Any `DB_*` environment variables you set — `DB_WAL_DIR`, `DB_RECORD_STORE`,
-        `DB_VECTOR_STORE`, object storage settings. "None" is a useful answer; it means
+        Any `DB_*` environment variables you set — `DXMT_WAL_DIR`, `DXMT_RECORD_STORE`,
+        `DXMT_VECTOR_STORE`, object storage settings. "None" is a useful answer; it means
         everything is in memory and nothing is durable.
       placeholder: None
 

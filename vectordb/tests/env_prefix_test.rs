@@ -202,3 +202,66 @@ fn regex_lite_upper_names() -> impl Fn(&str) -> Vec<String> {
         names
     }
 }
+
+/// The places that *set* variables, outside the source: CI, containers, scripts, the sample
+/// env file, the contributor guide.
+///
+/// The rename to `DXMT_*` was applied with a script run inside `vectordb/`, and the CI workflow
+/// at the repository root kept starting its server with `DB_WAL_DIR` for several commits. The
+/// alias kept it working, which is exactly why nothing noticed: a deprecation warning in a CI
+/// log is read by nobody. Every test above scans `src/` only.
+#[test]
+fn nothing_that_sets_variables_uses_the_old_names() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in ["../.github/workflows", "scripts"] {
+        if let Ok(entries) = std::fs::read_dir(crate_root.join(dir)) {
+            files.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_file()));
+        }
+    }
+    for file in [
+        "../CONTRIBUTING.md",
+        "Dockerfile",
+        "docker-compose.yml",
+        ".env.example",
+        "Makefile",
+    ] {
+        let path = crate_root.join(file);
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    // Outside a git checkout (a crate tarball) the repository-root files are absent; the ones in
+    // the crate are not, so an empty list means the paths are wrong, not that all is well.
+    assert!(files.len() >= 5, "found only {files:?}");
+
+    let mut found = Vec::new();
+    for path in &files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue; // binary or unreadable
+        };
+        for (number, line) in text.lines().enumerate() {
+            let mut rest = line;
+            while let Some(at) = rest.find("DB_") {
+                let before_ok = at == 0
+                    || !rest.as_bytes()[at - 1].is_ascii_alphanumeric()
+                        && rest.as_bytes()[at - 1] != b'_';
+                let name: String = rest[at..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                let after = rest[at + name.len()..].trim_start();
+                if before_ok && name.len() > 4 && (after.starts_with('=') || after.starts_with(':'))
+                {
+                    found.push(format!("{}:{}: {name}", path.display(), number + 1));
+                }
+                rest = &rest[at + 3..];
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "these set a variable by its pre-rename name; use DXMT_*:\n  {}",
+        found.join("\n  ")
+    );
+}
