@@ -123,6 +123,17 @@ for doc in results:
     print(f"Metadata: {doc.metadata}")
 ```
 
+### Authentication
+
+A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
+
+```python
+store = DXMTVectorDB(table_name="docs", embedding=emb, dimension=768,
+                     host="db.example.com", ssl=True, api_key="your-key")
+```
+
+Ignored when you pass `client=` — configure that client instead.
+
 ## Features
 
 - ✅ **Vector Similarity Search**: Multiple distance metrics (Cosine, Euclidean, Manhattan, Dot Product)

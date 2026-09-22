@@ -80,6 +80,18 @@ vector_store = DXMTVectorStore.from_existing_table(
 index = VectorStoreIndex.from_vector_store(vector_store)
 ```
 
+### Authentication
+
+A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
+
+```python
+store = DXMTVectorStore(table_name="docs", dimension=768,
+                        host="db.example.com", ssl=True, api_key="your-key")
+```
+
+The key is handed to the client and is not a field of the store, so it does not come back out of
+`to_dict()` or a persisted index. `from_existing_table(..., api_key=...)` takes it too.
+
 ### Hybrid Search
 
 Combine vector similarity with full-text search:

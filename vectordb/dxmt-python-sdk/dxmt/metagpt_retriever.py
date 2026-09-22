@@ -277,6 +277,7 @@ def create_dxmt_retriever(
     host: str = "localhost",
     port: int = 9999,
     embed_model: Optional[Any] = None,
+    api_key: Optional[str] = None,
     **kwargs: Any,
 ) -> DXMTRetriever:
     """Create a DXMT retriever from documents.
@@ -325,7 +326,7 @@ def create_dxmt_retriever(
     from .metagpt_vector_store import DXMTVectorStore
 
     # Create DXMT client and vector store
-    client = DXMTClient(host=host, port=port)
+    client = DXMTClient(host=host, port=port, api_key=api_key)
     vector_store = DXMTVectorStore(
         client=client,
         table_name=table_name,

@@ -292,3 +292,34 @@ jobs:
           npm run build
           DXMT_LIVE_URL=http://127.0.0.1:19999 npm test -- --run test/live.test.ts
         working-directory: vectordb/dxmt-js-sdk
+
+      # Every client again, against a server that requires a key. On the test side
+      # `DXMT_API_KEY` is read only by each suite's harness -- the SDKs read no environment
+      # themselves -- and the two curls first prove the server really refuses a keyless request
+      # and accepts a keyed one, or this could pass against a server with authentication off.
+      - name: Start a server that requires an API key
+        run: |
+          DXMT_WAL_DIR="$RUNNER_TEMP/dxmt-sdk-keyed-wal" \
+          DXMT_SNAPSHOT_INTERVAL_SECS=0 \
+          DXMT_EVICTION_INTERVAL_SECS=0 \
+          DXMT_API_KEY=ci-live-key \
+          target/debug/vectordb serve --host 127.0.0.1 --port 19998 >"$RUNNER_TEMP/dxmt-sdk-keyed.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:19998/health >/dev/null && break
+            sleep 1
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19998/api/v1/tables)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'api-key: ci-live-key' http://127.0.0.1:19998/api/v1/tables)" = 200
+        working-directory: vectordb
+
+      - name: Every client against the keyed server
+        env:
+          DXMT_API_KEY: ci-live-key
+        run: |
+          (cd dxmt-python-sdk && DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19998 pytest -q tests/test_integration.py)
+          (cd dxmt-rust-sdk && DXMT_URL=http://127.0.0.1:19998 cargo test --test live)
+          (cd dxmt-go-sdk && DXMT_URL=http://127.0.0.1:19998 go test ./...)
+          (cd langchain-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
+          (cd llama-index-vector-stores-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
+          (cd dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts)
+        working-directory: vectordb

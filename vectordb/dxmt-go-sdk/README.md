@@ -38,6 +38,16 @@ var apiErr *dxmt.APIError
 if errors.As(err, &apiErr) && apiErr.IsNotFound() { ... }
 ```
 
+### Authentication
+
+A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
+
+```go
+db, err := dxmt.New("https://db.example.com", dxmt.WithAPIKey("your-key"))
+```
+
+Printing the client with `%v`, `%+v` or `%#v` shows `<redacted>` in place of the key.
+
 ## What the API does that the types make explicit
 
 * **A filter is always `must` / `must_not` / `should`.** The server's `Filter` has those three

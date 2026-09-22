@@ -30,7 +30,12 @@ func url() string {
 // client, and a client with no server to talk to has nothing to assert.
 func connect(t *testing.T) (*dxmt.Client, context.Context) {
 	t.Helper()
-	db, err := dxmt.New(url())
+	var opts []dxmt.Option
+	if key := os.Getenv("DXMT_API_KEY"); key != "" {
+		// A server started with DXMT_API_KEY needs it on every request.
+		opts = append(opts, dxmt.WithAPIKey(key))
+	}
+	db, err := dxmt.New(url(), opts...)
 	if err != nil {
 		t.Fatalf("bad url: %v", err)
 	}

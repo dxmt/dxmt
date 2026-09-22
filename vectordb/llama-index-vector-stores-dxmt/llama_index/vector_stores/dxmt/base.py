@@ -107,6 +107,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
         text_fields: Optional[List[Dict[str, Any]]] = None,
         insert_mode: str = "standard",
         batch_size: int = 100,
+        api_key: Optional[str] = None,
         **kwargs: Any,
     ):
         """Initialize DXMT vector store.
@@ -128,6 +129,11 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 Options: "standard", "lock_free", "streaming", "deferred_index",
                 "ultimate", "batch", etc. Defaults to "standard".
             batch_size: Batch size for bulk operations. Defaults to 100.
+            api_key: The server's API key, if it was started with ``DXMT_API_KEY``. Handed to
+                the client and not kept on this model: every other argument here is a pydantic
+                field and comes back out of ``to_dict()``, ``repr()`` and a serialised index,
+                which is exactly where a credential must not go. Ignored when ``client`` is
+                given — configure that client instead.
             **kwargs: Additional arguments passed to DXMTClient.
         """
         # Call super().__init__ with all the model fields
@@ -154,6 +160,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 host=host,
                 port=port,
                 ssl=ssl,
+                api_key=api_key,
             )
 
         self._table_created = False
@@ -524,6 +531,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
         host: str = "localhost",
         port: int = 9999,
         ssl: bool = False,
+        api_key: Optional[str] = None,
         **kwargs: Any,
     ) -> "DXMTVectorStore":
         """Create DXMTVectorStore from an existing table.
@@ -537,6 +545,8 @@ class DXMTVectorStore(BasePydanticVectorStore):
             host: DXMT server host if client not provided.
             port: DXMT server port if client not provided.
             ssl: Whether to use SSL if client not provided.
+            api_key: The server's API key, if client not provided. It has to be a parameter
+                here rather than in ``kwargs``: the table is read before the store is built.
             **kwargs: Additional arguments passed to DXMTVectorStore.
 
         Returns:
@@ -546,7 +556,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
             DXMTError: If table doesn't exist or can't be accessed.
         """
         if client is None:
-            client = DXMTClient(host=host, port=port, ssl=ssl)
+            client = DXMTClient(host=host, port=port, ssl=ssl, api_key=api_key)
 
         # Get table info
         table_info = client.get_table(table_name)

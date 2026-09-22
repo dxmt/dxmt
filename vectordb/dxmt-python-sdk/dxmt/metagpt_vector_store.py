@@ -97,9 +97,14 @@ class DXMTVectorStore(BasePydanticVectorStore):
         create_if_not_exists: bool = True,
         host: str = "localhost",
         port: int = 9999,
+        api_key: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize DXMT vector store."""
+        """Initialize DXMT vector store.
+
+        ``api_key`` goes to the client and is not kept as a field: the other arguments are
+        pydantic fields and come back out of ``repr()`` and serialisation.
+        """
         super().__init__(
             client=client,
             table_name=table_name,
@@ -113,7 +118,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
 
         # Create client if not provided
         if self.client is None:
-            self.client = DXMTClient(host=self.host, port=self.port)
+            self.client = DXMTClient(host=self.host, port=self.port, api_key=api_key)
 
         # Initialize table
         if create_if_not_exists and not self._initialized:

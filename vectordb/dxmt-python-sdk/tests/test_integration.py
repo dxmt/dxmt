@@ -24,6 +24,8 @@ from dxmt.exceptions import DXMTSearchError, DXMTTableError
 pytestmark = pytest.mark.integration
 
 TEST_HOST = os.environ.get("DXMT_TEST_HOST", "localhost")
+# A server started with DXMT_API_KEY needs it on every request; this suite runs both ways.
+TEST_API_KEY = os.environ.get("DXMT_API_KEY")
 TEST_PORT = int(os.environ.get("DXMT_TEST_PORT", "9999"))
 
 
@@ -36,7 +38,7 @@ def test_table_name() -> str:
 @pytest.fixture(scope="module")
 def client() -> Generator[Client, None, None]:
     """Create a client for testing."""
-    client = Client(host=TEST_HOST, port=TEST_PORT)
+    client = Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY)
     yield client
     client.close()
 
@@ -289,7 +291,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_table_operations(self, test_table_name: str) -> None:
         """Test async table operations."""
-        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY) as client:
             # Create table
             async_table = f"{test_table_name}_async"
             result = await client.acreate_table(
@@ -311,7 +313,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_record_operations(self, setup_table: str) -> None:
         """Test async record operations."""
-        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY) as client:
             # Insert records
             records = [
                 {"id": "async_1", "vector": [0.8] * 128, "metadata": {}},
@@ -334,7 +336,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_async_search(self, setup_table: str) -> None:
         """Test async search."""
-        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY) as client:
             # Insert test data
             records = [
                 {"id": f"async_search_{i}", "vector": [float(i + 1) / 10] * 128, "metadata": {}}
@@ -352,7 +354,7 @@ class TestAsyncOperations:
     @pytest.mark.asyncio
     async def test_concurrent_searches(self, setup_table: str) -> None:
         """Test concurrent async searches."""
-        async with Client(host=TEST_HOST, port=TEST_PORT) as client:
+        async with Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY) as client:
             # Perform multiple searches concurrently
             queries = [[float(i + 1) / 100] * 128 for i in range(5)]
             tasks = [

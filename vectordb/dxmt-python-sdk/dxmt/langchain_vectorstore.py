@@ -108,9 +108,10 @@ class DXMTVectorStore(VectorStore):
         dimension: Optional[int] = None,
         distance_metric: str = "cosine",
         client: Optional[DXMTClient] = None,
+        api_key: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize DXMT vector store."""
+        """Initialize DXMT vector store. ``api_key`` is ignored when ``client`` is given."""
         if not LANGCHAIN_AVAILABLE:
             raise ImportError(
                 "LangChain is required for DXMTVectorStore. "
@@ -124,7 +125,7 @@ class DXMTVectorStore(VectorStore):
 
         # Create or use provided client
         if client is None:
-            self.client = DXMTClient(host=host, port=port)
+            self.client = DXMTClient(host=host, port=port, api_key=api_key)
         else:
             self.client = client
 

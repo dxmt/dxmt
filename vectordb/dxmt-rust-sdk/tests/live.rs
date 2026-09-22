@@ -18,7 +18,11 @@ fn url() -> String {
 /// `None` when nothing is listening, which is a skip rather than a failure: the unit of this
 /// crate is a client, and a client with no server to talk to has nothing to assert.
 async fn connect() -> Option<Client> {
-    let client = Client::new(url()).expect("the url should parse");
+    let mut client = Client::new(url()).expect("the url should parse");
+    // A server started with DXMT_API_KEY needs it on every request.
+    if let Ok(key) = std::env::var("DXMT_API_KEY") {
+        client = client.with_api_key(key);
+    }
     match client.ready().await {
         Ok(true) => Some(client),
         _ => {

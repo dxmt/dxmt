@@ -25,9 +25,23 @@ import (
 
 // Client is a handle to one server.
 type Client struct {
-	base string
-	http *http.Client
+	base   string
+	http   *http.Client
+	apiKey string
 }
+
+// String keeps the key out of logs: %v and %+v would otherwise print every field, unexported
+// ones included.
+func (c *Client) String() string {
+	key := ""
+	if c.apiKey != "" {
+		key = " api-key=<redacted>"
+	}
+	return "dxmt.Client{" + c.base + key + "}"
+}
+
+// GoString does the same for %#v.
+func (c *Client) GoString() string { return c.String() }
 
 // Option configures a Client.
 type Option func(*Client)
@@ -36,6 +50,12 @@ type Option func(*Client)
 // so this package does not have to grow an option for each.
 func WithHTTPClient(c *http.Client) Option {
 	return func(client *Client) { client.http = c }
+}
+
+// WithAPIKey sends key as the api-key header on every request, for a server started with
+// DXMT_API_KEY. Without it such a server answers 401 to everything but its health probes.
+func WithAPIKey(key string) Option {
+	return func(client *Client) { client.apiKey = key }
 }
 
 // New returns a client for the server at base, e.g. "http://127.0.0.1:9999". The /api/v1 prefix
@@ -187,6 +207,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.apiKey != "" {
+		req.Header.Set("api-key", c.apiKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

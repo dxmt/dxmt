@@ -37,7 +37,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 try:
     from crewai.tools import BaseTool, EnvVar
@@ -90,6 +90,13 @@ class DXMTToolConfig(BaseModel):
     port: int = Field(
         default=9999,
         description="DXMT server port"
+    )
+    api_key: SecretStr | None = Field(
+        default=None,
+        description="The server's API key, if it was started with DXMT_API_KEY",
+        # A credential: hidden in repr (SecretStr) and left out of model_dump(), so it cannot
+        # travel wherever this config is logged or serialised.
+        exclude=True,
     )
     table_name: str = Field(
         ...,
@@ -197,9 +204,11 @@ class DXMTVectorSearchTool(BaseTool):
 
         # Initialize DXMT client if not provided
         if not self.client:
+            key = self.dxmt_config.api_key
             self.client = DXMTClient(
                 host=self.dxmt_config.host,
-                port=self.dxmt_config.port
+                port=self.dxmt_config.port,
+                api_key=key.get_secret_value() if key else None,
             )
             logger.info(
                 f"Initialized DXMT client: {self.dxmt_config.host}:{self.dxmt_config.port}"

@@ -36,6 +36,16 @@ let hits = db.search("docs", SearchQuery::new(query_vector, 10)
 let removed = db.delete("docs", vec!["a".into()]).await?;   // removed.deleted, not the ask
 ```
 
+### Authentication
+
+A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
+
+```rust
+let db = dxmt_client::Client::new("https://db.example.com")?.with_api_key("your-key");
+```
+
+`{:?}` on the client prints `<redacted>` in place of the key.
+
 ## What the API does that the types make explicit
 
 * **A filter is always `must` / `must_not` / `should`.** The server's `Filter` has those three

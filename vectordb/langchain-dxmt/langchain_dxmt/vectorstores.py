@@ -205,6 +205,7 @@ class DXMTVectorDB(VectorStore):
         host: str = "localhost",
         port: int = 9999,
         ssl: bool = False,
+        api_key: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
         index_type: str = "hnsw",
         distance_metric: str = "cosine",
@@ -224,6 +225,8 @@ class DXMTVectorDB(VectorStore):
             host: DXMT server hostname. Default is 'localhost'.
             port: DXMT server port. Default is 9999.
             ssl: Whether to use HTTPS. Default is False.
+            api_key: The server's API key, if it was started with ``DXMT_API_KEY``. Ignored
+                when ``client`` is given — configure that client instead.
             headers: Additional HTTP headers.
             index_type: Index type ('hnsw', 'ivf', 'ivf_pq', 'lsh', 'brute_force').
             distance_metric: Distance metric ('cosine', 'euclidean', 'manhattan', 'dot').
@@ -249,6 +252,7 @@ class DXMTVectorDB(VectorStore):
                 host=host,
                 port=port,
                 ssl=ssl,
+                api_key=api_key,
                 headers=headers,
             )
 

@@ -10,6 +10,8 @@ function liveClient(): DXMTClient {
     host: url.hostname,
     port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)),
     ssl: url.protocol === 'https:',
+    // A server started with DXMT_API_KEY needs it on every request.
+    apiKey: process.env.DXMT_API_KEY,
   });
 }
 

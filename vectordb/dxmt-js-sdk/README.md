@@ -100,7 +100,7 @@ const client = new DXMTClient({
   port: 9999,             // DXMT server port
   ssl: false,             // Use HTTPS
   timeout: 30000,         // Request timeout (ms)
-  apiKey: 'your-key',     // Optional API key
+  apiKey: 'your-key',     // For a server started with DXMT_API_KEY; sent as a Bearer token
   headers: {              // Optional custom headers
     'X-Custom-Header': 'value'
   }

@@ -70,10 +70,21 @@ impl Error {
 
 /// A handle to one server. Cheap to clone -- the inner HTTP client pools connections, so one
 /// `Client` shared across tasks is better than one per task.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base: String,
+    api_key: Option<String>,
+}
+
+/// Written by hand so the key never reaches a log: `{:?}` on a derived `Debug` would print it.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base", &self.base)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -88,7 +99,21 @@ impl Client {
         Ok(Self {
             http: reqwest::Client::new(),
             base,
+            api_key: None,
         })
+    }
+
+    /// Send `key` as the `api-key` header on every request, for a server started with
+    /// `DXMT_API_KEY`. Without it such a server answers 401 to everything but its health probes.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), dxmt_client::Error> {
+    /// let db = dxmt_client::Client::new("https://db.example.com")?.with_api_key("s3cret");
+    /// # Ok(()) }
+    /// ```
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
     }
 
     /// Build on an HTTP client you already have -- to set timeouts, proxies or a connection
@@ -253,6 +278,9 @@ impl Client {
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| Error::BadUrl(method.to_string()))?;
         let mut request = self.http.request(method, &url);
+        if let Some(key) = &self.api_key {
+            request = request.header("api-key", key);
+        }
         if let Some(body) = body {
             request = request.json(body);
         }

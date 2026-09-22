@@ -83,6 +83,17 @@ for result in results:
     print(f"ID: {result['id']}, Score: {result['score']}")
 ```
 
+### Authentication
+
+A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
+
+```python
+client = Client(host="db.example.com", ssl=True, api_key="your-key")
+```
+
+The client reads no environment variable itself — pass `api_key=os.environ["DXMT_API_KEY"]` if that
+is where you keep it. Over plain HTTP to anything but localhost it warns.
+
 ### Async Usage
 
 ```python

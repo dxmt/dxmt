@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from typing import Any, Optional
 
 from urllib.parse import quote
@@ -92,10 +93,16 @@ class DXMTClient:
         host: DXMT server hostname. Default is 'localhost'.
         port: DXMT server port. Default is 9999.
         ssl: Whether to use HTTPS. Default is False.
+        api_key: The server's API key, when it was started with ``DXMT_API_KEY``. Sent as the
+            ``api-key`` header on every request. Default is None: the server's key is off by
+            default, and without one the client sends nothing.
         headers: Additional HTTP headers.
         timeout: Request timeout in seconds. Default is 30.0.
         **kwargs: Additional httpx client parameters.
     """
+
+    #: Hosts where sending a key over plain HTTP does not cross a network.
+    _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
     def __init__(
         self,
@@ -103,6 +110,7 @@ class DXMTClient:
         port: int = 9999,
         *,
         ssl: bool = False,
+        api_key: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
         timeout: float = 30.0,
         **kwargs: Any,
@@ -110,7 +118,21 @@ class DXMTClient:
         """Initialize DXMT client."""
         protocol = "https" if ssl else "http"
         self.base_url = f"{protocol}://{host}:{port}/api/v1"
-        self._headers = headers or {}
+        # Copied, so adding the key does not write into a dict the caller still holds.
+        self._headers = dict(headers or {})
+        if api_key:
+            # The explicit argument wins over an `api-key` the caller also put in `headers`, the
+            # way qdrant-client resolves the same collision.
+            self._headers["api-key"] = api_key
+            if not ssl and host not in self._LOCAL_HOSTS:
+                # A key over plain HTTP reaches every hop between here and the server, which is
+                # worse than sending none. qdrant-client switches to HTTPS when given a key; that
+                # would break a server that has no TLS in front of it, so this only says so.
+                warnings.warn(
+                    f"sending an API key to {host} over plain HTTP; pass ssl=True, or put TLS "
+                    "in front of the server",
+                    stacklevel=2,
+                )
         self._timeout = timeout
         self._client_kwargs = kwargs
 

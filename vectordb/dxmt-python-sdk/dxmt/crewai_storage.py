@@ -41,7 +41,7 @@ import re
 from collections import defaultdict
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 try:
     from crewai.memory.storage.interface import Storage
@@ -70,6 +70,13 @@ class DXMTStorageConfig(BaseModel):
     port: int = Field(
         default=9999,
         description="DXMT server port"
+    )
+    api_key: SecretStr | None = Field(
+        default=None,
+        description="The server's API key, if it was started with DXMT_API_KEY",
+        # A credential: hidden in repr (SecretStr) and left out of model_dump(), so it cannot
+        # travel wherever this config is logged or serialised.
+        exclude=True,
     )
     table_name: str = Field(
         default="crew_memory",
@@ -184,9 +191,11 @@ class DXMTStorage(Storage):
 
     def _initialize_client(self):
         """Initialize DXMT client and create table if needed."""
+        key = self.storage_config.api_key
         self.client = DXMTClient(
             host=self.storage_config.host,
-            port=self.storage_config.port
+            port=self.storage_config.port,
+            api_key=key.get_secret_value() if key else None,
         )
 
         # Check if table exists, create if not

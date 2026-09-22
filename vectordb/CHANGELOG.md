@@ -12,6 +12,14 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **Every client can send the API key.** `DXMT_API_KEY` (22fc06a) left the Python SDK, the
+  LangChain and LlamaIndex packages, and the Rust and Go clients with no way to send it — against
+  a keyed server they could not be used at all. Each takes a key now (`api_key=`,
+  `with_api_key`, `WithAPIKey`; the JavaScript SDK already had `apiKey`), and none of them
+  prints it: pydantic stores keep it off their fields, and the Rust and Go clients redact it
+  from `Debug` and `%v`. CI runs every client's live suite a second time against a server that
+  requires a key, after proving the server refuses a request without one.
+
 - **Filtering on array fields.** A condition on a field holding an array is satisfied when any
   element satisfies it, so `tags == "rag"` finds `tags: ["rag", "llm"]` — Qdrant's rule, and
   what Chroma's `$contains` and Weaviate's `ContainsAny` are for. It used to compare the whole
