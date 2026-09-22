@@ -1700,6 +1700,22 @@ impl IntelligentIndexedStorage {
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
         data.records.insert(Arc::new(record.clone()), None)?;
+        // The insert above indexed the record with the time it was *replayed*, because a create
+        // request carries no timestamp; the map now holds the one it was written with. A table
+        // created by this same replay has its payload index built from the start, so that index
+        // kept the replay time, and `records/list` with a filter — which pages by the index's
+        // timestamps — ordered every replayed record by when recovery reached it. A record the
+        // log had upserted went through the path that keeps its original time, which is older
+        // than every replay time, and sank to the bottom. Found by the stateful walk: two bulk
+        // inserts sharing one id, then `kill -9`. Re-file it under the time the map holds.
+        if let Some(derived) = data.derived_mut().as_mut() {
+            derived.payload.update_record(
+                &record.id,
+                &record.payload,
+                &record.payload,
+                crate::storage::payload_index::created_key(&record.created_at),
+            );
+        }
         data.table.record_count = data.records.len() as u64;
         if record.updated_at > data.table.updated_at {
             data.table.updated_at = record.updated_at;
@@ -5231,8 +5247,14 @@ impl IntelligentIndexedStorage {
     /// ranker returns the results in exactly the wrong order.
     fn similarity_from_distance(metric: DistanceMetric, distance: f32) -> f32 {
         match metric {
-            // Cosine distance = 1 - similarity.
-            DistanceMetric::Cosine => 1.0 - distance.clamp(0.0, 1.0),
+            // Cosine distance = 1 - similarity, so a similarity in [-1, 1] is a distance in
+            // [0, 2]. This clamped the *distance* to [0, 1], which reported every negative
+            // similarity as 0.0: vectors pointing away from the query all scored the same, and
+            // anything that re-ranked by score lost their order. Qdrant returns the negative
+            // cosine as it is; fusion normalises each list by its own mean and spread, so
+            // nothing downstream needs the score to be non-negative. The clamp left is for
+            // floating-point overshoot only.
+            DistanceMetric::Cosine => (1.0 - distance).clamp(-1.0, 1.0),
             // Dot-product distance = -dot.
             DistanceMetric::Dot => -distance,
             // Unbounded metrics: any decreasing function will do, and this one keeps the

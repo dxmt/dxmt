@@ -388,3 +388,67 @@ async fn exact_says_what_it_cannot_do_for_a_named_vector_space() {
         "and say what to use instead: {message}"
     );
 }
+
+/// A vector pointing away from the query scores its real, negative cosine similarity.
+///
+/// The distance-to-score conversion clamped the cosine *distance* to [0, 1], so every
+/// similarity below zero was reported as 0.0 — the exact opposite of the query scored the same
+/// as a vector at right angles to it, and anything re-ranking by score lost their order. The
+/// stateful walk caught it comparing exact search against a brute-force cosine.
+#[tokio::test]
+async fn a_negative_similarity_is_reported_as_it_is() {
+    let storage = open(None).await;
+    storage.create_table(table("neg")).await.unwrap();
+    let q: Vec<f32> = (0..DIM).map(|d| if d == 0 { 1.0 } else { 0.0 }).collect();
+    let at = |cos: f32| -> Vec<f32> {
+        // A unit vector at a chosen angle from `q`, in the plane of the first two axes.
+        let sin = (1.0 - cos * cos).max(0.0).sqrt();
+        (0..DIM)
+            .map(|d| match d {
+                0 => cos,
+                1 => sin,
+                _ => 0.0,
+            })
+            .collect()
+    };
+    let wanted = [
+        ("same", 1.0),
+        ("right_angle", 0.0),
+        ("away", -0.5),
+        ("opposite", -1.0),
+    ];
+    storage
+        .insert_records(
+            "neg",
+            wanted
+                .iter()
+                .map(|(id, cos)| CreateRecordRequest {
+                    id: id.to_string(),
+                    vector: at(*cos),
+                    sparse_vector: None,
+                    named_vectors: None,
+                    payload: None,
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    let hits = storage
+        .search("neg", query(q, 4, SearchMode::Exact))
+        .await
+        .unwrap()
+        .hits;
+    let got: Vec<(String, f32)> = hits.into_iter().map(|h| (h.id, h.score)).collect();
+    assert_eq!(
+        got.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        ["same", "right_angle", "away", "opposite"],
+        "{got:?}"
+    );
+    for ((_, score), (id, cos)) in got.iter().zip(wanted) {
+        assert!(
+            (score - cos).abs() < 1e-4,
+            "{id}: score {score}, cosine {cos}"
+        );
+    }
+}

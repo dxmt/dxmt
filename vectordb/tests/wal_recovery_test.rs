@@ -2771,3 +2771,74 @@ async fn an_update_is_replayed_with_its_vector() {
     assert_eq!(hits.len(), 50);
     assert!(hits.iter().all(|h| h.score.is_finite()), "{hits:?}");
 }
+
+/// After a crash, a filtered list pages in the same order as an unfiltered one.
+///
+/// Replay re-inserts each logged record through the ordinary insert path, which stamps a new
+/// record with the time it is *replayed* — a create request carries no timestamp — and then puts
+/// the logged record, with its real `created_at`, into the map. A table the replay itself creates
+/// has its payload index built from the start, so that index kept the replay times, and
+/// `records/list` with a filter pages by the index's timestamps. A record the log had upserted
+/// went through the path that keeps the original time — older than every replay time — and sank
+/// to the bottom. The stateful walk found it; this is its minimal form: two bulk inserts that
+/// share one id, then a crash.
+#[tokio::test]
+async fn a_filtered_list_keeps_its_order_across_a_crash() {
+    use dxmt_vectordb::types::record::{Condition, Filter, FilterOperation};
+
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("wal");
+    let tagged = |id: &str| CreateRecordRequest {
+        id: id.to_string(),
+        vector: vec![1.0, 0.5],
+        sparse_vector: None,
+        named_vectors: None,
+        payload: Some(serde_json::json!({ "k": 1 })),
+    };
+    {
+        let storage = open(&wal).await;
+        storage
+            .create_table(table("t", 2, DistanceMetric::Cosine))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![tagged("a"), tagged("b"), tagged("c")])
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // `b` again: an upsert, which keeps its original created_at.
+        storage
+            .insert_records("t", vec![tagged("b"), tagged("d")])
+            .await
+            .unwrap();
+        // Dropped without a snapshot: the crash.
+    }
+
+    let storage = open(&wal).await;
+    let filter = Filter {
+        must: Some(vec![Condition {
+            key: "k".into(),
+            operation: FilterOperation::Equal(serde_json::json!(1)),
+        }]),
+        must_not: None,
+        should: None,
+    };
+    let ids = |records: Vec<dxmt_vectordb::types::record::Record>| -> Vec<String> {
+        records.into_iter().map(|r| r.id).collect()
+    };
+    let unfiltered = ids(storage
+        .list_records("t", None, 10, 0, false)
+        .await
+        .unwrap()
+        .0);
+    let filtered = ids(storage
+        .list_records("t", Some(&filter), 10, 0, false)
+        .await
+        .unwrap()
+        .0);
+    assert_eq!(unfiltered.len(), 4);
+    assert_eq!(
+        filtered, unfiltered,
+        "the filtered list is in replay order, not write order"
+    );
+}
