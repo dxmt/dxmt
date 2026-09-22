@@ -53,12 +53,21 @@ Two things worth knowing:
 | Unit | inline `#[cfg(test)]` | `cd vectordb && cargo test --lib` |
 | Integration, in-process | `vectordb/tests/*.rs` | `cd vectordb && cargo test --tests` |
 | Functional, over HTTP | `vectordb/tests/api/` (pytest) | `cd vectordb && scripts/api_tests.sh` |
+| Stateful walk | `vectordb/tests/stateful/` | run by `scripts/api_tests.sh` |
+| Storage compatibility | `vectordb/tests/compat/` | run by `scripts/api_tests.sh` |
 | Client packages | each package's `tests/` | see below |
 
 `scripts/api_tests.sh` starts a server itself, **twice** — once with records and vectors in
 memory, once with them in row files — and reports which mode failed. Those are different code
 paths, which is the whole reason it runs the same assertions across both. It needs `python3`
 with `pytest` and `httpx`.
+
+After both modes it runs two more suites that start their own servers. The **stateful walk**
+drives a server through random writes, updates, deletes, snapshots, clean restarts and `kill -9`,
+checking everything it answers against a model of what it should hold (`tests/semantics.py`);
+a failure prints the seed and step that reproduce it, and `DXMT_STATEFUL_SEEDS=1-40
+DXMT_STATEFUL_STEPS=400` makes it a soak. **Storage compatibility** opens data written by earlier
+builds (`tests/compat/fixtures/`) and checks nothing stored was lost.
 
 To attach to a server you already have, run `pytest tests/api` from `vectordb/`. It is a package
 with relative imports, so it has to be that and not `cd tests/api`.
@@ -95,11 +104,24 @@ so the SDKs will not connect to it.
   feature-gated test targets that the default build compiles to nothing
 - **build** — release build
 - **api-text** — the functional HTTP suite with full-text search built in
-- **sdk-live** — starts the server binary and runs the Python, JavaScript, LangChain and
-  LlamaIndex packages against it
+- **sdk-live** — starts the server binary and runs the Python, JavaScript, Rust, Go, LangChain
+  and LlamaIndex packages against it, then again against a server that requires an API key
 
 `nightly.yml` measures recall against exact ground truth and runs the filter-selectivity
 benchmark.
+
+## Before a release
+
+Write the release's storage fixture, from the commit being released, and commit it:
+
+```bash
+cd vectordb && cargo build --bin vectordb && python3 scripts/make_compat_fixture.py <version>
+```
+
+It writes `tests/compat/fixtures/<version>/` — a small data directory covering every persisted
+format, and the model of what it holds. Fixtures are never regenerated or removed: every later
+build has to open every one of them. If a change makes an old fixture fail, the change needs a
+migration, not a new fixture.
 
 ## House rules
 

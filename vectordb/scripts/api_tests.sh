@@ -159,5 +159,16 @@ if [ "${DXMT_SKIP_STATEFUL:-0}" != "1" ]; then
   fi
 fi
 
+# Data written by earlier builds, opened by this one (tests/compat). Seconds, and the only thing
+# here that fails when a storage format changes in a way old data cannot survive.
+echo "### storage compatibility (tests/compat/fixtures/*)"
+DXMT_BIN="$BIN" $PYTEST tests/compat -q -p no:cacheprovider
+if [ $? = 0 ]; then
+  summary="$summary\n  storage compatibility: PASS"
+else
+  summary="$summary\n  storage compatibility: FAIL"
+  failed=1
+fi
+
 printf "\nfunctional API tests:%b\n" "$summary"
 exit $failed

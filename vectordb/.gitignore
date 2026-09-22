@@ -65,6 +65,9 @@ config.json
 /release/
 *.tar.gz
 *.zip
+# Except the storage-compatibility fixtures, which are data every build has to open. Without this
+# line the archive stays behind and CI tests an expected.json against nothing.
+!tests/compat/fixtures/*/data.tar.gz
 
 # Benchmarking results
 /benches/results/
