@@ -274,6 +274,19 @@ class TestSearchOperations:
         for result in results:
             assert result.value.get("category") == "tutorial"
 
+    def test_search_without_a_query_filters_on_the_server(self, store):
+        """No query vector: the store lists the table with the filter applied server-side,
+        newest first, and stops at `limit`."""
+        namespace = (f"nofilterq{int(time.time() * 1000)}",)
+        for i in range(12):
+            store.put(namespace, f"k{i}", {"kind": "a" if i % 3 == 0 else "b", "n": i})
+
+        found = store.search(namespace, filter={"kind": "a"}, limit=10)
+        assert sorted(item.key for item in found) == ["k0", "k3", "k6", "k9"]
+
+        first_two = store.search(namespace, filter={"kind": "b"}, limit=2)
+        assert len(first_two) == 2 and all(item.value["kind"] == "b" for item in first_two)
+
     def test_search_with_comparison_filter(self, store_with_embeddings):
         """Test search with comparison operators."""
         # Store documents with ratings

@@ -1,10 +1,35 @@
-"""Filter utilities for DXMT Python SDK.
+"""Filters: a typed builder, and a translator from MongoDB-style dicts.
 
-Converts simple dict filters to DXMT's Filter format.
-Supports MongoDB-style operators ($and, $or, $gte, $lt, etc.).
+The server takes one shape: three flat lists of conditions,
+
+    {"must": [...], "should": [...], "must_not": [...]}
+
+meaning every `must` holds, at least one `should` holds (when there is any), and no `must_not`
+holds. That is not every boolean formula. `(a and b) or c` has no such form, and neither has
+`(a or b) and (c or d)`. Both ways of writing a filter here -- `Field` and the dict translator --
+build that shape exactly or raise `ValueError` saying what cannot be expressed. They never
+approximate: the translator this replaced turned `(a and b) or c` into `a or b or c`, dropped a
+key written beside `$and`, and read a nested `$and` as a field named "$and", each of them a
+query that ran and returned the wrong records.
+
+    from dxmt import Field
+
+    f = (Field("lang") == "en") & (Field("year") >= 2020) & ~Field("tags").is_in(["spam"])
+    client.search("docs", vector, filter=f)
+
+What a condition means is the server's, and is the same on every endpoint:
+
+* a field holding an array matches when any element does, for every operation;
+* `!=` / `NotEqual` is true of a record without the field, `not_in` / `NotIn` is not;
+* numbers compare as numbers, so 5 matches 5.0, and ranges compare numbers only;
+* the key `id` is the record id;
+* comparing against an array or object is refused (`tags == ["a", "b"]`).
+
+Two conditions on the same array field are tested independently: `year >= 2020` and
+`year <= 2023` holds for `[2019, 2024]`, one element satisfying each.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional
 
 
 # MongoDB operator to DXMT operation type mapping
@@ -43,215 +68,271 @@ def _map_operator(mongo_op: str) -> str:
     return OPERATOR_MAP[mongo_op]
 
 
-def _parse_condition(cond_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parse a condition dict to DXMT condition format.
 
-    Supports:
-        - Simple equality: {"year": 2022}
-        - Operator form: {"year": {"$gte": 2022}}
-        - Multiple operators: {"year": {"$gte": 2020, "$lte": 2023}}
+_SCALAR = (str, int, float, bool)
 
-    Args:
-        cond_dict: Condition dictionary.
 
-    Returns:
-        List of DXMT condition dicts.
+def _condition(key: str, op_type: str, value: Any) -> Dict[str, Any]:
+    """One condition in the server's shape, refusing values the server would refuse."""
+    if not isinstance(key, str) or not key:
+        raise ValueError(f"a filter key must be a non-empty string, not {key!r}")
+    if op_type in ("In", "NotIn"):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{op_type} on {key!r} takes a list of values, not {value!r}")
+        value = list(value)
+        bad = [v for v in value if not isinstance(v, _SCALAR)]
+    elif op_type in ("Contains", "StartsWith", "EndsWith"):
+        bad = [] if isinstance(value, str) else [value]
+    elif op_type in ("GreaterThan", "GreaterThanOrEqual", "LessThan", "LessThanOrEqual"):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            # The server orders numbers only, so `date >= "2024-01-01"` matches nothing.
+            raise ValueError(
+                f"{op_type} on {key!r} compares against {value!r}; ranges compare numbers "
+                "only (store dates as a number, such as a Unix timestamp)"
+            )
+        bad = []
+    else:
+        bad = [] if isinstance(value, _SCALAR) else [value]
+    if bad:
+        raise ValueError(
+            f"{op_type} on {key!r} compares against {bad[0]!r}; a filter compares a field "
+            "against strings, numbers and booleans only (an array field matches when any "
+            "element does, so test the element instead)"
+        )
+    return {"key": key, "operation": {"type": op_type, "value": value}}
+
+
+class Filter:
+    """A filter in the server's flat shape. Combine with `&`, `|` and `~`.
+
+    Each combination either has an exact flat form or raises `ValueError`; see the module
+    docstring. Pass one anywhere a filter is taken, or call `to_dict()`.
     """
-    conditions = []
 
-    for key, value in cond_dict.items():
-        if isinstance(value, dict):
-            # Handle operators like {"year": {"$gte": 2022}}
-            for op, val in value.items():
-                if op.startswith("$"):
-                    op_type = _map_operator(op)
-                    conditions.append({
-                        "key": key,
-                        "operation": {"type": op_type, "value": val}
-                    })
-                else:
-                    # Nested dict without operator, treat as equality
-                    conditions.append({
-                        "key": key,
-                        "operation": {"type": "Equal", "value": value}
-                    })
-                    break
+    __slots__ = ("must", "should", "must_not")
+
+    def __init__(self, must=(), should=(), must_not=()):
+        self.must: List[Dict[str, Any]] = list(must)
+        self.should: List[Dict[str, Any]] = list(should)
+        self.must_not: List[Dict[str, Any]] = list(must_not)
+
+    def _single(self) -> Optional[Dict[str, Any]]:
+        """The condition this is, when it is exactly one positive condition."""
+        if len(self.must) == 1 and not self.should and not self.must_not:
+            return self.must[0]
+        return None
+
+    def _positives(self) -> Optional[List[Dict[str, Any]]]:
+        """The conditions of a plain disjunction: one condition, or a `should` alone."""
+        single = self._single()
+        if single is not None:
+            return [single]
+        if self.should and not self.must and not self.must_not:
+            return list(self.should)
+        return None
+
+    def __and__(self, other: "Filter") -> "Filter":
+        if not isinstance(other, Filter):
+            return NotImplemented
+        if self.should and other.should:
+            # (a or b) and (c or d): distributing it is exponential, and one `should` list
+            # cannot hold two independent disjunctions.
+            raise ValueError(
+                "cannot express two OR groups joined by AND; the filter has one `should` list"
+            )
+        return Filter(
+            self.must + other.must,
+            self.should or other.should,
+            self.must_not + other.must_not,
+        )
+
+    def __or__(self, other: "Filter") -> "Filter":
+        if not isinstance(other, Filter):
+            return NotImplemented
+        left, right = self._positives(), other._positives()
+        if left is None or right is None:
+            raise ValueError(
+                "OR can only join single conditions (or other ORs of them); "
+                "(a and b) or c has no form the server takes"
+            )
+        return Filter(should=left + right)
+
+    def __invert__(self) -> "Filter":
+        positives = self._positives()
+        if positives is None:
+            # not (a and b) is (not a) or (not b), and there is no negated condition to put
+            # in `should`.
+            raise ValueError("NOT can only negate a single condition or an OR of them")
+        return Filter(must_not=positives)
+
+    def __bool__(self) -> bool:
+        # `a and b`, `not a` and `2020 <= Field("y") <= 2023` all go through bool() and would
+        # quietly keep one side. Refusing is the only way to make them loud.
+        raise TypeError(
+            "a filter has no truth value: combine with &, | and ~ (not and/or/not), and write "
+            "a range as Field(k).between(lo, hi) rather than a chained comparison"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Filter) and self.to_dict() == other.to_dict()
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for name in ("must", "should", "must_not"):
+            conditions = getattr(self, name)
+            if conditions:
+                out[name] = [
+                    {"key": c["key"], "operation": dict(c["operation"])} for c in conditions
+                ]
+        return out
+
+    def __repr__(self) -> str:
+        return f"Filter({self.to_dict()!r})"
+
+
+class Field:
+    """A payload field (or `"id"`, the record id), to build conditions on.
+
+    >>> (Field("year") >= 2020) & (Field("lang") == "en")
+    """
+
+    __slots__ = ("key",)
+
+    def __init__(self, key: str):
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"a field name must be a non-empty string, not {key!r}")
+        self.key = key
+
+    def _op(self, op_type: str, value: Any) -> Filter:
+        return Filter(must=[_condition(self.key, op_type, value)])
+
+    def __eq__(self, value: Any) -> Filter:  # type: ignore[override]
+        return self._op("Equal", value)
+
+    def __ne__(self, value: Any) -> Filter:  # type: ignore[override]
+        return self._op("NotEqual", value)
+
+    def __gt__(self, value: Any) -> Filter:
+        return self._op("GreaterThan", value)
+
+    def __ge__(self, value: Any) -> Filter:
+        return self._op("GreaterThanOrEqual", value)
+
+    def __lt__(self, value: Any) -> Filter:
+        return self._op("LessThan", value)
+
+    def __le__(self, value: Any) -> Filter:
+        return self._op("LessThanOrEqual", value)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def is_in(self, values: Iterable[Any]) -> Filter:
+        return self._op("In", list(values))
+
+    def not_in(self, values: Iterable[Any]) -> Filter:
+        """Present and not one of `values`; a record without the field does not match."""
+        return self._op("NotIn", list(values))
+
+    def between(self, low: Any, high: Any) -> Filter:
+        """`low <= field <= high`. On an array field, each bound may be met by a different element."""
+        return (self >= low) & (self <= high)
+
+    def contains(self, text: str) -> Filter:
+        return self._op("Contains", text)
+
+    def starts_with(self, text: str) -> Filter:
+        return self._op("StartsWith", text)
+
+    def ends_with(self, text: str) -> Filter:
+        return self._op("EndsWith", text)
+
+    def __repr__(self) -> str:
+        return f"Field({self.key!r})"
+
+
+def _field_filter(key: str, value: Any) -> Filter:
+    """`{key: value}` from a dict filter: equality, or `{"$op": v, ...}` all ANDed."""
+    if key.startswith("$"):
+        raise ValueError(f"unknown operator {key!r} at the top of a filter")
+    if isinstance(value, dict):
+        if not value:
+            raise ValueError(f"empty condition for {key!r}")
+        plain = [op for op in value if not op.startswith("$")]
+        if plain:
+            raise ValueError(
+                f"{key!r}: {value!r} mixes operators with plain keys; comparing a field "
+                "against an object is not supported"
+            )
+        result = Filter()
+        for op, operand in value.items():
+            result = result & Filter(must=[_condition(key, _map_operator(op), operand)])
+        return result
+    return Filter(must=[_condition(key, "Equal", value)])
+
+
+def _dict_filter(filter_dict: Dict[str, Any]) -> Filter:
+    if not isinstance(filter_dict, dict):
+        raise ValueError(f"a filter is a dict, not {filter_dict!r}")
+    result = Filter()
+    # Every key is a term of an implicit AND -- including a key beside `$and` or `$or`.
+    for key, value in filter_dict.items():
+        if key in ("$and", "$or", "$nor", "$not"):
+            if not isinstance(value, list) or not value:
+                raise ValueError(f"{key} takes a non-empty list of filters, not {value!r}")
+            parts = [_dict_filter(part) for part in value]
+            if key == "$and":
+                term = parts[0]
+                for part in parts[1:]:
+                    term = term & part
+            else:
+                term = parts[0]
+                for part in parts[1:]:
+                    term = term | part
+                if key != "$or":
+                    # $nor, and $not given a list as this SDK has always taken it: none of them.
+                    term = ~term
         else:
-            # Simple equality: {"year": 2022}
-            conditions.append({
-                "key": key,
-                "operation": {"type": "Equal", "value": value}
-            })
+            term = _field_filter(key, value)
+        result = result & term
+    return result
 
-    return conditions
+
+def to_filter(value: Any) -> Optional[Dict[str, Any]]:
+    """Any filter this SDK takes, in the server's shape; None for no filter.
+
+    Takes a `Filter` (from `Field`), a MongoDB-style dict, or the server's own shape, which is
+    checked for stray keys and passed through.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Filter):
+        return value.to_dict() or None
+    if not isinstance(value, dict):
+        raise ValueError(f"a filter is a dict or a Filter, not {type(value).__name__}")
+    if not value:
+        return None
+    native = {"must", "should", "must_not"}
+    if native & value.keys():
+        stray = value.keys() - native
+        if stray:
+            raise ValueError(
+                f"a filter with must/should/must_not cannot also have {sorted(stray)}; "
+                "they would be ignored"
+            )
+        return value
+    return _dict_filter(value).to_dict() or None
 
 
 def convert_simple_filter_to_dxmt(
-    filter_dict: Optional[Dict[str, Any]]
+    filter_dict: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Convert simple filter dict to DXMT Filter format.
+    """Convert a filter to the server's shape. Kept under its old name; see `to_filter`.
 
-    Supported formats:
-
-    1. Simple equality:
-        {"category": "AI", "score": 0.8}
-
-    2. MongoDB-style operators:
-        {"year": {"$gte": 2022}, "rating": {"$lt": 9.0}}
-
-    3. MongoDB logical operators:
-        {
-            "$and": [
-                {"year": {"$gte": 2022}},
-                {"rating": {"$gte": 8.0}}
-            ]
-        }
-
-        {
-            "$or": [
-                {"category": "AI"},
-                {"category": "ML"}
-            ]
-        }
-
-    4. DXMT native format (passed through):
-        {
-            "must": [
-                {"key": "category", "operation": {"type": "Equal", "value": "AI"}},
-                {"key": "score", "operation": {"type": "GreaterThan", "value": 0.8}}
-            ]
-        }
-
-    Args:
-        filter_dict: Filter dictionary in any supported format.
-
-    Returns:
-        DXMT Filter format dictionary, or None if input is None.
-
-    Raises:
-        ValueError: If filter format is invalid or uses unsupported operators.
+    Accepts simple equality (`{"category": "AI"}`), operators
+    (`{"year": {"$gte": 2020, "$lte": 2023}}`), `$and`, `$or`, `$nor` (and `$not` with a list,
+    meaning the same), nested wherever the result has an exact form, the server's own shape, and
+    a `Filter`. Raises `ValueError` for anything it cannot translate exactly.
     """
-    if filter_dict is None or not filter_dict:
-        return None
-
-    # Check if already in DXMT format
-    if any(key in filter_dict for key in ["must", "must_not", "should"]):
-        return filter_dict
-
-    # Handle MongoDB logical operators
-    if "$and" in filter_dict:
-        must_conditions = []
-        for cond in filter_dict["$and"]:
-            must_conditions.extend(_parse_condition(cond))
-        return {"must": must_conditions}
-
-    if "$or" in filter_dict:
-        should_conditions = []
-        for cond in filter_dict["$or"]:
-            should_conditions.extend(_parse_condition(cond))
-        return {"should": should_conditions}
-
-    if "$not" in filter_dict:
-        must_not_conditions = []
-        for cond in filter_dict["$not"]:
-            must_not_conditions.extend(_parse_condition(cond))
-        return {"must_not": must_not_conditions}
-
-    # Convert simple dict or operator-based dict to DXMT format
-    must_conditions = _parse_condition(filter_dict)
-    return {"must": must_conditions} if must_conditions else None
-
-
-def _field_value(record: dict, key: str):
-    """The value a filter condition tests, from a normalised record.
-
-    `_normalize_record` puts the payload under both `payload` and `metadata`, and a record read
-    from `GET /records/{id}` carries `payload_json` as a string; all three are checked so this
-    works whichever endpoint produced the record.
-    """
-    for holder in ("payload", "metadata"):
-        container = record.get(holder)
-        if isinstance(container, dict) and key in container:
-            return container[key]
-    raw = record.get("payload_json")
-    if isinstance(raw, str):
-        import json
-
-        try:
-            decoded = json.loads(raw)
-        except ValueError:
-            return None
-        if isinstance(decoded, dict) and key in decoded:
-            return decoded[key]
-    return record.get(key)
-
-
-def _condition_holds(record: dict, condition: dict) -> bool:
-    """Whether one DXMT condition holds for a record, client-side.
-
-    The server is the authority on filtering; this exists only for the paths that have to list
-    records and filter them here, because the listing endpoint takes no filter. Kept beside
-    `convert_simple_filter_to_dxmt` so the two readings of a condition live in one file and are
-    hard to let drift.
-    """
-    key = condition.get("key")
-    operation = condition.get("operation") or {}
-    op_type = operation.get("type")
-    target = operation.get("value")
-    value = _field_value(record, key)
-
-    def numeric(pair):
-        left, right = pair
-        try:
-            return float(left), float(right)
-        except (TypeError, ValueError):
-            return None
-
-    if op_type == "Equal":
-        return value == target
-    if op_type == "NotEqual":
-        return value != target
-    if op_type in ("GreaterThan", "GreaterThanOrEqual", "LessThan", "LessThanOrEqual"):
-        pair = numeric((value, target))
-        if pair is None:
-            return False
-        left, right = pair
-        return {
-            "GreaterThan": left > right,
-            "GreaterThanOrEqual": left >= right,
-            "LessThan": left < right,
-            "LessThanOrEqual": left <= right,
-        }[op_type]
-    if op_type == "In":
-        return isinstance(target, list) and value in target
-    if op_type == "NotIn":
-        return isinstance(target, list) and value not in target
-    if op_type in ("Contains", "StartsWith", "EndsWith"):
-        if not isinstance(value, str) or not isinstance(target, str):
-            return False
-        return {
-            "Contains": target in value,
-            "StartsWith": value.startswith(target),
-            "EndsWith": value.endswith(target),
-        }[op_type]
-    return False
-
-
-def matches_filter(record: dict, dxmt_filter: dict | None) -> bool:
-    """Whether a record satisfies a filter in DXMT's own shape.
-
-    `must` all hold, `must_not` none hold, `should` at least one holds when there is a `should`
-    at all -- the same reading `Record::matches_filter` uses on the server.
-    """
-    if not dxmt_filter:
-        return True
-    for condition in dxmt_filter.get("must") or []:
-        if not _condition_holds(record, condition):
-            return False
-    for condition in dxmt_filter.get("must_not") or []:
-        if _condition_holds(record, condition):
-            return False
-    should = dxmt_filter.get("should") or []
-    if should and not any(_condition_holds(record, c) for c in should):
-        return False
-    return True
+    return to_filter(filter_dict)

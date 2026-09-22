@@ -27,6 +27,7 @@ from .exceptions import (
     DXMTTableError,
 )
 from .filters import convert_simple_filter_to_dxmt
+from .types import Filter
 
 logger = logging.getLogger(__name__)
 
@@ -553,7 +554,7 @@ class DXMTClient:
         self,
         table_name: str,
         *,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
         batch_size: int = 100,
         with_vector: bool = False,
     ) -> Iterator[dict[str, Any]]:
@@ -596,7 +597,7 @@ class DXMTClient:
         self,
         table_name: str,
         *,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
         batch_size: int = 100,
         with_vector: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -620,8 +621,9 @@ class DXMTClient:
     @staticmethod
     def _scroll_body(filter, batch_size, with_vector, cursor) -> dict[str, Any]:
         body: dict[str, Any] = {"limit": batch_size, "with_vector": with_vector}
-        if filter is not None:
-            body["filter"] = convert_simple_filter_to_dxmt(filter)
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
         if cursor is not None:
             body["cursor"] = cursor
         return body
@@ -1102,7 +1104,7 @@ class DXMTClient:
         vector: list[float],
         k: Optional[int] = None,
         limit: Optional[int] = None,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
         search_mode: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
@@ -1164,7 +1166,7 @@ class DXMTClient:
         vector: list[float],
         k: Optional[int] = None,
         limit: Optional[int] = None,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
         search_mode: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
@@ -1217,7 +1219,7 @@ class DXMTClient:
         alpha: Optional[float] = None,  # Alias for vector_weight
         k: Optional[int] = None,
         limit: Optional[int] = None,  # Alias for k
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
     ) -> list[dict[str, Any]]:
         """Hybrid search (vector + text).
 
@@ -1285,7 +1287,7 @@ class DXMTClient:
         alpha: Optional[float] = None,  # Alias for vector_weight
         k: Optional[int] = None,
         limit: Optional[int] = None,  # Alias for k
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
     ) -> list[dict[str, Any]]:
         """Async hybrid search.
 
@@ -1349,7 +1351,7 @@ class DXMTClient:
         limit: Optional[int] = None,  # Alias for k
         fields: Optional[list[str]] = None,
         highlight: bool = False,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
     ) -> list[dict[str, Any]]:
         """Full-text search.
 
@@ -1469,7 +1471,7 @@ class DXMTClient:
         limit: Optional[int] = None,  # Alias for k
         fields: Optional[list[str]] = None,
         highlight: bool = False,
-        filter: Optional[dict[str, Any]] = None,
+        filter: Optional[Filter] = None,
     ) -> list[dict[str, Any]]:
         """Async full-text search.
 

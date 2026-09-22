@@ -1,7 +1,8 @@
 """Unit tests for filter conversion utilities."""
 
 import pytest
-from dxmt.filters import convert_simple_filter_to_dxmt, _map_operator, _parse_condition
+from dxmt import Field
+from dxmt.filters import convert_simple_filter_to_dxmt, _map_operator
 
 
 class TestOperatorMapping:
@@ -32,7 +33,7 @@ class TestParseCondition:
 
     def test_parse_simple_equality(self):
         """Test parsing simple equality condition."""
-        result = _parse_condition({"category": "AI"})
+        result = convert_simple_filter_to_dxmt({"category": "AI"})["must"]
         assert len(result) == 1
         assert result[0] == {
             "key": "category",
@@ -41,7 +42,7 @@ class TestParseCondition:
 
     def test_parse_single_operator(self):
         """Test parsing condition with single operator."""
-        result = _parse_condition({"year": {"$gte": 2022}})
+        result = convert_simple_filter_to_dxmt({"year": {"$gte": 2022}})["must"]
         assert len(result) == 1
         assert result[0] == {
             "key": "year",
@@ -50,7 +51,7 @@ class TestParseCondition:
 
     def test_parse_multiple_operators(self):
         """Test parsing condition with multiple operators on same field."""
-        result = _parse_condition({"year": {"$gte": 2020, "$lte": 2023}})
+        result = convert_simple_filter_to_dxmt({"year": {"$gte": 2020, "$lte": 2023}})["must"]
         assert len(result) == 2
         # Order may vary, so check both conditions exist
         keys = [r["key"] for r in result]
@@ -61,7 +62,7 @@ class TestParseCondition:
 
     def test_parse_multiple_fields(self):
         """Test parsing multiple field conditions."""
-        result = _parse_condition({"year": 2022, "rating": {"$gte": 8.0}})
+        result = convert_simple_filter_to_dxmt({"year": 2022, "rating": {"$gte": 8.0}})["must"]
         assert len(result) == 2
         # Check both conditions exist
         field_map = {r["key"]: r for r in result}
@@ -259,83 +260,138 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-class TestMatchesFilter:
-    """Client-side evaluation of a filter in DXMT's own shape.
+def must(*conds):
+    return {"must": list(conds)}
 
-    This exists only for the paths that must list records and filter them here, because the
-    listing endpoint takes no filter. **The server is the authority**; this is a second reading
-    of the same conditions and therefore a second chance to drift, which is why every operator
-    is pinned rather than the handful the current callers happen to use.
-    """
 
-    from dxmt.filters import matches_filter
+def cond(key, op_type, value):
+    return {"key": key, "operation": {"type": op_type, "value": value}}
 
-    RECORD = {"payload": {"year": 2023, "title": "vector search", "tag": "ai"}}
 
-    def check(self, op_type, key, value):
-        from dxmt.filters import matches_filter
+class TestTranslationIsExactOrRefused:
+    """Each of these used to translate into a different query that ran and returned the wrong
+    records. Now each translates exactly or raises."""
 
-        return matches_filter(
-            self.RECORD, {"must": [{"key": key, "operation": {"type": op_type, "value": value}}]}
+    def test_an_and_inside_an_or_is_refused_not_flattened(self):
+        # Was {"should": [a, b, c]}: (a and b) or c read as a or b or c.
+        with pytest.raises(ValueError, match="OR"):
+            convert_simple_filter_to_dxmt({"$or": [{"a": 1, "b": 2}, {"c": 3}]})
+        with pytest.raises(ValueError, match="OR"):
+            convert_simple_filter_to_dxmt({"$or": [{"$and": [{"a": 1}, {"b": 2}]}, {"c": 3}]})
+
+    def test_a_key_beside_a_logical_operator_is_kept(self):
+        # Was {"must": [a]}: "lang" silently dropped.
+        assert convert_simple_filter_to_dxmt({"$and": [{"a": 1}], "lang": "en"}) == must(
+            cond("a", "Equal", 1), cond("lang", "Equal", "en")
         )
+        assert convert_simple_filter_to_dxmt({"$or": [{"a": 1}, {"b": 2}], "lang": "en"}) == {
+            "must": [cond("lang", "Equal", "en")],
+            "should": [cond("a", "Equal", 1), cond("b", "Equal", 2)],
+        }
 
-    def test_no_filter_matches_everything(self):
-        from dxmt.filters import matches_filter
+    def test_the_native_shape_with_stray_keys_is_refused(self):
+        with pytest.raises(ValueError, match="lang"):
+            convert_simple_filter_to_dxmt({"must": [], "lang": "en"})
 
-        assert matches_filter(self.RECORD, None)
-        assert matches_filter(self.RECORD, {})
+    def test_an_unknown_top_level_operator_is_refused(self):
+        # Was a condition on a field named "$where".
+        with pytest.raises(ValueError, match=r"\$where"):
+            convert_simple_filter_to_dxmt({"$where": "x"})
 
-    def test_equality(self):
-        assert self.check("Equal", "year", 2023)
-        assert not self.check("Equal", "year", 2022)
-        assert self.check("NotEqual", "year", 2022)
+    def test_nesting_that_has_a_flat_form_is_accepted(self):
+        assert convert_simple_filter_to_dxmt(
+            {"$and": [{"$and": [{"a": 1}]}, {"$or": [{"b": 2}, {"$or": [{"c": 3}]}]}]}
+        ) == {"must": [cond("a", "Equal", 1)], "should": [cond("b", "Equal", 2), cond("c", "Equal", 3)]}
 
-    def test_comparisons(self):
-        assert self.check("GreaterThanOrEqual", "year", 2023)
-        assert self.check("GreaterThan", "year", 2022)
-        assert not self.check("GreaterThan", "year", 2023)
-        assert self.check("LessThanOrEqual", "year", 2023)
-        assert not self.check("LessThan", "year", 2023)
+    def test_two_or_groups_are_refused(self):
+        with pytest.raises(ValueError, match="two OR groups"):
+            convert_simple_filter_to_dxmt({"$and": [{"$or": [{"a": 1}, {"b": 1}]}, {"$or": [{"c": 1}, {"d": 1}]}]})
 
-    def test_a_comparison_against_a_non_number_is_false_not_an_error(self):
-        assert not self.check("GreaterThan", "title", 5)
+    def test_nor_and_the_list_form_of_not(self):
+        expected = {"must_not": [cond("a", "Equal", 1), cond("b", "Equal", 2)]}
+        assert convert_simple_filter_to_dxmt({"$nor": [{"a": 1}, {"b": 2}]}) == expected
+        assert convert_simple_filter_to_dxmt({"$not": [{"a": 1}, {"b": 2}]}) == expected
+        # not (a and b) is not "none of them".
+        with pytest.raises(ValueError, match="NOT"):
+            convert_simple_filter_to_dxmt({"$nor": [{"a": 1, "b": 2}]})
 
-    def test_membership(self):
-        assert self.check("In", "tag", ["ai", "ml"])
-        assert not self.check("In", "tag", ["ml"])
-        assert self.check("NotIn", "tag", ["ml"])
-        assert not self.check("NotIn", "tag", ["ai"])
+    def test_values_the_server_would_refuse_are_refused_here(self):
+        with pytest.raises(ValueError, match="any\n?\s*element|element"):
+            convert_simple_filter_to_dxmt({"tags": ["a", "b"]})
+        with pytest.raises(ValueError, match="object"):
+            convert_simple_filter_to_dxmt({"meta": {"lang": "en"}})
+        with pytest.raises(ValueError, match="list"):
+            convert_simple_filter_to_dxmt({"tag": {"$in": "ai"}})
+        with pytest.raises(ValueError, match="empty"):
+            convert_simple_filter_to_dxmt({"tag": {}})
+        # The server orders numbers only: a string bound would match nothing.
+        with pytest.raises(ValueError, match="numbers only"):
+            convert_simple_filter_to_dxmt({"date": {"$gte": "2024-01-01"}})
+        with pytest.raises(ValueError, match="numbers only"):
+            Field("flag") > True
 
-    def test_string_tests(self):
-        assert self.check("Contains", "title", "search")
-        assert not self.check("Contains", "title", "audio")
-        assert self.check("StartsWith", "title", "vector")
-        assert self.check("EndsWith", "title", "search")
-        # A string test against a number matches nothing, the same way the server reads it.
-        assert not self.check("StartsWith", "year", "20")
 
-    def test_a_missing_field_matches_nothing(self):
-        assert not self.check("Equal", "absent", 1)
-        assert not self.check("GreaterThan", "absent", 0)
+class TestField:
+    def test_every_operation(self):
+        cases = [
+            (Field("y") == 1, "Equal", 1),
+            (Field("y") != 1, "NotEqual", 1),
+            (Field("y") > 1, "GreaterThan", 1),
+            (Field("y") >= 1, "GreaterThanOrEqual", 1),
+            (Field("y") < 1, "LessThan", 1),
+            (Field("y") <= 1, "LessThanOrEqual", 1),
+            (Field("y").is_in([1, 2]), "In", [1, 2]),
+            (Field("y").not_in((1, 2)), "NotIn", [1, 2]),
+            (Field("y").contains("a"), "Contains", "a"),
+            (Field("y").starts_with("a"), "StartsWith", "a"),
+            (Field("y").ends_with("a"), "EndsWith", "a"),
+        ]
+        for built, op_type, value in cases:
+            assert built.to_dict() == must(cond("y", op_type, value))
 
-    def test_must_not_and_should(self):
-        from dxmt.filters import matches_filter
+    def test_combinations(self):
+        f = (Field("lang") == "en") & Field("year").between(2020, 2023) & ~Field("tags").is_in(["spam"])
+        assert f.to_dict() == {
+            "must": [
+                cond("lang", "Equal", "en"),
+                cond("year", "GreaterThanOrEqual", 2020),
+                cond("year", "LessThanOrEqual", 2023),
+            ],
+            "must_not": [cond("tags", "In", ["spam"])],
+        }
+        g = ((Field("a") == 1) | (Field("b") == 2) | (Field("c") == 3)) & (Field("d") == 4)
+        assert g.to_dict() == {
+            "must": [cond("d", "Equal", 4)],
+            "should": [cond("a", "Equal", 1), cond("b", "Equal", 2), cond("c", "Equal", 3)],
+        }
+        assert (~((Field("a") == 1) | (Field("b") == 2))).to_dict() == {
+            "must_not": [cond("a", "Equal", 1), cond("b", "Equal", 2)]
+        }
 
-        year_is = {"key": "year", "operation": {"type": "Equal", "value": 2023}}
-        tag_is_ml = {"key": "tag", "operation": {"type": "Equal", "value": "ml"}}
+    def test_what_has_no_flat_form_is_refused(self):
+        a, b, c, d = (Field(k) == 1 for k in "abcd")
+        with pytest.raises(ValueError):
+            (a & b) | c
+        with pytest.raises(ValueError):
+            (a | b) & (c | d)
+        with pytest.raises(ValueError):
+            ~(a & b)
+        with pytest.raises(ValueError):
+            ~~a
 
-        assert not matches_filter(self.RECORD, {"must_not": [year_is]})
-        assert matches_filter(self.RECORD, {"must_not": [tag_is_ml]})
-        assert matches_filter(self.RECORD, {"should": [year_is, tag_is_ml]})
-        assert not matches_filter(self.RECORD, {"should": [tag_is_ml]})
+    def test_python_boolean_operators_are_refused(self):
+        # Each of these calls bool() on a filter and would keep only one side.
+        with pytest.raises(TypeError, match="between"):
+            2020 <= Field("y") <= 2023
+        with pytest.raises(TypeError):
+            (Field("a") == 1) and (Field("b") == 2)
+        with pytest.raises(TypeError):
+            not (Field("a") == 1)
 
-    def test_a_record_from_a_single_read_is_understood_too(self):
-        """`GET /records/{id}` returns `payload_json` as a string, not `payload` as an object.
-        A filter evaluator that only knew one shape would silently match nothing on records
-        that came from the other endpoint."""
-        from dxmt.filters import matches_filter
+    def test_a_composite_value_is_refused_when_built(self):
+        with pytest.raises(ValueError, match="element"):
+            Field("tags") == ["a"]
 
-        record = {"payload_json": '{"year": 2023}'}
-        assert matches_filter(
-            record, {"must": [{"key": "year", "operation": {"type": "Equal", "value": 2023}}]}
-        )
+    def test_accepted_wherever_a_dict_is(self):
+        f = (Field("a") == 1) | (Field("b") == 2)
+        assert convert_simple_filter_to_dxmt(f) == f.to_dict()

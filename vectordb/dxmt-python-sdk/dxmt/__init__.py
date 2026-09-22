@@ -37,6 +37,7 @@ from .exceptions import (
     DXMTTimeoutError,
     DXMTValidationError,
 )
+from .filters import Field
 from .types import (
     DenseVector,
     DistanceMetric,
@@ -139,6 +140,7 @@ __all__ = [
     "SearchResult",
     "TableConfig",
     "Filter",
+    "Field",
     # LangGraph integration (optional)
     "DXMTLangGraphStore",
     # mem0 integration (optional)

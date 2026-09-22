@@ -3,9 +3,11 @@
 This module defines type aliases and data structures used throughout the SDK.
 """
 
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 from typing_extensions import TypeAlias
+
+from . import filters as _filters
 
 # Vector types
 DenseVector: TypeAlias = list[float]
@@ -45,5 +47,5 @@ SearchResult: TypeAlias = dict[str, Any]
 # Table configuration
 TableConfig: TypeAlias = dict[str, Any]
 
-# Filter structure
-Filter: TypeAlias = dict[str, Any]
+# Filter structure: the server's dict shape, a MongoDB-style dict, or a `Field` expression
+Filter: TypeAlias = Union[dict[str, Any], _filters.Filter]

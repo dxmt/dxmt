@@ -17,7 +17,7 @@ from typing import Generator
 
 import pytest
 
-from dxmt import Client
+from dxmt import Client, Field
 from dxmt.exceptions import DXMTSearchError, DXMTTableError
 
 # Mark all tests in this module as integration tests
@@ -256,6 +256,43 @@ class TestScrollAndUpload:
             evens = [r["id"] for r in client.scroll(name, batch_size=20,
                      filter={"must": [{"key": "even", "operation": {"type": "Equal", "value": True}}]})]
             assert sorted(evens) == sorted(f"s{i}" for i in range(0, 250, 2))
+        finally:
+            client.delete_table(name)
+
+
+class TestFieldFiltersAgainstTheServer:
+    """What a `Field` expression selects, on arrays, missing fields and mixed number types,
+    through both a listing and a search."""
+
+    DOCS = {
+        "d1": {"lang": "en", "year": 2021, "tags": ["ai", "ml"]},
+        "d2": {"lang": "de", "year": 2019.0, "tags": ["spam"]},
+        "d3": {"year": 2023},
+        "d4": {"lang": "en", "year": [2019, 2024]},
+    }
+    CASES = [
+        (Field("lang") != "en", {"d2", "d3"}),         # a missing field is "not en"
+        (Field("lang").not_in(["en"]), {"d2"}),         # but is not "in something else"
+        (Field("tags") == "ai", {"d1"}),                # any element
+        (Field("year").between(2020, 2023), {"d1", "d3", "d4"}),  # d4: one element per bound
+        (Field("year") == 2019, {"d2", "d4"}),          # 2019.0 is 2019
+        ((Field("lang") == "en") & ~Field("tags").is_in(["spam"]), {"d1", "d4"}),
+        ((Field("lang") == "de") | (Field("year") >= 2023), {"d2", "d3", "d4"}),
+        (Field("id").is_in(["d1", "d3"]), {"d1", "d3"}),
+    ]
+
+    def test_listing_and_search_select_the_same_records(self, client: Client) -> None:
+        name = f"test_field_{random.randint(1000, 9999)}"
+        client.create_table(name=name, dimension=2)
+        try:
+            client.insert_records(name, [
+                {"id": rid, "vector": [1.0, float(i)], "payload": payload}
+                for i, (rid, payload) in enumerate(self.DOCS.items())
+            ])
+            for f, expected in self.CASES:
+                listed = {r["id"] for r in client.scroll(name, filter=f)}
+                found = {h["id"] for h in client.search(name, [1.0, 0.0], k=10, filter=f)}
+                assert (listed, found) == (expected, expected), f
         finally:
             client.delete_table(name)
 

@@ -116,16 +116,41 @@ filter = {
 }
 ```
 
-#### `$not` - Conditions must NOT match
+#### `$nor` - None of the conditions may match
 
 ```python
 filter = {
-    "$not": [
+    "$nor": [
         {"status": "deleted"},
         {"status": "archived"}
     ]
 }
 ```
+
+`$not` with a list means the same, and is still accepted.
+
+#### What can be combined
+
+The server takes a filter as three flat lists: every `must` holds, at least one `should`
+holds, no `must_not` holds. So:
+
+- `$and` of anything, `$or` of single conditions, `$nor` of single conditions, and one `$or`
+  beside any number of other conditions all translate exactly;
+- `(a and b) or c`, `(a or b) and (c or d)` and `not (a and b)` have no such form and raise
+  `ValueError` rather than run as a different query;
+- keys written beside `$and`/`$or` are ANDed with them, as in MongoDB.
+
+#### Ranges compare numbers
+
+`$gt`/`$gte`/`$lt`/`$lte` order numbers only; a string bound would match nothing, so it raises.
+Store dates as a number, such as a Unix timestamp.
+
+#### Arrays and missing fields
+
+- A field holding an array matches when any element does: `{"tags": "ai"}` matches
+  `["ai", "ml"]`. Comparing against a whole array (`{"tags": ["ai", "ml"]}`) is refused.
+- `$ne` is true of a record without the field; `$nin` is not.
+- Numbers compare as numbers: `5` matches `5.0`.
 
 ### 5. DXMT Native Format
 
@@ -196,7 +221,7 @@ results = client.search(
 filter = {
     "$and": [
         {"file_type": "pdf"},
-        {"created_at": {"$gte": "2023-01-01"}},
+        {"created_ts": {"$gte": 1672531200}},  # 2023-01-01 as a Unix timestamp
         {"author": {"$in": ["John Doe", "Jane Smith"]}},
         {"status": {"$ne": "archived"}}
     ]
@@ -237,6 +262,26 @@ results = client.search(
 3. **Combine with Vector Search**: Use filters to constrain the search space, then let vector similarity rank results
 4. **Test Filter Logic**: Validate your filters return expected results before deploying to production
 5. **Profile Performance**: Monitor query performance and adjust filter complexity as needed
+
+## Building Filters in Python
+
+`Field` builds the same filters with operators, and is accepted wherever a filter is:
+
+```python
+from dxmt import Field
+
+f = (
+    (Field("category") == "sci-fi")
+    & Field("year").between(2020, 2024)
+    & ~Field("status").is_in(["deleted", "archived"])
+)
+results = client.search(table_name="movies", vector=v, k=5, filter=f)
+```
+
+`==` `!=` `>` `>=` `<` `<=`, `.is_in()`, `.not_in()`, `.between()`, `.contains()`,
+`.starts_with()`, `.ends_with()`; combine with `&`, `|` and `~`. Python's `and`, `or`, `not`
+and chained comparisons (`2020 <= Field("year") <= 2024`) raise `TypeError`, because each would
+silently keep one side. `Field("id")` is the record id.
 
 ## Filter Conversion
 
@@ -284,7 +329,7 @@ except ValueError as e:
 - **Comparison**: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
 - **Array**: `$in`, `$nin`
 - **String**: `$contains`, `$startswith`, `$endswith`
-- **Logical**: `$and`, `$or`, `$not`
+- **Logical**: `$and`, `$or`, `$nor` (`$not` with a list is the same)
 
 ### Field Types
 
@@ -292,7 +337,7 @@ Filters work on any JSON-serializable field in your document's `payload`:
 - **Numbers**: integers, floats
 - **Strings**: text fields
 - **Booleans**: true/false
-- **Arrays**: lists of values (for `$in`, `$nin`)
+- **Arrays**: a condition matches when any element does
 
 ### Notes
 

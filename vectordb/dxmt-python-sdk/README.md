@@ -421,7 +421,7 @@ results = client.search(
     limit=10,
     filter={
         "source": {"$eq": "file.txt"},
-        "date": {"$gte": "2024-01-01"}
+        "date_ts": {"$gte": 1704067200}  # ranges compare numbers: 2024-01-01 as a timestamp
     }
 )
 ```
@@ -586,13 +586,21 @@ results = client.search(
     limit=10,
     filter=filter
 )
+
+# Or build the same thing with Field
+from dxmt import Field
+
+filter = (Field("year") >= 2022) & (Field("rating") >= 8.0) & Field("category").is_in(["AI", "ML"])
 ```
+
+A filter that has no exact translation -- `(a and b) or c`, two `$or` groups, a range with a
+string bound -- raises `ValueError` rather than running as a different query.
 
 **Supported operators:**
 - Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
 - Array: `$in`, `$nin`
 - String: `$contains`, `$startswith`, `$endswith`
-- Logical: `$and`, `$or`, `$not`
+- Logical: `$and`, `$or`, `$nor` (`$not` with a list is the same)
 
 ## Development
 

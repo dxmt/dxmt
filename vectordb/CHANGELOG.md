@@ -12,6 +12,10 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **`Field`, a filter builder for Python.** `(Field("lang") == "en") & Field("year").between(2020,
+  2024) & ~Field("tags").is_in(["spam"])`, accepted wherever a filter is. Python's `and`/`or`/`not`
+  and chained comparisons raise `TypeError`, since each would silently keep one side.
+
 - **Paging by cursor.** `records/list` returns `next_cursor`, and takes it back as `cursor`. An
   offset shifts under writes — the list is newest first, so each insert pushes the rest back and
   the next page repeats a record — where a cursor names a place in the order: every record
@@ -112,6 +116,16 @@ releases. Everything below is unreleased work on `main`.
 - jemalloc is the default allocator, with its background decay thread on.
 
 ### Fixed
+
+- **The Python SDK translates a MongoDB-style filter exactly or not at all.** Four shapes ran as
+  a different query and returned the wrong records: `{"$or": [{"a": 1, "b": 2}, {"c": 3}]}`
+  became `a or b or c`; a key beside `$and`/`$or` was dropped; a nested `$and` became a
+  condition on a field named "$and"; a native `must` filter lost any other key. A range with a
+  string bound (`{"date": {"$gte": "2024-01-01"}}`, in the README's own example) matched
+  nothing, since ranges compare numbers. Each now raises `ValueError`, as does anything else
+  without an exact form in `must`/`should`/`must_not`. The LangGraph store's query-less search
+  filters on the server instead of re-reading every record with a second, disagreeing
+  implementation of the filter.
 
 - **A filter now returns the same records from every endpoint.** `records/list`, a selective
   filtered search, `search_mode: "exact"` and the k-NN graph take the payload index's answer

@@ -245,7 +245,7 @@ class DXMTVectorStore(VectorStore):
         query_embedding = self.embeddings.embed_query(query)
 
         # Convert filter to DXMT format
-        dxmt_filter = self._convert_filter(filter) if filter else None
+        dxmt_filter = self._convert_filter(filter) if filter is not None else None
 
         # Search DXMT
         try:
@@ -295,7 +295,7 @@ class DXMTVectorStore(VectorStore):
         query_embedding = self.embeddings.embed_query(query)
 
         # Convert filter to DXMT format
-        dxmt_filter = self._convert_filter(filter) if filter else None
+        dxmt_filter = self._convert_filter(filter) if filter is not None else None
 
         # Search DXMT
         try:
@@ -433,7 +433,7 @@ class DXMTVectorStore(VectorStore):
         Returns:
             List of similar documents.
         """
-        dxmt_filter = self._convert_filter(filter) if filter else None
+        dxmt_filter = self._convert_filter(filter) if filter is not None else None
         try:
             results = self.client.search(
                 table_name=self.collection_name,

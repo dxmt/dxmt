@@ -30,7 +30,7 @@ from langgraph.store.base import (
 
 from .client import DXMTClient
 from .exceptions import DXMTError, DXMTTableError
-from .filters import convert_simple_filter_to_dxmt, matches_filter
+from .filters import convert_simple_filter_to_dxmt
 
 logger = logging.getLogger(__name__)
 
@@ -212,26 +212,19 @@ class DXMTLangGraphStore(BaseStore):
         dxmt_filter: dict[str, Any] | None,
         wanted: int,
     ) -> list[dict[str, Any]]:
-        """Records from `table_name`, filtered client-side, up to `wanted`.
+        """Records from `table_name` matching `dxmt_filter`, newest first, up to `wanted`.
 
-        The listing endpoint takes no filter, so a metadata-only search pages through the table
-        and applies the conditions here. That is linear in the table, which is why a query
-        vector is the better path when there is one -- but a slow right answer beats the fast
-        empty one this replaced.
+        The server filters: this used to page through the whole table and test each record
+        here, with a second reading of the filter that disagreed with the server's on arrays,
+        on missing fields and on `True == 1`.
         """
-        page_size = 1000
-        offset = 0
         out: list[dict[str, Any]] = []
-        while len(out) < wanted:
-            page = self.client.list_records(table_name, limit=page_size, offset=offset)
-            if not page:
+        for record in self.client.scroll(
+            table_name, filter=dxmt_filter, batch_size=min(max(wanted, 1), 1000)
+        ):
+            out.append(record)
+            if len(out) >= wanted:
                 break
-            for record in page:
-                if matches_filter(record, dxmt_filter):
-                    out.append(record)
-                    if len(out) >= wanted:
-                        break
-            offset += len(page)
         return out
 
     def _handle_search(self, op: SearchOp) -> list[SearchItem]:
