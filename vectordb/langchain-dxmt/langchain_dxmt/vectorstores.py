@@ -922,7 +922,7 @@ class DXMTVectorDB(VectorStore):
         self,
         query: str,
         k: int = DEFAULT_K,
-        vector_weight: float = 0.7,
+        vector_weight: Optional[float] = None,
         filter: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[Document]:
@@ -933,8 +933,11 @@ class DXMTVectorDB(VectorStore):
         Args:
             query: Query text.
             k: Number of documents to return.
-            vector_weight: Weight for vector similarity (0-1). Default is 0.7.
-                          Text weight will be (1 - vector_weight).
+            vector_weight: Weight for vector similarity (0-1); the text side gets the rest.
+                          Setting one selects weighted fusion, which is the method that reads
+                          it. Left unset, the server fuses by distribution (`dbsf`), which
+                          needs no weight -- this defaulted to 0.7, a number that was sent and
+                          then ignored.
             filter: Optional metadata filter.
             **kwargs: Additional keyword arguments.
 
@@ -970,11 +973,11 @@ class DXMTVectorDB(VectorStore):
         self,
         query: str,
         k: int = DEFAULT_K,
-        vector_weight: float = 0.7,
+        vector_weight: Optional[float] = None,
         filter: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[Document]:
-        """Async hybrid search."""
+        """Async hybrid search. See `hybrid_search` for what `vector_weight` selects."""
         if not self._enable_full_text_search:
             msg = "Full-text search not enabled. Set enable_full_text_search=True"
             raise ValueError(msg)

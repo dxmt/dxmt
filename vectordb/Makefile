@@ -11,45 +11,78 @@ export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
 .PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live dashboard-install dashboard-build dashboard-dev run-dashboard verify-dashboard dashboard-clean
 
 # Default target - show help
+# Every target below is listed here, and `make check-help` fails if one is not: this listed
+# about half of them, so the way to find `verify-core` or `dashboard-build` was to read the file.
 help:
 	@echo "DXMT VectorDB - Available targets:"
 	@echo ""
 	@echo "Development:"
-	@echo "  setup      - Install development dependencies"
-	@echo "  build      - Build the project in debug mode"
-	@echo "  release    - Build the project in release mode"
-	@echo "  run        - Run the server in debug mode"
-	@echo "  run-release- Run the server in release mode"
+	@echo "  setup        - Install development dependencies (rustfmt, clippy, audit, tarpaulin)"
+	@echo "  build        - Build the project in debug mode"
+	@echo "  release      - Build the project in release mode"
+	@echo "  run          - Run the server in debug mode"
+	@echo "  run-release  - Run the server in release mode"
+	@echo "  dev          - Format, then run under cargo-watch"
 	@echo ""
 	@echo "Testing:"
-	@echo "  test       - Run all tests"
-	@echo "  test-unit  - Run unit tests only"
-	@echo "  test-integ - Run integration tests"
-	@echo "  test-api   - Run the HTTP functional suite in both storage modes (needs python3+pytest+httpx)"
+	@echo "  test         - Run all tests"
+	@echo "  test-unit    - Run unit tests only"
+	@echo "  test-integ   - Run integration tests"
+	@echo "  test-recovery  - WAL recovery tests"
+	@echo "  test-contract  - The SDK/router contract test"
+	@echo "  test-api     - The HTTP functional suite in both storage modes (needs python3+pytest+httpx)"
 	@echo "  test-api-quick - Same, skipping the property suite"
-	@echo "  bench      - Run the criterion benchmarks"
+	@echo "  quick-test   - fmt + lint + unit tests"
+	@echo "  bench        - Run the criterion benchmarks"
 	@echo "  bench-recall - Measure ANN recall against exact ground truth"
-	@echo "  coverage   - Generate test coverage report"
+	@echo "  coverage     - Generate test coverage report"
+	@echo ""
+	@echo "Web console (needs Node 20+):"
+	@echo "  dashboard-install - npm ci in dashboard/"
+	@echo "  dashboard-build   - Build the bundle the binary embeds"
+	@echo "  dashboard-dev     - Vite dev server against a running API"
+	@echo "  dashboard-clean   - Remove the built bundle"
+	@echo "  run-dashboard     - Build the bundle and serve it at /dashboard"
+	@echo "  verify-dashboard  - Console tests plus the dashboard API suite"
 	@echo ""
 	@echo "Code Quality:"
-	@echo "  fmt        - Format code with rustfmt"
-	@echo "  lint       - Run clippy linter"
-	@echo "  check      - Run cargo check"
-	@echo "  audit      - Check for security vulnerabilities"
+	@echo "  fmt          - Format code with rustfmt"
+	@echo "  fmt-check    - Check formatting without writing"
+	@echo "  lint         - Run clippy linter"
+	@echo "  lint-strict  - clippy with -D warnings"
+	@echo "  check        - Run cargo check"
+	@echo "  audit        - Check for security vulnerabilities"
 	@echo ""
 	@echo "Documentation:"
-	@echo "  docs       - Build documentation"
-	@echo "  docs-open  - Build and open documentation"
+	@echo "  docs         - Build documentation"
+	@echo "  docs-open    - Build and open documentation"
 	@echo ""
 	@echo "Docker:"
-	@echo "  docker-build   - Build Docker image"
-	@echo "  docker-run     - Run Docker container"
+	@echo "  docker-build   - Build the image (dxmt/vectordb:alpha)"
+	@echo "  docker-run     - Run it on http://localhost:9999 with a data volume"
 	@echo "  docker-compose - Run with docker-compose"
 	@echo ""
 	@echo "Utilities:"
-	@echo "  clean      - Clean build artifacts"
-	@echo "  verify     - Run all checks (fmt, lint, test)"
-	@echo "  verify-live - verify plus the live HTTP suite"
+	@echo "  clean        - Clean build artifacts"
+	@echo "  verify-core  - fmt-check, check, clippy, unit, recovery and contract tests"
+	@echo "  verify       - verify-core plus the full integration suite"
+	@echo "  verify-live  - verify plus the live HTTP suite"
+	@echo "  ci           - Alias for verify"
+	@echo "  check-help   - Fail if a target is missing from this list"
+
+# Every target in this file must appear in `help`, or the help text drifts into a subset of
+# what exists -- which is what it had already become.
+check-help:
+	@listed=$$(mktemp); declared=$$(mktemp); \
+	grep -oE '^	@echo "  [a-z][a-z0-9-]*' $(firstword $(MAKEFILE_LIST)) \
+		| grep -oE '[a-z][a-z0-9-]*$$' | sort -u > $$listed; \
+	grep -oE '^[a-z][a-z0-9-]*:' $(firstword $(MAKEFILE_LIST)) | tr -d ':' | grep -v '^help$$' | sort -u > $$declared; \
+	missing=$$(comm -13 $$listed $$declared); \
+	rm -f $$listed $$declared; \
+	if [ -n "$$missing" ]; then \
+		echo "targets missing from 'make help':"; echo "$$missing"; exit 1; \
+	fi; \
+	echo "help lists every target"
 
 # Setup development environment
 setup:
@@ -194,14 +227,18 @@ docs-open:
 	@echo "Building and opening documentation..."
 	@cargo doc --no-deps --open
 
-# Docker operations
+# Docker operations. The image name is the one docker-compose.yml uses, so building here and
+# bringing it up there are the same image rather than two.
 docker-build:
 	@echo "Building Docker image..."
-	@docker build -t dxmt-vectordb:latest .
+	@docker build -t dxmt/vectordb:alpha .
 
+# The server listens on 9999 (Dockerfile: EXPOSE 9999, CMD --port 9999). This published 8000,
+# so the container came up healthy and nothing could reach it. The volume is the other half:
+# DXMT_ROOT_DIR is /data in the image, so without it every restart is an empty database.
 docker-run:
-	@echo "Running Docker container..."
-	@docker run -p 8000:8000 dxmt-vectordb:latest
+	@echo "Running Docker container on http://localhost:9999 ..."
+	@docker run --rm -p 9999:9999 -v dxmt-vectordb-data:/data dxmt/vectordb:alpha
 
 docker-compose:
 	@echo "Starting with docker-compose..."
@@ -218,7 +255,7 @@ clean:
 
 # Verify everything is working
 # The fast gate: everything except the full integration suite. Use it while iterating.
-verify-core: fmt-check check lint test-unit test-recovery test-contract
+verify-core: check-help fmt-check check lint test-unit test-recovery test-contract
 
 # The real gate, and what CI runs. `test-integ` is `cargo test --tests`, which includes the
 # recovery and contract targets above; running them first just fails faster.
@@ -227,24 +264,11 @@ verify: verify-core test-integ
 
 ci: verify
 
-# Release process
-release-patch:
-	@cargo bump patch
-	@git add Cargo.toml Cargo.lock
-	@git commit -m "chore: bump patch version"
-	@cargo build --release
-
-release-minor:
-	@cargo bump minor
-	@git add Cargo.toml Cargo.lock
-	@git commit -m "chore: bump minor version"
-	@cargo build --release
-
-release-major:
-	@cargo bump major
-	@git add Cargo.toml Cargo.lock
-	@git commit -m "chore: bump major version"
-	@cargo build --release
+# `release-patch`, `release-minor` and `release-major` were here and could not run: they began
+# with `cargo bump`, which is not a cargo subcommand and which `setup` does not install, so
+# each one stopped on its first line. They also ran `git commit` after `git add Cargo.toml
+# Cargo.lock`, which commits whatever else was already staged. Nothing has been released yet;
+# when that changes, the version is one line in Cargo.toml and the commit is yours to write.
 
 # Quick commands for common workflows
 quick-test: fmt lint test-unit

@@ -276,8 +276,7 @@ const results = await client.hybridSearch({
   vector: queryVector,
   text_query: 'machine learning',
   k: 10,
-  vector_weight: 0.7,
-  text_weight: 0.3
+  vector_weight: 0.7  // 70% vector, 30% text; selects weighted_sum fusion
 });
 ```
 

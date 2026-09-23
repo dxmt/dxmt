@@ -258,8 +258,9 @@ class DXMTVectorStore(BasePydanticVectorStore):
 
         Respects VectorStoreQuery.mode:
             - DEFAULT / None     → dense vector search
-            - HYBRID             → hybrid_search (vector + text, weighted by alpha)
-            - SEMANTIC_HYBRID    → hybrid_search with alpha=0.7 default
+            - HYBRID             → hybrid_search (vector + text)
+            - SEMANTIC_HYBRID    → the same; `alpha`, when the query carries one, is the
+              vector side's share and selects weighted fusion
             - SPARSE / TEXT_SEARCH → full_text_search (BM25 only)
 
         Args:
@@ -282,12 +283,14 @@ class DXMTVectorStore(BasePydanticVectorStore):
         try:
             # --- HYBRID modes ---
             if _MODE and mode in (_MODE.HYBRID, _MODE.SEMANTIC_HYBRID):
-                alpha = getattr(query, "alpha", None) or 0.7
+                # Pass the query's alpha through rather than inventing one: a weight selects
+                # weighted fusion, and a caller who set none should get the server's default
+                # (`dbsf`), which needs no weight.
                 results = self.client.hybrid_search(
                     table_name=self.table_name,
                     vector=query.query_embedding,
                     text=getattr(query, "query_str", None),
-                    alpha=alpha,
+                    alpha=getattr(query, "alpha", None),
                     k=top_k,
                     filter=dxmt_filter,
                 )

@@ -836,8 +836,7 @@ export class DXMTClient {
    *   vector: [0.1, 0.2, 0.3],
    *   text_query: 'machine learning',
    *   k: 10,
-   *   vector_weight: 0.7,
-   *   text_weight: 0.3
+   *   vector_weight: 0.7  // 70% vector, 30% text; selects weighted_sum fusion
    * });
    * ```
    */
@@ -860,7 +859,17 @@ export class DXMTClient {
           text: params.text_query,
           limit: params.k || 10,
           filter: params.filter,
-          vector_weight: params.vector_weight ?? 0.5,
+          // A weight only means something to a fusion that reads one. This sent 0.5 by
+          // default and never named a method, so every hybrid search asked for `dbsf` --
+          // which ignores the weight -- and the parameter did nothing whichever value it had.
+          ...(params.vector_weight === undefined
+            ? {}
+            : { vector_weight: params.vector_weight }),
+          ...(params.fusion_method === undefined
+            ? params.vector_weight === undefined
+              ? {}
+              : { fusion_method: 'weighted_sum' as const }
+            : { fusion_method: params.fusion_method }),
         }
       );
 

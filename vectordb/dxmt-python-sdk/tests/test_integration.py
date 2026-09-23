@@ -448,6 +448,46 @@ class TestHybridSearch:
         assert all("id" in r for r in results)
         assert all("score" in r for r in results)
 
+    def test_the_weight_changes_the_ranking(self, client: Client) -> None:
+        """`vector_weight` has to reach a fusion method that reads it.
+
+        The server's default fusion is `dbsf`, which normalises each side by its own
+        distribution and ignores the weight -- and this SDK sent the weight without ever
+        naming a method, so 0.0 and 1.0 came back with identical rows and identical scores.
+        Every test above passes a weight and asserts only the shape of the answer, which is
+        how a knob that did nothing stayed in the API and in three integrations' docs.
+        """
+        name = f"fusion_{random.randint(1000, 9999)}"
+        try:
+            client.create_table(name=name, dimension=3, enable_full_text_search=True)
+        except Exception as e:  # noqa: BLE001 - the feature may not be compiled in
+            pytest.skip(f"cannot create a full-text table: {e}")
+        try:
+            client.insert_records(name, [
+                # The vector favours "rust"; the word "python" favours the other document.
+                {"id": "vec", "vector": [1.0, 0.0, 0.0],
+                 "payload": {"content": "rust systems programming"}},
+                {"id": "text", "vector": [0.0, 1.0, 0.0],
+                 "payload": {"content": "python data science"}},
+            ])
+
+            def top(**kwargs):
+                hits = client.hybrid_search(
+                    name, vector=[1.0, 0.0, 0.0], text="python", k=2, **kwargs
+                )
+                if not hits:
+                    pytest.skip("hybrid search returned nothing; full-text may be disabled")
+                return hits[0]["id"]
+
+            assert top(vector_weight=1.0) == "vec"
+            assert top(vector_weight=0.0) == "text"
+            # Naming the method explicitly is still possible, and no weight leaves the server
+            # on its own default rather than quietly selecting one here.
+            assert top(vector_weight=1.0, fusion_method="reciprocal_rank_fusion") in {"vec", "text"}
+            assert top() == top(fusion_method="dbsf")
+        finally:
+            client.delete_table(name)
+
     def test_hybrid_search_text_only(
         self, client: Client, setup_hybrid_table: str
     ) -> None:

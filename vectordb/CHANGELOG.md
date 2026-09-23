@@ -12,6 +12,15 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **The LlamaIndex examples run without an API key.** All eight opened with
+  `OpenAIEmbedding()`, so the first thing anyone evaluating DXMT through LlamaIndex met was a
+  missing key. `examples/embedding.py` picks OpenAI when `OPENAI_API_KEY` is set,
+  sentence-transformers when it is installed, and otherwise a hashed bag of words, printing
+  which -- and the table's dimension follows the model instead of a hardcoded 1536. The three
+  that need no LLM run end to end; the rest still say so, in one line, for the generation step
+  alone. They also clear their table first, so a second run no longer shows every document
+  twice.
+
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
@@ -144,6 +153,27 @@ releases. Everything below is unreleased work on `main`.
 - jemalloc is the default allocator, with its background decay thread on.
 
 ### Fixed
+
+- **`vector_weight` reached a fusion method that reads it.** The server's default fusion is
+  `dbsf`, which normalises each side by its own distribution and ignores the weight; the Python
+  and JavaScript SDKs sent a weight and never a `fusion_method`, so `vector_weight=0.0` and
+  `vector_weight=1.0` returned the same rows with the same scores -- measured against a running
+  server, not inferred. Both SDKs invented a default (0.7 and 0.5) for callers who set nothing,
+  and the LlamaIndex and MetaGPT adapters invented 0.7 again, so the knob was in four APIs and
+  three sets of docs and did nothing anywhere. A weight now selects `weighted_sum`, `dbsf`
+  stays the default when no weight is given, and `fusion_method` is a parameter. The JS SDK's
+  `text_weight` was never sent at all and is gone; the text side gets what the vector side does
+  not take. The tests that passed a weight and asserted only the shape of the answer -- which
+  is how this survived -- now assert the ranking changes.
+
+- **Three Makefile targets that could not run**, and two that ran and did nothing useful.
+  `release-patch`, `release-minor` and `release-major` began with `cargo bump`, which is not a
+  cargo subcommand and which `make setup` does not install, and then `git commit` after
+  `git add Cargo.toml Cargo.lock` -- which commits whatever else was staged. They are gone.
+  `make docker-run` published port 8000 while the server listens on 9999 and the image
+  `EXPOSE`s it, so the container came up healthy and unreachable, with no volume, so every
+  restart was an empty database. `make help` listed about half the targets; `make check-help`
+  now fails when one is missing, and runs as part of `verify-core`.
 
 - **The Go client can clear a payload.** `Update.Payload` is `map[string]any` with
   `omitempty`, which drops an empty map as readily as a nil one -- so "clear this payload"

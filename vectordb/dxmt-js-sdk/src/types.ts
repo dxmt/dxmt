@@ -172,8 +172,16 @@ export interface HybridSearchParams {
   text_query?: string;
   k?: number;
   filter?: Filter;
+  /**
+   * The vector side's share of the score, 0 to 1; the text side gets the rest.
+   *
+   * Setting it selects `weighted_sum` fusion, which is the method that reads it. Left unset,
+   * the server fuses by distribution (`dbsf`), which needs no weight — and which ignores one,
+   * so a weight sent without a method changed nothing at all.
+   */
   vector_weight?: number;
-  text_weight?: number;
+  /** Which fusion to use. Defaults to the server's `dbsf`, or to `weighted_sum` with a weight. */
+  fusion_method?: 'dbsf' | 'weighted_sum' | 'reciprocal_rank_fusion';
 }
 
 /**

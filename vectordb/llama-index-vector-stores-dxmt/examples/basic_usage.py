@@ -9,7 +9,7 @@ This example demonstrates:
 
 from llama_index.core import VectorStoreIndex, Document
 from llama_index.vector_stores.dxmt import DXMTVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
+from embedding import default_embed_model, embed_dimension, has_llm
 
 
 def main():
@@ -18,11 +18,13 @@ def main():
     print("DXMT Vector Store - Basic Usage Example")
     print("=" * 60)
 
-    # 1. Initialize vector store
+    # 1. Initialize vector store. The table's dimension is the embedding model's, so ask the
+    # model rather than hardcode 1536 -- a wrong guess is a dimension error on the first insert.
+    embed_model = default_embed_model()
     print("\n1. Initializing DXMT vector store...")
     vector_store = DXMTVectorStore(
-        table_name="llamaindex_basic_example",
-        dimension=1536,  # OpenAI ada-002 embedding dimension
+        table_name=f"llamaindex_basic_example_{embed_dimension(embed_model)}",
+        dimension=embed_dimension(embed_model),
         host="localhost",
         port=9999,
         index_type="hnsw",
@@ -30,9 +32,16 @@ def main():
     )
     print("✓ Vector store created")
 
-    # 2. Create index with OpenAI embeddings
+    # Start from an empty table: this example inserts a fixed set of documents, and without
+    # this a second run shows every one of them twice -- which reads as a deduplication bug in
+    # the database rather than as the example adding them again.
+    try:
+        vector_store.clear()
+    except Exception:
+        pass
+
+    # 2. Create the index over that store
     print("\n2. Creating LlamaIndex index...")
-    embed_model = OpenAIEmbedding()
     index = VectorStoreIndex.from_vector_store(
         vector_store=vector_store,
         embed_model=embed_model,
@@ -69,27 +78,24 @@ def main():
         index.insert(doc)
         print(f"  ✓ Document {i}/{len(documents)} added")
 
-    # 4. Query the index
+    # 4. Query the index. Writing the answer needs an LLM; what DXMT is being asked for is the
+    # nodes underneath it, so without a key this prints those and skips the generation.
     print("\n4. Querying the index...")
-    query_engine = index.as_query_engine(similarity_top_k=3)
-
-    # Query 1: What is LlamaIndex?
-    print("\n  Query 1: 'What is LlamaIndex?'")
-    response = query_engine.query("What is LlamaIndex?")
-    print(f"  Response: {response}")
-    print(f"  Sources: {len(response.source_nodes)} documents")
-
-    # Query 2: What is DXMT?
-    print("\n  Query 2: 'What is DXMT VectorDB?'")
-    response = query_engine.query("What is DXMT VectorDB?")
-    print(f"  Response: {response}")
-    print(f"  Sources: {len(response.source_nodes)} documents")
-
-    # Query 3: Explain RAG
-    print("\n  Query 3: 'Explain RAG'")
-    response = query_engine.query("Explain RAG")
-    print(f"  Response: {response}")
-    print(f"  Sources: {len(response.source_nodes)} documents")
+    questions = ["What is LlamaIndex?", "What is DXMT VectorDB?", "Explain RAG"]
+    if has_llm():
+        query_engine = index.as_query_engine(similarity_top_k=3)
+        for question in questions:
+            print(f"\n  Query: {question!r}")
+            response = query_engine.query(question)
+            print(f"  Response: {response}")
+            print(f"  Sources: {len(response.source_nodes)} documents")
+    else:
+        retriever = index.as_retriever(similarity_top_k=3)
+        for question in questions:
+            print(f"\n  Query: {question!r}")
+            for node in retriever.retrieve(question):
+                print(f"    {node.score:.3f}  {node.node.text[:70]}...")
+        print("\n  (set OPENAI_API_KEY to see generated answers over these nodes)")
 
     # 5. Retrieve specific documents
     print("\n5. Using retriever...")

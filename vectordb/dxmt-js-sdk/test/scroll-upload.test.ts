@@ -120,3 +120,35 @@ describe('upload', () => {
     expect(most).toBe(3);
   });
 });
+
+describe('hybridSearch fusion', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  const call = async (params: Record<string, unknown>) => {
+    fetchMock.mockResolvedValueOnce(ok({ hits: [] }));
+    await new DXMTClient().hybridSearch({ table_name: 't', vector: [1, 0], text_query: 'x', ...params });
+    return bodyOf(0);
+  };
+
+  it('sends no weight and no method when none was asked for', async () => {
+    const body = await call({});
+    expect(body.vector_weight).toBeUndefined();
+    expect(body.fusion_method).toBeUndefined();
+  });
+
+  it('a weight selects the fusion that reads it', async () => {
+    // It used to send `vector_weight: 0.5` by default and never a method, so the server fused
+    // with `dbsf` -- which ignores the weight -- and the parameter did nothing.
+    expect(await call({ vector_weight: 0.9 })).toMatchObject({
+      vector_weight: 0.9,
+      fusion_method: 'weighted_sum',
+    });
+  });
+
+  it('an explicit method wins', async () => {
+    expect(await call({ vector_weight: 0.9, fusion_method: 'reciprocal_rank_fusion' })).toMatchObject({
+      vector_weight: 0.9,
+      fusion_method: 'reciprocal_rank_fusion',
+    });
+  });
+});

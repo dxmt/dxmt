@@ -114,7 +114,10 @@ class TestQueryModeRouting:
         call = client.hybrid_search.call_args
         assert call[1]["alpha"] == 0.6
 
-    def test_semantic_hybrid_defaults_alpha_to_07(self):
+    def test_semantic_hybrid_passes_no_alpha_when_the_query_has_none(self):
+        """It used to substitute 0.7, which is not a neutral default: a weight selects
+        weighted fusion, so inventing one changed how every unweighted query was scored --
+        and the weight itself was then ignored by the method the SDK actually asked for."""
         try:
             from llama_index.core.vector_stores.types import VectorStoreQueryMode
         except ImportError:
@@ -127,7 +130,7 @@ class TestQueryModeRouting:
 
         client.hybrid_search.assert_called_once()
         call = client.hybrid_search.call_args
-        assert call[1]["alpha"] == 0.7
+        assert call[1]["alpha"] is None
 
     def test_text_search_mode_calls_full_text_search(self):
         try:

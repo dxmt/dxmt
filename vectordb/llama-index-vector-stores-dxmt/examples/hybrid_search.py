@@ -13,7 +13,7 @@ from llama_index.core.vector_stores.types import (
     VectorStoreQuery,
     VectorStoreQueryMode,
 )
-from llama_index.embeddings.openai import OpenAIEmbedding
+from embedding import default_embed_model, embed_dimension, has_llm
 import statistics
 
 
@@ -110,12 +110,17 @@ def main():
     print("DXMT Vector Store - Hybrid Search Example")
     print("=" * 60)
 
-    # 0. Clean up existing table to avoid duplicates
+    embed_model = default_embed_model()
+    table_name = f"llamaindex_hybrid_example_{embed_dimension(embed_model)}"
+
+    # 0. Clean up existing table to avoid duplicates. It has to be the name this run will use:
+    # the table carries the embedding model's dimension, and deleting a different one left the
+    # documents from the previous run in place -- every run then showed each document twice.
     print("\n0. Cleaning up existing table...")
     try:
         from dxmt import Client
         client = Client(host="localhost", port=9999)
-        client.delete_table("llamaindex_hybrid_example")
+        client.delete_table(table_name)
         print("✓ Existing table deleted")
     except Exception:
         print("ℹ No existing table to clean up")
@@ -123,8 +128,8 @@ def main():
     # 1. Initialize vector store with full-text search enabled
     print("\n1. Initializing DXMT vector store with full-text search...")
     vector_store = DXMTVectorStore(
-        table_name="llamaindex_hybrid_example",
-        dimension=1536,
+        table_name=table_name,
+        dimension=embed_dimension(embed_model),
         host="localhost",
         port=9999,
         index_type="hnsw",
@@ -143,7 +148,6 @@ def main():
 
     # 2. Create index
     print("\n2. Creating LlamaIndex index...")
-    embed_model = OpenAIEmbedding()
     index = VectorStoreIndex.from_vector_store(
         vector_store=vector_store,
         embed_model=embed_model,
@@ -440,17 +444,18 @@ def main():
             print(f"    📊 Score range: [{min(scores):.4f}, {max(scores):.4f}], "
                   f"std: {statistics.stdev(scores):.4f}")
 
-    # 6. Query engine demonstration
+    # 6. Query engine demonstration. Generating an answer needs an LLM; the retrieval under
+    # it does not, so without a key this shows the nodes DXMT returned.
     print("\n6. Using query engine for RAG...")
-    query_engine = index.as_query_engine(
-        similarity_top_k=3,
-        # Note: Query engine uses vector search by default
-        # Use vector_store.query() for explicit hybrid control
-    )
-
-    response = query_engine.query("What is deep learning?")
-    print(f"\n  Query: 'What is deep learning?'")
-    print(f"  Response: {response}")
+    if has_llm():
+        query_engine = index.as_query_engine(similarity_top_k=3)
+        response = query_engine.query("What is deep learning?")
+        print(f"\n  Query: 'What is deep learning?'")
+        print(f"  Response: {response}")
+    else:
+        print("\n  Query: 'What is deep learning?' (retrieval only -- no OPENAI_API_KEY)")
+        for node in index.as_retriever(similarity_top_k=3).retrieve("What is deep learning?"):
+            print(f"    {node.score:.3f}  {node.node.text[:70]}...")
 
     # 7. Summary and Analysis
     print("\n7. Summary and Analysis:")

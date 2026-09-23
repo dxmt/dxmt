@@ -400,14 +400,17 @@ class DXMTVectorStore(BasePydanticVectorStore):
             if not query.query_str:
                 raise ValueError("query_str required for hybrid search")
 
-            alpha = query.alpha if query.alpha is not None else 0.7
-
+            # `alpha` selects weighted fusion, where it means what its name says: the share
+            # of the score that comes from the vector side. Passing it unconditionally would
+            # force that method on every caller, including the ones who never set it -- so
+            # when it is unset the server stays on its own default fusion (`dbsf`), which
+            # normalises each side by its distribution and needs no weight.
             results = self.client.hybrid_search(
                 self.table_name,
                 vector=query.query_embedding,
                 text=query.query_str,
                 k=query.similarity_top_k,
-                vector_weight=alpha,
+                vector_weight=query.alpha,
                 filter=dxmt_filter,
             )
 

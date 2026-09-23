@@ -17,7 +17,7 @@ from llama_index.core.vector_stores.types import (
     FilterOperator,
     FilterCondition,
 )
-from llama_index.embeddings.openai import OpenAIEmbedding
+from embedding import default_embed_model, embed_dimension
 
 
 def create_sample_documents():
@@ -109,11 +109,12 @@ def main():
     print("DXMT Vector Store - Advanced Filtering Example")
     print("=" * 60)
 
-    # 1. Initialize vector store
+    # 1. Initialize vector store. Its dimension is the embedding model's.
+    embed_model = default_embed_model()
     print("\n1. Initializing DXMT vector store...")
     vector_store = DXMTVectorStore(
-        table_name="llamaindex_filters_example",
-        dimension=1536,
+        table_name=f"llamaindex_filters_example_{embed_dimension(embed_model)}",
+        dimension=embed_dimension(embed_model),
         host="localhost",
         port=9999,
         index_type="hnsw",
@@ -121,9 +122,16 @@ def main():
     )
     print("✓ Vector store created")
 
+    # Start from an empty table: this example inserts a fixed set of documents, and without
+    # this a second run shows every one of them twice -- which reads as a deduplication bug in
+    # the database rather than as the example adding them again.
+    try:
+        vector_store.clear()
+    except Exception:
+        pass
+
     # 2. Create index and add documents
     print("\n2. Creating index and adding documents...")
-    embed_model = OpenAIEmbedding()
     index = VectorStoreIndex.from_vector_store(
         vector_store=vector_store,
         embed_model=embed_model,
