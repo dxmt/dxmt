@@ -245,6 +245,17 @@ jobs:
           DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q tests/test_integration.py
         working-directory: vectordb/dxmt-python-sdk
 
+      # The LangGraph store implements BaseStore over DXMT, and nothing ran it: `langgraph` is
+      # not a dependency of this SDK, so `importorskip` skipped the whole file everywhere --
+      # including here -- and seven of its tests had been failing for some time behind that
+      # skip. Installing the one package is what turns them back into a gate.
+      - name: LangGraph store tests
+        run: |
+          python -m pip install langgraph
+          DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q \
+            tests/test_langgraph_store.py tests/test_langgraph_store_integration.py
+        working-directory: vectordb/dxmt-python-sdk
+
       # The two adapter packages had no CI at all, and both had gone red without anyone
       # noticing: a test importing a class name this package never exported, and one asserting
       # a single filter unwrapped -- which the server does not reject, it reads as a filter
@@ -275,6 +286,9 @@ jobs:
           DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
         working-directory: vectordb/langchain-dxmt
 
+      # `tests/test_integration.py` here asked for `OpenAIEmbedding`, so it skipped itself on
+      # every machine without a key -- this one included -- and the package's live path was
+      # never exercised at all. It now embeds locally, so these are real.
       - name: LlamaIndex adapter tests
         run: |
           python -m pip install -e .

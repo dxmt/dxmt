@@ -12,6 +12,12 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **A LangGraph example, and the LangGraph and LlamaIndex suites now run.** `langgraph` and
+  `llama-index-core` are installed in CI's live job, `dxmt-python-sdk/examples/langgraph_memory.py`
+  is an agent whose long-term memory is a DXMT namespace, and the LlamaIndex integration tests
+  embed locally instead of calling OpenAI -- they had skipped themselves everywhere, so that
+  package's live path had never run at all.
+
 - **A field the server does not have is now an error.** Every request body carries
   `deny_unknown_fields` and goes through `ApiJson` (`src/api/extract.rs`), so a misspelled or
   invented field is a 400 naming it and listing the ones that exist. serde's default -- ignore
@@ -135,6 +141,16 @@ releases. Everything below is unreleased work on `main`.
 - jemalloc is the default allocator, with its background decay thread on.
 
 ### Fixed
+
+- **A LangGraph namespace round-trips.** A namespace is a table, joined with `_` and split on
+  `_`, so any component containing one came back wrong: `("agent", "memory", "session_123")`
+  listed as four components, a prefix search for it matched nothing, and `("a_b",)` and
+  `("a", "b")` quietly shared one table. An underscore inside a component is now doubled. A
+  namespace whose table name would exceed the server's 63 characters says so, rather than
+  failing on a name the caller never chose; and a store whose `embedding_dims` disagrees with
+  the table the namespace already has is refused by name -- a store with no `embed_fn` writes a
+  1-element placeholder, so it used to make every later put fail with the server's bare
+  "expected 384, got 1". Seven tests of this store had been failing behind a skip.
 
 - **The Python SDK translates a MongoDB-style filter exactly or not at all.** Four shapes ran as
   a different query and returned the wrong records: `{"$or": [{"a": 1, "b": 2}, {"c": 3}]}`

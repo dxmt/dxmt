@@ -43,27 +43,35 @@ from langgraph.store.base import (
 
 
 class MockEmbeddings:
-    """Mock embeddings for testing without external dependencies."""
+    """Deterministic embeddings with enough meaning to test search against.
+
+    A hashed bag of words: each word lands in one bucket, so two texts sharing a word share a
+    direction and cosine similarity tracks word overlap. This was an md5 of the whole string
+    spread over the first 16 buckets, which gives two texts differing by one character
+    unrelated directions -- "semantic search returns the Python document for a Python query"
+    was then a coin flip, and the test that asserted it failed about half the time for a
+    reason that had nothing to do with the database.
+    """
 
     def __init__(self, dims: int = 384):
         self.dims = dims
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Generate mock embeddings based on text content."""
         import hashlib
 
         embeddings = []
         for text in texts:
-            # Generate deterministic embedding from text hash
-            hash_val = hashlib.md5(text.encode()).hexdigest()
-            # Convert hash to numbers
-            embedding = [
-                float(int(hash_val[i : i + 2], 16)) / 255.0 for i in range(0, min(len(hash_val), self.dims * 2), 2)
-            ]
-            # Pad to required dimension
-            while len(embedding) < self.dims:
-                embedding.append(0.0)
-            embeddings.append(embedding[: self.dims])
+            embedding = [0.0] * self.dims
+            words = [w.strip(".,!?").lower() for w in text.split()]
+            for word in words:
+                if not word:
+                    continue
+                bucket = int(hashlib.md5(word.encode()).hexdigest(), 16) % self.dims
+                embedding[bucket] += 1.0
+            if not any(embedding):
+                # An empty text still needs a non-zero vector: the server refuses zero ones.
+                embedding[0] = 1.0
+            embeddings.append(embedding)
         return embeddings
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
@@ -234,12 +242,12 @@ class TestSearchOperations:
 
         for i, doc in enumerate(docs):
             store_with_embeddings.put(
-                ("docs",), f"doc{i}", doc, index=["text"]
+                ("edocs",), f"doc{i}", doc, index=["text"]
             )
 
         # Search for Python-related content
         results = store_with_embeddings.search(
-            ("docs",), query="Python programming", limit=10
+            ("edocs",), query="Python programming", limit=10
         )
 
         assert len(results) > 0
@@ -258,12 +266,12 @@ class TestSearchOperations:
 
         for i, doc in enumerate(docs):
             store_with_embeddings.put(
-                ("docs",), f"doc{i}", doc, index=["text"]
+                ("edocs",), f"doc{i}", doc, index=["text"]
             )
 
         # Search with filter
         results = store_with_embeddings.search(
-            ("docs",),
+            ("edocs",),
             query="Python",
             filter={"category": "tutorial"},
             limit=10,
@@ -298,12 +306,12 @@ class TestSearchOperations:
 
         for i, doc in enumerate(docs):
             store_with_embeddings.put(
-                ("docs",), f"doc{i}", doc, index=["text"]
+                ("edocs",), f"doc{i}", doc, index=["text"]
             )
 
         # Search with rating filter
         results = store_with_embeddings.search(
-            ("docs",),
+            ("edocs",),
             query="tutorial",
             filter={"rating": {"$gte": 4.0}},
             limit=10,
@@ -392,12 +400,12 @@ class TestAsyncOperations:
         """Test async search operation."""
         # Store documents (async)
         await store_with_embeddings.aput(
-            ("docs",), "doc1", {"text": "Python tutorial"}, index=["text"]
+            ("edocs",), "doc1", {"text": "Python tutorial"}, index=["text"]
         )
 
         # Search (async)
         results = await store_with_embeddings.asearch(
-            ("docs",), query="Python", limit=10
+            ("edocs",), query="Python", limit=10
         )
 
         assert len(results) > 0

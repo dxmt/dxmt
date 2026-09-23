@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # Constants
+MAX_TABLE_NAME_LENGTH = 63  # the server's own limit, in src/utils/mod.rs
 NAMESPACE_TABLE_PREFIX = "langgraph_"
 CREATED_AT_FIELD = "_created_at"
 UPDATED_AT_FIELD = "_updated_at"
@@ -683,18 +684,54 @@ class DXMTLangGraphStore(BaseStore):
     # Helper Methods
 
     def _namespace_to_table(self, namespace: tuple[str, ...]) -> str:
-        """Convert namespace tuple to table name."""
-        # Join namespace components with underscore
-        namespace_str = "_".join(namespace)
-        return f"{NAMESPACE_TABLE_PREFIX}{namespace_str}"
+        """Convert namespace tuple to table name.
+
+        A table name may hold letters, digits and underscores only, so the separator has to be
+        an underscore -- and a namespace component may contain one. Joining and splitting on a
+        bare `_` therefore did not round-trip: ("agent", "memory", "session_123") came back as
+        four components, so `list_namespaces` reported a namespace nobody had written and a
+        prefix search for it matched nothing. Worse, ("a_b",) and ("a", "b") named the *same*
+        table, quietly merging two namespaces.
+
+        So an underscore inside a component is doubled and a single underscore separates:
+        decoding reads left to right, which makes it unambiguous. A namespace without
+        underscores maps to exactly the name it always did.
+        """
+        encoded = "_".join(component.replace("_", "__") for component in namespace)
+        table_name = f"{NAMESPACE_TABLE_PREFIX}{encoded}"
+        if len(table_name) > MAX_TABLE_NAME_LENGTH:
+            # The server refuses it, and the error it gives names a table the caller never
+            # chose. Say what was too long instead.
+            raise ValueError(
+                f"namespace {namespace} maps to a table name of {len(table_name)} characters, "
+                f"over the server's limit of {MAX_TABLE_NAME_LENGTH}; use shorter components"
+            )
+        return table_name
 
     def _table_to_namespace(self, table_name: str) -> tuple[str, ...]:
-        """Convert table name back to namespace tuple."""
+        """Convert table name back to namespace tuple. The inverse of the above."""
         if not table_name.startswith(NAMESPACE_TABLE_PREFIX):
             return ()
 
-        namespace_str = table_name[len(NAMESPACE_TABLE_PREFIX) :]
-        return tuple(namespace_str.split("_"))
+        encoded = table_name[len(NAMESPACE_TABLE_PREFIX) :]
+        components: list[str] = []
+        current: list[str] = []
+        index = 0
+        while index < len(encoded):
+            char = encoded[index]
+            if char == "_":
+                if index + 1 < len(encoded) and encoded[index + 1] == "_":
+                    current.append("_")
+                    index += 2
+                    continue
+                components.append("".join(current))
+                current = []
+                index += 1
+                continue
+            current.append(char)
+            index += 1
+        components.append("".join(current))
+        return tuple(components)
 
     def _make_record_id(self, namespace: tuple[str, ...], key: str) -> str:
         """Generate unique record ID from namespace and key."""
@@ -704,13 +741,37 @@ class DXMTLangGraphStore(BaseStore):
         # Use first 16 chars of SHA256 hash for shorter IDs
         return hashlib.sha256(id_str.encode()).hexdigest()[:16]
 
+    def _check_dimension(self, table_name: str, table: dict[str, Any]) -> None:
+        """Refuse a table whose vectors are a different width from the ones this store writes.
+
+        A namespace is a table, and the table's dimension is whichever store reached it first.
+        A store with no `embed_fn` writes a one-element placeholder, so it creates the table at
+        dimension 1 -- and a store configured with real embeddings then failed on *every* put
+        with the server's own "expected 384, got 1", which names neither the namespace nor the
+        other store. Both directions are the same mistake and both are worth naming.
+        """
+        writes = self.embedding_dims if self.embedding_dims else 1
+        found = table.get("dimension")
+        if found is None or found == writes:
+            return
+        raise DXMTError(
+            f"table '{table_name}' holds {found}-dimension vectors, but this store writes "
+            f"{writes}: the namespace was first used by a store configured with "
+            + (
+                f"embedding_dims={found}"
+                if found != 1
+                else "no embed_fn (which writes a 1-element placeholder)"
+            )
+            + ". Use one embedding configuration per namespace, or a different namespace."
+        )
+
     def _ensure_table_exists_sync(self, table_name: str, create: bool = False) -> bool:
         """Ensure table exists synchronously. Returns True if exists/created."""
         if table_name in self._created_tables:
             return True
 
         try:
-            self.client.get_table(table_name)
+            self._check_dimension(table_name, self.client.get_table(table_name))
             self._created_tables.add(table_name)
             return True
         except DXMTTableError:
@@ -746,7 +807,7 @@ class DXMTLangGraphStore(BaseStore):
                 return True
 
             try:
-                await self.client.aget_table(table_name)
+                self._check_dimension(table_name, await self.client.aget_table(table_name))
                 self._created_tables.add(table_name)
                 return True
             except DXMTTableError:

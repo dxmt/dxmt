@@ -89,12 +89,26 @@ class TestNamespaceMapping:
         assert namespace == ("users", "profiles")
 
     def test_roundtrip_conversion(self, store):
-        """Test namespace ↔ table name roundtrip."""
+        """A component may contain an underscore, and the separator is an underscore.
+
+        Joining and splitting on a bare `_` lost the boundary: this namespace came back as
+        four components, so `list_namespaces` named one nobody wrote and a prefix search for
+        it matched nothing."""
         original_namespace = ("agent", "memory", "session_123")
         table_name = store._namespace_to_table(original_namespace)
         recovered_namespace = store._table_to_namespace(table_name)
 
         assert recovered_namespace == original_namespace
+
+
+    def test_two_namespaces_do_not_share_a_table(self, store):
+        """("a_b",) and ("a", "b") both used to be `langgraph_a_b`, quietly merging them."""
+        assert store._namespace_to_table(("a_b",)) != store._namespace_to_table(("a", "b"))
+        assert store._table_to_namespace(store._namespace_to_table(("a_b",))) == ("a_b",)
+
+    def test_a_namespace_too_long_for_a_table_name_says_so(self, store):
+        with pytest.raises(ValueError, match="over the server's limit"):
+            store._namespace_to_table(("x" * 40, "y" * 40))
 
 
 class TestRecordIdGeneration:
@@ -182,14 +196,12 @@ class TestFilterConversion:
         assert len(dxmt_filter["must"]) == 2
 
     def test_empty_filter(self, store):
-        """Test empty filter."""
-        dxmt_filter = store._convert_filter({})
-        assert dxmt_filter == {}
+        """No conditions is `None` -- the search body then carries no filter at all, rather
+        than an empty object the server would have to read as "everything"."""
+        assert store._convert_filter({}) is None
 
     def test_none_filter(self, store):
-        """Test None filter."""
-        dxmt_filter = store._convert_filter(None)
-        assert dxmt_filter == {}
+        assert store._convert_filter(None) is None
 
 
 class TestTextExtraction:

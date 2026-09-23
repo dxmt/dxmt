@@ -9,6 +9,7 @@ import os
 from typing import List
 
 from llama_index.core import VectorStoreIndex, Document
+from llama_index.core.llms import MockLLM
 from llama_index.core.schema import TextNode
 from llama_index.core.vector_stores.types import (
     VectorStoreQuery,
@@ -19,14 +20,7 @@ from llama_index.core.vector_stores.types import (
 )
 from llama_index.vector_stores.dxmt import DXMTVectorStore
 
-# `llama-index-embeddings-openai` is a separate distribution and is not a dependency of this
-# package. Importing it at module scope turned "the optional integration extra is not
-# installed" into a collection error that failed the whole run, including the unit tests that
-# need neither the extra nor a server.
-OpenAIEmbedding = pytest.importorskip(
-    "llama_index.embeddings.openai",
-    reason="llama-index-embeddings-openai is not installed",
-).OpenAIEmbedding
+from local_embedding import DIMENSION, LocalEmbedding
 
 
 # Skip all tests if DXMT server is not available or if integration tests are disabled
@@ -47,8 +41,12 @@ def dxmt_port():
 
 @pytest.fixture(scope="module")
 def embed_model():
-    """Create embedding model."""
-    return OpenAIEmbedding(model="text-embedding-ada-002")
+    """A local, deterministic embedding model.
+
+    This asked for `OpenAIEmbedding`, which needs an API key, so the whole file skipped itself
+    everywhere -- CI included -- and this package's live path had never actually run.
+    """
+    return LocalEmbedding()
 
 
 @pytest.fixture
@@ -59,7 +57,7 @@ def vector_store(dxmt_host, dxmt_port):
 
     store = DXMTVectorStore(
         table_name=table_name,
-        dimension=1536,
+        dimension=DIMENSION,
         host=dxmt_host,
         port=dxmt_port,
         index_type="hnsw",
@@ -117,13 +115,15 @@ class TestBasicOperations:
         for doc in sample_documents:
             index.insert(doc)
 
-        # Query
-        query_engine = index.as_query_engine(similarity_top_k=3)
+        # Query. A query engine needs an LLM to write the answer; what is under test here is
+        # which nodes DXMT returned to it, so the answer itself is mocked.
+        query_engine = index.as_query_engine(similarity_top_k=3, llm=MockLLM())
         response = query_engine.query("What is machine learning?")
 
         assert response is not None
         assert len(response.source_nodes) > 0
         assert len(response.source_nodes) <= 3
+        assert "machine learning" in response.source_nodes[0].node.text.lower()
 
     def test_add_nodes_directly(self, vector_store, embed_model):
         """Test adding nodes directly to vector store."""
@@ -330,7 +330,7 @@ class TestFromExistingTable:
         # Create initial store and add data
         store1 = DXMTVectorStore(
             table_name=table_name,
-            dimension=1536,
+            dimension=DIMENSION,
             host=dxmt_host,
             port=dxmt_port,
             index_type="hnsw",
@@ -352,7 +352,7 @@ class TestFromExistingTable:
             port=dxmt_port,
         )
 
-        assert store2.dimension == 1536
+        assert store2.dimension == DIMENSION
         assert store2.table_name == table_name
 
         # Query should work
@@ -375,13 +375,12 @@ class TestEndToEndRAG:
     """Test complete end-to-end RAG pipeline."""
 
     def test_rag_pipeline(self, vector_store, embed_model):
-        """Test complete RAG workflow."""
-        # Skip if no OpenAI API key (LLM required for this test)
-        if not os.getenv("OPENAI_API_KEY"):
-            pytest.skip("OpenAI API key required for RAG test")
+        """The whole workflow: documents in, retrieval out, a generated answer over it.
 
-        from llama_index.llms.openai import OpenAI
-
+        This skipped itself without an OpenAI key, which meant the one test of the end-to-end
+        path never ran. The retrieval is real; only the generation is mocked, because what a
+        vector store owes a RAG pipeline is the right nodes.
+        """
         # Create documents
         documents = [
             Document(text="Python is a high-level programming language."),
@@ -398,21 +397,17 @@ class TestEndToEndRAG:
         for doc in documents:
             index.insert(doc)
 
-        # Create query engine with LLM
-        query_engine = index.as_query_engine(
-            llm=OpenAI(model="gpt-3.5-turbo"),
-            similarity_top_k=2,
-        )
+        # Create query engine with a stand-in LLM
+        query_engine = index.as_query_engine(llm=MockLLM(), similarity_top_k=2)
 
         # Query
-        response = query_engine.query("What programming languages are mentioned?")
+        response = query_engine.query("Which language is used for web development?")
 
         assert response is not None
-        assert len(response.source_nodes) > 0
+        assert len(response.source_nodes) == 2
 
-        # Response should mention at least one language
-        response_text = str(response).lower()
-        assert any(lang in response_text for lang in ["python", "javascript", "rust"])
+        # The document that shares words with the question comes back first.
+        assert "javascript" in response.source_nodes[0].node.text.lower()
 
 
 if __name__ == "__main__":
