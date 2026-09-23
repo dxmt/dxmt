@@ -88,9 +88,9 @@ releases. Everything below is unreleased work on `main`.
   failed; they were accepted, dropped, and answered wrongly. `ApiJson` also replaces axum's
   rejection -- a 422 with a `text/plain` body -- with the normal error envelope, so a client
   reading `error.code` no longer chokes on the most ordinary mistake there is.
-  `tests/unknown_fields_test.rs` checks every body endpoint, simple mode's three, a nested
-  filter condition, and -- by reading the source -- that no handler has gone back to a plain
-  `Json<T>` body or a request type without the attribute.
+  `tests/unknown_fields_test.rs` checks every body endpoint, a nested filter condition, and --
+  by reading the source -- that no handler has gone back to a plain `Json<T>` body or a request
+  type without the attribute.
 
 - **`Field`, a filter builder for Python.** `(Field("lang") == "en") & Field("year").between(2020,
   2024) & ~Field("tags").is_in(["spam"])`, accepted wherever a filter is. Python's `and`/`or`/`not`
@@ -152,6 +152,21 @@ releases. Everything below is unreleased work on `main`.
   ask for more search effort without a rebuild.
 
 ### Changed
+
+- **The API reference and the web console are served by default.** `api-swagger` and
+  `api-dashboard` are default features, and `serve` mounts both without being asked:
+  `/api/docs` and `/dashboard`. A database you cannot look at, and whose API you cannot read,
+  is harder to evaluate than one you can — and both are read-only, and both sit behind
+  `DXMT_API_KEY` when one is set, like every other route. `--no-swagger` and `--no-dashboard`
+  turn them off; SECURITY.md says to use them on a port you do not control, which is the same
+  advice the data routes have always carried.
+
+  The console needs its bundle compiled in. A binary built without `dashboard/dist/` now warns
+  once at startup and serves everything else, where before it refused to start — that refusal
+  was right when the console was something you asked for, and would be wrong as a default,
+  because a checkout without Node could not run the database at all. Asking by name restores
+  the old strictness: `--dashboard` makes a missing bundle a refusal to start. `--swagger` and
+  `--dashboard` are still accepted so existing scripts keep working.
 
 - **The SDKs no longer send `mode` on an insert** (Python, JavaScript), and the parameter is
   gone from `insert_records`/`ainsert_records` and `InsertRecordsParams`. The server deleted the
@@ -343,6 +358,22 @@ releases. Everything below is unreleased work on `main`.
 - A dropped table stays dropped; an evicted table is no longer erased by the next snapshot.
 
 ### Removed
+
+- **Simple mode (`serve --simple`, `/collections/*`).** It was a second data model over the
+  same storage — its own wire shapes, its own scoring conventions, 942 lines and 12 routes, and
+  until this week not one test touched it. What it cost was visible in the shapes themselves:
+  its `distance` field carried a *similarity*, ordered descending, where Chroma — the API it
+  imitated — returns a distance where lower is better, so a client written against Chroma read
+  our results backwards. Its "auto-embedding" was a hashed bag of words: lexical retrieval
+  wearing a dense vector's shape, where "car" and "automobile" land in unrelated buckets.
+
+  The decision behind removing it rather than fixing it: **Qdrant, Weaviate, Chroma and LanceDB
+  each ship one data model and reach it through several protocols — Weaviate through four —
+  and none of them serves a competitor's API shape.** Compatibility, where it exists, lives in
+  the client layer: the LangChain and LlamaIndex adapters, and this SDK's MongoDB-style filter
+  translation. That is where ours stays. `--memory-limit`, which configured only simple mode,
+  goes with it, and the four interface flags no longer need to explain that they require
+  "standard mode", because there is one mode.
 
 - **Two scripts that tested things the server no longer has.** `scripts/test_index_status.py`
   called `/tables/{t}/index_status`, which answers 404, and `scripts/test_sync_insert.py`

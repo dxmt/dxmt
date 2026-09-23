@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 pub static malloc_conf: &[u8] = b"background_thread:true\0";
 
 use dxmt_vectordb::{
-    api::{create_app_with_storage, simple_core::create_simple_app, Interfaces},
+    api::{create_app_with_storage, Interfaces},
     config::AppConfig,
     mcp::server::McpServer,
     storage::IntelligentIndexedStorage,
@@ -53,33 +53,31 @@ enum Commands {
         /// Port to bind
         #[arg(long, default_value = "9999")]
         port: u16,
-        /// Enable simple mode (zero-config collection API)
-        #[arg(
-            long,
-            help = "Run in simple mode with zero configuration and auto-tuned performance"
-        )]
-        simple: bool,
-        /// Memory limit for simple mode in MB
-        #[arg(
-            long,
-            default_value = "1024",
-            help = "Memory limit for caching in simple mode"
-        )]
-        memory_limit: usize,
-        /// Serve the Swagger UI (standard mode only; requires the `api-swagger` feature)
+        /// Serve the Swagger UI at /api/docs. On by default; `--no-swagger` turns it off.
+        ///
+        /// Accepted and redundant, so a script that passes it keeps working.
         #[arg(long)]
         swagger: bool,
-        /// Serve the GraphQL endpoint at /graphql (standard mode only)
+        /// Do not serve the Swagger UI.
+        #[arg(long, conflicts_with = "swagger")]
+        no_swagger: bool,
+        /// Serve the GraphQL endpoint at /graphql
         #[arg(long)]
         graphql: bool,
-        /// Serve the WebSocket endpoint (standard mode only)
+        /// Serve the WebSocket endpoint
         #[arg(long)]
         websocket: bool,
-        /// Serve the read-only web console at /dashboard (standard mode only; requires the
-        /// `api-dashboard` feature and a built bundle). Unauthenticated, like every other
-        /// route on this port.
+        /// Serve the read-only web console at /dashboard. On by default when the bundle was
+        /// built into this binary; `--no-dashboard` turns it off.
+        ///
+        /// Passing it explicitly also makes a missing bundle an error rather than a warning:
+        /// someone who asked for the console by name should be told it is not there, where a
+        /// default-on console that is simply absent should not stop the database serving.
         #[arg(long)]
         dashboard: bool,
+        /// Do not serve the web console.
+        #[arg(long, conflicts_with = "dashboard")]
+        no_dashboard: bool,
         /// Serve gRPC on this port, alongside HTTP (standard mode only; requires `api-grpc`).
         /// 0 disables, which is the default.
         #[arg(long, default_value = "0", env = "DXMT_GRPC_PORT")]
@@ -158,74 +156,30 @@ async fn main() -> Result<()> {
         Commands::Serve {
             host,
             port,
-            simple,
-            memory_limit,
             swagger,
+            no_swagger,
             graphql,
             websocket,
             dashboard,
+            no_dashboard,
             grpc_port,
         } => {
             let bind_addr: SocketAddr = format!("{}:{}", host, port)
                 .parse()
                 .expect("Invalid bind address");
 
-            if simple {
-                // Simple mode: zero-config with auto-tuned performance
-                info!(
-                    "Starting DXMT VectorDB in SIMPLE MODE on {} (Zero-config, Auto-tuned)",
-                    bind_addr
-                );
-                info!("Memory limit: {} MB", memory_limit);
-                info!("Using auto-optimized search algorithms for best performance");
+            // On unless turned off. A database you cannot look at, and whose API you cannot
+            // read, is harder to evaluate than one you can; both are read-only surfaces and
+            // both sit behind `DXMT_API_KEY` when one is set, like every other route.
+            let serve_swagger = !no_swagger;
+            let serve_dashboard = !no_dashboard;
 
-                // Accepted-and-ignored is the defect the feature guards in `server.rs` exist
-                // to prevent, and simple mode has been doing exactly that with these four
-                // flags. The dashboard's case is the clearest -- it reads `/api/v1/*` and
-                // simple mode serves `/collections/*`, so it would render and then 404 on
-                // every request -- but none of the four does anything here.
-                for (asked, flag, why) in [
-                    (
-                        dashboard,
-                        "--dashboard",
-                        "it reads the /api/v1 routes, which simple mode does not serve",
-                    ),
-                    (swagger, "--swagger", "simple mode has no OpenAPI document"),
-                    (graphql, "--graphql", "simple mode mounts no GraphQL route"),
-                    (
-                        websocket,
-                        "--websocket",
-                        "simple mode mounts no WebSocket route",
-                    ),
-                ] {
-                    if asked {
-                        return Err(dxmt_vectordb::Error::InvalidConfig(format!(
-                            "{flag} needs standard mode: {why}. Drop --simple, or drop {flag}."
-                        )));
-                    }
-                }
-
-                // The `simple/` subdirectory keeps a simple-mode server's tables out of the
-                // way of a standard one sharing the same root.
-                let app = create_simple_app(
-                    memory_limit,
-                    dxmt_vectordb::api::server::wal_dir_from_env().map(|d| d.join("simple")),
-                )
-                .await?;
-
-                info!("✓ Simple mode API endpoints:");
-                info!("  POST   /collections          - Create collection");
-                info!("  GET    /collections          - List collections");
-                info!("  POST   /collections/{{name}}  - Add documents (auto-embedding)");
-                info!("  POST   /search/{{collection}} - Search (auto-embedding)");
-                info!("  DELETE /collections/{{name}}  - Delete collection");
-
-                axum::Server::bind(&bind_addr)
-                    .serve(app.into_make_service())
-                    .await
-                    .map_err(|e| dxmt_vectordb::Error::Internal(format!("server error: {}", e)))?;
-            } else {
-                // Standard mode with full configuration
+            {
+                // The simple mode that used to be the other half of this `if` is gone: it was
+                // a second data model (`/collections/*`) over the same storage, with its own
+                // wire shapes and no tests, and its "auto-embedding" was a hashed bag of
+                // words — lexical retrieval wearing a dense vector's shape. Peers ship several
+                // protocols over one model; none ships two models.
                 info!("Starting DXMT VectorDB on {}...", bind_addr);
 
                 let config = AppConfig::load()?;
@@ -248,10 +202,13 @@ async fn main() -> Result<()> {
                     // and `create_app()` passes the default, which is all of them off.
                     let (app, storage) = create_app_with_storage(
                         Interfaces {
-                            swagger,
+                            swagger: serve_swagger,
                             graphql,
                             websocket,
-                            dashboard,
+                            dashboard: serve_dashboard,
+                            // Only a dashboard asked for by name turns a missing bundle into
+                            // a refusal to start.
+                            dashboard_required: dashboard,
                         },
                         dxmt_vectordb::api::auth::ApiKey::from_env(),
                     )
@@ -282,8 +239,8 @@ async fn main() -> Result<()> {
                     {
                         let Some(storage) = storage.clone() else {
                             return Err(dxmt_vectordb::Error::InvalidConfig(
-                                "gRPC needs standard mode; simple mode has no shared storage \
-                                 handle to serve from"
+                                "gRPC needs a storage handle, and this server was built \
+                                 without one"
                                     .to_string(),
                             ));
                         };

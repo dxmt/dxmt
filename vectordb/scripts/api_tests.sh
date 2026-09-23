@@ -18,9 +18,11 @@
 #   DXMT_FEATURES=text-bm25   build with these cargo features, and tell the tests the server has
 #                             them: a test that needs one then fails where it would otherwise
 #                             skip, so a build that lost the feature cannot pass. Naming
-#                             api-swagger also starts the server with `--swagger`, and
-#                             api-dashboard with `--dashboard` -- compiling an interface in and
-#                             serving it are separate decisions, and the tests need both
+#                             api-dashboard also passes `--dashboard`, which is now about
+#                             strictness rather than enablement: the console is served by
+#                             default, and asking for it by name turns a missing bundle from a
+#                             warning into a refusal to start -- which is what a job that has
+#                             just built the bundle wants
 #   PYTEST=...                a specific interpreter's pytest
 #   DXMT_SKIP_STATEFUL=1      leave out the stateful walk (tests/stateful) that runs after both
 #                             modes
@@ -34,16 +36,16 @@ PYTEST=${PYTEST:-"python3 -m pytest"}
 BIN=target/debug/vectordb
 export DXMT_FEATURES=${DXMT_FEATURES:-}
 
-# Compiling Swagger in is not the same as serving it -- `--swagger` is a separate runtime
-# decision, and without the flag the binary carries the document and answers 404 for it. So the
-# flag follows the feature, and `test_openapi_examples.py` turns its skip into a failure when
-# `DXMT_FEATURES` names api-swagger: otherwise "the examples are checked" degrades into "the
-# examples were not there to check" without anything going red.
+# Both the OpenAPI document and the console are served by default now, so these flags are no
+# longer what turns them on. `--dashboard` is still worth passing when the caller named the
+# feature: it makes a missing bundle fatal instead of a logged warning, which is the difference
+# between "the console tests ran" and "the console tests quietly found nothing to test".
+# `test_openapi_examples.py` still turns its skip into a failure when `DXMT_FEATURES` names
+# api-swagger, for the same reason.
 # Appending, not assigning: with two features named, the second used to silently replace the
 # first, so `DXMT_FEATURES=api-swagger,api-dashboard` served only one of them.
 SERVE_FLAGS=""
 _features=",$(echo "$DXMT_FEATURES" | tr ' ' ','), "
-case "$_features" in *,api-swagger,*) SERVE_FLAGS="$SERVE_FLAGS --swagger" ;; esac
 case "$_features" in *,api-dashboard,*) SERVE_FLAGS="$SERVE_FLAGS --dashboard" ;; esac
 
 if [ "${DXMT_SKIP_BUILD:-0}" != "1" ]; then

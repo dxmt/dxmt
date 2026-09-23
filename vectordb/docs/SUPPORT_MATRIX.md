@@ -18,8 +18,7 @@ The following features are part of the intended single-node Alpha contract:
 
 | Area | Supported path | Notes |
 | --- | --- | --- |
-| Server | `vectordb serve` | Axum HTTP server; standard routes live under `/api/v1`. |
-| Simple API | `vectordb serve --simple` | Zero-config collection routes. Note the wire shape: `/add` takes `documents` + optional `embeddings`, `/query` takes `query` + optional `embedding`, and each result's `distance` field actually carries a **similarity** (higher is better, results ordered descending, and not bounded to [0, 1] — a measured pair is 1.33 and 0.67). Chroma, whose shape this mirrors, returns a real distance where *lower* is better, so a client written against Chroma reads this backwards. Renaming it is a breaking change to an unreleased API and is worth making before release. |
+| Server | `vectordb serve` | Axum HTTP server; routes live under `/api/v1`, probes at the root. One data model, several protocols (REST, gRPC, GraphQL, WebSocket, MCP) — the `serve --simple` mode that served a second model at `/collections/*` has been removed. |
 | Tables | Create, list, alter, delete, branch | Table configuration is persisted in WAL and snapshots. |
 | Records | Insert/upsert, get, update, delete (by id or filter), list, count | JSON payloads, versions, sparse vectors and named vectors are retained. |
 | Concurrent insert and search | Supported | Verified by `StreamingPerformanceCase`, which ingests and searches at once: recall 0.508 -> 0.993 across the four ingest stages at 1,777 -> 3,301 concurrent QPS. Until `0ed359b` the self-quantization at 65,536 rows trained its codebooks inside the index write lock, freezing every read and write on the table for the duration -- 56 s on the shipped 192-subspace default, and a 47.7 s concurrent p99 in that one window. Training now runs with no lock held. |
@@ -37,6 +36,8 @@ The following features are part of the intended single-node Alpha contract:
 | Counting | `records/count` | Exact, with or without a filter, computed from the index that answers the filter rather than by paging the matches. |
 | Paging | `records/list` by cursor | `next_cursor` goes back as `cursor`, and a record present for a whole scroll is returned exactly once however the table is written to meanwhile. An offset is still accepted, and still shifts under concurrent inserts. |
 | Ground truth | `search_mode: "exact"` | Scores every live row, so recall is measurable on your own data rather than only against a published dataset. Refused above `DXMT_EXACT_SCAN_MAX` rows (default 1,000,000) and for named vector spaces. |
+| API reference | `GET /api/docs` | Swagger UI and the OpenAPI document, served by default (`--no-swagger` turns it off); `api-swagger` is a default feature. Every documented example is executed by `tests/api/test_openapi_examples.py`, so the document cannot drift from the server. |
+| Web console | `GET /dashboard` | Read-only, served by default when the bundle was compiled in (`make dashboard-build`); `--no-dashboard` turns it off, and `--dashboard` makes a missing bundle a refusal to start rather than a warning. Behind `DXMT_API_KEY` like every other route. |
 | Monitoring | `GET /metrics` | Prometheus text exposition at the root, in the default build: `dxmt_up`, `dxmt_tables`, `dxmt_records`, `dxmt_ongoing_operations{kind=…}`, `dxmt_operations_total`, the WAL/snapshot frontier and the last-sync and last-snapshot timestamps. `tests/prometheus_metrics_test.rs` parses every sample, so a value a scraper would reject fails the build. |
 | Operations | `/health`, `/live`, `/ready`, `/health/metrics` | `/live` is liveness; `/ready` is authoritative readiness and returns 503 when local durability is degraded. |
 

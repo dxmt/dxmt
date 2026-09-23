@@ -11,6 +11,9 @@
 //! because the value of the change is that it holds for *all* of them: one struct missing the
 //! attribute is one endpoint back to silently ignoring what it is sent. Each case also checks
 //! the good body still works, so "refuses everything" cannot pass as a result.
+//!
+//! `simple_core.rs` was a third file here, for the zero-config `/collections` API. That was a
+//! second data model over the same storage and it is gone; the server has one.
 
 use std::process::{Child, Command, Stdio};
 
@@ -33,15 +36,10 @@ fn free_port() -> u16 {
 }
 
 fn start() -> Server {
-    start_with(&[])
-}
-
-fn start_with(extra: &[&str]) -> Server {
     let dir = tempfile::TempDir::new().unwrap();
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
         .arg("serve")
-        .args(extra)
         .arg("--port")
         .arg(port.to_string())
         .env("DXMT_WAL_DIR", dir.path().join("wal"))
@@ -291,50 +289,6 @@ fn a_malformed_body_is_an_error_object_not_plain_text() {
     assert_eq!(body["error"]["code"], "INVALID_INPUT");
 }
 
-#[test]
-fn simple_mode_refuses_a_field_it_does_not_have() {
-    // Simple mode serves its own three request types at the root, and has no test suite of its
-    // own -- the pytest suite and every SDK talk to `/api/v1`. Its bodies were the easiest
-    // place for the attribute to be forgotten.
-    let server = start_with(&["--simple"]);
-    let port = server.port;
-
-    let (code, body) = post(
-        port,
-        "/collections",
-        serde_json::json!({"name": "c", "dimension": 4}),
-    );
-    assert!((200..300).contains(&code), "{body}");
-
-    let (code, body) = post(
-        port,
-        "/collections",
-        serde_json::json!({"name": "c2", "dimensions": 4}),
-    );
-    assert_eq!(code, 400, "{body}");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("dimensions"),
-        "{body}"
-    );
-
-    let (code, body) = post(
-        port,
-        "/collections/c/add",
-        serde_json::json!({"documents": ["hello"], "meta": []}),
-    );
-    assert_eq!(code, 400, "{body}");
-
-    let (code, body) = post(
-        port,
-        "/collections/c/query",
-        serde_json::json!({"query": "hello", "top_k": 1}),
-    );
-    assert_eq!(code, 400, "a query knob the server does not have: {body}");
-}
-
 /// Every JSON body in the tree goes through `ApiJson`, and its type refuses unknown fields.
 ///
 /// The runtime tests above cover the endpoints that exist today. This one covers the next
@@ -345,7 +299,7 @@ fn simple_mode_refuses_a_field_it_does_not_have() {
 fn no_handler_takes_a_typed_body_through_plain_json() {
     let mut offenders = Vec::new();
     let mut wanted = Vec::new();
-    for file in ["handlers.rs", "simple_core.rs", "multimodal.rs"] {
+    for file in ["handlers.rs", "multimodal.rs"] {
         let path = format!("{}/src/api/{file}", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(&path).expect("api source");
         for line in source.lines() {

@@ -10,9 +10,15 @@
 //! missing `.js` answered with HTML produces a syntax error in the console rather than a 404,
 //! which sends the reader looking in entirely the wrong place.
 //!
-//! If `dashboard/dist/` has not been built this **fails** with the command to run. It does not
-//! skip: a skipped test and an absent one look identical in CI output, which is the same
-//! argument `tests/api/test_openapi_examples.py` makes.
+//! **When the bundle has been built, a failure here is a failure.** `api-dashboard` used to be
+//! opt-in, so compiling with it meant intending to ship the console, and this file failed
+//! outright when `dashboard/dist/` was absent — a skipped test and an absent one look identical
+//! in CI output. The feature is on by default now, so that inference no longer holds: a
+//! checkout without Node builds a binary with the routes and none of the bytes, and failing
+//! there would mean such a checkout cannot run its own test suite. So the rule is now read off
+//! the disk rather than inferred: `dashboard/dist/index.html` present means the bundle was
+//! built and everything below must hold; absent means the console was never built here and
+//! each test says so and stops.
 
 #![cfg(feature = "api-dashboard")]
 
@@ -36,7 +42,43 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
+/// Whether a bundle was built in this checkout. Not whether this binary carries one -- if the
+/// two disagree, the binary is stale, and the assertions below say so rather than skipping.
+fn bundle_was_built() -> bool {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("dashboard/dist/index.html")
+        .exists()
+}
+
+/// `return` out of a test when there is no console in this checkout to test.
+macro_rules! needs_bundle {
+    () => {
+        if !bundle_was_built() {
+            eprintln!(
+                "skipping: dashboard/dist/ has not been built in this checkout. \
+                 `make dashboard-build` to build it."
+            );
+            return;
+        }
+    };
+}
+
+/// `start(true)` asks for the console by name, `start(false)` turns it off with
+/// `--no-dashboard`. It is served by default now, so "not asked for" no longer means "absent".
+/// A server started the way a person starts one: no flags but the port.
+fn start_plain() -> Server {
+    start_argv(&[])
+}
+
 fn start(with_dashboard: bool) -> Server {
+    start_argv(if with_dashboard {
+        &["--dashboard"]
+    } else {
+        &["--no-dashboard"]
+    })
+}
+
+fn start_argv(extra: &[&str]) -> Server {
     let dir = tempfile::TempDir::new().unwrap();
     let port = free_port();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vectordb"));
@@ -49,9 +91,7 @@ fn start(with_dashboard: bool) -> Server {
         .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if with_dashboard {
-        command.arg("--dashboard");
-    }
+    command.args(extra);
     let child = command
         .spawn()
         .expect("failed to spawn the vectordb binary");
@@ -155,6 +195,7 @@ fn first_asset(body: &str) -> String {
 
 #[test]
 fn the_page_is_served_and_carries_the_headers_that_make_it_safe() {
+    needs_bundle!();
     let server = start(true);
     let reply = index_of(&server);
 
@@ -186,6 +227,7 @@ fn the_page_is_served_and_carries_the_headers_that_make_it_safe() {
 
 #[test]
 fn index_is_revalidated_and_hashed_assets_are_not() {
+    needs_bundle!();
     // The whole correctness story for a redeploy. `index.html` names the hashed bundles, so a
     // cached copy points at files the new server does not have -- a page that breaks with no
     // error anywhere and no fix but a hard reload. Relaxing either half brings that back.
@@ -214,6 +256,7 @@ fn index_is_revalidated_and_hashed_assets_are_not() {
 
 #[test]
 fn a_matching_etag_is_answered_with_304_and_no_body() {
+    needs_bundle!();
     let server = start(true);
     let index = index_of(&server);
     let etag = index.header("etag").expect("index.html has no ETag");
@@ -241,6 +284,7 @@ fn a_matching_etag_is_answered_with_304_and_no_body() {
 
 #[test]
 fn a_deep_link_serves_the_app_but_a_missing_file_is_a_404() {
+    needs_bundle!();
     let server = start(true);
     let _ = index_of(&server);
 
@@ -265,6 +309,7 @@ fn a_deep_link_serves_the_app_but_a_missing_file_is_a_404() {
 
 #[test]
 fn the_bundle_is_compressed_when_the_browser_asks() {
+    needs_bundle!();
     let server = start(true);
     let index = index_of(&server);
     let asset = first_asset(&index.body);
@@ -284,6 +329,7 @@ fn the_bundle_is_compressed_when_the_browser_asks() {
 
 #[test]
 fn the_api_is_not_compressed_because_that_is_a_separate_decision() {
+    needs_bundle!();
     // The compression layer is scoped to the dashboard on purpose: turning it on globally
     // changes every API response's framing for every SDK and every functional test. If that
     // ever becomes the right call it should be measured, not arrive as a side effect of
@@ -304,21 +350,34 @@ fn the_api_is_not_compressed_because_that_is_a_separate_decision() {
     );
 }
 
+/// The console is served without being asked for, and `--no-dashboard` takes it away.
+///
+/// It used to be the other way round -- `--dashboard` to get it -- and the test here asserted
+/// that the runtime gate was real, because CLAUDE.md records a period when all three optional
+/// interfaces were compiled in and unreachable behind a hardcoded `false`. The gate is still
+/// real; the default moved. Both directions are asserted, because a default that cannot be
+/// turned off is the same defect with the sign flipped.
 #[test]
-fn without_the_flag_there_is_no_dashboard() {
-    // Compiling an interface in and serving it are separate decisions everywhere in this
-    // server, and CLAUDE.md records that all three used to be compiled in and unreachable
-    // because the runtime half was hardcoded false. Same shape, same test.
-    let server = start(false);
-    let reply = fetch(server.port, "/dashboard/", &[]).unwrap();
+fn the_console_is_on_by_default_and_can_be_turned_off() {
+    needs_bundle!();
+    let by_default = start_plain();
     assert_eq!(
-        reply.status, 404,
-        "the dashboard answered without --dashboard; the runtime gate is not real"
+        fetch(by_default.port, "/dashboard/", &[]).unwrap().status,
+        200,
+        "the console did not answer on a server started with no flags at all"
+    );
+
+    let refused = start(false);
+    assert_eq!(
+        fetch(refused.port, "/dashboard/", &[]).unwrap().status,
+        404,
+        "--no-dashboard served the console anyway"
     );
 }
 
 #[test]
 fn a_path_that_climbs_out_of_the_bundle_is_refused() {
+    needs_bundle!();
     let server = start(true);
     let _ = index_of(&server);
     for path in [

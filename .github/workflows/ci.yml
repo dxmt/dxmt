@@ -180,7 +180,8 @@ jobs:
       # The bundle has to exist before the Rust build, because it is embedded into the binary.
       # `rust-embed`'s `allow_missing` is what lets every *other* job compile this code without
       # Node; the price of that is a binary that links with no assets, so the server refuses to
-      # start with --dashboard and `tests/dashboard_test.rs` fails rather than skips.
+      # start with --dashboard, and `tests/dashboard_test.rs` skips (it reads dashboard/dist/
+      # to decide). This job is the one that builds the bundle, so here it must not skip.
       - name: Build the console
         run: npm ci && npm run lint && npm test && npm run build
         working-directory: vectordb/dashboard

@@ -86,6 +86,14 @@ pub struct Interfaces {
     pub graphql: bool,
     pub websocket: bool,
     pub dashboard: bool,
+    /// Whether a missing dashboard bundle is an error rather than a warning.
+    ///
+    /// The console is served by default, and a binary built without running the bundle build
+    /// carries the routes and none of the bytes. Refusing to start there would mean a checkout
+    /// without Node cannot run the database at all — but someone who passed `--dashboard` by
+    /// name is asking for the console specifically, and should be told it is absent rather
+    /// than handed a server that quietly has no console.
+    pub dashboard_required: bool,
 }
 
 /// 创建应用程序路由器
@@ -322,6 +330,7 @@ pub async fn create_app_with_storage(
         graphql: enable_graphql,
         websocket: enable_websocket,
         dashboard: enable_dashboard,
+        dashboard_required: _,
     } = interfaces;
 
     #[cfg(not(feature = "api-swagger"))]
@@ -354,13 +363,23 @@ pub async fn create_app_with_storage(
     // without Node, which means a binary can carry the routes and none of the bytes. Serving
     // that is a white page with no explanation, so refuse instead and name the command.
     #[cfg(feature = "api-dashboard")]
-    if enable_dashboard && !dashboard::assets_are_embedded() {
-        return Err(crate::Error::InvalidConfig(
-            "The dashboard was requested, but no assets are embedded in this binary. Run \
-             `make dashboard-build` and rebuild with `--features api-dashboard`."
-                .to_string(),
-        ));
-    }
+    let enable_dashboard = if enable_dashboard && !dashboard::assets_are_embedded() {
+        if interfaces.dashboard_required {
+            return Err(crate::Error::InvalidConfig(
+                "The dashboard was requested, but no assets are embedded in this binary. Run \
+                 `make dashboard-build` and rebuild."
+                    .to_string(),
+            ));
+        }
+        tracing::warn!(
+            "No web console in this binary: `dashboard/dist/` was absent when it was built. \
+             Run `make dashboard-build` and rebuild to get /dashboard; everything else is \
+             unaffected."
+        );
+        false
+    } else {
+        enable_dashboard
+    };
 
     // Everything this server writes, created and proved writable before anything is served.
     //

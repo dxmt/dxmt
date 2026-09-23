@@ -6,9 +6,8 @@
 # Default builds/runs are unaffected.
 #
 # Usage:
-#   scripts/run-gpu.sh                                  # simple mode, 1024 MB
-#   scripts/run-gpu.sh --simple --memory-limit 2048
-#   scripts/run-gpu.sh --host 0.0.0.0 --port 9999       # standard mode
+#   scripts/run-gpu.sh                                  # defaults
+#   scripts/run-gpu.sh --host 0.0.0.0 --port 9999
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,10 +16,6 @@ source "$REPO/scripts/gpu-env.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 cd "$REPO"
-
-if [ "$#" -eq 0 ]; then
-  set -- --simple --memory-limit 1024
-fi
 
 echo "[run-gpu] launching: vectordb serve $*"
 exec cargo run --features gpu --bin vectordb -- serve "$@"

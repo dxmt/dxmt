@@ -19,21 +19,18 @@ cargo build --release
 ### 2. Run the Server
 
 ```bash
-# Simple mode (recommended for testing)
-cargo run -- serve --simple --memory-limit 1024
+# From source
+cargo run -- serve
 
-# Or use the release binary
-./target/release/dxmt-vectordb serve --simple --memory-limit 1024
-
-# Standard mode with all features
-./target/release/dxmt-vectordb serve --host 0.0.0.0 --port 9999
+# Or the release binary
+./target/release/vectordb serve --host 0.0.0.0 --port 9999
 ```
 
 ### 3. Verify the Improvements
 
 ```bash
 # Terminal 1: Server is running
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 
 # Terminal 2: Test improvements
 cd dxmt-python-sdk/examples
@@ -124,7 +121,7 @@ curl http://localhost:9999/health/metrics | jq
 
 - [ ] **Server starts successfully**
   ```bash
-  cargo run -- serve --simple --memory-limit 1024
+  cargo run -- serve
   ```
 
 - [ ] **Health endpoint works**

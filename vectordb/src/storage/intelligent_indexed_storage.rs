@@ -1031,7 +1031,7 @@ async fn process_insert_group(
                 }
 
                 // Non-finite values are refused here and not at the HTTP layer, because DXQL,
-                // MCP and simple mode all reach this processor without passing that validator.
+                // MCP reaches this processor without passing that validator.
                 // `INSERT ... [1e999, 0]` parses to an infinity, and an infinite coordinate
                 // makes a cosine distance NaN, which panicked the comparator HNSW sorts with:
                 // the next search on the table closed the connection without answering, and the
@@ -7378,7 +7378,7 @@ impl IntelligentIndexedStorage {
     // all seven lines long, and all reduced to `insert_records`. They are gone now, with the
     // `mode` field on `/records/bulk` that was the only thing selecting between them.
 
-    /// Add a single record to a table (for simple mode API)
+    /// Add a single record to a table.
     pub async fn add_record(
         &self,
         tablename: &str,
@@ -8821,7 +8821,7 @@ mod tests {
 
     /// A non-finite coordinate never reaches the index, whichever entry point sent it.
     ///
-    /// The record routes validate vectors in the handler, but DXQL, MCP and simple mode reach
+    /// The record routes validate vectors in the handler, but DXQL and MCP reach
     /// this processor without passing that validator, and `[1e999, 0, 0, 0]` is valid to the
     /// DXQL grammar and parses to an infinity. Measured before this check existed: the insert
     /// was accepted, and the next search on the table answered `curl: (52) Empty reply from

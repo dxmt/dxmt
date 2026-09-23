@@ -151,7 +151,11 @@ def test_every_route_the_dashboard_declares_answers(page, table):
         "/graph": {"sample": 4, "neighbours": 2},
         "/search": {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1},
         "/search/text": {"query": "x", "limit": 1},
-        "/search/hybrid": {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1},
+        # `limit`, not `top_k`: this endpoint has never had a `top_k`, and the body here said
+        # otherwise for as long as unknown fields were ignored. The dashboard itself sends
+        # `limit` -- it was this replay that was wrong, and it only surfaced when the file
+        # stopped skipping.
+        "/search/hybrid": {"vector": [1.0, 0.0, 0.0, 0.0], "limit": 1},
     }
 
     failures = []

@@ -57,7 +57,6 @@ body:
       label: Server mode
       options:
         - serve (standard, /api/v1)
-        - serve --simple (zero-config collection API)
         - vectordb mcp (MCP over stdio)
         - embedded / library use
         - not applicable

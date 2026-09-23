@@ -67,7 +67,7 @@ let db = dxmt_client::Client::new("https://db.example.com")?.with_api_key("your-
 ## Run it
 
 ```bash
-cd vectordb && cargo run -- serve          # standard mode, port 9999, NOT --simple
+cd vectordb && cargo run -- serve          # port 9999
 cd vectordb/dxmt-rust-sdk
 cargo run --example basic_crud             # the five operations, end to end
 cargo test                                 # live tests; they skip when no server answers

@@ -91,8 +91,8 @@ Start the server in **standard** mode for anything the SDKs touch:
 cd vectordb && cargo run -- serve          # /api/v1/*, port 9999
 ```
 
-`serve --simple` serves a different, zero-config surface at the root with no `/api/v1` at all,
-so the SDKs will not connect to it.
+There is one server mode. `serve --simple`, which served a second data model at
+`/collections/*` that the SDKs could not talk to, has been removed.
 
 ## What CI runs
 

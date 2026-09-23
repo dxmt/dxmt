@@ -41,10 +41,7 @@ Requires a recent stable Rust toolchain.
 # Build
 cargo build --release
 
-# Zero-config mode — collection API, auto-tuned
-./target/release/vectordb serve --simple --memory-limit 1024
-
-# Standard mode
+# Run
 ./target/release/vectordb serve --host 0.0.0.0 --port 9999
 ```
 
@@ -56,17 +53,29 @@ curl http://localhost:9999/health
 curl -f http://localhost:9999/ready
 ```
 
-Swagger, GraphQL and WebSocket are optional integrations and are not compiled into the default
-single-node build. Build them explicitly when needed, then opt in per process:
+Two things are served without asking, because a database you cannot look at and whose API you
+cannot read is harder to evaluate than one you can:
+
+| | Endpoint | Turn off with |
+| --- | --- | --- |
+| API reference | `GET /api/docs`, spec at `/api/docs/openapi.json` | `--no-swagger` |
+| Web console | `GET /dashboard` — read-only | `--no-dashboard` |
+
+Both are read-only, and both require `DXMT_API_KEY` when one is set, like every other route.
+The console needs its bundle compiled in (`make dashboard-build`, then rebuild); a binary built
+without it says so once at startup and serves everything else. Passing `--dashboard` explicitly
+turns that warning into a refusal to start, which is what you want in a deployment that is
+supposed to have one.
+
+GraphQL and WebSocket are not compiled into the default build, and are off unless asked for:
 
 ```bash
-cargo build --release --features api-swagger,api-graphql,api-ws
-./target/release/vectordb serve --swagger --graphql --websocket
+cargo build --release --features api-graphql,api-ws
+./target/release/vectordb serve --graphql --websocket
 ```
 
 | Flag          | Endpoint                                            |
 | ------------- | --------------------------------------------------- |
-| `--swagger`   | `GET /api/docs`, spec at `/api/docs/openapi.json`    |
 | `--graphql`   | `POST /graphql`                                      |
 | `--websocket` | `GET /ws` (upgrade)                                  |
 | `--grpc-port` | gRPC on that port, alongside HTTP (`proto/dxmt.proto`) |
@@ -152,11 +161,10 @@ Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_
 
 ## Architecture
 
-Both server modes converge on one storage implementation, `IntelligentIndexedStorage`:
+One data model, reached through several protocols, over one storage implementation:
 
 ```
-serve --simple  →  /collections/*   (zero-config collection API, at the root)
-serve           →  /api/v1/*
+REST /api/v1/*  ·  gRPC  ·  GraphQL  ·  WebSocket  ·  MCP
                         ↓
              IntelligentIndexedStorage
                ├─ records: in-process HashMap      ← all data lives here
@@ -203,10 +211,12 @@ against — the periodic re-evaluation is what corrects it. `POST /api/v1/tables
 forces it immediately. A rebuild builds the replacement before swapping it in, so queries keep
 being served by the old index throughout.
 
-Interfaces: REST (`src/api/handlers.rs`), a zero-config simple mode
-(`src/api/simple_core.rs`), GraphQL, and WebSocket. Standard-mode REST routes are served
-under `/api/v1`; system probes are available at the root (`/health`, `/live`, `/ready`) and
-under the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
+Interfaces: REST (`src/api/handlers.rs`), gRPC, GraphQL, WebSocket and MCP — **several
+protocols over one data model**, which is what every comparable database does; none of them
+serves a second, differently shaped model beside its own. A `serve --simple` mode did exactly
+that here, at `/collections/*`, and is gone: see the CHANGELOG. REST routes are served under
+`/api/v1`; system probes are at the root (`/health`, `/live`, `/ready`, `/metrics`) and under
+the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
 
 ## Configuration
 

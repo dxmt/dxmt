@@ -3,7 +3,7 @@
 # with the `gpu` feature.
 #
 #   source scripts/gpu-env.sh
-#   cargo run --features gpu --bin vectordb -- serve --simple --memory-limit 1024
+#   cargo run --features gpu --bin vectordb -- serve
 #   cargo test --features gpu --test gpu_acceleration_test
 #
 # Why this is needed: `gpu` is an opt-in cargo feature and cudarc is pinned to

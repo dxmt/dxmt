@@ -6,7 +6,7 @@ if one stops working, it is a bug, not an expected casualty.
 
 All of them need a running server:
 
-    cd vectordb && cargo run --release -- serve       # standard mode, port 9999, NOT --simple
+    cd vectordb && cargo run --release -- serve       # port 9999
 
 `DXMT_HOST` / `DXMT_PORT` are not read by these; they connect to localhost:9999.
 
