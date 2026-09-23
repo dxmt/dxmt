@@ -201,7 +201,7 @@ def main() -> None:
             }
             for (rid, text), vec in zip(ALL_RECORDS, vectors)
         ]
-        client.insert_records(table_name=TABLE, records=insert_records, mode="batch")
+        client.insert_records(table_name=TABLE, records=insert_records)
         print(f"\n[index] {len(ALL_RECORDS)} records indexed")
 
         # Score

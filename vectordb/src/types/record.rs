@@ -120,6 +120,7 @@ impl<'de> Deserialize<'de> for Record {
 /// 创建记录的请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateRecordRequest {
     pub id: RecordId,
     pub vector: DenseVector,
@@ -223,6 +224,7 @@ impl SearchMode {
 /// 搜索查询
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     pub vector: DenseVector,
     #[serde(default = "default_top_k", alias = "k")]
@@ -245,6 +247,7 @@ pub struct SearchQuery {
 /// 混合搜索查询
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct HybridSearchQuery {
     /// 密集向量查询
     pub dense_vector: Option<DenseVector>,
@@ -270,6 +273,7 @@ pub struct HybridSearchQuery {
 /// 全文搜索请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct FullTextSearchRequest {
     /// 搜索查询文本
     pub query: String,
@@ -293,6 +297,7 @@ pub struct FullTextSearchRequest {
 /// 模糊搜索配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct FuzzyConfig {
     /// 最大编辑距离（Levenshtein距离）
     #[serde(default = "default_max_distance")]
@@ -347,6 +352,7 @@ pub enum FusionMethod {
 /// 混合搜索请求（向量 + 稀疏向量 + 文本）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct HybridSearchRequest {
     /// 稠密向量查询（可选）
     pub vector: Option<DenseVector>,
@@ -435,6 +441,7 @@ pub struct SearchHit {
 /// 过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct Filter {
     pub must: Option<Vec<Condition>>,
     pub must_not: Option<Vec<Condition>>,
@@ -481,6 +488,7 @@ impl Filter {
 /// 单个过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct Condition {
     pub key: String,
     pub operation: FilterOperation,

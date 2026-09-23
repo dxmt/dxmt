@@ -182,4 +182,6 @@ def test_a_backup_refuses_a_destination_inside_the_wal_directory():
 
 
 def test_a_backup_without_a_path_is_refused():
-    assert post("/backup", {}, expect_ok=False).status_code in (400, 422)
+    response = post("/backup", {}, expect_ok=False)
+    assert response.status_code == 400, response.text
+    assert "path" in response.json()["error"]["message"], response.text

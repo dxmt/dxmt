@@ -55,6 +55,22 @@ describe('unwrap', () => {
     expect(error.message).toContain('text-bm25');
   });
 
+  it('classifies a current server\'s body rejection as the envelope', async () => {
+    // Every body now goes through `ApiJson`, so a refused field or an unknown enum variant is
+    // the same envelope as any other error -- with serde's message, which names the field and
+    // lists what exists. The plain-text arm below is what an *older* server answers.
+    const error = (await unwrap(
+      response(
+        '{"success":false,"data":null,"error":{"code":"INVALID_INPUT","message":"Failed to deserialize the JSON body into the target type: search_mode: unknown variant `exact`, expected one of `fast`, `normal`, `accurate`, `auto` at line 1 column 51","details":null},"timestamp":"t"}',
+        400,
+      ),
+    ).catch((e: unknown) => e)) as ApiFailure;
+
+    expect(error.failure.kind).toBe('envelope');
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toContain('unknown variant');
+  });
+
   it('does not throw a SyntaxError on the plain-text extractor rejection', async () => {
     // The real body, verbatim, from a server asked for a search_mode it does not have. This is
     // what a capability probe reads, and `response.json()` throws an opaque SyntaxError on it.

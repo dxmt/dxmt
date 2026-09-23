@@ -221,7 +221,7 @@ class RAGPipeline:
             }
             for i, (chunk, vec) in enumerate(zip(chunks, vectors))
         ]
-        self.client.insert_records(table_name=TABLE, records=records, mode="batch")
+        self.client.insert_records(table_name=TABLE, records=records)
         print(f"[rag] indexed {len(records)} chunks")
         return len(records)
 

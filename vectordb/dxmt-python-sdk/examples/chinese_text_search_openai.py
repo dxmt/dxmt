@@ -282,7 +282,7 @@ def main() -> None:
 
         # Insert records
         print("\n插入文章到 DXMT...")
-        client.insert_records(table_name="chinese_articles_openai", records=records, mode="batch")
+        client.insert_records(table_name="chinese_articles_openai", records=records)
         print(f"✅ 插入 {len(records)} 篇文章")
 
         # Get all records for display

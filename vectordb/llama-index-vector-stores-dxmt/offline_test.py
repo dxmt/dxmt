@@ -154,7 +154,7 @@ try:
         {"index_type": "ivf", "distance_metric": "euclidean"},
         {"index_type": "brute_force", "distance_metric": "manhattan"},
         {"enable_full_text_search": True},
-        {"insert_mode": "lock_free", "batch_size": 500},
+        {"batch_size": 500},
     ]
 
     for i, config in enumerate(configs, 1):

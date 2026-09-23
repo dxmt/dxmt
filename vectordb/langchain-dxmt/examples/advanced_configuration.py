@@ -195,85 +195,6 @@ def example_distance_metrics() -> None:
             print(f"  ✗ Error: {e}\n")
 
 
-def example_insert_modes() -> None:
-    """Demonstrate different insert modes."""
-    print("=== Insert Modes Comparison ===\n")
-
-    embeddings = OpenAIEmbeddings()
-
-    # Test with larger batch
-    documents = [
-        Document(page_content=f"Performance test document {i}")
-        for i in range(100)
-    ]
-
-    modes = [
-        {
-            "name": "Standard",
-            "type": "standard",
-            "description": "Default insertion mode with balanced performance",
-            "use_case": "General purpose",
-        },
-        {
-            "name": "LockFree",
-            "type": "lockfree",
-            "description": "Lock-free insertion for high concurrency",
-            "use_case": "High concurrent write workloads",
-        },
-        {
-            "name": "Streaming",
-            "type": "streaming",
-            "description": "Optimized for continuous data ingestion",
-            "use_case": "Real-time data pipelines",
-        },
-        {
-            "name": "MemoryPool",
-            "type": "memorypool",
-            "description": "Pre-allocated memory for better performance",
-            "use_case": "Batch insertions with known size",
-        },
-        {
-            "name": "Ultimate",
-            "type": "ultimate",
-            "description": "All optimizations enabled",
-            "use_case": "Maximum performance when memory is available",
-        },
-    ]
-
-    for mode in modes:
-        print(f"Mode: {mode['name']}")
-        print(f"  Description: {mode['description']}")
-        print(f"  Use Case: {mode['use_case']}")
-
-        try:
-            # Create vector store with specific insert mode
-            store = DXMTVectorDB(
-                table_name=f"insert_test_{mode['type']}",
-                embedding=embeddings,
-                dimension=1536,
-                index_type="hnsw",
-                distance_metric="cosine",
-                insert_mode=mode["type"],
-            )
-
-            # Measure batch insert performance
-            start_time = time.time()
-            ids = store.add_documents(documents)
-            insert_time = time.time() - start_time
-
-            throughput = len(documents) / insert_time
-
-            print(f"  ✓ Inserted {len(ids)} documents")
-            print(f"  ✓ Time: {insert_time:.3f}s")
-            print(f"  ✓ Throughput: {throughput:.1f} docs/sec\n")
-
-            # Cleanup
-            store.delete(ids=ids)
-
-        except Exception as e:
-            print(f"  ✗ Error: {e}\n")
-
-
 def example_production_config() -> None:
     """Demonstrate production-ready configuration."""
     print("=== Production Configuration Example ===\n")
@@ -293,14 +214,12 @@ def example_production_config() -> None:
         # Performance optimizations
         index_type="hnsw",           # Fast and accurate
         distance_metric="cosine",     # Standard for text embeddings
-        insert_mode="ultimate",       # All optimizations
         enable_full_text_search=True, # Hybrid search capability
     )
 
     print(f"   ✓ Created: {store_high_perf._table_name}")
     print(f"   - Index: HNSW (fast approximate search)")
     print(f"   - Metric: Cosine (text embeddings)")
-    print(f"   - Insert: Ultimate (all optimizations)")
     print(f"   - Features: Full-text search enabled\n")
 
     # Memory-efficient configuration
@@ -316,14 +235,12 @@ def example_production_config() -> None:
         # Memory optimizations
         index_type="ivf_pq",          # Product quantization
         distance_metric="cosine",
-        insert_mode="streaming",      # Streaming insertion
         enable_full_text_search=False,# Disable if not needed
     )
 
     print(f"   ✓ Created: {store_memory_eff._table_name}")
     print(f"   - Index: IVF-PQ (memory efficient)")
     print(f"   - Metric: Cosine")
-    print(f"   - Insert: Streaming (low memory)")
     print(f"   - Features: Vector-only search\n")
 
     # Accuracy-first configuration
@@ -339,7 +256,6 @@ def example_production_config() -> None:
         # Accuracy optimizations
         index_type="brute_force",     # Exact search
         distance_metric="euclidean",  # Precise distance
-        insert_mode="standard",
         enable_full_text_search=True,
     )
 
@@ -445,7 +361,6 @@ def main() -> None:
         example_distance_metrics()
         print()
 
-        example_insert_modes()
         print()
 
         example_production_config()

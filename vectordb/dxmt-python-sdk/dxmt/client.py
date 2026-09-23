@@ -674,7 +674,7 @@ class DXMTClient:
         path = f"/tables/{_seg(table_name)}/records"
 
         def send(batch: list[dict[str, Any]]) -> tuple[int, Optional[UploadFailure], int]:
-            body = _encode_json({"records": _payload_records(batch), "mode": "standard"})
+            body = _encode_json({"records": _payload_records(batch)})
             retries = 0
             while True:
                 status: Optional[int] = None
@@ -720,14 +720,12 @@ class DXMTClient:
         self,
         table_name: str,
         records: list[dict[str, Any]],
-        mode: str = "standard",
     ) -> dict[str, Any]:
         """Insert records into a table.
 
         Args:
             table_name: Name of the table.
             records: List of records with id, vector, and metadata.
-            mode: Insert mode (standard, lock_free, streaming, ultimate, etc.).
 
         Returns:
             Response data from server.
@@ -747,7 +745,7 @@ class DXMTClient:
             else:
                 normalized_records.append(record)
 
-        payload = {"records": normalized_records, "mode": mode}
+        payload = {"records": normalized_records}
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/records",
@@ -767,7 +765,6 @@ class DXMTClient:
         self,
         table_name: str,
         records: list[dict[str, Any]],
-        mode: str = "standard",
     ) -> dict[str, Any]:
         """Async insert records into a table."""
         # Normalize records: map 'metadata' to 'payload' if present
@@ -778,7 +775,7 @@ class DXMTClient:
                 normalized["payload"] = normalized.pop("metadata")
             normalized_records.append(normalized)
 
-        payload = {"records": normalized_records, "mode": mode}
+        payload = {"records": normalized_records}
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/records",

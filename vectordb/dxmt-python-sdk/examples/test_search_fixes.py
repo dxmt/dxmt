@@ -284,7 +284,7 @@ def main() -> None:
                 },
             })
 
-        client.insert_records(table_name="chinese_articles", records=records, mode="batch")
+        client.insert_records(table_name="chinese_articles", records=records)
         print(f"✅ 插入 {len(records)} 篇文章")
 
         # Get all records for display

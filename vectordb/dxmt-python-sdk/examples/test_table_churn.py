@@ -46,14 +46,13 @@ def main():
         print("Phase 1: 9 Table Create/Delete Cycles (like Example 1)")
         print("=" * 80)
 
-        modes = ["batch", "parallel", "lockfree"]
         batch_sizes = [100, 500, 1000]
         cycle_count = 0
 
-        for mode in modes:
+        for repeat in range(3):
             for batch_size in batch_sizes:
                 cycle_count += 1
-                print(f"\nCycle {cycle_count}/9: mode={mode}, size={batch_size}")
+                print(f"\nCycle {cycle_count}/9: size={batch_size}")
 
                 # Delete and create table
                 try:
@@ -71,7 +70,7 @@ def main():
                 # Insert records
                 records = generate_records(1, batch_size, dimension)
                 try:
-                    client.insert_records(table_name=table_name, records=records, mode=mode)
+                    client.insert_records(table_name=table_name, records=records)
                     print(f"  ✅ Inserted {batch_size} records")
                 except Exception as e:
                     print(f"  ❌ Failed to insert: {str(e)[:80]}")
@@ -105,7 +104,7 @@ def main():
         for i in range(0, 10000, chunk_size):
             records = generate_records(i + 1, chunk_size, dimension)
             try:
-                client.insert_records(table_name=table_name, records=records, mode="parallel")
+                client.insert_records(table_name=table_name, records=records)
                 print(f"  Chunk {i // chunk_size + 1}/10: ✅")
             except Exception as e:
                 print(f"  Chunk {i // chunk_size + 1}/10: ❌ {str(e)[:60]}")
@@ -125,7 +124,7 @@ def main():
         for attempt in range(3):
             try:
                 start = time.time()
-                client.insert_records(table_name=table_name, records=test_records, mode="batch")
+                client.insert_records(table_name=table_name, records=test_records)
                 duration = time.time() - start
                 print(f"  ✅ Insert succeeded on attempt {attempt + 1} ({duration:.4f}s)")
                 break
@@ -165,13 +164,13 @@ def main():
         print("\nInserting 10,000 records...")
         for i in range(0, 10000, 1000):
             records = generate_records(i + 1, 1000, dimension)
-            client.insert_records(table_name=table_name, records=records, mode="parallel")
+            client.insert_records(table_name=table_name, records=records)
 
         # Immediate insert
         print("\nImmediate insert (50 records)...")
         test_records = generate_records(10001, 50, dimension)
         try:
-            client.insert_records(table_name=table_name, records=test_records, mode="batch")
+            client.insert_records(table_name=table_name, records=test_records)
             print("  ✅ Insert succeeded (no table churn)")
         except Exception as e:
             print(f"  ❌ Insert failed even without churn: {str(e)[:80]}")

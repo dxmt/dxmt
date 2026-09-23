@@ -1,6 +1,7 @@
 pub mod auth;
 #[cfg(feature = "api-dashboard")]
 pub mod dashboard;
+pub mod extract;
 #[cfg(feature = "api-graphql")]
 pub mod graphql;
 #[cfg(feature = "api-grpc")]

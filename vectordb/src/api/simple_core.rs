@@ -10,6 +10,7 @@
 // Quality trade-off: worse than a trained sentence-transformer but orders-of-magnitude
 // better than a random hash seed, and requires zero external dependencies.
 
+use crate::api::extract::ApiJson;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -39,6 +40,7 @@ use crate::{
 // ─── request / response structs ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateCollectionRequest {
     name: String,
     #[serde(default = "default_dimension")]
@@ -55,6 +57,7 @@ fn default_distance_metric() -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddDocumentsRequest {
     documents: Vec<String>,
     ids: Option<Vec<String>>,
@@ -63,6 +66,7 @@ struct AddDocumentsRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QueryRequest {
     query: String,
     #[serde(default = "default_limit")]
@@ -322,7 +326,7 @@ async fn status(State(state): State<Arc<SimpleModeState>>) -> impl IntoResponse 
 
 async fn create_collection(
     State(state): State<Arc<SimpleModeState>>,
-    Json(req): Json<CreateCollectionRequest>,
+    ApiJson(req): ApiJson<CreateCollectionRequest>,
 ) -> impl IntoResponse {
     // A collection is a table, and its name follows the rules `POST /tables` applies. It becomes
     // a file name in disk mode, and this route accepted any string.
@@ -420,7 +424,7 @@ async fn delete_collection(
 async fn add_documents(
     State(state): State<Arc<SimpleModeState>>,
     Path(collection_name): Path<String>,
-    Json(req): Json<AddDocumentsRequest>,
+    ApiJson(req): ApiJson<AddDocumentsRequest>,
 ) -> impl IntoResponse {
     info!(
         "Adding {} documents to collection '{}'",
@@ -540,7 +544,7 @@ async fn add_documents(
 async fn query(
     State(state): State<Arc<SimpleModeState>>,
     Path(collection_name): Path<String>,
-    Json(req): Json<QueryRequest>,
+    ApiJson(req): ApiJson<QueryRequest>,
 ) -> impl IntoResponse {
     info!("Querying '{}': {:?}", collection_name, req.query);
 

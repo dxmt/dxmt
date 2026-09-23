@@ -12,10 +12,11 @@
  *      `/health/ready` are unwrapped by design.
  *   4. **Plain text.** axum's `Json` extractor rejects a malformed body or an unknown enum
  *      variant *before any handler runs*, so there is no `ApiResponse` to wrap it: the answer
- *      is 422 with `content-type: text/plain`. This is exactly what probing for
- *      `search_mode: "exact"` returns on a server that does not have it, which makes this arm
- *      load-bearing rather than defensive -- `(await res.json()).error.code` throws here, and
- *      a capability probe that throws reports a feature as broken instead of absent.
+ *      is 422 with `content-type: text/plain`. A current server no longer does this -- every
+ *      body goes through `ApiJson`, which answers in the envelope -- but an older one does, and
+ *      it is exactly what probing for `search_mode: "exact"` returns there. The arm stays
+ *      load-bearing for those servers: `(await res.json()).error.code` throws on it, and a
+ *      capability probe that throws reports a feature as broken instead of absent.
  *   5. A 200 that is not the envelope at all, which means the shape changed underneath us.
  *
  * Nothing downstream is allowed to reach into `error.code` without narrowing through this.

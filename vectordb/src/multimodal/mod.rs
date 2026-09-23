@@ -53,6 +53,7 @@ impl Modality {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MultimodalContent {
     pub modality: Modality,
     pub data: Vec<u8>,

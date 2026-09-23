@@ -194,7 +194,7 @@ class RetrievalEvaluator:
             }
             for doc, vec in zip(DOCUMENTS, vectors)
         ]
-        self.client.insert_records(table_name=TABLE, records=records, mode="batch")
+        self.client.insert_records(table_name=TABLE, records=records)
 
     def _retrieve(self, query: str, k: int) -> list[str]:
         q_vec = embed([query])[0]

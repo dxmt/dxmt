@@ -1,7 +1,7 @@
+use crate::api::extract::ApiJson;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ pub async fn list_embedding_functions(
 pub async fn load_embedding_function(
     State(state): State<MultimodalAppState>,
     Path(name): Path<String>,
-    Json(config): Json<EmbeddingConfig>,
+    ApiJson(config): ApiJson<EmbeddingConfig>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     let config_value = match serde_json::to_value(&config) {
         Ok(v) => v,
@@ -147,7 +147,7 @@ pub async fn list_active_embedding_functions(
 ))]
 pub async fn generate_embedding(
     State(state): State<MultimodalAppState>,
-    Json(request): Json<EmbeddingRequest>,
+    ApiJson(request): ApiJson<EmbeddingRequest>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     // 获取嵌入函数
     let _embedding_function = match state.embeddingmanager.get_function(&request.model).await {
@@ -191,7 +191,7 @@ pub async fn generate_embedding(
 pub async fn create_multimodal_record(
     State(state): State<MultimodalAppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<CreateMultiVectorRequest>,
+    ApiJson(request): ApiJson<CreateMultiVectorRequest>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     // 验证表是否存在
     let table = match state.basestate.storage.get_table(&table_name).await {
@@ -263,7 +263,7 @@ pub async fn create_multimodal_record(
 pub async fn cross_modal_search(
     State(state): State<MultimodalAppState>,
     Path(table_name): Path<String>,
-    Json(_query): Json<CrossModalSearchQuery>,
+    ApiJson(_query): ApiJson<CrossModalSearchQuery>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     // 验证表是否存在
     let _table = match state.basestate.storage.get_table(&table_name).await {
@@ -297,7 +297,7 @@ pub async fn cross_modal_search(
     tag = "multimodal"
 ))]
 pub async fn validate_multimodal_content(
-    Json(contents): Json<Vec<crate::types::MultimodalContent>>,
+    ApiJson(contents): ApiJson<Vec<crate::types::MultimodalContent>>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     // Convert MultimodalContent to bytes
     let bytecontents: Vec<Vec<u8>> = contents
@@ -345,7 +345,7 @@ pub async fn validate_multimodal_content(
     tag = "multimodal"
 ))]
 pub async fn get_multimodal_info(
-    Json(content): Json<crate::types::MultimodalContent>,
+    ApiJson(content): ApiJson<crate::types::MultimodalContent>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     // Convert MultimodalContent to bytes
     let contentbytes = match &content {

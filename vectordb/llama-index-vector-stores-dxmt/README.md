@@ -167,7 +167,6 @@ vector_store = DXMTVectorStore(
     distance_metric="cosine",  # Options: cosine, euclidean, manhattan, dot
 
     # Performance tuning
-    insert_mode="lock_free",  # Options: standard, lock_free, streaming, etc.
     batch_size=500,  # Batch size for bulk operations
 
     # Full-text search
@@ -213,7 +212,6 @@ vector_store = DXMTVectorStore(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `insert_mode` | str | `"standard"` | Insert optimization mode |
 | `batch_size` | int | `100` | Batch size for bulk operations |
 
 **Insert Modes:**

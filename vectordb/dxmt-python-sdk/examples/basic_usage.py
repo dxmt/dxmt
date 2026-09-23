@@ -62,7 +62,7 @@ def main() -> None:
             },
         ]
 
-        client.insert_records(table_name="demo", records=records, mode="batch")
+        client.insert_records(table_name="demo", records=records)
         print(f"Inserted {len(records)} records")
 
         # Search for similar vectors

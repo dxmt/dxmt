@@ -188,7 +188,7 @@ def setup_and_index(client: Client) -> None:
                 "code": entry["code"],
             },
         })
-    client.insert_records(table_name=TABLE, records=records, mode="batch")
+    client.insert_records(table_name=TABLE, records=records)
     langs = sorted({e["language"] for e in CORPUS})
     types = sorted({e["type"] for e in CORPUS})
     print(f"[index] {len(CORPUS)} snippets | languages: {langs} | types: {types}")

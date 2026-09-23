@@ -276,14 +276,6 @@ answer = qa_chain.invoke("What is DXMT VectorDB?")
 - `enable_full_text_search`: Enable BM25 full-text search (default: False)
 - `text_fields`: Configuration for text fields (list of dicts)
 
-### Performance Parameters
-
-- `insert_mode`: Batch insert optimization
-  - `"standard"` (default): Standard insertion
-  - `"lock_free"`: Lock-free high-performance
-  - `"streaming"`: Stream processing
-  - `"ultimate"`: All optimizations enabled
-
 ## Performance
 
 DXMT VectorDB offers excellent performance characteristics:
@@ -292,7 +284,7 @@ DXMT VectorDB offers excellent performance characteristics:
 |--------|-------|---------------|
 | **Query Latency (p50)** | ~15ms | 1M vectors, 1536-dim, k=10 |
 | **Query Latency (p95)** | ~38ms | 1M vectors, 1536-dim, k=10 |
-| **Insert Throughput** | ~1500 docs/sec | Ultimate mode, single server |
+| **Insert Throughput** | ~1500 docs/sec | Single server |
 | **Memory Usage** | ~5.5 GB | 1M vectors, HNSW index |
 | **Memory Usage (IVF-PQ)** | ~2 GB | 1M vectors, compressed |
 
@@ -307,7 +299,6 @@ vector_store = DXMTVectorDB(
     embedding=embeddings,
     dimension=1536,
     index_type="hnsw",           # Fast approximate search
-    insert_mode="ultimate",      # All optimizations
     enable_full_text_search=True,
 )
 
@@ -317,7 +308,6 @@ vector_store = DXMTVectorDB(
     embedding=embeddings,
     dimension=1536,
     index_type="ivf_pq",         # Product quantization
-    insert_mode="streaming",
     enable_full_text_search=False,
 )
 ```

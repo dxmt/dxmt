@@ -92,7 +92,6 @@ def benchmark_insert_throughput(
         dimension=1536,
         host=DXMT_HOST,
         port=DXMT_PORT,
-        insert_mode="ultimate",
     )
 
     # Generate test documents
@@ -113,7 +112,6 @@ def benchmark_insert_throughput(
         name="Insert Throughput",
         duration=duration,
         operations=num_docs,
-        mode="ultimate",
         dimension=1536,
     )
 

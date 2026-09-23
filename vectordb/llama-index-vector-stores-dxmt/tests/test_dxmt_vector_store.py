@@ -108,7 +108,6 @@ class TestDXMTVectorStoreInit:
             ssl=True,
             index_type="ivf",
             distance_metric="euclidean",
-            insert_mode="lock_free",
             batch_size=500,
         )
 
@@ -119,7 +118,6 @@ class TestDXMTVectorStoreInit:
         assert store.ssl == True
         assert store.index_type == "ivf"
         assert store.distance_metric == "euclidean"
-        assert store.insert_mode == "lock_free"
         assert store.batch_size == 500
 
     def test_init_with_existing_client(self):

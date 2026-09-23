@@ -27,11 +27,6 @@ export type IndexType =
 export type QuantizationType = 'none' | 'product' | 'scalar' | 'binary';
 
 /**
- * Insert mode for handling duplicates.
- */
-export type InsertMode = 'append' | 'replace' | 'error_on_duplicate';
-
-/**
  * Vector representation - array of numbers.
  */
 export type Vector = number[];
@@ -133,7 +128,6 @@ export interface TableInfo {
 export interface InsertRecordsParams {
   table_name: string;
   records: Record[];
-  mode?: InsertMode;
 }
 
 /**

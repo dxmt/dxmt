@@ -402,13 +402,11 @@ client.create_table(
 ### Insert Modes
 
 ```python
-# Optimize insertion for your workload
-client.insert_records(
-    table_name="documents",
-    records=[...],
-    mode="batch"  # Batch insertion
-    # or: "streaming", "lock_free", "parallel", etc.
-)
+# One call is one request, so bigger batches amortise the round trip
+client.insert_records(table_name="documents", records=[...])
+
+# Or let upload() batch, parallelise and retry for you
+client.upload("documents", records, batch_size=256, parallel=4)
 ```
 
 ### Filtering
@@ -509,14 +507,13 @@ Create a new table.
 - `distance_metric` (str): Distance metric ("cosine", "euclidean", "manhattan", "dot")
 - `index_type` (str): Index type ("hnsw", "ivf", "ivf_pq", "lsh", "brute_force")
 
-#### `insert_records(table_name, records, mode="standard")`
+#### `insert_records(table_name, records)`
 
 Insert records into a table.
 
 **Parameters:**
 - `table_name` (str): Table name
 - `records` (list[dict]): Records to insert (each record must have `id`, `vector`, and `payload`)
-- `mode` (str): Insert mode ("standard", "batch", "streaming", etc.)
 
 **Record Structure:**
 ```python

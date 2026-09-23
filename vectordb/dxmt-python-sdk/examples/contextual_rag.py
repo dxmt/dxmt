@@ -164,7 +164,7 @@ def setup_and_index(client: Client, chunks: list[str]) -> None:
         }
         for i, (chunk, vec) in enumerate(zip(chunks, vectors))
     ]
-    client.insert_records(table_name=TABLE, records=records, mode="batch")
+    client.insert_records(table_name=TABLE, records=records)
     print(f"[index] {len(chunks)} chunks indexed (dim={EMBED_DIM})")
 
 

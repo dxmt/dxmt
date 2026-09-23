@@ -101,8 +101,6 @@ class DXMTVectorDB(VectorStore):
             Distance metric ('cosine', 'euclidean', 'manhattan', 'dot').
         enable_full_text_search:
             Enable full-text search capabilities. Default is False.
-        insert_mode:
-            Batch insert mode ('standard', 'lock_free', 'ultimate', etc.).
 
     Instantiate:
         ```python
@@ -211,7 +209,6 @@ class DXMTVectorDB(VectorStore):
         distance_metric: str = "cosine",
         enable_full_text_search: bool = False,
         text_fields: Optional[list[dict[str, Any]]] = None,
-        insert_mode: str = "standard",
         relevance_score_fn: Optional[Callable[[float], float]] = None,
         create_table_if_not_exists: bool = True,
     ) -> None:
@@ -232,7 +229,6 @@ class DXMTVectorDB(VectorStore):
             distance_metric: Distance metric ('cosine', 'euclidean', 'manhattan', 'dot').
             enable_full_text_search: Enable full-text search. Default is False.
             text_fields: Text field configurations for full-text search.
-            insert_mode: Batch insert mode. Default is 'standard'.
             relevance_score_fn: Custom relevance score function.
             create_table_if_not_exists: Whether to create table if it doesn't exist.
         """
@@ -264,7 +260,6 @@ class DXMTVectorDB(VectorStore):
         self._distance_metric = distance_metric
         self._enable_full_text_search = enable_full_text_search
         self._text_fields = text_fields
-        self._insert_mode = insert_mode
         self.override_relevance_score_fn = relevance_score_fn
 
         # Create or verify table
@@ -331,7 +326,7 @@ class DXMTVectorDB(VectorStore):
             texts: Texts to add.
             metadatas: Optional metadata for each text.
             ids: Optional IDs for each text.
-            **kwargs: Additional keyword arguments (e.g., insert_mode).
+            **kwargs: Additional keyword arguments.
 
         Returns:
             List of IDs of added texts.
@@ -385,11 +380,9 @@ class DXMTVectorDB(VectorStore):
         ]
 
         # Insert records
-        insert_mode = kwargs.get("insert_mode", self._insert_mode)
         self._client.insert_records(
             table_name=self._table_name,
             records=records,
-            mode=insert_mode,
         )
 
         return ids
@@ -452,11 +445,9 @@ class DXMTVectorDB(VectorStore):
         ]
 
         # Insert records (async)
-        insert_mode = kwargs.get("insert_mode", self._insert_mode)
         await self._client.ainsert_records(
             table_name=self._table_name,
             records=records,
-            mode=insert_mode,
         )
 
         return ids
@@ -1025,7 +1016,6 @@ class DXMTVectorDB(VectorStore):
         index_type: str = "hnsw",
         distance_metric: str = "cosine",
         enable_full_text_search: bool = False,
-        insert_mode: str = "standard",
         **kwargs: Any,
     ) -> DXMTVectorDB:
         """Create DXMTVectorDB from texts.
@@ -1043,7 +1033,6 @@ class DXMTVectorDB(VectorStore):
             index_type: Index type.
             distance_metric: Distance metric.
             enable_full_text_search: Enable full-text search.
-            insert_mode: Batch insert mode.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -1065,7 +1054,6 @@ class DXMTVectorDB(VectorStore):
             index_type=index_type,
             distance_metric=distance_metric,
             enable_full_text_search=enable_full_text_search,
-            insert_mode=insert_mode,
             create_table_if_not_exists=True,
             **kwargs,
         )
@@ -1091,7 +1079,6 @@ class DXMTVectorDB(VectorStore):
         index_type: str = "hnsw",
         distance_metric: str = "cosine",
         enable_full_text_search: bool = False,
-        insert_mode: str = "standard",
         **kwargs: Any,
     ) -> DXMTVectorDB:
         """Async create DXMTVectorDB from texts."""
@@ -1111,7 +1098,6 @@ class DXMTVectorDB(VectorStore):
             index_type=index_type,
             distance_metric=distance_metric,
             enable_full_text_search=enable_full_text_search,
-            insert_mode=insert_mode,
             create_table_if_not_exists=True,
             **kwargs,
         )

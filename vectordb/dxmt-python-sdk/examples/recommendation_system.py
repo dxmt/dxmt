@@ -653,7 +653,7 @@ def main() -> None:
 
         # Insert records
         print("\nInserting movies into DXMT...")
-        client.insert_records(table_name="movies", records=records, mode="batch")
+        client.insert_records(table_name="movies", records=records)
         print(f"✅ Inserted {len(records)} movies")
 
         # Get all records

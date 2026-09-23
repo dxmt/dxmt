@@ -26,8 +26,8 @@ STORAGE_MODE = os.environ.get("DXMT_STORAGE_MODE", "memory")
 #: `/records/bulk` used to take a `mode` with these ten values. Every one of them reached the
 #: same function -- eight seven-line wrappers and a `insert_records_batch` whose body read
 #: `// For now, just use regular insert` -- so they were ten names for one code path, each
-#: promising an optimisation that did not exist. The field is gone; these are kept here only to
-#: check that a client still sending one is not broken by its removal.
+#: promising an optimisation that did not exist. The field is gone; these are kept here to
+#: check that a client still sending one is told so, rather than having it quietly ignored.
 FORMER_BULK_MODES = [
     "standard",
     "lock_free",
@@ -179,19 +179,8 @@ def test_index_operations_on_a_table_that_does_not_exist_are_a_404(method, path)
 # ---- Bulk insert ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", FORMER_BULK_MODES + [None])
-def test_a_bulk_insert_stores_the_records_whatever_mode_is_sent(empty_table, mode):
-    """The endpoint takes no `mode` any more, and a body that still carries one still works.
-
-    Removing the field rather than rejecting the values it used to take is what keeps an
-    existing client working: the body is deserialised without `deny_unknown_fields`, so a
-    `mode` is now read by nothing instead of selecting between ten identical paths.
-    """
-    body = {"records": CORPUS}
-    if mode is not None:
-        body["mode"] = mode
-
-    data = post(f"/tables/{empty_table}/records/bulk", body).json()["data"]
+def test_a_bulk_insert_stores_the_records(empty_table):
+    data = post(f"/tables/{empty_table}/records/bulk", {"records": CORPUS}).json()["data"]
 
     assert data["count"] == len(CORPUS)
     assert sorted(data["inserted_ids"]) == ALL_IDS
@@ -203,11 +192,28 @@ def test_a_bulk_insert_stores_the_records_whatever_mode_is_sent(empty_table, mod
     assert payload_of(stored) == BY_ID["r3"]["payload"]
 
 
-@pytest.mark.parametrize("mode", FORMER_BULK_MODES)
-def test_a_wrong_dimension_is_refused_whatever_mode_is_sent(empty_table, mode):
+@pytest.mark.parametrize("mode", FORMER_BULK_MODES + ["warp_speed"])
+def test_a_mode_is_refused_now_that_the_endpoint_has_none(empty_table, mode):
+    """Ten names for one code path were removed from the server, and for a while a body still
+    carrying one was accepted and ignored -- which is how every SDK went on sending `mode`
+    through a release that had deleted it. A field the server does not have is now an error
+    naming it, so a client saying something the server does not do finds out."""
     response = post(
         f"/tables/{empty_table}/records/bulk",
-        {"records": [{"id": "bad", "vector": [1.0, 2.0]}], "mode": mode},
+        {"records": CORPUS, "mode": mode},
+        expect_ok=False,
+    )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_INPUT"
+    assert "mode" in error["message"], error
+    assert stats(empty_table)["record_count"] == 0, "the refused batch was stored anyway"
+
+
+def test_a_wrong_dimension_is_refused(empty_table):
+    response = post(
+        f"/tables/{empty_table}/records/bulk",
+        {"records": [{"id": "bad", "vector": [1.0, 2.0]}]},
         expect_ok=False,
     )
     assert response.status_code == 400, response.text
@@ -217,19 +223,6 @@ def test_a_wrong_dimension_is_refused_whatever_mode_is_sent(empty_table, mode):
 def test_an_empty_batch_is_a_400(empty_table):
     response = post(f"/tables/{empty_table}/records/bulk", {"records": []}, expect_ok=False)
     assert response.status_code == 400, response.text
-
-
-def test_an_unknown_mode_is_ignored_rather_than_refused(empty_table):
-    """This used to be a 422 naming the ten modes. It is a 200 now, and that is the intended
-    change: there is no `mode` to be unknown. Pinned so the removal is a decision on the
-    record rather than something that quietly happened."""
-    response = post(
-        f"/tables/{empty_table}/records/bulk",
-        {"records": CORPUS, "mode": "warp_speed"},
-        expect_ok=False,
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["count"] == len(CORPUS)
 
 
 def test_bulk_insert_into_a_table_that_does_not_exist_is_a_404():

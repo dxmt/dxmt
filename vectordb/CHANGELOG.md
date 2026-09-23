@@ -12,6 +12,20 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **A field the server does not have is now an error.** Every request body carries
+  `deny_unknown_fields` and goes through `ApiJson` (`src/api/extract.rs`), so a misspelled or
+  invented field is a 400 naming it and listing the ones that exist. serde's default -- ignore
+  it -- had cost this API real behaviour three times: `mode` on an insert (ten names for one
+  code path, removed from the server while every SDK went on sending it), `alpha` and `top_k`
+  on a hybrid search (in this crate's own Swagger example, tuning nothing), `named_vectors` on
+  a table that then built no named index and searched the default vector instead. None of them
+  failed; they were accepted, dropped, and answered wrongly. `ApiJson` also replaces axum's
+  rejection -- a 422 with a `text/plain` body -- with the normal error envelope, so a client
+  reading `error.code` no longer chokes on the most ordinary mistake there is.
+  `tests/unknown_fields_test.rs` checks every body endpoint, simple mode's three, a nested
+  filter condition, and -- by reading the source -- that no handler has gone back to a plain
+  `Json<T>` body or a request type without the attribute.
+
 - **`Field`, a filter builder for Python.** `(Field("lang") == "en") & Field("year").between(2020,
   2024) & ~Field("tags").is_in(["spam"])`, accepted wherever a filter is. Python's `and`/`or`/`not`
   and chained comparisons raise `TypeError`, since each would silently keep one side.
@@ -72,6 +86,11 @@ releases. Everything below is unreleased work on `main`.
   ask for more search effort without a rebuild.
 
 ### Changed
+
+- **The SDKs no longer send `mode` on an insert** (Python, JavaScript), and the parameter is
+  gone from `insert_records`/`ainsert_records` and `InsertRecordsParams`. The server deleted the
+  field; a call still passing it now fails loudly in the client rather than being ignored by the
+  server. Nothing has been released, so this breaks no published API.
 
 - **A filter comparing against an array or an object is refused** with `INVALID_INPUT`, from
   every endpoint. `tags == ["a", "b"]` used to return no records from `records/list`, a

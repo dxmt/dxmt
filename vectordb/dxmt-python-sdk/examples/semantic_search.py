@@ -214,7 +214,7 @@ def main() -> None:
 
         # Insert records
         print("\nInserting documents into DXMT...")
-        client.insert_records(table_name="docs", records=records, mode="batch")
+        client.insert_records(table_name="docs", records=records)
         print(f"✅ Inserted {len(records)} documents")
 
         # Get all records for display (create a map)

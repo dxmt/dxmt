@@ -108,6 +108,7 @@ pub struct MultiVectorRecord {
 
 /// 创建多向量记录的请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateMultiVectorRequest {
     pub id: RecordId,
     /// 直接提供的向量映射
@@ -122,6 +123,7 @@ pub struct CreateMultiVectorRequest {
 
 /// 跨模态搜索查询
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrossModalSearchQuery {
     /// 查询输入（可以是任意模态）
     pub query: MultimodalInput,
@@ -204,6 +206,7 @@ pub struct MultimodalSearchHit {
 
 /// 嵌入函数配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbeddingConfig {
     pub function_name: String,
     pub model_name: String,
@@ -214,6 +217,7 @@ pub struct EmbeddingConfig {
 
 /// 嵌入请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: MultimodalInput,

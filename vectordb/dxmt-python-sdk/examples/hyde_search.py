@@ -276,7 +276,7 @@ def index_corpus(client: Client) -> None:
         }
         for doc, vec in zip(CORPUS, vectors)
     ]
-    client.insert_records(table_name=TABLE, records=records, mode="batch")
+    client.insert_records(table_name=TABLE, records=records)
     print(f"[hyde] indexed {len(CORPUS)} documents")
 
 

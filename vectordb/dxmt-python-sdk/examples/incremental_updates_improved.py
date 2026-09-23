@@ -280,7 +280,7 @@ def main() -> None:
             })
 
         # Insert initial records
-        client.insert_records(table_name="docs", records=records, mode="batch")
+        client.insert_records(table_name="docs", records=records)
         print(f"✅ Inserted {len(records)} documents")
 
         # Display initial state
@@ -512,8 +512,7 @@ def main() -> None:
                                 "content_hash": content_hash(content),
                                 "cdc_sequence": sequence,
                             },
-                        }],
-                        mode="batch"
+                        }]
                     )
                     print(f"  ✅ Inserted {doc_id}")
                 except Exception as e:

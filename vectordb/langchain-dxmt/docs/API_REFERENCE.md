@@ -43,7 +43,6 @@ DXMTVectorDB(
     distance_metric: str = "cosine",
     enable_full_text_search: bool = False,
     text_fields: Optional[list[dict[str, Any]]] = None,
-    insert_mode: str = "standard",
     relevance_score_fn: Optional[Callable[[float], float]] = None,
     create_table_if_not_exists: bool = True,
 ) -> None
@@ -72,12 +71,6 @@ DXMTVectorDB(
   - `"dot_product"` - Dot product
 - **enable_full_text_search** (`bool`, default: `False`): Enable BM25 full-text search.
 - **text_fields** (`list[dict]`, optional): Configuration for text fields (advanced).
-- **insert_mode** (`str`, default: `"standard"`): Insert optimization mode. Options:
-  - `"standard"` - Default mode
-  - `"lockfree"` - Lock-free insertions
-  - `"streaming"` - Streaming mode
-  - `"memorypool"` - Pre-allocated memory pool
-  - `"ultimate"` - All optimizations enabled
 - **relevance_score_fn** (`Callable`, optional): Custom score normalization function.
 - **create_table_if_not_exists** (`bool`, default: `True`): Auto-create table if it doesn't exist.
 
@@ -857,7 +850,6 @@ vector_store = DXMTVectorDB(
     headers={"Authorization": "Bearer YOUR_TOKEN"},
     index_type="hnsw",
     distance_metric="cosine",
-    insert_mode="ultimate",
     enable_full_text_search=True,
 )
 ```
@@ -871,7 +863,6 @@ vector_store = DXMTVectorDB(
     dimension=768,
     index_type="ivf_pq",  # Product quantization
     distance_metric="cosine",
-    insert_mode="streaming",
     enable_full_text_search=False,
 )
 ```

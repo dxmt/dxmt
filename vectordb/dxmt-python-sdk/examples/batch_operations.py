@@ -1,10 +1,10 @@
 """Batch operations and performance optimization example for DXMT Python SDK.
 
 This example demonstrates:
-1. Batch insert with different modes (batch, parallel, lockfree)
+1. Batch insert at several batch sizes
 2. Batch update operations
 3. Batch delete operations
-4. Performance comparison between modes
+4. Performance comparison across batch sizes
 5. Large-scale data ingestion patterns
 
 Use case:
@@ -37,14 +37,13 @@ def generate_records(start_id: int, count: int, dimension: int = 128) -> List[Di
     return records
 
 
-def benchmark_insert(client: Client, table_name: str, records: List[Dict[str, Any]], mode: str, max_retries: int = 3) -> float:
+def benchmark_insert(client: Client, table_name: str, records: List[Dict[str, Any]], max_retries: int = 3) -> float:
     """Benchmark insert operation and return duration in seconds.
 
     Args:
         client: DXMT client
         table_name: Name of the table
         records: Records to insert
-        mode: Insert mode (batch, parallel, lockfree)
         max_retries: Maximum number of retry attempts
 
     Returns:
@@ -54,7 +53,7 @@ def benchmark_insert(client: Client, table_name: str, records: List[Dict[str, An
 
     for attempt in range(max_retries):
         try:
-            client.insert_records(table_name=table_name, records=records, mode=mode)
+            client.insert_records(table_name=table_name, records=records)
             duration = time.time() - start_time
             return duration
         except Exception as e:
@@ -93,41 +92,39 @@ def main() -> None:
         # Example 1: Batch Insert Modes Comparison
         # ================================================================
         print("\n" + "=" * 80)
-        print("Example 1: Batch Insert Modes Comparison")
+        print("Example 1: Batch Size Comparison")
         print("=" * 80)
 
-        modes = ["batch", "parallel", "lockfree"]
         batch_sizes = [100, 500, 1000]
 
-        print("\nTesting different insert modes with various batch sizes:")
-        print(f"{'Mode':<12} {'Batch Size':<12} {'Duration (s)':<15} {'Throughput (records/s)':<25}")
+        print("\nTesting various batch sizes:")
+        print(f"{'Batch Size':<12} {'Duration (s)':<15} {'Throughput (records/s)':<25}")
         print("─" * 80)
 
-        for mode in modes:
-            for batch_size in batch_sizes:
-                # Create fresh table for each test
-                try:
-                    client.delete_table(table_name)
-                except Exception:
-                    pass
+        for batch_size in batch_sizes:
+            # Create fresh table for each test
+            try:
+                client.delete_table(table_name)
+            except Exception:
+                pass
 
-                client.create_table(
-                    name=table_name,
-                    dimension=dimension,
-                    distance_metric="cosine",
-                    index_type="hnsw",
-                )
+            client.create_table(
+                name=table_name,
+                dimension=dimension,
+                distance_metric="cosine",
+                index_type="hnsw",
+            )
 
-                # Generate records
-                records = generate_records(1, batch_size, dimension)
+            # Generate records
+            records = generate_records(1, batch_size, dimension)
 
-                # Benchmark
-                duration = benchmark_insert(client, table_name, records, mode)
-                throughput = batch_size / duration if duration > 0 else 0
+            # Benchmark
+            duration = benchmark_insert(client, table_name, records)
+            throughput = batch_size / duration if duration > 0 else 0
 
-                print(f"{mode:<12} {batch_size:<12} {duration:<15.4f} {throughput:<25.2f}")
+            print(f"{batch_size:<12} {duration:<15.4f} {throughput:<25.2f}")
 
-        # ================================================================
+    # ================================================================
         # Example 2: Large-Scale Data Ingestion
         # ================================================================
         print("\n" + "=" * 80)
@@ -287,10 +284,9 @@ def main() -> None:
         print("Performance Summary & Best Practices")
         print("=" * 80)
         print("""
-Insert Modes:
-  - batch: Sequential inserts, most consistent latency
-  - parallel: Parallel inserts, good for moderate throughput
-  - lockfree: Lock-free channel-based inserts, highest throughput
+Batch Sizes:
+  - one insert call is one request; bigger batches amortise the round trip
+  - the server caps a batch at 10,000 records (100,000 on /records/bulk)
 
 Recommendations:
   1. Use chunk sizes of 500-2000 records for optimal performance

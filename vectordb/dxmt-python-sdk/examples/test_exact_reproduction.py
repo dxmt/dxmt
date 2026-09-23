@@ -47,13 +47,12 @@ def main():
         # Example 1: Batch Insert Modes Comparison (EXACT REPLICA)
         # ================================================================
         print("=" * 80)
-        print("Example 1: Batch Insert Modes Comparison")
+        print("Example 1: Batch Size Comparison")
         print("=" * 80)
 
-        modes = ["batch", "parallel", "lockfree"]
         batch_sizes = [100, 500, 1000]
 
-        for mode in modes:
+        for repeat in range(3):
             for batch_size in batch_sizes:
                 # Create fresh table for each test
                 try:
@@ -72,8 +71,8 @@ def main():
                 records = generate_records(1, batch_size, dimension)
 
                 # Insert
-                client.insert_records(table_name=table_name, records=records, mode=mode)
-                print(f"  {mode}/{batch_size}: ✅")
+                client.insert_records(table_name=table_name, records=records)
+                print(f"  {batch_size}: ✅")
 
         print("✅ Example 1 completed")
 
@@ -103,7 +102,7 @@ def main():
 
         for i in range(0, total_records, chunk_size):
             chunk = generate_records(i + 1, min(chunk_size, total_records - i), dimension)
-            client.insert_records(table_name=table_name, records=chunk, mode="parallel")
+            client.insert_records(table_name=table_name, records=chunk)
             print(f"  Chunk {i // chunk_size + 1}/10: ✅")
 
         print("✅ Example 2 completed")
@@ -169,7 +168,7 @@ def main():
             for attempt in range(3):
                 try:
                     start = time.time()
-                    client.insert_records(table_name=table_name, records=new_records, mode="batch")
+                    client.insert_records(table_name=table_name, records=new_records)
                     duration = time.time() - start
                     print(f"    ✅ Inserted {len(new_records)} records (attempt {attempt + 1}, {duration:.4f}s)")
                     break

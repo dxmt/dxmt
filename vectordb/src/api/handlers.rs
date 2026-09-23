@@ -1,3 +1,4 @@
+use crate::api::extract::ApiJson;
 use crate::api::response::ApiResponse;
 use axum::{
     extract::{Path, Query, State},
@@ -54,6 +55,7 @@ pub struct PaginationQuery {
 /// 创建表的请求
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateTableRequest {
     pub name: String,
     pub dimension: usize,
@@ -70,10 +72,11 @@ pub struct CreateTableRequest {
     /// through `vector_name` on `POST /search`.
     ///
     /// This was missing from this struct while `TableConfig` had it, and the body is
-    /// deserialised without `deny_unknown_fields` — so a request declaring named vector spaces
-    /// was accepted, the field was dropped, no named index was built, and a later search naming
-    /// one of those spaces silently scored against the *default* vector instead. A wrong answer
-    /// rather than an error, over a feature the engine has had all along.
+    /// deserialised without `deny_unknown_fields` at the time — so a request declaring named
+    /// vector spaces was accepted, the field was dropped, no named index was built, and a later
+    /// search naming one of those spaces silently scored against the *default* vector instead.
+    /// A wrong answer rather than an error, over a feature the engine has had all along. That
+    /// default is what `ApiJson` and the attribute above this struct exist to take away.
     #[serde(default)]
     pub named_vectors: Option<Vec<crate::types::table::VectorSpaceConfig>>,
     /// Declared payload fields. Dropped here for the same reason and with the same shape of
@@ -86,6 +89,7 @@ pub struct CreateTableRequest {
 /// 批量插入记录的请求
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct BatchInsertRequest {
     pub records: Vec<CreateRecordRequest>,
 }
@@ -103,8 +107,10 @@ pub struct BatchInsertRequest {
 /// difference was the size cap the mode selected.
 ///
 /// The field is gone rather than kept as a set of aliases, because a knob that does nothing is
-/// the thing this API had too many of. A body that still sends `mode` is accepted and ignored
-/// (serde takes unknown fields here), so nothing breaks; it simply stops being documented.
+/// the thing this API had too many of. A body that still sends `mode` is now refused naming it
+/// (`deny_unknown_fields`): it was accepted and ignored for a while, and that is precisely how
+/// every SDK went on sending it through the release that deleted it.
+#[serde(deny_unknown_fields)]
 pub struct OptimizedBatchInsertRequest {
     pub records: Vec<CreateRecordRequest>,
 }
@@ -203,6 +209,7 @@ pub enum PayloadUpdateMode {
 /// 更新记录的请求
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRecordRequest {
     /// Optional dense vector replacement. When omitted, the current dense, sparse and named
     /// vectors are preserved; this makes payload-only updates safe for hybrid search.
@@ -219,6 +226,7 @@ pub struct UpdateRecordRequest {
 /// 批量删除记录的请求
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct BatchDeleteRequest {
     pub ids: Vec<String>,
 }
@@ -226,6 +234,7 @@ pub struct BatchDeleteRequest {
 /// 按元数据列出记录的请求
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ListRecordsRequest {
     /// Optional filter to apply to record payloads
     pub filter: Option<crate::types::Filter>,
@@ -276,7 +285,7 @@ pub struct ListRecordsRequest {
 #[axum::debug_handler]
 pub async fn create_table(
     State(state): State<AppState>,
-    Json(request): Json<CreateTableRequest>,
+    ApiJson(request): ApiJson<CreateTableRequest>,
 ) -> impl IntoResponse {
     // 增强输入验证
     if request.name.len() > MAX_TABLE_NAME_LENGTH {
@@ -485,7 +494,7 @@ pub async fn delete_table(
 pub async fn alter_table(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(req): Json<TableAlterRequest>,
+    ApiJson(req): ApiJson<TableAlterRequest>,
 ) -> impl IntoResponse {
     match state.storage.alter_table(&table_name, req).await {
         Ok(table) => {
@@ -714,7 +723,7 @@ pub async fn branch_table(
 pub async fn insert_records(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<BatchInsertRequest>,
+    ApiJson(request): ApiJson<BatchInsertRequest>,
 ) -> impl IntoResponse {
     // Check server health and apply backpressure if needed
     let (should_accept, health_state) = state.server_health.should_accept_insert().await;
@@ -827,7 +836,7 @@ pub async fn get_record(
 pub async fn update_record(
     State(state): State<AppState>,
     Path((table_name, record_id)): Path<(String, String)>,
-    Json(request): Json<UpdateRecordRequest>,
+    ApiJson(request): ApiJson<UpdateRecordRequest>,
 ) -> impl IntoResponse {
     // 1. Validate vector dimension if provided
     if let Some(ref vector) = request.vector {
@@ -926,7 +935,7 @@ pub async fn update_record(
 pub async fn delete_records(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<BatchDeleteRequest>,
+    ApiJson(request): ApiJson<BatchDeleteRequest>,
 ) -> impl IntoResponse {
     let requested_count = request.ids.len();
     match state.storage.delete_records(&table_name, request.ids).await {
@@ -984,7 +993,7 @@ pub async fn delete_records(
 pub async fn search_vectors(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(query): Json<SearchQuery>,
+    ApiJson(query): ApiJson<SearchQuery>,
 ) -> impl IntoResponse {
     if query.vector.is_empty() {
         let error = ApiError::new("INVALID_VECTOR", "Query vector must not be empty");
@@ -1024,7 +1033,7 @@ pub async fn search_vectors(
 pub async fn list_records(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<ListRecordsRequest>,
+    ApiJson(request): ApiJson<ListRecordsRequest>,
 ) -> impl IntoResponse {
     let limit = request.limit.unwrap_or(100).min(1000); // Max 1000 records per request
     let offset = request.offset.unwrap_or(0);
@@ -1121,7 +1130,7 @@ pub async fn list_records(
 pub async fn hybrid_search(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(query): Json<HybridSearchQuery>,
+    ApiJson(query): ApiJson<HybridSearchQuery>,
 ) -> impl IntoResponse {
     // For now, convert to regular search if only dense vector is provided
     if query.dense_vector.is_some() && query.sparse_vector.is_none() && query.text_query.is_none() {
@@ -1304,6 +1313,7 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateBackupRequest {
     /// Directory the backup is written to. Must be writable by the server process.
     pub path: String,
@@ -1328,7 +1338,7 @@ pub struct CreateBackupRequest {
 ))]
 pub async fn create_backup(
     State(state): State<AppState>,
-    Json(request): Json<CreateBackupRequest>,
+    ApiJson(request): ApiJson<CreateBackupRequest>,
 ) -> impl IntoResponse {
     match state
         .storage
@@ -1353,8 +1363,7 @@ pub async fn create_backup(
         "records": [
             {"id": "doc-4", "vector": [0.0, 0.0, 1.0, 0.0],
              "payload": {"topic": "python", "content": "python collects and does not borrow"}}
-        ],
-        "mode": "standard"
+        ]
     })),
     responses(
         (status = 200, description = "插入记录成功", body = ApiResponse),
@@ -1367,7 +1376,7 @@ pub async fn create_backup(
 pub async fn insert_records_optimized(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<OptimizedBatchInsertRequest>,
+    ApiJson(request): ApiJson<OptimizedBatchInsertRequest>,
 ) -> impl IntoResponse {
     // The cap used to depend on the `mode` the caller named -- 100,000 for two of them, 50,000
     // for two more -- which made the limit a property of a word rather than of the work. One
@@ -1440,6 +1449,7 @@ pub async fn insert_records_optimized(
 /// 请求一张 kNN 图
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct KnnGraphRequest {
     /// How many records to sample as nodes. Default 1,000, capped by `DXMT_KNN_GRAPH_MAX_NODES`.
     pub sample: Option<usize>,
@@ -1497,7 +1507,7 @@ pub struct KnnGraphRequest {
 pub async fn knn_graph(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<KnnGraphRequest>,
+    ApiJson(request): ApiJson<KnnGraphRequest>,
 ) -> impl IntoResponse {
     let sample = request.sample.unwrap_or(1_000);
     let neighbours = request.neighbours.unwrap_or(15);
@@ -1546,7 +1556,7 @@ pub async fn knn_graph(
 pub async fn full_text_search(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<FullTextSearchRequest>,
+    ApiJson(request): ApiJson<FullTextSearchRequest>,
 ) -> impl IntoResponse {
     #[cfg(not(feature = "text-bm25"))]
     {
@@ -1605,9 +1615,9 @@ pub async fn full_text_search(
         ("table_name" = String, Path, description = "表名", example = "demo")
     ),
     // `top_k` and `alpha` used to be in this example and are not fields of
-    // `HybridSearchRequest`. serde takes this body without `deny_unknown_fields`, so both were
-    // accepted, ignored, and left anyone tuning `alpha` watching a number that changed nothing.
-    // The real knobs are `limit`, `fusion_method` and — for `weighted_sum` only — `vector_weight`.
+    // `HybridSearchRequest`. They were accepted and ignored, and left anyone tuning `alpha`
+    // watching a number that changed nothing; the body is now refused naming the field. The
+    // real knobs are `limit`, `fusion_method` and — for `weighted_sum` only — `vector_weight`.
     request_body(content = HybridSearchRequest, example = json!({
         "vector": [1.0, 0.0, 0.0, 0.0],
         "text": "rust",
@@ -1625,7 +1635,7 @@ pub async fn full_text_search(
 pub async fn hybrid_search_combined(
     State(state): State<AppState>,
     Path(table_name): Path<String>,
-    Json(request): Json<HybridSearchRequest>,
+    ApiJson(request): ApiJson<HybridSearchRequest>,
 ) -> impl IntoResponse {
     // Validate inputs
     if request.vector.is_none() && request.text.is_none() {

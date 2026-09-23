@@ -49,7 +49,7 @@ def test_insert_after_heavy_load(client: Client, table_name: str, dimension: int
     chunk_size = 1000
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
-        client.insert_records(table_name=table_name, records=chunk, mode="parallel")
+        client.insert_records(table_name=table_name, records=chunk)
         print(f"  Inserted chunk {i // chunk_size + 1}/10")
 
     print("✅ Heavy load completed")
@@ -61,7 +61,7 @@ def test_insert_after_heavy_load(client: Client, table_name: str, dimension: int
     for attempt in range(3):
         try:
             start = time.time()
-            client.insert_records(table_name=table_name, records=test_records, mode="batch")
+            client.insert_records(table_name=table_name, records=test_records)
             duration = time.time() - start
             print(f"  ✅ Insert succeeded (attempt {attempt + 1}, {duration:.4f}s)")
             return True
@@ -98,7 +98,7 @@ def test_insert_with_delays(client: Client, table_name: str, dimension: int):
     print("\nInserting 10,000 records with 1s delay between chunks...")
     for i in range(10):
         records = generate_records(i * 1000 + 1, 1000, dimension)
-        client.insert_records(table_name=table_name, records=records, mode="parallel")
+        client.insert_records(table_name=table_name, records=records)
         print(f"  Chunk {i + 1}/10")
         time.sleep(1.0)  # 1 second delay
 
@@ -108,7 +108,7 @@ def test_insert_with_delays(client: Client, table_name: str, dimension: int):
     print("\nImmediate insert (50 records)...")
     test_records = generate_records(10001, 50, dimension)
     try:
-        client.insert_records(table_name=table_name, records=test_records, mode="batch")
+        client.insert_records(table_name=table_name, records=test_records)
         print("  ✅ Insert succeeded")
         return True
     except Exception as e:
@@ -139,7 +139,7 @@ def test_connection_pooling(client: Client, table_name: str, dimension: int):
     print("\nHeavy load with existing client...")
     for i in range(10):
         records = generate_records(i * 1000 + 1, 1000, dimension)
-        client.insert_records(table_name=table_name, records=records, mode="parallel")
+        client.insert_records(table_name=table_name, records=records)
         print(f"  Chunk {i + 1}/10")
 
     # Create new client
@@ -150,7 +150,7 @@ def test_connection_pooling(client: Client, table_name: str, dimension: int):
     print("\nInsert with new client (50 records)...")
     test_records = generate_records(10001, 50, dimension)
     try:
-        new_client.insert_records(table_name=table_name, records=test_records, mode="batch")
+        new_client.insert_records(table_name=table_name, records=test_records)
         print("  ✅ Insert with new client succeeded")
         success = True
     except Exception as e:
@@ -173,7 +173,7 @@ def test_table_recreation(client: Client, table_name: str, dimension: int):
     chunk_size = 1000
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
-        client.insert_records(table_name=table_name, records=chunk, mode="parallel")
+        client.insert_records(table_name=table_name, records=chunk)
         print(f"  Chunk {i // chunk_size + 1}/10")
 
     # Recreate table
@@ -191,50 +191,12 @@ def test_table_recreation(client: Client, table_name: str, dimension: int):
     print("\nInsert after table recreation (50 records)...")
     test_records = generate_records(1, 50, dimension)
     try:
-        client.insert_records(table_name=table_name, records=test_records, mode="batch")
+        client.insert_records(table_name=table_name, records=test_records)
         print("  ✅ Insert succeeded")
         return True
     except Exception as e:
         print(f"  ❌ Insert failed: {str(e)[:80]}")
         return False
-
-
-def test_different_modes(client: Client, table_name: str, dimension: int):
-    """Test if insert mode affects failure."""
-    print("\n" + "=" * 80)
-    print("TEST 5: Different Insert Modes After Heavy Load")
-    print("=" * 80)
-
-    # Heavy load
-    print("\nHeavy load (10,000 records)...")
-    records = generate_records(1, 10000, dimension)
-    chunk_size = 1000
-    for i in range(0, len(records), chunk_size):
-        chunk = records[i:i + chunk_size]
-        client.insert_records(table_name=table_name, records=chunk, mode="parallel")
-        print(f"  Chunk {i // chunk_size + 1}/10")
-
-    print("✅ Heavy load completed")
-
-    # Test different modes
-    modes = ["batch", "parallel", "lockfree"]
-    results = {}
-
-    for mode in modes:
-        print(f"\nTesting {mode} mode (50 records)...")
-        test_records = generate_records(10001 + modes.index(mode) * 100, 50, dimension)
-
-        try:
-            client.insert_records(table_name=table_name, records=test_records, mode=mode)
-            print(f"  ✅ {mode} mode succeeded")
-            results[mode] = True
-        except Exception as e:
-            print(f"  ❌ {mode} mode failed: {str(e)[:80]}")
-            results[mode] = False
-
-        time.sleep(0.5)
-
-    return results
 
 
 def main():
@@ -294,15 +256,6 @@ def main():
         except Exception:
             pass
 
-        client.create_table(
-            name=table_name,
-            dimension=dimension,
-            distance_metric="cosine",
-            index_type="hnsw",
-        )
-
-        results["test5"] = test_different_modes(client, table_name, dimension)
-
         # Summary
         print("\n" + "=" * 80)
         print("DIAGNOSTIC SUMMARY")
@@ -313,10 +266,6 @@ def main():
         print(f"  2. Insert With Delays: {'✅ PASSED' if results['test2'] else '❌ FAILED'}")
         print(f"  3. New Client Connection: {'✅ PASSED' if results['test3'] else '❌ FAILED'}")
         print(f"  4. Table Recreation: {'✅ PASSED' if results['test4'] else '❌ FAILED'}")
-        print(f"  5. Different Insert Modes:")
-        if isinstance(results["test5"], dict):
-            for mode, success in results["test5"].items():
-                print(f"     - {mode}: {'✅ PASSED' if success else '❌ FAILED'}")
 
         print("\n" + "=" * 80)
         print("DIAGNOSIS")
@@ -339,12 +288,6 @@ def main():
                 print("✅ Table recreation resolves the issue")
                 print("   → Table enters a temporary locked/busy state")
                 print("   → Recommendation: Implement backoff retry or periodic table refresh")
-
-            if isinstance(results["test5"], dict):
-                failed_modes = [m for m, s in results["test5"].items() if not s]
-                if failed_modes:
-                    print(f"\n❌ Modes that failed: {', '.join(failed_modes)}")
-                    print(f"   → 'batch' mode may be more stable")
 
         print("\n" + "=" * 80)
         print("RECOMMENDATIONS")

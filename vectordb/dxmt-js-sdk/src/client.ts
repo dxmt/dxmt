@@ -382,8 +382,7 @@ export class DXMTClient {
    *       vector: [0.4, 0.5, 0.6],
    *       metadata: { text: 'Document 2' }
    *     }
-   *   ],
-   *   mode: 'replace'
+   *   ]
    * });
    * ```
    */
@@ -469,7 +468,6 @@ export class DXMTClient {
           ...record,
           ...(metadata === undefined ? {} : { payload: metadata }),
         })),
-        mode: 'append',
       };
       for (let attempt = 0; ; attempt++) {
         let status: number | undefined;
@@ -573,7 +571,6 @@ export class DXMTClient {
             ...record,
             ...(metadata === undefined ? {} : { payload: metadata }),
           })),
-          mode: params.mode || 'append',
         }
       );
       const insertedIds = response.inserted_ids || [];

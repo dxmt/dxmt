@@ -161,7 +161,6 @@ await client.insertRecords({
       metadata: { text: 'Document 2', category: 'science' }
     }
   ],
-  mode: 'replace'  // 'append', 'replace', 'error_on_duplicate'
 });
 ```
 

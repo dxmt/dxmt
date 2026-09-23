@@ -92,31 +92,35 @@ def test_the_approximate_modes_can_be_measured_against_exact(table):
         )
 
 
-def test_an_unknown_mode_is_refused_as_plain_text_not_as_the_envelope(table):
-    """Pinned because a client cannot parse this response the way it parses every other error.
+def test_an_unknown_mode_is_refused_in_the_error_envelope(table):
+    """A capability probe -- "does this build have exact?" -- reads exactly this response.
 
-    axum 0.6's `Json` extractor rejects an unknown enum variant before the handler runs, so
-    there is no `ApiResponse` to wrap it. A capability probe — "does this build have exact?" —
-    reads exactly this, and one that does `response.json()["error"]["code"]` raises instead of
-    reporting the feature as absent.
+    It used to be axum's own rejection: a 422 with a `text/plain` body, because the extractor
+    refuses an unknown enum variant before the handler runs and there was no `ApiResponse` to
+    wrap it. A probe doing `response.json()["error"]["code"]` raised instead of reporting the
+    mode as absent. `ApiJson` now answers in the same envelope as everything else, and serde's
+    message -- which lists the permitted values -- is the message.
     """
     response = search(table, {"vector": BY_ID["r1"]["vector"], "top_k": 1, "search_mode": "wat"})
 
-    assert response.status_code == 422, (
-        f"expected 422 from the body extractor, got {response.status_code}"
+    assert response.status_code == 400, (
+        f"expected 400 from the body extractor, got {response.status_code}"
     )
-    assert response.headers["content-type"].startswith("text/plain"), (
-        f"expected a plain-text extractor rejection, got {response.headers.get('content-type')!r}"
+    assert response.headers["content-type"].startswith("application/json"), (
+        f"expected the JSON error envelope, got {response.headers.get('content-type')!r}"
     )
-    body = response.text
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_INPUT", error
+    body = error["message"]
     assert "search_mode" in body and "unknown variant" in body, (
         f"the message should name the field and the problem: {body[:300]}"
     )
     for mode in MODES:
         assert mode in body, (
-            f"the rejection lists the permitted values, and {mode!r} is missing from it — "
+            f"the rejection lists the permitted values, and {mode!r} is missing from it -- "
             f"a mode was added or removed without this test noticing: {body[:300]}"
         )
+
 
 
 def test_exact_refuses_a_table_it_would_have_to_read_too_much_of(table):

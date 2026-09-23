@@ -118,7 +118,7 @@ def ingest_transcripts(client: Client) -> None:
         }
         for seg, vec in zip(TRANSCRIPT_SEGMENTS, vectors)
     ]
-    client.insert_records(table_name=TABLE, records=records, mode="batch")
+    client.insert_records(table_name=TABLE, records=records)
     print(f"[store] ingested {len(records)} transcript segments")
 
 
@@ -135,7 +135,7 @@ def ingest_images(client: Client) -> None:
         }
         for frame in IMAGE_FRAMES
     ]
-    client.insert_records(table_name=TABLE, records=records, mode="batch")
+    client.insert_records(table_name=TABLE, records=records)
     print(f"[store] ingested {len(records)} image frames")
 
 

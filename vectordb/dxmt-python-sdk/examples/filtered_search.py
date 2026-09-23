@@ -181,7 +181,7 @@ def main() -> None:
         # Insert products
         print("\nInserting products...")
         products = create_product_records()
-        client.insert_records(table_name="products", records=products, mode="batch")
+        client.insert_records(table_name="products", records=products)
         print(f"✅ Inserted {len(products)} products")
 
         # Query vector (similar to gaming mouse)

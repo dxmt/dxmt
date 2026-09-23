@@ -39,8 +39,7 @@ def test_dimension_validation(client: Client):
             "id": "doc1",
             "vector": correct_vector,
             "payload": {"content": "Test document", "version": 1}
-        }],
-        mode="batch"
+        }]
     )
     print("✅ Inserted record with correct dimension")
 
@@ -113,8 +112,7 @@ def test_payload_merge_mode(client: Client):
                 "status": "published",
                 "views": 100
             }
-        }],
-        mode="batch"
+        }]
     )
     print("✅ Inserted record with multiple payload fields")
 

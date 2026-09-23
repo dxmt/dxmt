@@ -36,7 +36,7 @@ async def main() -> None:
         ]
 
         await client.ainsert_records(
-            table_name="async_demo", records=records, mode="parallel"
+            table_name="async_demo", records=records
         )
         print(f"Inserted {len(records)} records")
 

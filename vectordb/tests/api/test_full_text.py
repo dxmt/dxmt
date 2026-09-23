@@ -218,14 +218,11 @@ def test_the_two_endpoints_spell_their_timing_field_differently(text_table):
     assert "tookms" in hybrid, f"/search/hybrid lost tookms: {sorted(hybrid)}"
 
 
-def test_hybrid_reads_vector_weight_and_ignores_a_misspelled_knob(text_table):
-    """`HybridSearchRequest` has no `alpha` and no `top_k`, and serde accepts a body carrying
-    them anyway — no `deny_unknown_fields` — so a caller tuning the wrong name sees a request
-    succeed and nothing change. The Swagger example used to advertise both.
-
-    Pinned two ways: the real names are accepted, and the invented ones are accepted *and do
-    nothing*, which is the behaviour a caller has to know about.
-    """
+def test_hybrid_reads_vector_weight_and_refuses_a_misspelled_knob(text_table):
+    """`HybridSearchRequest` has no `alpha` and no `top_k` -- the names this crate's own Swagger
+    example advertised. They used to be accepted and ignored, so someone tuning `alpha` watched
+    a number that changed nothing. Pinned two ways: the real names work, the invented ones are
+    a 400 that names them."""
     query = {"vector": vector_for(3), "text": "quantization", "limit": 3}
 
     real = post(
@@ -237,13 +234,14 @@ def test_hybrid_reads_vector_weight_and_ignores_a_misspelled_knob(text_table):
         absent("text-bm25")
     assert succeeded(real), real.text[:400]
 
-    invented = post(f"/tables/{text_table}/search/hybrid", {**query, "alpha": 0.1, "top_k": 99})
-    assert succeeded(invented)
-    hits = invented.json()["data"]["hits"]
-    assert len(hits) <= 3, (
-        f"`top_k: 99` changed the result count to {len(hits)}; if the server has learned to read "
-        "it, the dashboard and the Swagger example should start sending it"
-    )
+    for knob in ("alpha", "top_k"):
+        invented = post(
+            f"/tables/{text_table}/search/hybrid", {**query, knob: 0.1}, expect_ok=False
+        )
+        assert invented.status_code == 400, invented.text[:400]
+        error = invented.json()["error"]
+        assert error["code"] == "INVALID_INPUT"
+        assert knob in error["message"], error
 
 
 def test_a_text_hit_carries_what_the_console_draws(text_table):

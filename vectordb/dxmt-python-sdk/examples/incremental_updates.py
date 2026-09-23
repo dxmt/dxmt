@@ -165,7 +165,7 @@ def main() -> None:
             })
 
         # Insert initial records
-        client.insert_records(table_name="docs", records=records, mode="batch")
+        client.insert_records(table_name="docs", records=records)
         print(f"✅ Inserted {len(records)} documents")
 
         # Display initial state
@@ -331,8 +331,7 @@ def main() -> None:
                             "views": 0,
                             "last_updated": time.strftime("%Y-%m-%d"),
                         },
-                    }],
-                    mode="batch"
+                    }]
                 )
                 print(f"  ✅ Inserted")
 

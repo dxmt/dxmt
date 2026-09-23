@@ -387,7 +387,7 @@ class DXMTLangGraphStore(BaseStore):
             # Try lock_free mode first (more lenient with duplicates)
             logger.debug(f"Inserting record {record_id} into {table_name}")
             try:
-                self.client.insert_records(table_name, [record], mode="lock_free")
+                self.client.insert_records(table_name, [record])
             except DXMTError as e:
                 # If lock_free fails with "already exists", try standard mode as fallback
                 if "already exists" in str(e).lower():
@@ -629,7 +629,7 @@ class DXMTLangGraphStore(BaseStore):
             # Try lock_free mode first (more lenient with duplicates)
             logger.debug(f"Inserting record {record_id} into {table_name}")
             try:
-                await self.client.ainsert_records(table_name, [record], mode="lock_free")
+                await self.client.ainsert_records(table_name, [record])
             except DXMTError as e:
                 # If lock_free fails with "already exists", try standard mode as fallback
                 if "already exists" in str(e).lower():

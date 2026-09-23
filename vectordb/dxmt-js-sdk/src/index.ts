@@ -85,7 +85,6 @@ export type {
   DistanceMetric,
   IndexType,
   QuantizationType,
-  InsertMode,
 
   // Utility
   HealthCheckResponse,

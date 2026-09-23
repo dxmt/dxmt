@@ -86,7 +86,6 @@ class DXMTVectorStore(BasePydanticVectorStore):
     index_type: str = "hnsw"
     enable_full_text_search: bool = False
     text_fields: Optional[List[Dict[str, Any]]] = None
-    insert_mode: str = "standard"
     batch_size: int = 100
 
     # Private attributes
@@ -105,7 +104,6 @@ class DXMTVectorStore(BasePydanticVectorStore):
         index_type: str = "hnsw",
         enable_full_text_search: bool = False,
         text_fields: Optional[List[Dict[str, Any]]] = None,
-        insert_mode: str = "standard",
         batch_size: int = 100,
         api_key: Optional[str] = None,
         **kwargs: Any,
@@ -125,7 +123,6 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 Options: "hnsw", "ivf", "ivf_pq", "lsh", "brute_force". Defaults to "hnsw".
             enable_full_text_search: Enable full-text search capability. Defaults to False.
             text_fields: Configuration for text fields if full-text search is enabled.
-            insert_mode: Insert mode for batch operations.
                 Options: "standard", "lock_free", "streaming", "deferred_index",
                 "ultimate", "batch", etc. Defaults to "standard".
             batch_size: Batch size for bulk operations. Defaults to 100.
@@ -147,7 +144,6 @@ class DXMTVectorStore(BasePydanticVectorStore):
             index_type=index_type,
             enable_full_text_search=enable_full_text_search,
             text_fields=text_fields,
-            insert_mode=insert_mode,
             batch_size=batch_size,
             **kwargs
         )
@@ -258,11 +254,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
 
         for batch_start in range(0, len(records), batch_size):
             batch = records[batch_start : batch_start + batch_size]
-            self.client.insert_records(
-                self.table_name,
-                batch,
-                mode=self.insert_mode
-            )
+            self.client.insert_records(self.table_name, batch)
 
         return [node.node_id for node in nodes]
 

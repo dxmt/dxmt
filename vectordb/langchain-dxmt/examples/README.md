@@ -521,7 +521,7 @@ client.delete_table("your_table_name")
 
 **Solutions:**
 1. Use `index_type="hnsw"` for fast queries (default)
-2. Use `insert_mode="lock_free"` for fast inserts
+2. Insert in batches rather than one record per request
 3. Check DXMT server resources (CPU, memory)
 4. Reduce `k` (number of results) in searches
 

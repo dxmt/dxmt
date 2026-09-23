@@ -183,7 +183,6 @@ export class DXMTVectorStore extends VectorStore {
     await this.client.insertRecords({
       table_name: this.collectionName,
       records,
-      mode: 'replace',
     });
 
     return ids;
@@ -235,7 +234,6 @@ export class DXMTVectorStore extends VectorStore {
     await this.client.insertRecords({
       table_name: this.collectionName,
       records,
-      mode: 'replace',
     });
 
     return ids;

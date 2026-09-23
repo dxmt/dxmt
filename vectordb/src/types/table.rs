@@ -168,6 +168,7 @@ fn default_true() -> bool {
 /// Request to alter an existing table (only safe mutations)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct TableAlterRequest {
     pub description: Option<String>,
     pub memory_optimization: Option<bool>,

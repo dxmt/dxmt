@@ -146,7 +146,7 @@ def test_backpressure_under_load():
             ]
 
             try:
-                client.insert_records(table_name="load_test", records=records, mode="parallel")
+                client.insert_records(table_name="load_test", records=records)
                 print(f"  Batch {i + 1}/10: ✅")
             except Exception as e:
                 error_str = str(e)

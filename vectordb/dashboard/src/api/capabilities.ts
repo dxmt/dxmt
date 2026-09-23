@@ -8,12 +8,14 @@
  *   - **`text-bm25`** is off in the default build, so `/search/text` answers 501
  *     `FEATURE_DISABLED` and `/search/hybrid` quietly degrades to the dense component.
  *
- * The exact-mode probe is the one that needs care. An older server rejects the unknown enum
- * variant in axum's `Json` extractor, *before any handler runs*, so the answer is **422 with a
- * plain-text body** and not the error envelope. A probe written as
- * `(await res.json()).error.code` throws there and reports the feature as broken rather than
- * absent -- which is why `envelope.ts` classifies that shape explicitly and why this reads
- * `isExtractorRejection` instead of a status code.
+ * The exact-mode probe is the one that needs care, because "this server does not know that
+ * value" and "this server knows it and refuses it here" arrive as the same status. A current
+ * server answers both in the error envelope with `INVALID_INPUT`, so they are told apart by
+ * serde's own words -- `unknown variant` -- and only then by the message. An older server
+ * rejects the unknown variant in axum's `Json` extractor before any handler runs, answering
+ * **422 with a plain-text body**, which `envelope.ts` classifies as `text` and this reads
+ * through `isExtractorRejection`; a probe written as `(await res.json()).error.code` throws
+ * there and reports the feature as broken rather than absent.
  */
 
 import { api } from './client';
@@ -66,7 +68,14 @@ export async function probeExactMode(
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
 
-    if (cause instanceof ApiFailure && cause.isExtractorRejection) {
+    const message =
+      cause instanceof ApiFailure && cause.failure.kind === 'envelope'
+        ? cause.failure.error.message
+        : '';
+    if (
+      cause instanceof ApiFailure &&
+      (cause.isExtractorRejection || message.includes('unknown variant'))
+    ) {
       // The server does not know the value. This is the absence, and it is the arm that a
       // naive probe gets wrong.
       result = {

@@ -99,7 +99,7 @@ def test_insert_after_heavy_load(client: Client, table_name: str, dimension: int
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
         chunk_start = time.time()
-        client.insert_records(table_name=table_name, records=chunk, mode="parallel")
+        client.insert_records(table_name=table_name, records=chunk)
         chunk_duration = time.time() - chunk_start
         metrics.add_latency(chunk_duration)
         metrics.add_records(len(chunk))
@@ -118,7 +118,7 @@ def test_insert_after_heavy_load(client: Client, table_name: str, dimension: int
     for attempt in range(3):
         try:
             start = time.time()
-            client.insert_records(table_name=table_name, records=test_records, mode="batch")
+            client.insert_records(table_name=table_name, records=test_records)
             duration = time.time() - start
             print(f"  ✅ Insert succeeded (attempt {attempt + 1}, {duration:.4f}s)")
             test_success = True
@@ -178,7 +178,7 @@ def test_load_gradient(client: Client, table_name: str, dimension: int) -> Dict:
             for i in range(0, len(records), chunk_size):
                 chunk = records[i:i + chunk_size]
                 chunk_start = time.time()
-                client.insert_records(table_name=table_name, records=chunk, mode="parallel")
+                client.insert_records(table_name=table_name, records=chunk)
                 chunk_duration = time.time() - chunk_start
                 metrics.add_latency(chunk_duration)
                 metrics.add_records(len(chunk))
@@ -232,7 +232,7 @@ def test_concurrent_inserts(client: Client, table_name: str, dimension: int) -> 
             records = generate_records(thread_id * 10000 + 1, records_per_thread, dimension)
 
             start = time.time()
-            worker_client.insert_records(table_name=table_name, records=records, mode="batch")
+            worker_client.insert_records(table_name=table_name, records=records)
             duration = time.time() - start
 
             results["threads"].append({
@@ -309,7 +309,7 @@ def test_insert_with_delays(client: Client, table_name: str, dimension: int) -> 
     for i in range(10):
         records = generate_records(i * 1000 + 1, 1000, dimension)
         chunk_start = time.time()
-        client.insert_records(table_name=table_name, records=records, mode="parallel")
+        client.insert_records(table_name=table_name, records=records)
         chunk_duration = time.time() - chunk_start
         metrics.add_latency(chunk_duration)
         metrics.add_records(1000)
@@ -324,7 +324,7 @@ def test_insert_with_delays(client: Client, table_name: str, dimension: int) -> 
     test_records = generate_records(10001, 50, dimension)
     try:
         start = time.time()
-        client.insert_records(table_name=table_name, records=test_records, mode="batch")
+        client.insert_records(table_name=table_name, records=test_records)
         duration = time.time() - start
         print(f"  ✅ Insert succeeded ({duration:.4f}s)")
         success = True
@@ -338,61 +338,6 @@ def test_insert_with_delays(client: Client, table_name: str, dimension: int) -> 
         "test_insert_success": success,
         "test_insert_duration": duration,
     }
-
-
-def test_different_modes(client: Client, table_name: str, dimension: int) -> Dict:
-    """Test if insert mode affects failure."""
-    print("\n" + "=" * 80)
-    print("TEST 5: Different Insert Modes After Heavy Load")
-    print("=" * 80)
-
-    # Recreate table
-    try:
-        client.delete_table(table_name)
-        time.sleep(0.5)
-    except Exception:
-        pass
-
-    client.create_table(
-        name=table_name,
-        dimension=dimension,
-        distance_metric="cosine",
-        index_type="hnsw",
-    )
-
-    # Heavy load
-    print("\nHeavy load (10,000 records)...")
-    records = generate_records(1, 10000, dimension)
-    chunk_size = 1000
-    for i in range(0, len(records), chunk_size):
-        chunk = records[i:i + chunk_size]
-        client.insert_records(table_name=table_name, records=chunk, mode="parallel")
-        print(f"  Chunk {i // chunk_size + 1}/10")
-
-    print("✅ Heavy load completed")
-
-    # Test different modes
-    modes = ["batch", "parallel", "lockfree"]
-    results = {}
-
-    for mode in modes:
-        print(f"\nTesting {mode} mode (50 records)...")
-        test_records = generate_records(10001 + modes.index(mode) * 100, 50, dimension)
-
-        try:
-            start = time.time()
-            client.insert_records(table_name=table_name, records=test_records, mode=mode)
-            duration = time.time() - start
-            print(f"  ✅ {mode} mode succeeded ({duration:.4f}s)")
-            results[mode] = {"success": True, "duration": duration}
-        except Exception as e:
-            duration = time.time() - start
-            print(f"  ❌ {mode} mode failed: {str(e)[:80]}")
-            results[mode] = {"success": False, "error": str(e)[:80], "duration": duration}
-
-        time.sleep(0.5)
-
-    return results
 
 
 def analyze_results(test_results: Dict) -> Dict[str, Any]:
@@ -454,14 +399,6 @@ def analyze_results(test_results: Dict) -> Dict[str, Any]:
         diagnosis["issues"].append("Delays resolve insert failures")
         diagnosis["recommendations"].append("Add 1-2s delays between large batch operations in production")
 
-    # Analyze Test 5: Different modes
-    test5 = test_results.get("test5", {})
-    if test5:
-        failed_modes = [mode for mode, result in test5.items() if not result.get("success")]
-        if failed_modes:
-            diagnosis["issues"].append(f"Insert modes failed: {', '.join(failed_modes)}")
-            diagnosis["recommendations"].append("Use 'batch' mode for better stability after heavy loads")
-
     # Overall assessment
     if not diagnosis["issues"]:
         diagnosis["status"] = "healthy"
@@ -494,13 +431,6 @@ def print_diagnostic_summary(test_results: Dict, diagnosis: Dict):
 
     test4 = test_results.get("test4", {})
     print(f"  4. Insert With Delays: {'✅ PASSED' if test4.get('test_insert_success') else '❌ FAILED'}")
-
-    test5 = test_results.get("test5", {})
-    if test5:
-        print(f"  5. Different Insert Modes:")
-        for mode, result in test5.items():
-            status = "✅ PASSED" if result.get("success") else "❌ FAILED"
-            print(f"     - {mode}: {status}")
 
     # Performance metrics
     print("\n" + "=" * 80)
@@ -634,9 +564,6 @@ def main():
         # Test 4: With delays
         success, data = test_insert_with_delays(client, table_name, dimension)
         test_results["test4"] = data
-
-        # Test 5: Different modes
-        test_results["test5"] = test_different_modes(client, table_name, dimension)
 
         # Analyze and print summary
         diagnosis = analyze_results(test_results)
