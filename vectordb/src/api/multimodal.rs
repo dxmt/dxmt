@@ -1,6 +1,6 @@
-use crate::api::extract::ApiJson;
+use crate::api::extract::{ApiJson, ApiQuery};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -24,6 +24,7 @@ pub struct MultimodalAppState {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::IntoParams))]
+#[serde(deny_unknown_fields)]
 pub struct ListEmbeddingFunctionsQuery {
     pub modality: Option<String>,
 }
@@ -42,7 +43,7 @@ pub struct ListEmbeddingFunctionsQuery {
 ))]
 pub async fn list_embedding_functions(
     State(state): State<MultimodalAppState>,
-    Query(query): Query<ListEmbeddingFunctionsQuery>,
+    ApiQuery(query): ApiQuery<ListEmbeddingFunctionsQuery>,
 ) -> std::result::Result<ApiResponse, StatusCode> {
     let registry = state.embeddingmanager.registry();
     let all_metadata = registry.get_all_metadata();

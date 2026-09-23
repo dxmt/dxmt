@@ -202,6 +202,30 @@ fn every_body_endpoint_refuses_a_field_it_does_not_have() {
 }
 
 #[test]
+fn an_unknown_query_parameter_is_refused() {
+    // `?limitt=1` was accepted and dropped, so the caller got the default page of 50 while
+    // believing they had asked for one row. A query string is the easiest place in an HTTP API
+    // to make a typo and the least likely place to notice one.
+    let server = start();
+    let port = server.port;
+
+    let (code, body) = call(port, "GET", "/api/v1/tables?limit=1", None).expect("no answer");
+    assert_eq!(code, 200, "the good query must work: {body}");
+
+    let (code, text) = call(port, "GET", "/api/v1/tables?limitt=1", None).expect("no answer");
+    assert_eq!(code, 400, "{text}");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("the body must be JSON");
+    assert_eq!(body["error"]["code"], "INVALID_INPUT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("limitt"),
+        "{body}"
+    );
+}
+
+#[test]
 fn a_filter_condition_refuses_a_field_it_does_not_have() {
     // The nested types matter as much as the top level: `{"key": ..., "op": ...}` for
     // `operation` is exactly the typo a person makes writing a filter by hand.

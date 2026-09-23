@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GIST-960 快速基准测试 - LMDB 存储"""
+"""GIST-960 快速基准测试（通过 HTTP API）"""
 
 import requests
 import time
@@ -11,7 +11,7 @@ BASE_URL = "http://localhost:9999/api/v1"
 DIM = 960
 
 print("=" * 80)
-print("  GIST-960 快速基准测试 - LMDB 存储")
+print("  GIST-960 快速基准测试（通过 HTTP API）")
 print("=" * 80)
 print()
 

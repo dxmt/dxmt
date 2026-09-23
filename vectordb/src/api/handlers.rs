@@ -1,7 +1,7 @@
-use crate::api::extract::ApiJson;
+use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{
         header::{HeaderMap, HeaderValue},
         StatusCode,
@@ -47,6 +47,7 @@ pub struct AppState {
 /// 分页查询参数
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct PaginationQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -420,7 +421,7 @@ pub async fn get_table(
 #[axum::debug_handler]
 pub async fn list_tables(
     State(state): State<AppState>,
-    Query(pagination): Query<PaginationQuery>,
+    ApiQuery(pagination): ApiQuery<PaginationQuery>,
 ) -> impl IntoResponse {
     let tables = match state.storage.list_tables().await {
         Ok(tables) => tables,

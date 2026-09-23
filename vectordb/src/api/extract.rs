@@ -19,8 +19,11 @@
 use crate::api::response::{ApiError, ApiResponse};
 use axum::{
     async_trait,
-    extract::{rejection::JsonRejection, FromRequest},
-    http::Request,
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        FromRequest, FromRequestParts, Query,
+    },
+    http::{request::Parts, Request},
     Json,
 };
 use serde::de::DeserializeOwned;
@@ -46,6 +49,35 @@ where
             Err(rejection) => Err(rejection_response(rejection)),
         }
     }
+}
+
+/// `Query<T>`, with unknown parameters refused and rejections in the API's error envelope.
+///
+/// Same reasoning as `ApiJson`, and the same silence before it: `?limitt=1` was accepted and
+/// dropped, so a caller who misspelled `limit` got the default page of 50 while believing they
+/// had asked for one row. A query string is the easiest place in an HTTP API to make a typo and
+/// the least likely place to notice one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ApiQuery<T>(pub T);
+
+#[async_trait]
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiResponse;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(ApiQuery(value)),
+            Err(rejection) => Err(query_rejection_response(rejection)),
+        }
+    }
+}
+
+fn query_rejection_response(rejection: QueryRejection) -> ApiResponse {
+    ApiResponse::error(ApiError::new("INVALID_INPUT", &rejection.body_text()))
 }
 
 fn rejection_response(rejection: JsonRejection) -> ApiResponse {

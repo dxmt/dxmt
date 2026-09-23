@@ -65,8 +65,8 @@ RESULT1=$(curl -s -X POST "${API_BASE}/tables/upsert_test/search" \
     "top_k": 10
   }')
 
-COUNT1=$(echo "$RESULT1" | jq '.data.results | length')
-VERSION1=$(echo "$RESULT1" | jq -r '.data.results[0].payload.version')
+COUNT1=$(echo "$RESULT1" | jq '.data.hits | length')
+VERSION1=$(echo "$RESULT1" | jq -r '.data.hits[0].payload.version')
 
 echo "   Found $COUNT1 document(s)"
 echo "   Version: $VERSION1"
@@ -105,9 +105,9 @@ RESULT2=$(curl -s -X POST "${API_BASE}/tables/upsert_test/search" \
     "top_k": 10
   }')
 
-COUNT2=$(echo "$RESULT2" | jq '.data.results | length')
-VERSION2=$(echo "$RESULT2" | jq -r '.data.results[0].payload.version')
-UPDATED2=$(echo "$RESULT2" | jq -r '.data.results[0].payload.updated')
+COUNT2=$(echo "$RESULT2" | jq '.data.hits | length')
+VERSION2=$(echo "$RESULT2" | jq -r '.data.hits[0].payload.version')
+UPDATED2=$(echo "$RESULT2" | jq -r '.data.hits[0].payload.updated')
 
 echo "   Found $COUNT2 document(s)"
 if [ "$COUNT2" -gt 0 ]; then
@@ -128,7 +128,7 @@ else
     echo -e "${RED}❌ FAIL: Found $COUNT2 documents (expected 1)${NC}"
     echo ""
     echo "All results:"
-    echo "$RESULT2" | jq '.data.results[] | {id: .id, version: .payload.version, text: .payload.text}'
+    echo "$RESULT2" | jq '.data.hits[] | {id: .id, version: .payload.version, text: .payload.text}'
 fi
 
 if [ "$VERSION2" = "v2" ] && [ "$UPDATED2" = "true" ]; then
@@ -172,8 +172,8 @@ RESULT3=$(curl -s -X POST "${API_BASE}/tables/upsert_test/search" \
     "top_k": 10
   }')
 
-COUNT3=$(echo "$RESULT3" | jq '.data.results | length')
-UPDATE_NUM=$(echo "$RESULT3" | jq -r '.data.results[0].payload.update_num')
+COUNT3=$(echo "$RESULT3" | jq '.data.hits | length')
+UPDATE_NUM=$(echo "$RESULT3" | jq -r '.data.hits[0].payload.update_num')
 
 echo "   Found $COUNT3 document(s)"
 if [ "$COUNT3" -gt 0 ]; then

@@ -30,6 +30,12 @@ releases. Everything below is unreleased work on `main`.
   embed locally instead of calling OpenAI -- they had skipped themselves everywhere, so that
   package's live path had never run at all.
 
+- **An unknown query parameter is an error too.** `?limitt=1` was accepted and dropped, so a
+  caller who misspelled `limit` got the default page of 50 while believing they had asked for
+  one row -- the same silence the request bodies had, in the place where a typo is easiest to
+  make. `ApiQuery` refuses it in the same envelope, and the source-reading test now fails on a
+  handler that takes a plain `Query<T>` as well as a plain `Json<T>`.
+
 - **A field the server does not have is now an error.** Every request body carries
   `deny_unknown_fields` and goes through `ApiJson` (`src/api/extract.rs`), so a misspelled or
   invented field is a 400 naming it and listing the ones that exist. serde's default -- ignore
@@ -289,6 +295,14 @@ releases. Everything below is unreleased work on `main`.
 - A dropped table stays dropped; an evicted table is no longer erased by the next snapshot.
 
 ### Removed
+
+- **Two scripts that tested things the server no longer has.** `scripts/test_index_status.py`
+  called `/tables/{t}/index_status`, which answers 404, and `scripts/test_sync_insert.py`
+  compared "sync" against "async" inserts by sending `?sync=true` -- a query parameter no
+  handler has ever read -- so it timed two runs of the same path and reported the difference as
+  a finding. `scripts/README.md` now says what each of the remaining 33 is for and that none of
+  them is the gate; `test_upsert_fix.sh` read `.data.results`, which the search endpoint stopped
+  returning, so it had been failing on every run against a working server.
 
 - **A second, dead `UpdateRecordRequest`.** `types::record` had one with `sparse_vector` and
   an `expected_version` for optimistic locking; nothing constructed or deserialised it, and

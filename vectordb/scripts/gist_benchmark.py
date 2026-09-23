@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GIST-960 数据集基准测试 - LMDB 存储性能测试
+GIST-960 数据集基准测试（通过 HTTP API，存储由服务端配置决定）
 
 测试项目：
 1. 插入性能（不同批次大小）
@@ -67,7 +67,7 @@ def generate_gist_like_vector(seed=None):
 
 def test_insert_performance():
     """测试 1: 插入性能（不同批次大小）"""
-    print_header("测试 1: 插入性能测试（GIST-960，LMDB 存储）")
+    print_header("测试 1: 插入性能测试（GIST-960）")
 
     table_name = f"gist_insert_{int(time.time())}"
 
@@ -439,14 +439,15 @@ def test_concurrent_search():
 
 def generate_report(insert_results, search_results, recall_result, concurrent_results):
     """生成测试报告"""
-    print_header("GIST-960 LMDB 性能测试报告")
+    print_header("GIST-960 性能测试报告")
 
     report = {
         "test_time": datetime.now().isoformat(),
         "config": {
             "dimension": DIM,
             "distance_metric": DISTANCE_METRIC,
-            "storage_type": "LMDB",
+            # The LMDB backend was removed; the server decides where rows live (DXMT_RECORD_STORE).
+            "storage_type": "server-configured",
             "index_type": "HNSW"
         },
         "results": {
@@ -498,14 +499,14 @@ def main():
     """主测试流程"""
     print(f"{Colors.BOLD}{Colors.BLUE}")
     print("=" * 80)
-    print("  GIST-960 基准测试 - LMDB 存储性能评估")
+    print("  GIST-960 基准测试")
     print("=" * 80)
     print(f"{Colors.END}")
 
     print(f"\n配置信息:")
     print(f"  向量维度: {DIM}")
     print(f"  距离度量: {DISTANCE_METRIC}")
-    print(f"  存储类型: LMDB")
+    print("  存储类型: 由服务端配置决定（DXMT_RECORD_STORE / DXMT_VECTOR_STORE）")
     print(f"  索引类型: HNSW")
 
     # 运行测试
