@@ -1,0 +1,118 @@
+# Support Matrix
+
+**The answer to "can I use this?"** — separate from "does this module exist?" and from "is it
+wired up?". A module being present in this repository is not, by itself, a promise that it is
+safe to use: this tree contains modules that compile, carry unit tests, and are reached by no
+binary.
+
+This is a single-node database. Distributed mode was designed, was never implemented, and is
+not being worked on — `cluster/` and `consensus/` are scaffolding. Everything below describes
+one process.
+
+Numbers quoted here were measured on one machine with the harness in this repository; the
+README carries the method beside each headline figure.
+
+## Supported Alpha Surface
+
+The following features are part of the intended single-node Alpha contract:
+
+| Area | Supported path | Notes |
+| --- | --- | --- |
+| Server | `vectordb serve` | Axum HTTP server; standard routes live under `/api/v1`. |
+| Simple API | `vectordb serve --simple` | Zero-config collection routes. Note the wire shape: `/add` takes `documents` + optional `embeddings`, `/query` takes `query` + optional `embedding`, and each result's `distance` field actually carries a **similarity** (higher is better, results ordered descending, and not bounded to [0, 1] — a measured pair is 1.33 and 0.67). Chroma, whose shape this mirrors, returns a real distance where *lower* is better, so a client written against Chroma reads this backwards. Renaming it is a breaking change to an unreleased API and is worth making before release. |
+| Tables | Create, list, alter, delete, branch | Table configuration is persisted in WAL and snapshots. |
+| Records | Insert/upsert, get, update, delete, list | JSON payloads, versions, sparse vectors and named vectors are retained. |
+| Concurrent insert and search | Supported | Verified by `StreamingPerformanceCase`, which ingests and searches at once: recall 0.508 -> 0.993 across the four ingest stages at 1,777 -> 3,301 concurrent QPS. Until `0ed359b` the self-quantization at 65,536 rows trained its codebooks inside the index write lock, freezing every read and write on the table for the duration -- 56 s on the shipped 192-subspace default, and a 47.7 s concurrent p99 in that one window. Training now runs with no lock held. |
+| Capacity | Bounded by ingest rate, not by memory, on a 121 GB machine | `CapacityDim960` loaded 27.8M x 960-dim vectors on 13,506 MB resident (0.49 KB a row) and was still going when the two-hour window closed; `CapacityDim128` 4.8M x 128-dim on 2,413 MB. Neither reached the case's terminus, which is exhausting memory: at 0.5 KB a row that needs more than 200M rows. |
+| Dense search | HNSW-PQ (the default), HNSW, brute force | A new table is HNSW-PQ: an exact graph below 65,536 rows, PQ codes above with an exact rerank of 5k candidates from the row file. Accepted at 1M and 10M against exact HNSW (recall@100 within 0.2 points, 1.9x the QPS, 4.66 GB resident against 66.9 GB at 10M). `DXMT_MEMORY_OPTIMIZATION=false` restores the size-based selector (brute force / HNSW). `ef_search` doubles per decade of rows above a million, read at search time (`e0e65fb`): a fixed budget loses recall as the graph grows, and segmented engines get that growth for free from their segment count. **Full standard-case coverage, one binary, 2026-09-09**: 768d 1M 0.9806/6,310 QPS, 10M 0.9793/3,682; 1536d 50K 0.9962/5,577, 500K 0.9897/4,489, 5M 0.9816/4,281; 1024d 1M 0.9488/5,900, 10M 0.9640/3,741. The 1024d figures are lower because Bioasq needs more traversal budget than Cohere at the same scale, not because the codes lose more -- the accurate mode reaches 0.9786 on the same codes. The rule is calibrated on Cohere; a different corpus may want a different `ef_search`. A head-to-head comparison against other engines on the same machine exists in the internal measurement notes and is deliberately not quoted here: a competitive number is worth publishing only beside the full method and the tuning used on both sides. |
+| Filtering | Payload equality, range and string operations | Payload indexes are an optimization; `Record::matches_filter` remains the source of truth, and the index is only allowed to answer where the two provably agree. **Known cost, measured 2026-09-09**: a numeric field is indexed as one inverted set per distinct value, so a range condition walks every distinct value of the field. On a field with a value per row (the benchmark filters on the primary key) that is O(table): 10M rows at 1% selectivity is 108.8 QPS and a 236 ms serial p99, against 3,682 QPS unfiltered. The same structure costs 2.5 GB of resident memory for one integer field at 10M rows (7,149 MB against 4,659 MB with no payload), 250 bytes a row to store an i64. Low-cardinality fields are unaffected -- the inverted set is the right shape for them. |
+| Persistence | Local WAL, local snapshots, backup directory, row files | The server uses `new_with_wal`; `DXMT_WAL_DIR` controls the location. Records (`wal/records/<table>.rec` + `.log`) and full vectors (`wal/vectors/<table>.f32`, or `.f16` with `DXMT_VECTOR_F16=1`) are row files beside the WAL; a snapshot of such a table carries the index and no records, so a 10M snapshot takes 7 s rather than 108 s. A backup must include them. |
+| Recovery | Snapshot load followed by WAL replay | A corrupt snapshot is a startup error after the covered WAL has been compacted. |
+| Durability failure | Mutations return HTTP 503 and the process becomes read-only until restart | The failed mutation is not acknowledged; it may have reached memory and is not guaranteed to survive recovery. `snapshot` and `backup` also refuse in this state — deliberately, so an unacknowledged in-memory write cannot become a new durable frontier — so a backup has to be taken from the on-disk WAL and snapshot directory instead. |
+| Text search | Tantivy/BM25 via `/search/text` | Requires the `text-bm25` feature and table text configuration. |
+| Hybrid search | Vector/text endpoint `/search/hybrid` | Sparse-vector fusion is not part of the Alpha contract. |
+| Client surface | Python, JavaScript, Go and Rust clients | Every route each one calls is listed in `tests/api_contract_test.rs` and served by the router, and all four run against a live server in CI. The LangChain, LlamaIndex and LangGraph adapters go through the Python client and have live suites of their own. |
+| Authentication | `DXMT_API_KEY`, optional | Unset means open, which is what every comparable database ships. When set, every route but `/live`, `/ready` and `/health` requires `api-key` or `Authorization: Bearer`, compared in constant time. Every client can send it. |
+| Request validation | Unknown fields and parameters are refused | A body or query string carrying a field the server does not have is a 400 naming it, rather than being accepted and ignored — which is how `mode`, `alpha` and `named_vectors` each spent a period being sent, dropped, and answered wrongly. |
+| Paging | `records/list` by cursor | `next_cursor` goes back as `cursor`, and a record present for a whole scroll is returned exactly once however the table is written to meanwhile. An offset is still accepted, and still shifts under concurrent inserts. |
+| Ground truth | `search_mode: "exact"` | Scores every live row, so recall is measurable on your own data rather than only against a published dataset. Refused above `DXMT_EXACT_SCAN_MAX` rows (default 1,000,000) and for named vector spaces. |
+| Operations | `/health`, `/live`, `/ready`, `/health/metrics` | `/live` is liveness; `/ready` is authoritative readiness and returns 503 when local durability is degraded. |
+
+## Experimental or Not Yet Supported
+
+These modules may compile or have unit tests, but they are not part of the stable Alpha promise:
+
+| Area | Current status | Required before promotion |
+| --- | --- | --- |
+| HNSW-PQ below 65,536 rows | Exact graph; the codebooks are not trained until then | Nothing — it is the same graph HNSW builds. Listed so nobody expects a 10,000-row table to be smaller than under HNSW. |
+| Object storage | Snapshot and WAL mirroring can be enabled | Recovery, failure injection and multi-process safety tests. |
+| Partitioned IVF | Implemented behind the adaptive path | Long-running maintenance and remote-segment recovery tests. |
+| DiskANN / ScaNN / QuantizedIVF | Not selectable as stable indexes | Complete index implementations and round-trip tests. |
+| EnhancedDiskANN | Reachable only with `DXMT_MEMORY_OPTIMIZATION=false`: the size-based selector picks it above a million rows once a notional in-memory HNSW would exceed half the machine's RAM (~18M rows at 768d on a 121 GB box, ~2M on a 16 GB one). 748 lines, a real search, **no delete** (`NOT_IMPLEMENTED`) and **no test of its own**. Until 2026-09-07 the periodic sweep routed *every* table here at that size, whatever it was created with. | Delete support and a round-trip test before anything is routed here by default. |
+| LMDB / RocksDB | Alternate modules; not the standard server path | A documented factory path and complete search semantics. |
+| Cluster / consensus | Experimental scaffolding | Replication, split-brain and recovery semantics. |
+| Multimodal / Rust embeddings | Experimental or placeholder implementations: these modules are reachable from the server but return placeholder vectors | Real model backends and reproducible integration tests. Until then they should not be in `src/`; `planning/` is where this repo keeps code a binary cannot usefully reach. |
+| GPU acceleration | Optional build and benchmark path | Hardware matrix and correctness comparison against CPU. |
+| GraphQL / WebSocket / MCP | Optional interfaces | Contract tests and versioned compatibility guarantees. |
+
+Unsupported operations must return an explicit `NOT_IMPLEMENTED` error. They must not silently
+fall back to brute-force search or discard part of a query.
+
+## Runtime Data Path
+
+The supported server path is intentionally narrow:
+
+```text
+REST / simple API / MCP
+              |
+              v
+  IntelligentIndexedStorage
+      |       |       |
+  records   indexes   payload/text indexes
+      |
+      +--> local WAL --> snapshot manifest and segments
+                              |
+                              +--> optional object storage mirror
+```
+
+Records and indexes are resident in the process while a table is hot. WAL is the durability
+boundary for acknowledged writes. Snapshots reduce replay time and are the only copy of data
+covered by a compacted WAL, so the snapshot directory must be included in backups.
+
+## Probe Contract
+
+- `GET /live` (and `/health/live`) only proves that the process and HTTP runtime are responding.
+- `GET /ready` (and `/health/ready`) proves that the local WAL directory is accessible and the
+  storage instance has not entered the post-fsync-failure read-only state. It returns HTTP 503
+  when not ready. The same readiness routes are mounted under `/api/v1` for SDKs.
+- `GET /health` is a diagnostic health document and may report load/backpressure state; it is not
+  a replacement for the readiness probe.
+- `GET /health/metrics` includes operation counters plus WAL/snapshot frontier, last-sync and
+  last-snapshot timestamps, snapshot failure diagnostics, and resident-table information. These
+  metrics are process-local and are not a distributed monitoring contract.
+
+## Configuration Contract
+
+For the Alpha release, the documented persistence controls are:
+
+```text
+DXMT_WAL_DIR
+DXMT_SNAPSHOT_INTERVAL_SECS
+DXMT_EVICTION_INTERVAL_SECS
+DXMT_REINDEX_INTERVAL_SECS
+DXMT_PARTITION_THRESHOLD_MB
+DXMT_COMPRESSION
+```
+
+`DXMT_STORAGE_TYPE` is currently parsed but does not select the server implementation. It must not
+be presented as a backend switch until it is connected to the actual construction path.
+
+## Promotion Rules
+
+A feature can move into the supported table only when it has:
+
+1. A documented API and configuration contract.
+2. A clean restart and recovery test.
+3. A corruption or dependency-failure test where applicable.
+4. A deterministic CI entry point.
+5. No silent fallback that changes the requested semantics.

@@ -456,7 +456,9 @@ it.
 
 ## Known Limitations
 
-These are real gaps, not roadmap aspirations:
+These are real gaps, not roadmap aspirations. [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md)
+is the per-subsystem version of this list: what is part of the single-node contract, what is
+experimental, and what a feature has to have before it moves between the two.
 
 - **A backup may only be written inside `DXMT_BACKUP_ROOT`**, which defaults to the WAL
   directory's parent. `POST /backup` takes the destination from the request body, and this
