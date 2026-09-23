@@ -96,7 +96,7 @@ jobs:
       # ever compiled under `-D warnings`. A weaker gate here means the opt-in features drift
       # to a different standard than the code they sit next to.
       - name: API and text integrations
-        run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,api-grpc,api-dashboard,metrics -- -D warnings
+        run: cargo clippy --all-targets --features text-bm25,api-swagger,api-graphql,api-ws,api-grpc,api-dashboard -- -D warnings
 
       - name: Object store backend
         run: cargo check --features s3-storage

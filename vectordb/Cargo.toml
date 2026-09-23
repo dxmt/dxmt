@@ -226,7 +226,6 @@ crc32fast = "1.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # External services
-prometheus = { version = "0.13", optional = true }
 
 # CLI and UI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -359,7 +358,6 @@ simd = ["embeddings"]
 # Was an empty feature: `--features jemalloc` compiled and changed nothing. Now it swaps
 # the global allocator, which is the point.
 jemalloc = ["tikv-jemallocator"]
-metrics = ["prometheus"]
 cluster = ["consul", "dep:tonic", "dep:prost", "hash_ring", "consensus"]
 consensus = []
 # Multimodal support (experimental - ONNX Runtime API changes in progress)

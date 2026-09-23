@@ -92,6 +92,7 @@ async fn test_basic_state_recreation() {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
 
         storage.search("state_test", query).await.unwrap()
@@ -125,6 +126,7 @@ async fn test_basic_state_recreation() {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
 
         storage.search("state_test", query).await.unwrap()
@@ -197,6 +199,7 @@ async fn test_fast_data_loading() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let results = storage.search("recovery_test", query).await.unwrap();
@@ -262,6 +265,7 @@ async fn test_index_consistency_after_rebuild() {
                 limit: 10,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
+                ..Default::default()
             };
             let results = storage.search("rebuild_test", query).await.unwrap();
             all_results.push(results);
@@ -299,6 +303,7 @@ async fn test_index_consistency_after_rebuild() {
                 limit: 10,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
+                ..Default::default()
             };
             let results = storage.search("rebuild_test", query).await.unwrap();
             all_results.push(results);

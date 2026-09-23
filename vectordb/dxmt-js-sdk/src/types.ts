@@ -138,9 +138,21 @@ export interface SearchParams {
   vector: Vector;
   k?: number;
   filter?: Filter;
-  ef_search?: number;
   include_metadata?: boolean;
   include_vectors?: boolean;
+  /**
+   * How hard to search, as a mode rather than a raw `ef`.
+   *
+   * `ef_search` used to be here and was sent on every search. The server has no such field:
+   * it derives the traversal budget from this mode and from the table's size, so the number
+   * was ignored — and since the server started refusing unknown fields, sending it fails the
+   * request outright. `exact` scores every row, which is how recall is measured on real data.
+   */
+  search_mode?: 'fast' | 'normal' | 'accurate' | 'auto' | 'exact';
+  /** Drop hits scoring below this. Scores are similarities, so it is a floor: higher is nearer. */
+  score_threshold?: number;
+  /** Return only these payload keys instead of the whole payload. */
+  payload_fields?: string[];
 }
 
 /**

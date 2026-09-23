@@ -90,6 +90,7 @@ async fn test_tiered_search_memory_only() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage
@@ -161,6 +162,7 @@ async fn test_tiered_search_with_warm_tier() {
         limit: 20,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage
@@ -241,6 +243,7 @@ async fn test_tiered_search_all_tiers() {
         limit: 30,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage
@@ -307,6 +310,7 @@ async fn test_hot_vector_promotion() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     for _ in 0..10 {
@@ -401,6 +405,7 @@ async fn test_search_result_reranking() {
         limit: 3,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage
@@ -461,6 +466,7 @@ async fn test_early_termination_optimization() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage
@@ -514,6 +520,7 @@ mod performance_benchmarks {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
         for _ in 0..10 {
             let _ = tiered_storage.search("benchmark", query.clone()).await;

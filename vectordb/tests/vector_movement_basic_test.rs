@@ -204,6 +204,7 @@ async fn test_promotion_on_frequent_access() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     for i in 0..15 {

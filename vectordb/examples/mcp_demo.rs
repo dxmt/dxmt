@@ -100,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limit: 2,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
     let results = storage.search("products", query).await?;
     println!("\nVector search results (top 2):");

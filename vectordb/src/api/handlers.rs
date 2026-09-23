@@ -229,7 +229,17 @@ pub struct UpdateRecordRequest {
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BatchDeleteRequest {
+    /// The records to delete. Exactly one of `ids` and `filter` is given.
+    #[serde(default)]
     pub ids: Vec<String>,
+    /// Delete everything this filter matches, instead of naming ids.
+    ///
+    /// Without it, "delete every record belonging to tenant X" could not be expressed: the
+    /// caller had to page the table, collect ids and send them back, a round trip per page and
+    /// at the mercy of anything written meanwhile. The filter is the same one `search` and
+    /// `records/list` take, and is read the same way.
+    #[serde(default)]
+    pub filter: Option<crate::types::Filter>,
 }
 
 /// 按元数据列出记录的请求
@@ -938,6 +948,44 @@ pub async fn delete_records(
     Path(table_name): Path<String>,
     ApiJson(request): ApiJson<BatchDeleteRequest>,
 ) -> impl IntoResponse {
+    // One selector or the other. Both would have to mean intersection or union, and neither
+    // reading is obvious enough to guess at; neither means "delete the whole table", which is
+    // not something to do by omission.
+    match (request.ids.is_empty(), &request.filter) {
+        (true, None) => {
+            return ApiResponse::error(ApiError::new(
+                "INVALID_INPUT",
+                "give either `ids` or `filter`: an empty request would otherwise read as \
+                 \"delete everything\"",
+            ))
+            .into_response();
+        }
+        (false, Some(_)) => {
+            return ApiResponse::error(ApiError::new(
+                "INVALID_INPUT",
+                "give either `ids` or `filter`, not both",
+            ))
+            .into_response();
+        }
+        _ => {}
+    }
+
+    if let Some(filter) = request.filter {
+        return match state
+            .storage
+            .delete_records_matching(&table_name, &filter)
+            .await
+        {
+            Ok(deleted) => ApiResponse::success(serde_json::json!({
+                "deleted_count": deleted,
+                // There is no "requested" count for a filter: what it matched is what it was.
+                "requested_count": deleted,
+            }))
+            .into_response(),
+            Err(e) => error_response(e),
+        };
+    }
+
     let requested_count = request.ids.len();
     match state.storage.delete_records(&table_name, request.ids).await {
         // `deleted` is what was actually there, not what was asked about. These were the same
@@ -955,6 +1003,51 @@ pub async fn delete_records(
 }
 
 // ============ 搜索API ============
+
+/// How many records a filter matches.
+///
+/// `GET /tables/{t}/stats` carries a record count for the whole table and nothing for a
+/// condition, so "how many of these are there" meant paging the matches and counting them
+/// client-side — every byte of every match on the wire to produce one integer. The count is
+/// exact: there is no sampled mode, and a filter here is read exactly as `search` and
+/// `records/list` read it.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CountRecordsRequest {
+    /// Count only what this matches. Omitted, it counts the table.
+    #[serde(default)]
+    pub filter: Option<crate::types::Filter>,
+}
+
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/records/count",
+    params(("table_name" = String, Path, description = "表名", example = "demo")),
+    request_body(content = CountRecordsRequest, example = json!({
+        "filter": {"must": [{"key": "topic", "operation": {"type": "Equal", "value": "rust"}}]}
+    })),
+    responses(
+        (status = 200, description = "匹配的记录数", body = ApiResponse),
+        (status = 400, description = "过滤条件不合法", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse),
+    ),
+    tag = "records"
+))]
+pub async fn count_records(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    ApiJson(request): ApiJson<CountRecordsRequest>,
+) -> impl IntoResponse {
+    match state
+        .storage
+        .count_records(&table_name, request.filter.as_ref())
+        .await
+    {
+        Ok(count) => ApiResponse::success(serde_json::json!({ "count": count })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
 
 /// Nearest neighbours to a query vector.
 ///
@@ -1757,6 +1850,157 @@ pub async fn execute_dxql(
 /// Detailed server health metrics endpoint
 ///
 /// Returns comprehensive health metrics for monitoring and debugging.
+/// The same numbers as `/health/metrics`, in Prometheus text exposition format.
+///
+/// A JSON health document is not something a monitoring system can scrape: Prometheus, and
+/// everything that speaks its format, wants `# HELP` / `# TYPE` and one sample per line. Until
+/// this existed, running DXMT under the monitoring every other database assumes meant writing
+/// an exporter first -- and the `metrics` cargo feature that suggested otherwise pulled in the
+/// `prometheus` crate and was used by no code at all.
+///
+/// Rendered by hand rather than through that crate, so it is in the default build: needing a
+/// special build to be observable is the wrong way round.
+///
+/// Timestamps are emitted as Unix seconds, which is the convention for a `_timestamp_seconds`
+/// gauge; an absent one is omitted rather than sent as zero, because zero is 1970 and a
+/// dashboard cannot tell that from "never happened" if it is sent a number.
+pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    use std::fmt::Write as _;
+
+    let metrics = state.server_health.get_metrics();
+    let storage = state.storage.health_snapshot().await;
+    let mut out = String::with_capacity(2048);
+
+    fn gauge(out: &mut String, name: &str, help: &str, value: String) {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        let _ = writeln!(out, "{name} {value}");
+    }
+
+    gauge(
+        &mut out,
+        "dxmt_up",
+        "1 when the storage layer is ready to serve, 0 while it is not.",
+        u8::from(storage.ready).to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_durability_degraded",
+        "1 after a local WAL sync failure, when the process is read-only until restart.",
+        u8::from(storage.durability_degraded).to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_tables",
+        "Tables that exist.",
+        storage.table_count.to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_tables_resident",
+        "Tables held in memory; the rest are rehydrated on the next query that needs them.",
+        storage.resident_table_count.to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_records",
+        "Records across every table.",
+        storage.total_records.to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_index_building",
+        "1 while an index build or rebuild is running.",
+        // A bool renders as "true"/"false", which is not a sample value Prometheus can parse.
+        u8::from(metrics.index_building).to_string(),
+    );
+    gauge(
+        &mut out,
+        "dxmt_recent_errors",
+        "Errors in the recent window the backpressure logic watches.",
+        metrics.recent_errors.to_string(),
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_ongoing_operations Requests in flight, by kind."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_ongoing_operations gauge");
+    for (kind, value) in [
+        ("insert", metrics.ongoing_inserts),
+        ("search", metrics.ongoing_searches),
+        ("delete", metrics.ongoing_deletes),
+        ("table", metrics.ongoing_table_ops),
+    ] {
+        let _ = writeln!(out, "dxmt_ongoing_operations{{kind=\"{kind}\"}} {value}");
+    }
+
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_operations_total Operations completed since process start."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_operations_total counter");
+    let _ = writeln!(out, "dxmt_operations_total {}", metrics.total_operations);
+
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_snapshot_failures_total Snapshot attempts that failed since process start."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_snapshot_failures_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_snapshot_failures_total {}",
+        storage.snapshot_failures
+    );
+
+    // The durability frontier: how much a restart would replay, and how far behind the last
+    // snapshot is. `wal_next_sequence - snapshot_wal_next_sequence` is the replay depth.
+    if let Some(sequence) = storage.wal_next_sequence {
+        gauge(
+            &mut out,
+            "dxmt_wal_next_sequence",
+            "The sequence number the next WAL entry will take.",
+            sequence.to_string(),
+        );
+    }
+    if let Some(sequence) = storage.snapshot_wal_next_sequence {
+        gauge(
+            &mut out,
+            "dxmt_snapshot_wal_next_sequence",
+            "The WAL sequence the newest installed snapshot covers up to.",
+            sequence.to_string(),
+        );
+    }
+    for (name, help, value) in [
+        (
+            "dxmt_last_wal_sync_timestamp_seconds",
+            "Unix time of the most recent successful WAL fsync.",
+            storage.last_wal_sync_at.as_deref(),
+        ),
+        (
+            "dxmt_last_snapshot_timestamp_seconds",
+            "Unix time of the most recently installed snapshot.",
+            storage.last_snapshot_at.as_deref(),
+        ),
+    ] {
+        if let Some(seconds) = value
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp())
+        {
+            gauge(&mut out, name, help, seconds.to_string());
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    )
+}
+
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     get,
     path = "/api/v1/health/metrics",

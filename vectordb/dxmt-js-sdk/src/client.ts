@@ -22,6 +22,7 @@ import {
   FullTextSearchParams,
   HybridSearchParams,
   Metadata,
+  Filter,
   ScrollOptions,
   UploadOptions,
   UploadResult,
@@ -387,6 +388,33 @@ export class DXMTClient {
    * ```
    */
   /**
+   * How many records a filter matches, or how many the table holds.
+   *
+   * Counted server-side from the same index that answers the filter. Without it the only way
+   * to this number was to page every match and count them here, which puts every matching
+   * record on the wire to produce one integer.
+   *
+   * @example
+   * ```typescript
+   * const total = await client.count('documents');
+   * const english = await client.count('documents', {
+   *   must: [{ key: 'lang', operation: { type: 'Equal', value: 'en' } }],
+   * });
+   * ```
+   */
+  async count(tableName: string, filter?: Filter): Promise<number> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    const answer = await this.request<{ count: number }>(
+      'POST',
+      `/tables/${encodeURIComponent(tableName)}/records/count`,
+      filter === undefined ? {} : { filter }
+    );
+    return answer.count;
+  }
+
+  /**
    * Every record of a table, newest first, fetched a page at a time.
    *
    * Pages by cursor rather than offset: every record present for the whole scroll comes back
@@ -691,14 +719,11 @@ export class DXMTClient {
     if (!params.table_name) {
       throw new DXMTValidationError('Table name is required');
     }
-    if (!params.record_ids && !params.filter) {
+    if (!params.record_ids === !params.filter) {
+      // Both would have to mean intersection or union, and neither reading is obvious;
+      // neither means "delete the whole table", which is not something to do by omission.
       throw new DXMTValidationError(
-        'Either record_ids or filter is required'
-      );
-    }
-    if (!params.record_ids && params.filter) {
-      throw new DXMTValidationError(
-        'The server API currently supports delete by record_ids only'
+        'Give either record_ids or filter, not both and not neither'
       );
     }
 
@@ -706,9 +731,9 @@ export class DXMTClient {
       await this.request<void>(
         'DELETE',
         `/tables/${encodeURIComponent(params.table_name)}/records`,
-        {
-          ids: params.record_ids,
-        }
+        params.record_ids
+          ? { ids: params.record_ids }
+          : { filter: params.filter }
       );
     } catch (error) {
       if (error instanceof DXMTError) throw error;
@@ -763,9 +788,15 @@ export class DXMTClient {
           vector: params.vector,
           top_k: params.k || 10,
           filter: params.filter,
-          ef_search: params.ef_search,
           with_payload: params.include_metadata !== false,
           with_vector: params.include_vectors || false,
+          ...(params.search_mode === undefined ? {} : { search_mode: params.search_mode }),
+          ...(params.score_threshold === undefined
+            ? {}
+            : { score_threshold: params.score_threshold }),
+          ...(params.payload_fields === undefined
+            ? {}
+            : { payload_fields: params.payload_fields }),
         }
       );
 

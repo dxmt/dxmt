@@ -136,6 +136,7 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
                             }),
                             with_payload: true,
                             with_vector: false,
+                            ..Default::default()
                         };
 
                         let result = storage.search(table_name, query).await;
@@ -184,6 +185,7 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
                 filter: None,
                 with_payload: true,
                 with_vector: false,
+                ..Default::default()
             };
 
             let result = storage.search(table_name, query).await;

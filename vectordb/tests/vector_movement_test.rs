@@ -261,6 +261,7 @@ async fn test_automatic_promotion_on_access() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     for _ in 0..20 {

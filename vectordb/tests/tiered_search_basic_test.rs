@@ -117,6 +117,7 @@ async fn test_tiered_storage_insert_and_search() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let search_result = tiered_storage.search("test_search", query).await;
@@ -178,6 +179,7 @@ async fn test_tier_promotion_policy() {
         limit: 5,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     // Search multiple times
@@ -237,6 +239,7 @@ async fn test_search_result_sorting() {
         limit: 20,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage.search("test_sorting", query).await.unwrap();
@@ -295,6 +298,7 @@ async fn test_search_with_filters() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = tiered_storage.search("test_filters", query).await.unwrap();

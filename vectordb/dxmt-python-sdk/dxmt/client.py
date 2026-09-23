@@ -901,24 +901,75 @@ class DXMTClient:
             msg = f"Connection error updating record {record_id}: {e}"
             raise DXMTConnectionError(msg) from e
 
-    def delete_records(
+    def count(
         self,
         table_name: str,
-        ids: list[str],
-    ) -> dict[str, Any]:
-        """Delete records by IDs.
+        *,
+        filter: Optional[Filter] = None,
+    ) -> int:
+        """How many records a filter matches, or how many the table holds.
+
+        The count is computed server-side from the same index that answers the filter: before
+        this existed the only way to get it was to page every match and count them here, which
+        put every matching record on the wire to produce one integer.
 
         Args:
             table_name: Name of the table.
-            ids: List of record IDs to delete.
+            filter: Count only what this matches. Omitted, it counts the table.
 
         Returns:
-            Response data from server.
+            The number of matching records.
 
         Raises:
+            DXMTError: If the request fails.
+        """
+        body: dict[str, Any] = {}
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
+        try:
+            response = self._client.post(
+                f"/tables/{_seg(table_name)}/records/count", json=body
+            )
+            response.raise_for_status()
+            return int(self._response_data(response.json())["count"])
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to count records: {e.response.text}"
+            raise DXMTError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error while counting: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    def delete_records(
+        self,
+        table_name: str,
+        ids: Optional[list[str]] = None,
+        *,
+        filter: Optional[Filter] = None,
+    ) -> dict[str, Any]:
+        """Delete records by id, or everything a filter matches.
+
+        Exactly one of `ids` and `filter`. Deleting by filter is one request whatever it
+        matches: before it existed, "remove everything belonging to tenant X" meant paging the
+        table, collecting ids and sending them back, a round trip per page and at the mercy of
+        anything written meanwhile.
+
+        Args:
+            table_name: Name of the table.
+            ids: Record IDs to delete.
+            filter: Delete every record this matches instead (a `Field` expression or a dict).
+
+        Returns:
+            Response data from server, including `deleted_count`.
+
+        Raises:
+            ValueError: If both or neither selector is given.
             DXMTError: If deletion fails.
         """
-        payload = {"ids": ids}
+        converted = convert_simple_filter_to_dxmt(filter)
+        if (ids is None) == (converted is None):
+            raise ValueError("give either ids or filter, not both and not neither")
+        payload = {"ids": ids} if ids is not None else {"filter": converted}
         try:
             response = self._client.request(
                 "DELETE",
@@ -937,10 +988,15 @@ class DXMTClient:
     async def adelete_records(
         self,
         table_name: str,
-        ids: list[str],
+        ids: Optional[list[str]] = None,
+        *,
+        filter: Optional[Filter] = None,
     ) -> dict[str, Any]:
-        """Async delete records by IDs."""
-        payload = {"ids": ids}
+        """Async version of :meth:`delete_records`; same one-selector rule."""
+        converted = convert_simple_filter_to_dxmt(filter)
+        if (ids is None) == (converted is None):
+            raise ValueError("give either ids or filter, not both and not neither")
+        payload = {"ids": ids} if ids is not None else {"filter": converted}
         try:
             response = await self.async_client.request(
                 "DELETE",
@@ -1103,6 +1159,8 @@ class DXMTClient:
         limit: Optional[int] = None,
         filter: Optional[Filter] = None,
         search_mode: Optional[str] = None,
+        score_threshold: Optional[float] = None,
+        payload_fields: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
 
@@ -1142,6 +1200,13 @@ class DXMTClient:
         }
         if search_mode is not None:
             payload["search_mode"] = search_mode
+        # A floor on the similarity the server returns (higher is nearer), not on a distance.
+        if score_threshold is not None:
+            payload["score_threshold"] = score_threshold
+        # Only these payload keys come back. A payload is often mostly the text the embedding
+        # came from, so a page of hits can be a megabyte of JSON to deliver two fields.
+        if payload_fields is not None:
+            payload["payload_fields"] = payload_fields
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search",
@@ -1165,6 +1230,8 @@ class DXMTClient:
         limit: Optional[int] = None,
         filter: Optional[Filter] = None,
         search_mode: Optional[str] = None,
+        score_threshold: Optional[float] = None,
+        payload_fields: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
@@ -1192,6 +1259,13 @@ class DXMTClient:
         }
         if search_mode is not None:
             payload["search_mode"] = search_mode
+        # A floor on the similarity the server returns (higher is nearer), not on a distance.
+        if score_threshold is not None:
+            payload["score_threshold"] = score_threshold
+        # Only these payload keys come back. A payload is often mostly the text the embedding
+        # came from, so a page of hits can be a megabyte of JSON to deliver two fields.
+        if payload_fields is not None:
+            payload["payload_fields"] = payload_fields
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search",

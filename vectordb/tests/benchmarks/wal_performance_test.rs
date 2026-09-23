@@ -169,6 +169,7 @@ async fn bench_mixed_workload() {
                 limit: 10,
                 search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
                 vector_name: None,
+                ..Default::default()
             };
             let _ = storage.search("benchmark_table", query).await.unwrap();
         }

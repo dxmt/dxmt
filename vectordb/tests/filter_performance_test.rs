@@ -95,6 +95,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         with_vector: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = storage.search("test_pre_filter", query).await.unwrap();
@@ -197,6 +198,7 @@ async fn test_post_filtering_with_low_selective_filter() {
         with_vector: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = storage.search("test_post_filter", query).await.unwrap();
@@ -289,6 +291,7 @@ async fn test_filter_with_in_operation() {
         with_vector: false,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = storage.search("test_in_filter", query).await.unwrap();

@@ -24,6 +24,48 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **`score_threshold` on a search.** A floor on the similarity the caller sees — higher is
+  nearer — not on the internal distance, which runs the other way: a threshold that silently
+  meant the distance would return exactly the hits it was asked to remove. It cannot make a
+  search find more; the index is still asked for `top_k` and the floor only removes, so a short
+  page means that was all there was above it.
+
+- **`payload_fields` on a search.** Return two keys instead of the whole payload. A payload is
+  often mostly the chunk of text the embedding came from, so a page of a hundred hits can be a
+  megabyte of JSON to deliver two fields. `with_payload` stays a boolean: making it polymorphic
+  the way Qdrant does would have touched 30 call sites across 13 files including the gRPC,
+  GraphQL and Python surfaces, for a projection.
+
+- **Recall after quantization is under test.** Every recall assertion in this repository ran on
+  a few thousand rows, and an HNSW-PQ index is an *exact* graph until 65,536 — so the path every
+  production table above that size takes had no accuracy guard anywhere, and a commit that broke
+  the codebooks, the encoding or the rerank went through green. `tests/quantized_recall_test.rs`
+  crosses the threshold at a lowered setting and measures both halves: **0.706 on the codes
+  alone, 1.000 after the exact rerank**. That gap is the claim the quantized design rests on,
+  and it is now the thing that fails if it stops being true.
+
+- **`GET /metrics`, in Prometheus text exposition format.** At the root, where a scrape
+  config expects it, in the default build — being observable should not need a special build.
+  It carries `dxmt_up`, the table and record counts, in-flight operations by kind, the
+  operation and snapshot-failure counters, and the durability frontier (WAL sequence, snapshot
+  sequence, last sync and last snapshot as Unix seconds). `tests/prometheus_metrics_test.rs`
+  parses every sample, which is how the first version's `dxmt_index_building false` — valid
+  JSON, rejected by every scraper — was caught. The `metrics` cargo feature pulled in the
+  `prometheus` crate and was used by no code at all; it is gone.
+
+- **Delete by filter.** `DELETE /tables/{t}/records` takes `filter` instead of `ids`, so
+  "remove everything belonging to tenant X" is one request. It used to mean paging the table,
+  collecting ids and sending them back — a round trip per page, at the mercy of anything
+  written meanwhile. Exactly one selector: both would have to mean intersection or union, and
+  neither reading is obvious; neither means "delete the table", which is not something to do
+  by omission. The JS SDK already took a `filter` and threw "the server API currently supports
+  delete by record_ids only" — a parameter that could only ever produce an error.
+
+- **`POST /tables/{t}/records/count`.** Exact, with or without a filter, from the same index
+  that answers the filter. Table stats carry a count for the table and nothing for a
+  condition, so counting matches meant putting every matching record on the wire to produce
+  one integer. Both SDKs have `count`.
+
 - **A LangGraph example, and the LangGraph and LlamaIndex suites now run.** `langgraph` and
   `llama-index-core` are installed in CI's live job, `dxmt-python-sdk/examples/langgraph_memory.py`
   is an agent whose long-term memory is a DXMT namespace, and the LlamaIndex integration tests
@@ -192,6 +234,12 @@ releases. Everything below is unreleased work on `main`.
   `EXPOSE`s it, so the container came up healthy and unreachable, with no volume, so every
   restart was an empty database. `make help` listed about half the targets; `make check-help`
   now fails when one is missing, and runs as part of `verify-core`.
+
+- **The JS SDK sent `ef_search` on every search, and the server has no such field.** It was
+  accepted and dropped for as long as unknown fields were ignored — a caller tuning the
+  traversal budget watched a number that did nothing — and once they started being refused, any
+  search carrying it failed outright. It is replaced by `search_mode`, which the server does
+  read, alongside the new `score_threshold` and `payload_fields`.
 
 - **The Go client can clear a payload.** `Update.Payload` is `map[string]any` with
   `omitempty`, which drops an empty map as readily as a nil one -- so "clear this payload"

@@ -697,6 +697,8 @@ impl StorageIntegration {
                 with_vector: true,
                 search_mode: crate::types::record::SearchMode::Normal,
                 vector_name: None,
+                payload_fields: None,
+                score_threshold: None,
             };
 
             match current_storage.search(&table.name, query).await {

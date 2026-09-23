@@ -75,6 +75,9 @@ cargo build --release --features api-swagger,api-graphql,api-ws
 asked. A query against an evicted table rehydrates it transparently, so without this a caller
 has no way to know the next one will pay for a fetch from object storage.
 
+`GET /metrics` is the Prometheus scrape endpoint, at the root where every scrape config
+expects it — the same numbers as below, in text exposition format, in the default build.
+
 `GET /health/metrics` (also `/api/v1/health/metrics`) includes the local durability frontier:
 `storage.wal_next_sequence`, `storage.last_wal_sync_at`, `storage.last_snapshot_at`, and
 `storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These

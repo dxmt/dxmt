@@ -108,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limit: 3,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
+                ..Default::default()
             },
         )
         .await?;
@@ -139,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limit: 2,
                 search_mode: SearchMode::Normal,
                 vector_name: None,
+                ..Default::default()
             },
         )
         .await?;

@@ -152,3 +152,83 @@ describe('hybridSearch fusion', () => {
     });
   });
 });
+
+describe('deleteRecords', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  it('sends a filter when one is given', async () => {
+    // The SDK took a `filter` and threw "the server API currently supports delete by
+    // record_ids only" — a parameter that could only ever produce an error.
+    fetchMock.mockResolvedValueOnce(ok({ deleted_count: 3 }));
+    const filter = { must: [{ key: 'tenant', operation: { type: 'Equal' as const, value: 'a' } }] };
+    await new DXMTClient().deleteRecords({ table_name: 't', filter });
+    expect(bodyOf(0)).toEqual({ filter });
+  });
+
+  it('sends ids when they are given', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ deleted_count: 1 }));
+    await new DXMTClient().deleteRecords({ table_name: 't', record_ids: ['a'] });
+    expect(bodyOf(0)).toEqual({ ids: ['a'] });
+  });
+
+  it('refuses both and neither', async () => {
+    const client = new DXMTClient();
+    await expect(client.deleteRecords({ table_name: 't' })).rejects.toThrow(/either/);
+    await expect(
+      client.deleteRecords({ table_name: 't', record_ids: ['a'], filter: { must: [] } })
+    ).rejects.toThrow(/either/);
+  });
+});
+
+describe('count', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  it('counts the table when no filter is given', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ count: 42 }));
+    expect(await new DXMTClient().count('t')).toBe(42);
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:9999/api/v1/tables/t/records/count');
+    expect(bodyOf(0)).toEqual({});
+  });
+
+  it('passes the filter through', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ count: 7 }));
+    const filter = { must: [{ key: 'lang', operation: { type: 'Equal' as const, value: 'en' } }] };
+    expect(await new DXMTClient().count('t', filter)).toBe(7);
+    expect(bodyOf(0)).toEqual({ filter });
+  });
+});
+
+describe('search parameters', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  const searched = async (params: Record<string, unknown>) => {
+    fetchMock.mockResolvedValueOnce(ok({ hits: [] }));
+    await new DXMTClient().search({ table_name: 't', vector: [1, 0], ...params });
+    return bodyOf(0);
+  };
+
+  it('sends no ef_search, which the server does not have', async () => {
+    // It was sent on every search. The server derives its traversal budget from search_mode
+    // and the table's size, so the number was ignored — and once unknown fields started being
+    // refused, sending it failed the request outright.
+    const body = await searched({});
+    expect(body).not.toHaveProperty('ef_search');
+  });
+
+  it('passes the mode, the floor and the projection through', async () => {
+    expect(
+      await searched({ search_mode: 'exact', score_threshold: 0.5, payload_fields: ['title'] })
+    ).toMatchObject({
+      search_mode: 'exact',
+      score_threshold: 0.5,
+      payload_fields: ['title'],
+    });
+  });
+
+  it('omits them when they were not asked for', async () => {
+    const body = await searched({});
+    for (const field of ['search_mode', 'score_threshold', 'payload_fields']) {
+      expect(body).not.toHaveProperty(field);
+    }
+  });
+});

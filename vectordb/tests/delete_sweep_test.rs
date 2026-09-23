@@ -254,6 +254,76 @@ fn a_deleted_record_is_gone_from_every_path() {
     );
 }
 
+/// Deleting by filter takes the record out of the same five places deleting by id does.
+///
+/// "Remove everything belonging to tenant X" could not be expressed at all before: the caller
+/// paged the table, collected ids and sent them back. The risk in the new path is that it is a
+/// *different* path — so it is asked the same question this file asks of every other one.
+#[test]
+fn a_filter_deletes_from_every_path_too() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let port = free_port();
+    let server = start(dir.path(), port);
+    seed(server.port);
+
+    // `mark: target` is `doomed` and `keep1`; `keep2` is ordinary and must survive.
+    let answer = call(
+        server.port,
+        "DELETE",
+        "/api/v1/tables/t/records",
+        Some(
+            r#"{"filter":{"must":[{"key":"mark","operation":{"type":"Equal","value":"target"}}]}}"#,
+        ),
+    )
+    .expect("no answer");
+    assert_eq!(answer["data"]["deleted_count"], 2, "{answer}");
+
+    let mut still_there = Vec::new();
+    for (path, found) in every_path(server.port) {
+        for gone in [DOOMED, "keep1"] {
+            if found.contains(&gone.to_string()) {
+                still_there.push(format!("  {path}: {gone} in {found:?}"));
+            }
+        }
+    }
+    assert!(
+        still_there.is_empty(),
+        "records deleted by filter came back through:\n{}",
+        still_there.join("\n")
+    );
+}
+
+/// The two selectors are exclusive, and an empty body is not "delete everything".
+#[test]
+fn a_delete_names_ids_or_a_filter_but_not_both_and_not_neither() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let port = free_port();
+    let server = start(dir.path(), port);
+    seed(server.port);
+
+    for body in [
+        r#"{}"#,
+        r#"{"ids":["doomed"],"filter":{"must":[{"key":"mark","operation":{"type":"Equal","value":"target"}}]}}"#,
+    ] {
+        let answer = call(
+            server.port,
+            "DELETE",
+            "/api/v1/tables/t/records",
+            Some(body),
+        )
+        .expect("no answer");
+        assert_eq!(answer["success"], false, "{body} was accepted: {answer}");
+        assert_eq!(answer["error"]["code"], "INVALID_INPUT", "{answer}");
+    }
+
+    // Nothing was deleted by either refusal.
+    let (_, all) = every_path(server.port)
+        .into_iter()
+        .find(|(path, _)| *path == "records/list, unfiltered")
+        .expect("the unfiltered list is one of the paths");
+    assert_eq!(all.len(), 3, "a refused delete removed something: {all:?}");
+}
+
 #[test]
 fn it_is_still_gone_after_a_restart() {
     // The indexes are rebuilt from the records on the way back up, so a record the *records*

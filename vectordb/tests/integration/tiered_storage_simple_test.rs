@@ -93,6 +93,7 @@ async fn test_basic_insert_and_search() {
         limit: 10,
         search_mode: SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let results = storage.search("basic_test", query).await.unwrap();
@@ -165,6 +166,7 @@ async fn test_memory_tier_performance() {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
         storage.search("perf_test", query).await.unwrap();
     }
@@ -183,6 +185,7 @@ async fn test_memory_tier_performance() {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
 
         let start = Instant::now();
@@ -250,6 +253,7 @@ async fn test_data_persistence() {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            ..Default::default()
         };
 
         let results = storage.search("persist_test", query).await.unwrap();

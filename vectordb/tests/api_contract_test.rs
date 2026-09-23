@@ -126,10 +126,22 @@ const CONTRACTS: &[Contract] = &[
     },
     // The dashboard reads these two and nothing else does. `/status` is root-only, which is
     // why `curl` above has to know about it.
+    // Not a client route: a Prometheus scrape config points here, and a monitoring stack that
+    // stops collecting is as much an outage as a client that stops working.
+    Contract {
+        method: "GET",
+        path: "/metrics",
+        caller: "prometheus",
+    },
     Contract {
         method: "GET",
         path: "/status",
         caller: "dashboard",
+    },
+    Contract {
+        method: "POST",
+        path: "/tables/{t}/records/count",
+        caller: "python",
     },
     Contract {
         method: "POST",
@@ -204,6 +216,7 @@ fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16,
             | "/health/live"
             | "/health/ready"
             | "/health/metrics"
+            | "/metrics"
     );
     let url = if root_probe {
         // System probes are served at the root for orchestrators.

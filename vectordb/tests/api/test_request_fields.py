@@ -247,6 +247,30 @@ def _(table):
 
 # ---- DELETE /tables/{t}/records --------------------------------------------------------------
 
+@probe("BatchDeleteRequest", "filter")
+def _(table):
+    # Deleting what a filter matches, in one request. The probe has to prove the filter chose
+    # the victims: a delete that ignored it and removed everything would also answer 200.
+    post(f"/tables/{table}/records", {"records": [
+        {"id": "f1", "vector": [0.5, 0.5, 0.5, 0.5], "payload": {"topic": "sweep"}},
+        {"id": "f2", "vector": [0.5, 0.5, 0.5, 0.4], "payload": {"topic": "sweep"}},
+        {"id": "f3", "vector": [0.4, 0.5, 0.5, 0.5], "payload": {"topic": "stay"}}]})
+    try:
+        call("DELETE", f"/tables/{table}/records", {
+            "filter": {
+                "must": [{"key": "topic", "operation": {"type": "Equal", "value": "sweep"}}]
+            }})
+        for gone in ("f1", "f2"):
+            assert get(f"/tables/{table}/records/{gone}", expect_ok=False).status_code == 404
+        assert get(f"/tables/{table}/records/f3").json()["success"] is True
+        # And it left the corpus alone -- a delete that ignored the filter would pass every
+        # assertion above by removing everything.
+        assert get(f"/tables/{table}/records/r0").json()["success"] is True
+    finally:
+        # The table is shared with every other probe, and one of them counts its records.
+        call("DELETE", f"/tables/{table}/records", {"ids": ["f3"]}, expect_ok=False)
+
+
 @probe("BatchDeleteRequest", "ids")
 def _(table):
     post(f"/tables/{table}/records", {"records": [
@@ -332,6 +356,51 @@ def _(table):
         assert named[0] == "n4", named
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("SearchQuery", "score_threshold")
+def _(table):
+    # A floor on the similarity, not on the internal distance -- those run in opposite
+    # directions, and a threshold that meant the other one would return exactly the hits it
+    # was asked to remove.
+    everything = search(table, top_k=5, limit=5).json()["data"]["hits"]
+    assert len(everything) > 1, everything
+    floor = everything[0]["score"]
+    kept = search(table, top_k=5, limit=5, score_threshold=floor).json()["data"]["hits"]
+    assert kept, "the best hit is at the floor and must survive it"
+    assert all(h["score"] >= floor for h in kept), kept
+    assert len(kept) < len(everything), (
+        f"a floor of {floor} removed nothing from {[h['score'] for h in everything]}"
+    )
+
+
+@probe("SearchQuery", "payload_fields")
+def _(table):
+    # The whole payload, then two keys of it: what is returned has to shrink, and what is kept
+    # has to be the same values.
+    whole = search(table, top_k=1, limit=1).json()["data"]["hits"][0]["payload"]
+    assert len(whole) > 1, whole
+    projected = (
+        search(table, top_k=1, limit=1, payload_fields=["topic"])
+        .json()["data"]["hits"][0]["payload"]
+    )
+    assert projected == {"topic": whole["topic"]}, projected
+
+
+# ---- POST /tables/{t}/records/count ----------------------------------------------------------
+
+@probe("CountRecordsRequest", "filter")
+def _(table):
+    # A count that ignored the filter would return the table's size, which is a plausible
+    # number -- so the probe has to compare against something other than "it answered".
+    def count(body):
+        return post(f"/tables/{table}/records/count", body).json()["data"]["count"]
+
+    whole = count({})
+    alpha = count(
+        {"filter": {"must": [{"key": "topic", "operation": {"type": "Equal", "value": "alpha"}}]}}
+    )
+    assert 0 < alpha < whole, f"filtered count {alpha} against a table of {whole}"
 
 
 # ---- POST /tables/{t}/records/list -----------------------------------------------------------

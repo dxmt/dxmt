@@ -5087,7 +5087,10 @@ impl IntelligentIndexedStorage {
                         .map(|r| {
                             (
                                 if query.with_payload {
-                                    Some(r.payload.clone())
+                                    Some(crate::types::record::project_payload(
+                                        &r.payload,
+                                        query.payload_fields.as_deref(),
+                                    ))
                                 } else {
                                     None
                                 },
@@ -5104,6 +5107,15 @@ impl IntelligentIndexedStorage {
                 };
 
                 let similarity_score = Self::similarity_from_distance(metric, score);
+
+                // The floor is on the similarity the caller sees, not on the internal
+                // distance: those run in opposite directions, and a threshold that silently
+                // meant the other one would return exactly the hits it was asked to remove.
+                if let Some(floor) = query.score_threshold {
+                    if similarity_score < floor {
+                        return None;
+                    }
+                }
 
                 Some(SearchHit {
                     id,
@@ -7554,6 +7566,75 @@ impl IntelligentIndexedStorage {
         };
         Self::fill_vectors(table_data, &mut page, with_vector);
         Ok((page, total, next))
+    }
+
+    /// How many records a filter matches, without building any of them.
+    ///
+    /// "How many of these are there" had no answer short of paging the whole result: table
+    /// stats carry a record count for the table and nothing for a condition, so a caller
+    /// counting matches downloaded them. The page functions already return the total as a
+    /// by-product of choosing a page, so a count is that number with a page of zero.
+    pub async fn count_records(
+        &self,
+        tablename: &str,
+        filter: Option<&crate::types::Filter>,
+    ) -> crate::Result<usize> {
+        Self::check_filter(filter)?;
+        self.ensure_resident(tablename).await?;
+        let tables = self.read_tables("count_records").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        Ok(match filter {
+            None => table_data.records.len(),
+            Some(filter) => {
+                let derived = table_data.derived();
+                let (_, total) = derived.payload.page_of_matching(filter, 0, 0);
+                total
+            }
+        })
+    }
+
+    /// Delete every record a filter matches, and report how many there were.
+    ///
+    /// Deleting by id is the only shape this had, so "remove everything belonging to tenant X"
+    /// could not be expressed at all: a caller had to page the table, collect ids, and send
+    /// them back — a round trip per page, at the mercy of anything inserted meanwhile.
+    ///
+    /// It pages rather than materialising every matching id, because a filter can match the
+    /// whole table and the write lock is held per batch, not for the whole delete. Each pass
+    /// asks for the *first* page again: the previous pass removed what it returned, so the
+    /// matching set shrinks under the loop by construction. A record inserted mid-delete and
+    /// matching the filter is deleted too, which is the same answer a single-pass
+    /// implementation would give on a table that is being written to.
+    pub async fn delete_records_matching(
+        &self,
+        tablename: &str,
+        filter: &crate::types::Filter,
+    ) -> crate::Result<usize> {
+        const BATCH: usize = 1_000;
+
+        Self::check_filter(Some(filter))?;
+        self.ensure_writable()?;
+        self.ensure_resident(tablename).await?;
+
+        let mut deleted = 0usize;
+        loop {
+            let (records, _) = self
+                .list_records(tablename, Some(filter), BATCH, 0, false)
+                .await?;
+            if records.is_empty() {
+                break;
+            }
+            let ids: Vec<RecordId> = records.into_iter().map(|record| record.id).collect();
+            let asked = ids.len();
+            deleted += self.delete_records(tablename, ids).await?;
+            if asked < BATCH {
+                break;
+            }
+        }
+        Ok(deleted)
     }
 
     pub async fn list_records(

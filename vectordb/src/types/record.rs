@@ -238,6 +238,29 @@ pub struct SearchQuery {
     /// Target named vector space. None = use the default (unnamed) vector.
     #[serde(default)]
     pub vector_name: Option<String>,
+    /// Return only these payload keys, instead of the whole payload.
+    ///
+    /// `with_payload` is all-or-nothing, and a payload is often mostly the chunk of text the
+    /// embedding came from: a page of 100 hits can be a megabyte of JSON to deliver two fields
+    /// a caller wanted. An empty list is not "no fields" — leave the field out, or set
+    /// `with_payload` to false, both of which say so plainly.
+    ///
+    /// A key that is not in a record's payload is simply absent from the projection; it is not
+    /// an error, because a payload has no declared shape.
+    #[serde(default)]
+    pub payload_fields: Option<Vec<String>>,
+    /// Drop hits scoring below this, after scoring and before `top_k` is applied.
+    ///
+    /// Scores here are similarities — higher is nearer, cosine in [-1, 1], `1/(1 + d)` for
+    /// euclidean — so this is a floor, not a distance ceiling. Every comparable database has
+    /// one, and without it a caller asking for ten neighbours of a query with three good
+    /// matches gets seven bad ones and has to know the metric's scale to throw them away.
+    ///
+    /// It cannot make a search find *more*: the index is still asked for `top_k`, and the
+    /// threshold only removes. A page that comes back short means that is all there was above
+    /// the floor.
+    #[serde(default)]
+    pub score_threshold: Option<f32>,
 }
 
 /// 混合搜索查询
@@ -423,6 +446,27 @@ pub struct SearchResult {
     pub hits: Vec<SearchHit>,
     pub total: usize,
     pub tookms: u64,
+}
+
+/// The payload a caller asked for: the whole thing, or only the named keys.
+///
+/// Taking the keys rather than removing the others keeps the cost proportional to what is
+/// returned instead of to what is stored, which is the point of asking.
+pub fn project_payload(payload: &Payload, fields: Option<&[String]>) -> Payload {
+    match fields {
+        None => payload.clone(),
+        Some(fields) => {
+            let mut out = serde_json::Map::with_capacity(fields.len());
+            if let Some(object) = payload.as_object() {
+                for field in fields {
+                    if let Some(value) = object.get(field) {
+                        out.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+    }
 }
 
 /// 搜索命中结果
@@ -701,6 +745,8 @@ impl Default for SearchQuery {
             limit: 10,
             search_mode: SearchMode::Normal,
             vector_name: None,
+            payload_fields: None,
+            score_threshold: None,
         }
     }
 }

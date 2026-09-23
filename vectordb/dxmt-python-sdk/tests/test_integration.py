@@ -260,6 +260,35 @@ class TestScrollAndUpload:
             client.delete_table(name)
 
 
+class TestDeleteByFilter:
+    """Deleting by filter, which is one request whatever it matches."""
+
+    def test_a_filter_deletes_what_it_matches_and_nothing_else(self, client: Client) -> None:
+        name = f"test_delfilter_{random.randint(1000, 9999)}"
+        client.create_table(name=name, dimension=2)
+        try:
+            client.insert_records(name, [
+                {"id": f"r{i}", "vector": [1.0, float(i)],
+                 "payload": {"tenant": "a" if i % 2 else "b"}}
+                for i in range(10)
+            ])
+            answer = client.delete_records(name, filter=Field("tenant") == "a")
+            assert answer["data"]["deleted_count"] == 5
+
+            left = sorted(r["id"] for r in client.scroll(name))
+            assert left == ["r0", "r2", "r4", "r6", "r8"]
+        finally:
+            client.delete_table(name)
+
+    def test_one_selector_or_the_other(self, client: Client) -> None:
+        # An empty delete must not read as "delete everything", and two selectors have no
+        # obvious meaning -- intersection and union are both defensible, which is the problem.
+        with pytest.raises(ValueError):
+            client.delete_records("t")
+        with pytest.raises(ValueError):
+            client.delete_records("t", ["a"], filter=Field("x") == 1)
+
+
 class TestFieldFiltersAgainstTheServer:
     """What a `Field` expression selects, on arrays, missing fields and mixed number types,
     through both a listing and a search."""

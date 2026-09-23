@@ -9,11 +9,12 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
     api::handlers::{
-        alter_table, branch_table, create_backup, create_snapshot, create_table, delete_records,
-        delete_table, drop_index, execute_dxql, full_text_search, get_record, get_status,
-        get_table, get_table_stats, health_check, health_metrics, hybrid_search,
+        alter_table, branch_table, count_records, create_backup, create_snapshot, create_table,
+        delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
+        get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
         hybrid_search_combined, insert_records, insert_records_optimized, knn_graph, list_records,
-        list_tables, liveness, readiness, rebuild_index, search_vectors, update_record, AppState,
+        list_tables, liveness, prometheus_metrics, readiness, rebuild_index, search_vectors,
+        update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -419,6 +420,7 @@ pub async fn create_app_with_storage(
         )
         .route("/tables/:table_name/records", delete(delete_records))
         .route("/tables/:table_name/records/list", post(list_records))
+        .route("/tables/:table_name/records/count", post(count_records))
         // The nearest-neighbour structure of a sample, without its vectors — so a client can
         // lay a table out without the wire deciding how many points it may draw.
         .route("/tables/:table_name/graph", post(knn_graph))
@@ -457,6 +459,10 @@ pub async fn create_app_with_storage(
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .route("/health/metrics", get(health_metrics))
+        // Prometheus scrapes `/metrics` at the root, which is where Qdrant, Weaviate and
+        // everything else that speaks this format put it; a scrape config should not need a
+        // per-database path.
+        .route("/metrics", get(prometheus_metrics))
         .with_state(base_state.clone());
 
     // 创建系统路由（在根路径）
@@ -468,6 +474,7 @@ pub async fn create_app_with_storage(
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .route("/health/metrics", get(health_metrics))
+        .route("/metrics", get(prometheus_metrics))
         .with_state(base_state.clone());
 
     #[cfg(feature = "multimodal")]

@@ -223,6 +223,7 @@ async fn test_search_basic() {
         limit: 5,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = state.storage.search("search_test", query).await;
@@ -252,6 +253,7 @@ async fn test_search_nonexistent_table() {
         limit: 10,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let result = state.storage.search("nonexistent_table", query).await;
@@ -311,6 +313,7 @@ async fn test_delete_record() {
         limit: 10,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let search_result = state.storage.search("delete_test", query).await.unwrap();
@@ -371,6 +374,7 @@ async fn test_update_record() {
         limit: 1,
         search_mode: dxmt_vectordb::types::record::SearchMode::Normal,
         vector_name: None,
+        ..Default::default()
     };
 
     let search_result = state.storage.search("update_test", query).await.unwrap();
