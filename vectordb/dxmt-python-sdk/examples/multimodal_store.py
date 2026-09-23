@@ -42,11 +42,18 @@ def embed_text(texts: list[str]) -> list[list[float]]:
     """Embed a list of texts. Falls back to deterministic synthetic vectors."""
     if _MODEL is not None:
         return _MODEL.encode(texts, convert_to_numpy=True).tolist()
-    return [_synthetic_vector(t, EMBED_DIM) for t in texts]
+    return [_text_vector(t, EMBED_DIM) for t in texts]
 
 
-def _synthetic_vector(seed: str, dim: int) -> list[float]:
-    """Deterministic unit vector derived from a string seed."""
+# Two different jobs shared one function, and only one of them wanted a seeded-random vector.
+# Text without sentence-transformers goes through the bag of words in common_utils, so two
+# similar captions are actually similar; the image stub below keeps the seeded-random one,
+# because unrelated directions are exactly what stands in for embeddings of unrelated images.
+from common_utils import synthetic_vector as _text_vector
+
+
+def _seeded_vector(seed: str, dim: int) -> list[float]:
+    """A deterministic, direction-free unit vector -- a stand-in, not an embedding."""
     raw = []
     for i in range(dim):
         h = int(hashlib.md5(f"{seed}:{i}".encode()).hexdigest(), 16)
@@ -60,7 +67,7 @@ def embed_image_stub(image_id: str, dim: int = EMBED_DIM) -> list[float]:
 
     In a real pipeline, replace this with a CLIP / ViT model call.
     """
-    return _synthetic_vector(f"img:{image_id}", dim)
+    return _seeded_vector(f"img:{image_id}", dim)
 
 
 # ── dataset ───────────────────────────────────────────────────────────────────

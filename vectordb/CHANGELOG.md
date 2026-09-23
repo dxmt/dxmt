@@ -154,6 +154,18 @@ releases. Everything below is unreleased work on `main`.
 
 ### Fixed
 
+- **The examples' fallback embedding has meaning in it.** Without `sentence-transformers` the
+  SDK examples hashed the whole string into every coordinate, so "the cat sat on the mat" and
+  "a cat is sitting on a mat" scored 0.0215 against each other and 0.0179 against a sentence
+  about lattice gauge theory -- noise. Eleven examples whose subject is semantic search were
+  demonstrating nothing whenever that package was absent, which is the default after a plain
+  `pip install`. It is a hashed bag of words now: the same pair scores 0.667, and
+  `retrieval_eval.py` reports Recall@1 0.37 and MRR 0.60 where it used to report 0.05 and 0.10.
+  The two examples that print quality metrics say that the numbers measure the embedding rather
+  than the database when the fallback is in use, and `agent_memory.py`'s consolidation step now
+  adds a memory that actually crosses the deduplication threshold -- it announced a dedup demo
+  and removed nothing.
+
 - **`vector_weight` reached a fusion method that reads it.** The server's default fusion is
   `dbsf`, which normalises each side by its own distribution and ignores the weight; the Python
   and JavaScript SDKs sent a weight and never a `fusion_method`, so `vector_weight=0.0` and
@@ -277,6 +289,12 @@ releases. Everything below is unreleased work on `main`.
 - A dropped table stays dropped; an evicted table is no longer erased by the next snapshot.
 
 ### Removed
+
+- **A second, dead `UpdateRecordRequest`.** `types::record` had one with `sparse_vector` and
+  an `expected_version` for optimistic locking; nothing constructed or deserialised it, and
+  `PUT /records/{id}` takes the one in `api::handlers`, which has neither field and has
+  `merge_mode` and `upsert` instead. Two live-looking types under one name, one of them
+  describing a version check the endpoint has never had.
 
 - **25 files of leftover debugging from the LlamaIndex package's root**, plus three from its
   examples: seven progress-report markdown files (`FIXES_APPLIED.md`, `TEST_RESULTS_CN.md`,

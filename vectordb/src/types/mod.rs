@@ -14,7 +14,6 @@ pub use multimodal::{
 };
 pub use record::{
     CreateRecordRequest, Filter, Record, RecordStatus, SearchHit, SearchQuery, SearchResult,
-    UpdateRecordRequest,
 };
 pub use sparse_vector::*;
 pub use table::*;

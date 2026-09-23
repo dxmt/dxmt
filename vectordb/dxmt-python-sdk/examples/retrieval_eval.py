@@ -39,13 +39,11 @@ except ImportError:
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
-def _synthetic_vector(seed: str, dim: int) -> list[float]:
-    raw = []
-    for i in range(dim):
-        h = int(hashlib.md5(f"{seed}:{i}".encode()).hexdigest(), 16)
-        raw.append((h % 10000) / 10000.0 * 2 - 1)
-    norm = math.sqrt(sum(x * x for x in raw)) or 1.0
-    return [x / norm for x in raw]
+# The fallback lives in common_utils, so the copies here and in multimodal_store.py cannot
+# drift from it. It used to hash the whole string into every coordinate, which gives two
+# near-identical sentences unrelated directions -- and this file *measures retrieval quality*,
+# so every number it printed without sentence-transformers was noise with four decimal places.
+from common_utils import synthetic_vector as _synthetic_vector
 
 
 def embed(texts: list[str]) -> list[list[float]]:
@@ -251,6 +249,10 @@ def print_report(reports: dict[int, EvalReport]) -> None:
         r = reports[k]
         print(f"  {k:>4}  {r.mean_recall():>10.4f}  {r.mean_precision():>12.4f}  {r.mrr():>8.4f}")
     print(f"{'─' * 60}")
+    if not _HAS_ST:
+        # The metric is the retriever's, and the retriever is mostly its embedding model.
+        print("  NOTE: on the bag-of-words fallback these measure word overlap, not meaning; "
+              "pip install sentence-transformers for numbers worth comparing.")
 
     # Interpretation guide
     best = reports[max(reports)]

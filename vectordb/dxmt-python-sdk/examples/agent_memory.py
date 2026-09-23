@@ -306,7 +306,7 @@ RECALL_QUERIES = [
 
 def run_demo(use_openai: bool) -> None:
     from common_utils import _HAS_ST
-    embed_mode = "sentence-transformers" if _HAS_ST else "synthetic"
+    embed_mode = "sentence-transformers" if _HAS_ST else "bag-of-words"
     print("=" * 70)
     print("  DXMT Agent Memory Demo")
     print(f"  Embedding: {embed_mode}  (dim={EMBED_DIM})")
@@ -351,13 +351,21 @@ def run_demo(use_openai: bool) -> None:
         print("  Consolidation demo (dedup near-duplicate memories)")
         print(f"{'─' * 70}")
 
+        # A near-duplicate of turn 3, not merely a related question: the same words about the
+        # same thing. "How does HNSW search work?" was here, which shares one word with the
+        # turn it was meant to duplicate -- so the demo added a memory, removed nothing, and
+        # printed "removed 0" under a heading that says it deduplicates.
         store.add(
-            "How does HNSW search work?",   # very similar to earlier HNSW turn
-            "HNSW traverses a layered graph using greedy descent and ef_search beam width.",
+            "How does HNSW work?",
+            "HNSW builds a layered graph for approximate nearest-neighbour search.",
         )
-        print(f"  Added duplicate HNSW memory. Store size: {store.size()}")
+        print(f"  Added a near-duplicate of turn 3. Store size: {store.size()}")
         removed = store.consolidate(sim_threshold=0.80)
-        print(f"  Consolidation removed {removed} near-duplicate(s). Size now: {store.size()}")
+        print(f"  Consolidation removed {removed} near-duplicate(s) at a 0.80 threshold. "
+              f"Size now: {store.size()}")
+        if removed == 0:
+            print("  (nothing crossed the threshold -- with the bag-of-words fallback, only "
+                  "near-identical wording does)")
 
     finally:
         store.close()

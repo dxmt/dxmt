@@ -297,14 +297,41 @@ except Exception:
     _HAS_ST = False
 
 
+import re as _re
+
+_WORD = _re.compile(r"[a-z0-9]+")
+# Words too common to carry meaning; without dropping them a short sentence's direction is
+# mostly "the" and "a".
+_STOPWORDS = {"a", "an", "the", "i", "my", "me", "you", "it", "is", "are", "was", "were", "be",
+              "of", "on", "in", "to", "for", "and", "or", "no", "do", "does", "did", "have",
+              "has", "how", "what", "which", "this", "that", "with", "at", "by", "from"}
+
+
 def synthetic_vector(seed: str, dim: int) -> list:
-    """Deterministic unit vector from a string seed (no external dependency)."""
-    raw = []
-    for i in range(dim):
-        h = int(hashlib.md5(f"{seed}:{i}".encode()).hexdigest(), 16)
-        raw.append((h % 10000) / 10000.0 * 2 - 1)
-    norm = _math.sqrt(sum(x * x for x in raw)) or 1.0
-    return [x / norm for x in raw]
+    """A hashed bag of words: shared content words mean a shared direction.
+
+    This hashed the *whole string* into every coordinate, which gives two texts that differ by
+    one character completely unrelated directions. "the cat sat on the mat" and "a cat is
+    sitting on a mat" scored 0.0215 against each other and 0.0179 against a sentence about
+    lattice gauge theory -- noise, at three decimal places. Every example here that says it is
+    demonstrating semantic search was demonstrating nothing whenever sentence-transformers was
+    absent, which is the default for anyone who has just installed the SDK.
+
+    It is not a language model: "car" and "automobile" still land in unrelated buckets. It is
+    enough to watch retrieval rank by word overlap, and deterministic, so an example prints the
+    same thing twice.
+    """
+    vector = [0.0] * dim
+    for word in _WORD.findall(seed.lower()):
+        if word in _STOPWORDS:
+            continue
+        vector[int(hashlib.md5(word.encode()).hexdigest(), 16) % dim] += 1.0
+    norm = _math.sqrt(sum(x * x for x in vector))
+    if norm == 0.0:
+        # The server refuses a zero vector: it has no direction to compare against.
+        vector[0] = 1.0
+        return vector
+    return [x / norm for x in vector]
 
 
 def embed(texts: list) -> list:

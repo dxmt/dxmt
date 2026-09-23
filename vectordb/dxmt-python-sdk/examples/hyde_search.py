@@ -328,7 +328,7 @@ def main() -> None:
 
     hyde_mode = "OpenAI GPT-3.5 (true HyDE)" if use_openai else "rule expansion (NOT true HyDE — use --openai for real results)"
     from common_utils import _HAS_ST
-    embed_mode = "sentence-transformers" if _HAS_ST else "synthetic"
+    embed_mode = "sentence-transformers" if _HAS_ST else "bag-of-words"
     print("=" * 70)
     print("  DXMT HyDE (Hypothetical Document Embeddings) Demo")
     print(f"  Embedding:    {embed_mode}  (dim={EMBED_DIM})")

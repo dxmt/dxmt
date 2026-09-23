@@ -366,9 +366,9 @@ fn no_handler_takes_a_typed_body_through_plain_json() {
     for name in wanted {
         // `MultimodalContent` and friends come from types this test cannot see the end of;
         // look for the definition and the attribute above it.
-        // Two names in this tree have a second, unrelated definition (`FullTextSearchRequest`,
-        // `UpdateRecordRequest`), so it is enough that one of them carries the attribute --
-        // a type with no definition carrying it is the case worth failing on.
+        // `FullTextSearchRequest` names two types: the body this API takes, and the engine's
+        // own request inside `search::full_text`. It is enough that one definition carries the
+        // attribute; a type with none carrying it is the case worth failing on.
         let mut found = false;
         let mut denied = false;
         for (at, _) in sources.match_indices(&format!("pub struct {name} ")) {

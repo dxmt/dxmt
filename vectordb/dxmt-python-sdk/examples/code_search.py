@@ -276,7 +276,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from common_utils import _HAS_ST
-    embed_mode = "sentence-transformers" if _HAS_ST else "synthetic"
+    embed_mode = "sentence-transformers" if _HAS_ST else "bag-of-words"
     print("=" * 70)
     print("  DXMT Code Semantic Search")
     print(f"  Embedding: {embed_mode}  (dim={EMBED_DIM})")

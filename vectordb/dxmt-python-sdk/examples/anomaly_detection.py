@@ -170,7 +170,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from common_utils import _HAS_ST
-    embed_mode = "sentence-transformers" if _HAS_ST else "synthetic"
+    embed_mode = "sentence-transformers" if _HAS_ST else "bag-of-words"
     n_normal = len(CLUSTER_A) + len(CLUSTER_B) + len(CLUSTER_C)
     print("=" * 70)
     print("  DXMT kNN Anomaly Detection Demo")
@@ -240,6 +240,15 @@ def main() -> None:
             print(f"    false positives: {false_pos}")
             for r in flagged:
                 print(f"    [{r.label:8s}] {r.record_id}  score={r.anomaly_score:.4f}")
+            if not _HAS_ST:
+                # These numbers measure the embedding, not the database: with the
+                # bag-of-words fallback an anomaly is only odd if its *words* are, and the
+                # ones here are odd in meaning. Say so rather than let a reader read a low
+                # catch rate as DXMT missing them.
+                print("\n  NOTE: running on the bag-of-words fallback, which scores word "
+                      "overlap and not meaning -- these catch rates say little. "
+                      "pip install sentence-transformers for numbers worth reading.")
+
 
     finally:
         try:

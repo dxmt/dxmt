@@ -131,15 +131,11 @@ pub struct CreateRecordRequest {
     pub payload: Option<Payload>,
 }
 
-/// 更新记录的请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateRecordRequest {
-    pub vector: Option<DenseVector>,
-    pub sparse_vector: Option<SparseVector>,
-    pub payload: Option<Payload>,
-    /// 期望的版本号，用于乐观锁
-    pub expected_version: Option<u64>,
-}
+// `UpdateRecordRequest` was here too, with `sparse_vector` and an `expected_version` for
+// optimistic locking. Nothing constructed or deserialised it: `PUT /records/{id}` takes the
+// `UpdateRecordRequest` in `api::handlers`, which has neither field and has `merge_mode` and
+// `upsert` instead. Two live-looking types under one name, and a reader who found this one
+// would have believed the endpoint supports a version check it has never had.
 
 /// Search accuracy/speed tradeoff mode.
 ///
