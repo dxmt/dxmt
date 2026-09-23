@@ -38,6 +38,8 @@ from llama_index.core.vector_stores.types import (
     VectorStoreQuery,
     VectorStoreQueryResult,
 )
+from pydantic import ConfigDict, PrivateAttr
+
 from llama_index.core.vector_stores.utils import (
     metadata_dict_to_node,
     node_to_metadata_dict,
@@ -73,8 +75,12 @@ class DXMTVectorStore(BasePydanticVectorStore):
     stores_text: bool = True
     is_embedding_query: bool = True
 
-    # Pydantic fields
-    client: Optional[DXMTClient] = None
+    # Pydantic fields. `client` is not one of them: `BasePydanticVectorStore` declares it as an
+    # abstract property, and a field of the same name shadows it -- pydantic said so in a
+    # warning printed on every `import dxmt` once llama-index was installed. It is a private
+    # attribute with the property the interface asks for, which is what the standalone
+    # `llama-index-vector-stores-dxmt` package has always done.
+    _client: Optional[DXMTClient] = PrivateAttr(default=None)
     table_name: str = "documents"
     dimension: int = 1536
     distance_metric: str = "cosine"
@@ -82,11 +88,11 @@ class DXMTVectorStore(BasePydanticVectorStore):
     host: str = "localhost"
     port: int = 9999
 
-    _initialized: bool = False
+    _initialized: bool = PrivateAttr(default=False)
 
-    class Config:
-        """Pydantic config."""
-        arbitrary_types_allowed = True
+    # A class-based `Config` is the pydantic v1 spelling, deprecated since v2 and removed in
+    # v3; it warned on every import of this module.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __init__(
         self,
@@ -106,7 +112,6 @@ class DXMTVectorStore(BasePydanticVectorStore):
         pydantic fields and come back out of ``repr()`` and serialisation.
         """
         super().__init__(
-            client=client,
             table_name=table_name,
             dimension=dimension,
             distance_metric=distance_metric,
@@ -117,8 +122,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
         )
 
         # Create client if not provided
-        if self.client is None:
-            self.client = DXMTClient(host=self.host, port=self.port, api_key=api_key)
+        self._client = client or DXMTClient(host=self.host, port=self.port, api_key=api_key)
 
         # Initialize table
         if create_if_not_exists and not self._initialized:
@@ -142,8 +146,14 @@ class DXMTVectorStore(BasePydanticVectorStore):
             )
 
     @property
+    def client(self) -> DXMTClient:
+        """The underlying DXMT client, as `BasePydanticVectorStore` requires."""
+        assert self._client is not None  # set in __init__, which is the only way in
+        return self._client
+
+    @property
     def client_instance(self) -> DXMTClient:
-        """Get the DXMT client instance."""
+        """The client, under the name this class used before `client` became a property."""
         return self.client
 
     def add(

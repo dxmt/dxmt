@@ -90,6 +90,12 @@ func (r StoredRecord) Payload() map[string]any {
 type Update struct {
 	Vector []float32 `json:"vector,omitempty"`
 	// Payload replaces the stored payload, or merges into it when Merge is set.
+	//
+	// A nil map leaves the stored payload alone; an empty non-nil map (map[string]any{})
+	// clears it. `omitempty` cannot tell those apart -- it drops an empty map as readily as a
+	// nil one -- so clearing a payload was not expressible from this client at all: the field
+	// never reached the wire and the server, which keeps what an update does not mention,
+	// left the old payload in place.
 	Payload map[string]any `json:"payload,omitempty"`
 	// Merge sends merge_mode="merge": the keys given are merged into the stored payload
 	// instead of replacing it.
@@ -101,12 +107,17 @@ type Update struct {
 // MarshalJSON renders Merge as the server's merge_mode field.
 func (u Update) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		Vector    []float32      `json:"vector,omitempty"`
-		Payload   map[string]any `json:"payload,omitempty"`
-		MergeMode string         `json:"merge_mode,omitempty"`
-		Upsert    bool           `json:"upsert,omitempty"`
+		Vector    []float32       `json:"vector,omitempty"`
+		Payload   *map[string]any `json:"payload,omitempty"`
+		MergeMode string          `json:"merge_mode,omitempty"`
+		Upsert    bool            `json:"upsert,omitempty"`
 	}
-	w := wire{Vector: u.Vector, Payload: u.Payload, Upsert: u.Upsert}
+	// A pointer, so that a nil map omits the field and an empty one sends `"payload": {}` --
+	// which is how the server is told to clear it.
+	w := wire{Vector: u.Vector, Upsert: u.Upsert}
+	if u.Payload != nil {
+		w.Payload = &u.Payload
+	}
 	if u.Merge {
 		w.MergeMode = "merge"
 	}

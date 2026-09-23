@@ -12,6 +12,9 @@ releases. Everything below is unreleased work on `main`.
 
 ### Added
 
+- **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
+  "looked for configuration files and found none". Seven source files, clean.
+
 - **A LangGraph example, and the LangGraph and LlamaIndex suites now run.** `langgraph` and
   `llama-index-core` are installed in CI's live job, `dxmt-python-sdk/examples/langgraph_memory.py`
   is an agent whose long-term memory is a DXMT namespace, and the LlamaIndex integration tests
@@ -142,6 +145,17 @@ releases. Everything below is unreleased work on `main`.
 
 ### Fixed
 
+- **The Go client can clear a payload.** `Update.Payload` is `map[string]any` with
+  `omitempty`, which drops an empty map as readily as a nil one -- so "clear this payload"
+  never reached the wire, and the server, which keeps what an update does not mention, left the
+  old payload in place. A nil map now means "leave it alone" and an empty one clears it.
+
+- **`import dxmt` is quiet again.** `metagpt_vector_store.DXMTVectorStore` declared `client` as
+  a pydantic field, shadowing the abstract property `BasePydanticVectorStore` declares, and
+  carried a v1-style `class Config`: two warnings printed on every import once llama-index was
+  installed. It now uses `PrivateAttr` plus the property the interface asks for, and
+  `ConfigDict`, which is what the standalone LlamaIndex package always did.
+
 - **A LangGraph namespace round-trips.** A namespace is a table, joined with `_` and split on
   `_`, so any component containing one came back wrong: `("agent", "memory", "session_123")`
   listed as four components, a prefix search for it matched nothing, and `("a_b",)` and
@@ -233,6 +247,13 @@ releases. Everything below is unreleased work on `main`.
 - A dropped table stays dropped; an evicted table is no longer erased by the next snapshot.
 
 ### Removed
+
+- **25 files of leftover debugging from the LlamaIndex package's root**, plus three from its
+  examples: seven progress-report markdown files (`FIXES_APPLIED.md`, `TEST_RESULTS_CN.md`,
+  `RAGAS_QUICKFIX.md`, …) and sixteen ad-hoc `test_*.py` scripts that printed rather than
+  asserted, hardcoded `/localdisk/...` paths from another machine, and were collected by
+  nothing -- everything they probed is covered by `tests/`. The one analysis worth keeping
+  moved to `design/`, which is not distributed.
 
 - 51 source files that were never part of the build, five modules superseded by the code that is
   actually wired up, and every example that did not run.

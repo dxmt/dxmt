@@ -25,7 +25,7 @@ cd examples
 ./setup_examples.sh
 
 # Option B: Manual installation
-pip install ragas datasets llama-index-embeddings-openai llama-index-llms-openai
+pip install ragas datasets llama-index-embeddings-openai llama-index-llms-openai langchain-openai
 ```
 
 ### 2. Set OpenAI API Key

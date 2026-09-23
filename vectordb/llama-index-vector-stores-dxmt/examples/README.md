@@ -488,7 +488,6 @@ pip install ragas datasets
 ### Troubleshooting Guides
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Complete troubleshooting guide for all examples
 - **[RAGAS_TROUBLESHOOTING.md](RAGAS_TROUBLESHOOTING.md)** - RAGAS-specific issues
-- **[RAGAS_QUICKFIX.md](RAGAS_QUICKFIX.md)** - Quick fixes for common RAGAS problems
 
 ## Contributing
 

@@ -206,13 +206,6 @@ Install langchain-openai:
 pip install langchain-openai
 ```
 
-Or use the fix script:
-```bash
-./fix_ragas.sh
-```
-
-See `RAGAS_QUICKFIX.md` for details.
-
 ---
 
 ## Issue 8: Table Already Exists

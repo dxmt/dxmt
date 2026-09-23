@@ -106,6 +106,23 @@ func TestRecordSurvivesInsertReadUpdateAndDelete(t *testing.T) {
 		t.Fatal("merge must keep the untouched key")
 	}
 
+	// A nil payload leaves the stored one alone; an empty one clears it. Both used to send
+	// nothing at all, so clearing a payload was not expressible from this client.
+	if err := db.Update(ctx, table, "r1", dxmt.Update{Vector: vector(3)}); err != nil {
+		t.Fatalf("vector-only update: %v", err)
+	}
+	read, _ = db.Get(ctx, table, "r1")
+	if read.Payload()["colour"] != "blue" {
+		t.Fatalf("a nil payload must leave the stored one alone: %v", read.Payload())
+	}
+	if err := db.Update(ctx, table, "r1", dxmt.Update{Payload: map[string]any{}}); err != nil {
+		t.Fatalf("clearing update: %v", err)
+	}
+	read, _ = db.Get(ctx, table, "r1")
+	if len(read.Payload()) != 0 {
+		t.Fatalf("an empty payload must clear it, got %v", read.Payload())
+	}
+
 	deleted, err := db.Delete(ctx, table, []string{"r1", "never-existed"})
 	if err != nil {
 		t.Fatalf("delete: %v", err)
