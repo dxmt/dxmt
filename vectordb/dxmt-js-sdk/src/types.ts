@@ -45,14 +45,21 @@ export type FilterOperationType =
   | 'NotIn'
   | 'Contains'
   | 'StartsWith'
-  | 'EndsWith';
+  | 'EndsWith'
+  /** The field is absent, null, or an empty array. Sent with no `value`. */
+  | 'IsEmpty'
+  /** The field is present and null, or holds a null element. Sent with no `value`. */
+  | 'IsNull';
 
 /**
  * Filter operation for metadata filtering.
  */
 export interface FilterOperation {
   type: FilterOperationType;
-  value: any;
+  /** Omitted for `IsEmpty` and `IsNull`, which are about the field rather than a value in it.
+   * The server refuses a member it does not know, so sending `value: null` with those is a
+   * 400 rather than a no-op. */
+  value?: unknown;
 }
 
 /**

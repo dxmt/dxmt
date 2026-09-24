@@ -45,6 +45,8 @@ OPERATOR_MAP = {
     "$contains": "Contains",
     "$startswith": "StartsWith",
     "$endswith": "EndsWith",
+    "$isempty": "IsEmpty",
+    "$isnull": "IsNull",
 }
 
 
@@ -76,6 +78,10 @@ def _condition(key: str, op_type: str, value: Any) -> Dict[str, Any]:
     """One condition in the server's shape, refusing values the server would refuse."""
     if not isinstance(key, str) or not key:
         raise ValueError(f"a filter key must be a non-empty string, not {key!r}")
+    if op_type in ("IsEmpty", "IsNull"):
+        # No value at all: the condition is about the field, not about something in it. The
+        # server refuses an unknown member, so sending `"value": null` would be a 400.
+        return {"key": key, "operation": {"type": op_type}}
     if op_type in ("In", "NotIn"):
         if not isinstance(value, (list, tuple)):
             raise ValueError(f"{op_type} on {key!r} takes a list of values, not {value!r}")
@@ -251,6 +257,18 @@ class Field:
 
     def ends_with(self, text: str) -> Filter:
         return self._op("EndsWith", text)
+
+    def is_empty(self) -> Filter:
+        """The field is absent, `null`, or an empty array.
+
+        The only way to ask for the records a field is *missing* from: `!=` answers a different
+        question, since a record holding some other value satisfies that too.
+        """
+        return Filter(must=[_condition(self.key, "IsEmpty", None)])
+
+    def is_null(self) -> Filter:
+        """The field is present and `null` — or holds a `null` element."""
+        return Filter(must=[_condition(self.key, "IsNull", None)])
 
     def __repr__(self) -> str:
         return f"Field({self.key!r})"

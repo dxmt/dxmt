@@ -110,6 +110,28 @@ fn payload(i: usize) -> serde_json::Value {
     if i.is_multiple_of(9) {
         p.insert("meta.lang".into(), "written-not-derived".into());
     }
+    // The three shapes `IsEmpty` has to separate: a null, an empty array and a field that is
+    // simply absent -- plus an array holding a null, which is *not* empty and whose null the
+    // index files like any other scalar.
+    match i % 8 {
+        0 => {
+            p.insert("maybe".into(), serde_json::Value::Null);
+        }
+        1 => {
+            p.insert("maybe".into(), serde_json::json!([]));
+        }
+        2 => {
+            p.insert("maybe".into(), "here".into());
+        }
+        3 => {
+            p.insert("maybe".into(), serde_json::json!([null]));
+        }
+        4 => {
+            p.insert("maybe".into(), serde_json::json!({"nested": 1}));
+        }
+        // 5, 6, 7: the field is absent entirely.
+        _ => {}
+    }
     serde_json::Value::Object(p)
 }
 
@@ -195,6 +217,23 @@ fn filters() -> Vec<(&'static str, Filter)> {
         (
             "meta.nope == anything (a path nothing has)",
             one("meta.nope", Equal(json!("anything"))),
+        ),
+        ("maybe is empty", one("maybe", IsEmpty)),
+        ("maybe is null", one("maybe", IsNull)),
+        // On a field every record has, so the complement is the interesting half.
+        ("n is empty", one("n", IsEmpty)),
+        // And on a name nothing carries: every record matches.
+        ("nothing is empty", one("no-such-field", IsEmpty)),
+        (
+            "must_not maybe is empty",
+            Filter {
+                must: None,
+                must_not: Some(vec![Condition {
+                    key: "maybe".into(),
+                    operation: IsEmpty,
+                }]),
+                should: None,
+            },
         ),
         (
             "must_not topic != beta",

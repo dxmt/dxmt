@@ -125,6 +125,16 @@ pub struct PayloadIndex {
     /// Set while the index is being rebuilt from the records in one pass. See
     /// [`PayloadIndex::begin_bulk`].
     bulk: bool,
+    /// Per key, the records whose value there is `null` or an empty array.
+    ///
+    /// `IsEmpty` has to separate three cases the rest of this index deliberately blurs: a
+    /// missing field (in nothing), a `null` (filed under `ValueKey::Null` like any scalar) and
+    /// an empty array (marked present in `unindexed`, with no element to file). Only the last
+    /// two need recording, and only for the records that have them -- on a table where nobody
+    /// writes a null this map is empty. The alternative was a bitmap of every record per
+    /// field, which was measured at two seconds of a 10M-row rebuild and rejected for `NotIn`
+    /// for the same reason.
+    empty_marks: FastMap<String, roaring::RoaringBitmap>,
     /// Which payload fields this index is for. Default: all of them.
     ///
     /// A field outside it is never indexed, which is the whole point -- the memory and the
@@ -499,6 +509,11 @@ impl NumericIndex {
         }
     }
 
+    /// Every (value, record) entry across both halves, in no particular order.
+    fn entries(&self) -> impl Iterator<Item = (OrderedFloat, Ordinal)> + '_ {
+        self.sorted.iter().chain(self.pending.iter()).copied()
+    }
+
     /// Entries across both halves: one per (value, record), not per distinct value.
     fn entry_count(&self) -> usize {
         self.sorted.len() + self.pending.len()
@@ -849,6 +864,7 @@ impl PayloadIndex {
             total_records: 0,
             ids: Ids::default(),
             unindexed: FastMap::default(),
+            empty_marks: FastMap::default(),
             bulk: false,
             policy: crate::types::table::PayloadIndexPolicy::default(),
         }
@@ -1177,6 +1193,10 @@ impl PayloadIndex {
             | FilterOperation::StartsWith(_)
             | FilterOperation::EndsWith(_) => true,
             FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => false,
+            // Answered from the record set rather than from this field's values, so the
+            // "every record it accepts is in the index" reasoning does not apply: a record it
+            // accepts is typically one with no entry here at all.
+            FilterOperation::IsEmpty | FilterOperation::IsNull => false,
         }
     }
 
@@ -1223,6 +1243,11 @@ impl PayloadIndex {
             FilterOperation::EndsWith(suffix) => {
                 matches!(value_key, ValueKey::String(s) if s.ends_with(suffix.as_str()))
             }
+            // `IsNull` is the one of the two that a stored value can answer: the index files a
+            // null scalar under `ValueKey::Null`. `IsEmpty` is about the absence of a value and
+            // is answered in `positive_ids`, before any value is looked at.
+            FilterOperation::IsNull => matches!(value_key, ValueKey::Null),
+            FilterOperation::IsEmpty => false,
         }
     }
 
@@ -1697,6 +1722,9 @@ impl PayloadIndex {
             | FilterOperation::GreaterThanOrEqual(_)
             | FilterOperation::LessThan(_)
             | FilterOperation::LessThanOrEqual(_) => FastSet::default(),
+            // Every record has an id and none of them is null, so on `id` these are the empty
+            // set and the whole table's complement of it.
+            FilterOperation::IsEmpty | FilterOperation::IsNull => FastSet::default(),
             // Complements, answered by the caller from the positive forms above.
             FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => {
                 unreachable!("negations are taken as complements in get_condition_ids")
@@ -1714,6 +1742,11 @@ impl PayloadIndex {
             operation: operation.clone(),
         };
         let condition = &condition;
+        // Before the field lookup, because the records it answers with are typically the ones
+        // with no entry under this key at all -- including every record when nothing has it.
+        if matches!(operation, FilterOperation::IsEmpty) {
+            return self.empty_ordinals(key);
+        }
         let field_index = match self.field_indices.get(&condition.key) {
             Some(idx) => idx,
             None => return FastSet::default(),
@@ -1838,6 +1871,9 @@ impl PayloadIndex {
                 // Also recorded as present, which the elements alone do not say for `[]` or an
                 // array of nothing but arrays and objects — and `NotIn` needs presence.
                 self.mark_unindexed(key, ordinal);
+                if elements.is_empty() {
+                    self.mark_empty(key, ordinal);
+                }
                 for element in elements {
                     if !matches!(
                         element,
@@ -1868,7 +1904,12 @@ impl PayloadIndex {
                     self.index_field(&path, nested, ordinal, literals);
                 }
             }
-            _ => self.index_scalar(key, value, ordinal),
+            _ => {
+                if value.is_null() {
+                    self.mark_empty(key, ordinal);
+                }
+                self.index_scalar(key, value, ordinal)
+            }
         }
     }
 
@@ -1883,6 +1924,9 @@ impl PayloadIndex {
         match value {
             serde_json::Value::Array(elements) => {
                 self.unmark_unindexed(key, ordinal);
+                if elements.is_empty() {
+                    self.unmark_empty(key, ordinal);
+                }
                 // A repeated element is removed once per occurrence. The postings drop the
                 // ordinal on the first and find nothing on the next; the numeric index holds
                 // one entry per occurrence and loses one each time.
@@ -1908,8 +1952,71 @@ impl PayloadIndex {
                     self.unindex_field(&path, nested, ordinal, literals);
                 }
             }
-            _ => self.unindex_scalar(key, value, ordinal),
+            _ => {
+                if value.is_null() {
+                    self.unmark_empty(key, ordinal);
+                }
+                self.unindex_scalar(key, value, ordinal)
+            }
         }
+    }
+
+    fn mark_empty(&mut self, key: &str, ordinal: Ordinal) {
+        match self.empty_marks.get_mut(key) {
+            Some(held) => {
+                held.insert(ordinal);
+            }
+            None => {
+                let mut held = roaring::RoaringBitmap::new();
+                held.insert(ordinal);
+                self.empty_marks.insert(key.to_string(), held);
+            }
+        }
+    }
+
+    fn unmark_empty(&mut self, key: &str, ordinal: Ordinal) {
+        if let Some(held) = self.empty_marks.get_mut(key) {
+            held.remove(ordinal);
+            if held.is_empty() {
+                self.empty_marks.remove(key);
+            }
+        }
+    }
+
+    /// Every record with nothing to match under `key`: no value, `null`, or an empty array.
+    ///
+    /// Computed rather than kept: the complement of "has a value here", walked out of this
+    /// field's postings at query time. That is O(the field's entries) for one condition, and
+    /// the alternative is a bitmap per field maintained on every write -- a cost every table
+    /// would pay so that a rarely used operator could be a lookup.
+    fn empty_ordinals(&self, key: &str) -> FastSet<Ordinal> {
+        let mut has_content = roaring::RoaringBitmap::new();
+        if let Some(field) = self.field_indices.get(key) {
+            for postings in field.value_to_ids.values() {
+                match postings {
+                    Postings::One(ordinal) => {
+                        has_content.insert(*ordinal);
+                    }
+                    Postings::Many(many) => has_content |= many,
+                }
+            }
+            for (_, ordinal) in field.numeric.entries() {
+                has_content.insert(ordinal);
+            }
+        }
+        if let Some(present) = self.unindexed.get(key) {
+            has_content |= present;
+        }
+        // A `null` is filed like any other scalar and an empty array is marked present, so both
+        // are in `has_content` and both are empty. Taking them back out is what makes the
+        // complement below mean "nothing to match" rather than "no entry".
+        if let Some(marks) = self.empty_marks.get(key) {
+            has_content -= marks;
+        }
+        self.ids
+            .live()
+            .filter(|ordinal| !has_content.contains(*ordinal))
+            .collect()
     }
 
     /// Note that a record has `key` with a value the index cannot file — or an array. See

@@ -24,6 +24,23 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **`IsEmpty` and `IsNull`.** "Which records is this field missing from" had no expression at
+  all: `NotEqual` answers a different question, because a record holding some other value
+  satisfies it too, so finding the rows a pipeline failed to enrich meant paging the whole
+  table and checking by hand. `{"type": "IsEmpty"}` matches a field that is absent, `null`, or
+  an empty array; `{"type": "IsNull"}` matches one that is present and null. Both carry no
+  `value`. Python has `Field("x").is_empty()` / `.is_null()` and the `$isempty` / `$isnull`
+  aliases.
+
+  `IsEmpty` is the complement of "has something here", so it is computed at query time out of
+  the field's own postings rather than kept as a bitmap per field maintained on every write —
+  that bitmap was measured at two seconds of a 10M-row rebuild when `NotIn` wanted it, and
+  charging every table for an operator few use is the wrong trade. What *is* kept is a mark for
+  the records whose value is null or `[]`, because those are the two cases the index otherwise
+  cannot tell from "has a value": a null is filed like any other scalar and an empty array is
+  marked present with no element to file. `tests/filter_agreement_test.rs` carries all four
+  shapes — null, `[]`, `[null]`, absent — in memory and on disk.
+
 - **Filters reach into a nested payload.** `meta.lang` reads the `lang` of the object under
   `meta`, at any depth, on `search`, `records/list`, `records/count` and delete-by-filter. A
   payload is arbitrary JSON and people nest it; until now only the top-level keys were

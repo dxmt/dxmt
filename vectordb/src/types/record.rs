@@ -605,6 +605,17 @@ pub enum FilterOperation {
     StartsWith(String),
     /// The field is a string ending with this one.
     EndsWith(String),
+    /// The field holds nothing to match: it is absent, `null`, or an empty array.
+    ///
+    /// Sent as `{"type": "IsEmpty"}`, with no value. It is the only way to ask for the records
+    /// a field is *missing* from -- `NotEqual` answers a different question, since a record
+    /// that has the field with another value satisfies it too.
+    IsEmpty,
+    /// The field is present and `null` — or, for an array, holds a `null` element.
+    ///
+    /// Sent as `{"type": "IsNull"}`. Distinct from `IsEmpty`: a payload that writes `null` to
+    /// mean "we looked and there was nothing" is saying something a missing field is not.
+    IsNull,
 }
 
 impl Record {
@@ -743,6 +754,15 @@ impl Record {
             FilterOperation::NotIn(targets) => {
                 value.is_some_and(|v| !any_element(v, |x| targets.iter().any(|t| same_json(x, t))))
             }
+            // Both are about the field itself rather than about a value in it, so neither goes
+            // through `any_element`: an empty array has no element to ask, which is the point.
+            FilterOperation::IsEmpty => match value {
+                None => true,
+                Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::Array(elements)) => elements.is_empty(),
+                Some(_) => false,
+            },
+            FilterOperation::IsNull => value.is_some_and(|v| any_element(v, |x| x.is_null())),
             positive => value.is_some_and(|v| any_element(v, |x| scalar_matches(x, positive))),
         }
     }
@@ -824,6 +844,9 @@ fn scalar_matches(value: &serde_json::Value, operation: &FilterOperation) -> boo
     let number = || value.as_f64();
     let text = || value.as_str();
     match operation {
+        // Both are answered before this function, against the field rather than a value in it.
+        // A value cannot say whether its field is absent.
+        FilterOperation::IsEmpty | FilterOperation::IsNull => value.is_null(),
         FilterOperation::Equal(target) => same_json(value, target),
         FilterOperation::In(targets) => targets.iter().any(|t| same_json(value, t)),
         FilterOperation::GreaterThan(target) => {
