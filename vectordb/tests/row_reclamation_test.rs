@@ -114,6 +114,8 @@ async fn upserts_give_their_disk_back_and_every_live_row_survives() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .expect("create table");
@@ -226,6 +228,8 @@ async fn a_reclaimed_table_still_recovers_from_its_row_files() {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
             .await
             .expect("create table");

@@ -232,3 +232,26 @@ describe('search parameters', () => {
     }
   });
 });
+
+describe('createTable parameters', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  it('sends the per-table graph and quantization parameters as the server names them', async () => {
+    // The config object is the request body, and `m`, `ef_construction`, `max_elements` and a
+    // string `quantization` used to sit at its top level — four fields the server never had.
+    // Since unknown fields started being refused, naming any of them failed the create.
+    fetchMock.mockResolvedValueOnce(ok({ name: 't', dimension: 4 }));
+    await new DXMTClient().createTable({
+      name: 't',
+      dimension: 4,
+      hnsw: { m: 8, ef_construction: 64 },
+      quantization: { quantize_at_rows: 4096 },
+    });
+    expect(bodyOf(0)).toEqual({
+      name: 't',
+      dimension: 4,
+      hnsw: { m: 8, ef_construction: 64 },
+      quantization: { quantize_at_rows: 4096 },
+    });
+  });
+});

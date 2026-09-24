@@ -140,6 +140,8 @@ async fn test_storage_ann_10k_recall_and_latency() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();
@@ -275,6 +277,8 @@ async fn test_search_effort_is_live() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

@@ -84,6 +84,8 @@ impl DXMTVectorDB {
             memory_optimization: None,
             payload_schema: None,
             schema_version: 1,
+            hnsw: None,
+            quantization: None,
         };
 
         self.runtime

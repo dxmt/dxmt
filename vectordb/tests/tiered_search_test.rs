@@ -33,6 +33,8 @@ fn create_test_table_config(name: &str) -> TableConfig {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     }
 }
 

@@ -59,6 +59,8 @@ async fn test_create_table_basic() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let result = state.storage.create_table(table_config).await;
@@ -91,6 +93,8 @@ async fn test_create_table_duplicate() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     state.storage.create_table(table_config.clone()).await.unwrap();
@@ -115,6 +119,8 @@ async fn test_insert_records_basic() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -162,6 +168,8 @@ async fn test_insert_records_wrong_dimension() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -197,6 +205,8 @@ async fn test_search_basic() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -277,6 +287,8 @@ async fn test_delete_record() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -337,6 +349,8 @@ async fn test_update_record() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -404,6 +418,8 @@ async fn test_list_tables() {
             named_vectors: None,
             payload_schema: None,
             schema_version: 1,
+            hnsw: None,
+            quantization: None,
         };
         state.storage.create_table(table_config).await.unwrap();
     }
@@ -438,6 +454,8 @@ async fn test_large_batch_insert() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 

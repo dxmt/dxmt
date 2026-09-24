@@ -60,6 +60,8 @@ async fn test_basic_state_recreation() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let vectors = create_test_vectors(50, 32);
@@ -162,6 +164,8 @@ async fn test_fast_data_loading() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let vectors = create_test_vectors(1000, 128);
@@ -231,6 +235,8 @@ async fn test_index_consistency_after_rebuild() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let vectors = create_test_vectors(200, 64);

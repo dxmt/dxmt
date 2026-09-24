@@ -22,11 +22,6 @@ export type IndexType =
   | 'lsh';
 
 /**
- * Quantization types for compression.
- */
-export type QuantizationType = 'none' | 'product' | 'scalar' | 'binary';
-
-/**
  * Vector representation - array of numbers.
  */
 export type Vector = number[];
@@ -91,6 +86,26 @@ export interface Record {
   score?: number;
 }
 
+/** Graph parameters for one table; unset fields keep the server's defaults. */
+export interface HnswParams {
+  /** Edges per node: denser graph, better recall, more memory, slower build. */
+  m?: number;
+  /** Candidates considered while building. Cannot be recovered by searching harder later. */
+  ef_construction?: number;
+  /** Starting traversal budget at query time; `search_mode` scales it per query. */
+  ef_search?: number;
+}
+
+/** Product-quantization parameters for one table. */
+export interface QuantizationParams {
+  /** Subspaces per vector; one byte of code each at 256 centroids. */
+  num_subvectors?: number;
+  num_centroids?: number;
+  /** Rows at which the index trains codebooks and switches to codes. Set it above the table's
+   * eventual size to keep the table exact. */
+  quantize_at_rows?: number;
+}
+
 /**
  * Table configuration for creating tables.
  */
@@ -99,12 +114,19 @@ export interface TableConfig {
   dimension: number;
   distance_metric?: DistanceMetric;
   index_type?: IndexType;
-  quantization?: QuantizationType;
   description?: string;
   enable_full_text_search?: boolean;
-  max_elements?: number;
-  ef_construction?: number;
-  m?: number;
+  /**
+   * Graph parameters for this table.
+   *
+   * `m` and `ef_construction` used to sit at the top level here, next to a `quantization` that
+   * took a quantization-type string and a `max_elements` — four fields the server has never
+   * had. The whole object is sent as the request body, so since unknown fields started being
+   * refused, naming any of them failed the create outright.
+   */
+  hnsw?: HnswParams;
+  /** Quantization parameters for this table. */
+  quantization?: QuantizationParams;
 }
 
 /**
@@ -115,11 +137,19 @@ export interface TableInfo {
   dimension: number;
   distance_metric: DistanceMetric;
   index_type: IndexType;
-  quantization: QuantizationType;
   record_count: number;
   created_at: string;
   updated_at: string;
   description?: string;
+  /** The graph parameters this table was created with, or null for the server's defaults. */
+  hnsw?: HnswParams | null;
+  /**
+   * The quantization parameters this table was created with, or null for the defaults.
+   *
+   * This was typed as a `QuantizationType` string — 'none' | 'product' | 'scalar' | 'binary' —
+   * which the server has never returned for a table.
+   */
+  quantization?: QuantizationParams | null;
 }
 
 /**

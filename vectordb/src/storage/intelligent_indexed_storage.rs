@@ -187,7 +187,8 @@ pub struct StorageHealthSnapshot {
 
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
 /// （例如 BruteForce），恢复时从 `records` 重新插入即可。
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// In memory only: what the file holds is [`TableSnapshotFile`].
 struct TableSnapshot {
     table: Table,
     algorithm: IndexAlgorithm,
@@ -197,6 +198,120 @@ struct TableSnapshot {
     /// unchanged; what changes is that writing a snapshot of 10M records no longer needs a
     /// second 90 GB of them in memory first (design doc section 34.3).
     records: Vec<Arc<Record>>,
+    has_index: bool,
+}
+
+/// What a `tN.meta` file holds, and why it is in two halves.
+///
+/// The records are bincode, because they are the bulk: a `f32` costs 4 bytes there and 5 in
+/// MessagePack, and at 10M×768 that difference is 30 GB. Their type does not change.
+///
+/// The head does change -- it is where a table's configuration lives -- and bincode is
+/// positional, so adding one field to `Table` moved every later byte and turned every
+/// existing snapshot into `tag for enum is not valid, found 16`. The server refuses to start
+/// on a snapshot it cannot read, by design, so that is a database that does not come up.
+/// MessagePack carries field names, so from here a new field with `#[serde(default)]` costs
+/// nothing and needs no frozen copy of the old struct.
+///
+/// Reading the head alone is also cheap: it is the first field, and bincode stops at the
+/// length it was given, so a listing does not decode the records.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TableSnapshotFile {
+    /// MessagePack of [`SnapshotHead`].
+    head: Vec<u8>,
+    records: Vec<Arc<Record>>,
+}
+
+/// The part of a snapshot that describes the table rather than its rows.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotHead {
+    table: Table,
+    algorithm: IndexAlgorithm,
+    has_index: bool,
+}
+
+/// The current meta layout: a MessagePack head, then bincode records.
+const SNAPSHOT_KIND: &str = "table-snapshot-v2";
+/// Everything written before 2026-09-24: one bincode `{table, algorithm, records, has_index}`.
+/// Read through [`crate::storage::snapshot_v1`], never written again.
+const SNAPSHOT_KIND_V1: &str = "table-snapshot";
+
+/// The head of a `tN.meta`, without decoding its records.
+fn read_snapshot_head(path: &std::path::Path) -> crate::Result<SnapshotHead> {
+    match crate::search::index_persistence::read_kind(path)?.as_str() {
+        SNAPSHOT_KIND => {
+            #[derive(serde::Deserialize)]
+            struct HeadOnly {
+                head: Vec<u8>,
+            }
+            let file: HeadOnly = crate::search::index_persistence::read_index(path, SNAPSHOT_KIND)?;
+            decode_head(&file.head)
+        }
+        SNAPSHOT_KIND_V1 => {
+            // `table` and `algorithm` are the first two fields, so this stops before the
+            // records too.
+            #[derive(serde::Deserialize)]
+            struct LegacyHead {
+                table: crate::storage::snapshot_v1::TableV1,
+                algorithm: crate::storage::snapshot_v1::IndexAlgorithmV1,
+            }
+            let old: LegacyHead =
+                crate::search::index_persistence::read_index(path, SNAPSHOT_KIND_V1)?;
+            Ok(SnapshotHead {
+                table: old.table.into(),
+                algorithm: old.algorithm.into(),
+                // Not read, and the one caller that wants it re-reads the whole file.
+                has_index: false,
+            })
+        }
+        other => Err(crate::Error::Serialization(format!(
+            "{}: holds a '{}' snapshot, which this build does not know",
+            path.display(),
+            other
+        ))),
+    }
+}
+
+/// A whole `tN.meta`, records included.
+fn read_snapshot_meta(path: &std::path::Path) -> crate::Result<TableSnapshot> {
+    match crate::search::index_persistence::read_kind(path)?.as_str() {
+        SNAPSHOT_KIND => {
+            let file: TableSnapshotFile =
+                crate::search::index_persistence::read_index(path, SNAPSHOT_KIND)?;
+            let head = decode_head(&file.head)?;
+            Ok(TableSnapshot {
+                table: head.table,
+                algorithm: head.algorithm,
+                records: file.records,
+                has_index: head.has_index,
+            })
+        }
+        SNAPSHOT_KIND_V1 => {
+            let old: crate::storage::snapshot_v1::TableSnapshotV1 =
+                crate::search::index_persistence::read_index(path, SNAPSHOT_KIND_V1)?;
+            Ok(TableSnapshot {
+                table: old.table.into(),
+                algorithm: old.algorithm.into(),
+                records: old.records,
+                has_index: old.has_index,
+            })
+        }
+        other => Err(crate::Error::Serialization(format!(
+            "{}: holds a '{}' snapshot, which this build does not know",
+            path.display(),
+            other
+        ))),
+    }
+}
+
+fn decode_head(bytes: &[u8]) -> crate::Result<SnapshotHead> {
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| crate::Error::Serialization(format!("snapshot head is unreadable: {}", e)))
+}
+
+/// What the verification keeps out of a snapshot it has just read end to end.
+struct VerifiedMeta {
+    table_name: String,
     has_index: bool,
 }
 
@@ -212,17 +327,48 @@ struct TableSnapshot {
 /// Same fields in the same order, so bincode reads the same bytes; `records` decodes each
 /// element and drops it, which is what keeps the guarantee -- a record that will not decode
 /// still fails the verification -- at constant memory.
-#[derive(serde::Deserialize)]
-struct VerifiedSnapshot {
-    #[allow(dead_code)]
-    table: Table,
-    #[allow(dead_code)]
-    algorithm: IndexAlgorithm,
-    /// Never read, and that is the point: the work happens in its `Deserialize`, which
-    /// decodes each record and drops it. Reading it would defeat the purpose.
-    #[allow(dead_code)]
-    records: DecodedAndDropped,
-    has_index: bool,
+fn verify_snapshot_meta(path: &std::path::Path) -> crate::Result<VerifiedMeta> {
+    match crate::search::index_persistence::read_kind(path)?.as_str() {
+        SNAPSHOT_KIND => {
+            #[derive(serde::Deserialize)]
+            struct VerifiedFile {
+                head: Vec<u8>,
+                /// Never read, and that is the point: the work happens in its `Deserialize`,
+                /// which decodes each record and drops it.
+                #[allow(dead_code)]
+                records: DecodedAndDropped,
+            }
+            let file: VerifiedFile =
+                crate::search::index_persistence::read_index(path, SNAPSHOT_KIND)?;
+            let head = decode_head(&file.head)?;
+            Ok(VerifiedMeta {
+                table_name: head.table.name,
+                has_index: head.has_index,
+            })
+        }
+        SNAPSHOT_KIND_V1 => {
+            #[derive(serde::Deserialize)]
+            struct VerifiedV1 {
+                table: crate::storage::snapshot_v1::TableV1,
+                #[allow(dead_code)]
+                algorithm: crate::storage::snapshot_v1::IndexAlgorithmV1,
+                #[allow(dead_code)]
+                records: DecodedAndDropped,
+                has_index: bool,
+            }
+            let old: VerifiedV1 =
+                crate::search::index_persistence::read_index(path, SNAPSHOT_KIND_V1)?;
+            Ok(VerifiedMeta {
+                table_name: old.table.name,
+                has_index: old.has_index,
+            })
+        }
+        other => Err(crate::Error::Serialization(format!(
+            "{}: holds a '{}' snapshot, which this build does not know",
+            path.display(),
+            other
+        ))),
+    }
 }
 
 /// A `Vec<Record>` decoded for its errors and not for its contents.
@@ -1580,6 +1726,8 @@ impl IntelligentIndexedStorage {
                         payload_schema: None,
                         schema_version: 1,
                         named_vectors: None,
+                        hnsw: None,
+                        quantization: None,
                     };
                     self.create_table(config).await.map(|_| {
                         tables += 1;
@@ -1880,16 +2028,16 @@ impl IntelligentIndexedStorage {
                     })
                     .collect(),
             };
-            let meta = TableSnapshot {
+            let head = rmp_serde::to_vec_named(&SnapshotHead {
                 table: template.table,
                 algorithm: template.algorithm,
-                records,
                 has_index,
-            };
+            })
+            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
             crate::search::index_persistence::write_index(
                 &staging.join(format!("{}.meta", stem)),
-                "table-snapshot",
-                &meta,
+                SNAPSHOT_KIND,
+                &TableSnapshotFile { head, records },
             )?;
 
             names.push(name);
@@ -2196,10 +2344,7 @@ impl IntelligentIndexedStorage {
         };
 
         let stem = format!("t{}", i);
-        let meta: TableSnapshot = crate::search::index_persistence::read_index(
-            &dir.join(format!("{}.meta", stem)),
-            "table-snapshot",
-        )?;
+        let meta = read_snapshot_meta(&dir.join(format!("{}.meta", stem)))?;
 
         // Two concurrent readers can both find the table missing and both start restoring. The
         // second one finds it present by the time it takes the write lock, and restore_table's
@@ -2407,6 +2552,78 @@ impl IntelligentIndexedStorage {
     /// **只能有这一处。** 分区的判断原本只写在 `rebuild_index` 里，而 `reevaluate_indexes`
     /// 直接比较选择器的输出——于是一张已经分区的表每次扫描都被判为"不对"，重建一次又拿回
     /// 分区索引，下次扫描再来一遍。O(n) 的无限循环，有测试专门盯着。
+    /// A table's own graph and quantization parameters, applied over whatever the selector
+    /// chose for it.
+    ///
+    /// The selector decides the *family* — brute force, HNSW, HNSW-PQ — from the data's shape,
+    /// and that stays automatic. What it should not decide alone is how hard to build: `m` was
+    /// hardcoded at 16 and `ef_construction` came from an environment variable, so a server
+    /// holding a 5,000-row lookup table beside a 10M-row corpus built both the same way. These
+    /// overrides are per table, persisted with it, and applied on rebuilds too — otherwise the
+    /// first re-evaluation would quietly undo them.
+    fn apply_table_index_params(
+        algorithm: &mut IndexAlgorithm,
+        hnsw: Option<&crate::types::table::HnswParams>,
+        quantization: Option<&crate::types::table::QuantizationParams>,
+    ) {
+        let (graph_m, graph_ef_construction, graph_ef_search) = hnsw
+            .map(|h| (h.m, h.ef_construction, h.ef_search))
+            .unwrap_or((None, None, None));
+
+        match algorithm {
+            IndexAlgorithm::HNSW {
+                m,
+                ef_construction,
+                ef_search,
+            } => {
+                if let Some(v) = graph_m {
+                    *m = v;
+                }
+                if let Some(v) = graph_ef_construction {
+                    *ef_construction = v;
+                }
+                if let Some(v) = graph_ef_search {
+                    *ef_search = v;
+                }
+            }
+            IndexAlgorithm::HnswPQ {
+                m,
+                ef_construction,
+                ef_search,
+                num_subvectors,
+                num_centroids,
+                quantize_at_rows,
+                ..
+            } => {
+                if let Some(v) = graph_m {
+                    *m = v;
+                }
+                if let Some(v) = graph_ef_construction {
+                    *ef_construction = v;
+                }
+                if let Some(v) = graph_ef_search {
+                    *ef_search = v;
+                }
+                if let Some(q) = quantization {
+                    if let Some(v) = q.num_subvectors {
+                        *num_subvectors = v;
+                    }
+                    if let Some(v) = q.num_centroids {
+                        *num_centroids = v;
+                    }
+                    if let Some(v) = q.quantize_at_rows {
+                        *quantize_at_rows = Some(v);
+                    }
+                }
+            }
+            // Brute force has no graph to tune, and the three unimplemented families are
+            // refused before they are built. Silently ignoring parameters on those is right:
+            // the alternative is refusing a create over a field that describes an index the
+            // table did not get.
+            _ => {}
+        }
+    }
+
     /// One decision function for `rebuild_index` and `reevaluate_indexes`.
     ///
     /// `memory_optimization` is the table's own setting (or the global default), the same
@@ -2419,6 +2636,8 @@ impl IntelligentIndexedStorage {
         dimension: usize,
         distance_metric: DistanceMetric,
         memory_optimization: bool,
+        hnsw: Option<&crate::types::table::HnswParams>,
+        quantization: Option<&crate::types::table::QuantizationParams>,
     ) -> crate::Result<IndexDecision> {
         let config = IndexConfig {
             dataset_size: record_count,
@@ -2439,6 +2658,11 @@ impl IntelligentIndexedStorage {
                 .select_optimal_index(&config)
                 .await?
         };
+
+        // The selector picks the family; the table says how hard to build. Applied here rather
+        // than at creation so a rebuild and the periodic re-evaluation keep the table's
+        // parameters instead of reverting it to the server's defaults.
+        Self::apply_table_index_params(&mut decision.selected_algorithm, hnsw, quantization);
 
         // Threshold on bytes of vector data, not row count. Row count says nothing about
         // memory: a million 1536-dimension vectors is 6 GB, a million 64-dimension vectors is
@@ -2640,6 +2864,7 @@ impl IntelligentIndexedStorage {
                 num_subvectors: dimension / 4,
                 num_centroids: 256,
                 enable_reranking: true,
+                quantize_at_rows: None,
             }),
             other => {
                 warn!("DXMT_INDEX_ALGORITHM={other} is not hnsw or hnsw-pq; ignoring it");
@@ -2681,13 +2906,15 @@ impl IntelligentIndexedStorage {
                 continue;
             }
 
-            let (dimension, metric, memory_optimization) = {
+            let (dimension, metric, memory_optimization, hnsw, quantization) = {
                 let tables = self.read_tables("reevaluate_indexes").await;
                 match tables.get(&name) {
                     Some(d) => (
                         d.table.dimension,
                         d.table.distance_metric,
                         self.memory_optimization_of(&d.table),
+                        d.table.hnsw.clone(),
+                        d.table.quantization.clone(),
                     ),
                     // Evicted or dropped while we were iterating; nothing to do.
                     None => continue,
@@ -2695,7 +2922,14 @@ impl IntelligentIndexedStorage {
             };
 
             let want = self
-                .decide_algorithm(count, dimension, metric, memory_optimization)
+                .decide_algorithm(
+                    count,
+                    dimension,
+                    metric,
+                    memory_optimization,
+                    hnsw.as_ref(),
+                    quantization.as_ref(),
+                )
                 .await?
                 .selected_algorithm;
 
@@ -2989,16 +3223,13 @@ impl IntelligentIndexedStorage {
 
         for i in 0..tables {
             let stem = format!("t{}", i);
-            let meta: VerifiedSnapshot = crate::search::index_persistence::read_index(
-                &dir.join(format!("{}.meta", stem)),
-                "table-snapshot",
-            )?;
+            let meta = verify_snapshot_meta(&dir.join(format!("{}.meta", stem)))?;
             if meta.has_index {
                 let idx = dir.join(format!("{}.idx", stem));
                 if !idx.exists() {
                     return Err(crate::Error::Internal(format!(
                         "snapshot for table '{}' claims an index but {} is missing",
-                        meta.table.name,
+                        meta.table_name,
                         idx.display()
                     )));
                 }
@@ -3048,11 +3279,7 @@ impl IntelligentIndexedStorage {
 
         for i in 0..manifest.tables {
             let stem = format!("t{}", i);
-            let meta: TableSnapshot = crate::search::index_persistence::read_index(
-                &dir.join(format!("{}.meta", stem)),
-                "table-snapshot",
-            )
-            .map_err(|e| {
+            let meta = read_snapshot_meta(&dir.join(format!("{}.meta", stem))).map_err(|e| {
                 crate::Error::Internal(format!("snapshot table {} is unreadable: {}", i, e))
             })?;
 
@@ -3099,6 +3326,8 @@ impl IntelligentIndexedStorage {
             text_fields: meta.table.text_fields.clone(),
             enable_full_text_search: meta.table.enable_full_text_search,
             memory_optimization: meta.table.memory_optimization,
+            hnsw: meta.table.hnsw.clone(),
+            quantization: meta.table.quantization.clone(),
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
@@ -3745,6 +3974,13 @@ impl IntelligentIndexedStorage {
         if let Some(forced) = Self::forced_algorithm(config.dimension) {
             index_decision.selected_algorithm = forced;
         }
+        // The table's own parameters win over both the selector and the environment: they are
+        // the most specific statement anyone made about this table.
+        Self::apply_table_index_params(
+            &mut index_decision.selected_algorithm,
+            config.hnsw.as_ref(),
+            config.quantization.as_ref(),
+        );
 
         info!(
             "Selected {} algorithm for table {} with confidence {:.2}",
@@ -5699,11 +5935,8 @@ impl IntelligentIndexedStorage {
             }
             // Read only the metadata; the point of eviction is not to pull the records back in
             // just to answer a listing.
-            if let Ok(meta) = crate::search::index_persistence::read_index::<TableSnapshot>(
-                &dir.join(format!("t{}.meta", i)),
-                "table-snapshot",
-            ) {
-                out.push(meta.table);
+            if let Ok(head) = read_snapshot_head(&dir.join(format!("t{}.meta", i))) {
+                out.push(head.table);
             }
         }
 
@@ -5973,6 +6206,8 @@ impl IntelligentIndexedStorage {
                     dimension,
                     distance_metric,
                     self.memory_optimization_of(&table_data.table),
+                    table_data.table.hnsw.as_ref(),
+                    table_data.table.quantization.as_ref(),
                 )
                 .await?;
 
@@ -6209,6 +6444,10 @@ impl IntelligentIndexedStorage {
                 text_fields: src.table.text_fields.clone(),
                 enable_full_text_search: src.table.enable_full_text_search,
                 memory_optimization: src.table.memory_optimization,
+                // A branch is a copy: the same graph parameters, or it would be a copy of the
+                // data under a different index and useless for comparing anything.
+                hnsw: src.table.hnsw.clone(),
+                quantization: src.table.quantization.clone(),
                 payload_schema: src.table.payload_schema.clone(),
                 schema_version: src.table.schema_version,
                 named_vectors: None,
@@ -6277,6 +6516,11 @@ impl IntelligentIndexedStorage {
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         let index_stats = data.index.get_stats().await;
+        // Which regime this table's index is in. An HNSW-PQ index is an exact graph until it
+        // has enough rows to train codebooks on, and everything about recall and memory
+        // changes when it crosses: a table that answered exactly yesterday answers
+        // approximately today, and nothing said so.
+        let quantized = data.index.is_quantized().await;
         let dimension = data.table.dimension;
         let record_count = data.records.len();
 
@@ -6325,6 +6569,7 @@ impl IntelligentIndexedStorage {
             "record_count": record_count,
             "dimension": dimension,
             "index_type": data.table.index_type.to_string(),
+            "quantized": quantized,
             "index_size_bytes": index_stats.index_size_bytes,
             "memory_usage_bytes": record_bytes + vector_row_bytes + index_stats.index_size_bytes,
             "disk_usage_bytes": disk_bytes,
@@ -6530,6 +6775,7 @@ impl IntelligentIndexedStorage {
             num_subvectors: config.dimension / 4,
             num_centroids: 256,
             enable_reranking: true,
+            quantize_at_rows: None,
         };
         // Measured, not estimated: 1M x 768 Cohere, records and vectors on disk, HNSW-PQ192
         // with a 500-candidate rerank (design/DISK_INDEX.md section 4, phase 3 / fp16).
@@ -6609,6 +6855,7 @@ impl IntelligentIndexedStorage {
                 num_subvectors,
                 num_centroids,
                 enable_reranking,
+                quantize_at_rows,
             } => {
                 use crate::search::hnsw::HnswConfig;
                 use crate::search::hnsw_pq::{HnswPqConfig, HnswPqIndex};
@@ -6622,6 +6869,8 @@ impl IntelligentIndexedStorage {
                     hnsw_config: HnswConfig::from_params(*m, *ef_construction, *ef_search),
                     num_subvectors: *num_subvectors,
                     num_centroids: *num_centroids,
+                    quantize_at_rows: quantize_at_rows
+                        .unwrap_or(HnswPqConfig::DEFAULT_QUANTIZE_AT_ROWS),
                     // Reranking is not optional any more: the graph holds codes, not
                     // vectors, so the storage layer always reranks (`search_reranked`).
                     ..HnswPqConfig::default()
@@ -7983,10 +8232,12 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         let snap: Snapshot = serde_json::from_slice(&json)
             .map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
-        // Re-create the table with the restored schema, then bulk-insert records
+        // Re-create the table with the restored schema, then bulk-insert records,
         // which rebuilds the vector index automatically.
         let table_cfg = TableConfig {
             name: table_name.to_string(),
+            hnsw: snap.table.hnsw.clone(),
+            quantization: snap.table.quantization.clone(),
             dimension: snap.table.dimension,
             distance_metric: snap.table.distance_metric,
             description: snap.table.description.clone(),
@@ -8108,6 +8359,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
         // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
         // and would make this test vacuous. The size-based selector, explicitly: the
@@ -8135,7 +8388,7 @@ mod tests {
         // built for the purpose: the assertion is about the selector's answer, and a second
         // 6,000-row graph build is a minute of the unit suite for nothing.
         let wanted = storage
-            .decide_algorithm(ROWS, 16, DistanceMetric::Cosine, false)
+            .decide_algorithm(ROWS, 16, DistanceMetric::Cosine, false, None, None)
             .await?
             .selected_algorithm
             .configured_ef_search()
@@ -8194,6 +8447,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table = storage.create_table(table_config).await?;
@@ -8235,6 +8490,8 @@ mod tests {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             };
 
             let table = storage.create_table(table_config).await?;
@@ -8281,6 +8538,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8350,7 +8609,7 @@ mod tests {
         // does. Building a 25M-row table to assert a branch would cost hours.
         for rows in [1_000_000usize, 25_000_000, 100_000_000] {
             let want = storage
-                .decide_algorithm(rows, 768, DistanceMetric::Cosine, true)
+                .decide_algorithm(rows, 768, DistanceMetric::Cosine, true, None, None)
                 .await?
                 .selected_algorithm;
             assert!(
@@ -8362,7 +8621,7 @@ mod tests {
         // And the size-based selector still answers what it always did, so the assertion above
         // is about the routing rather than about a selector that stopped choosing DiskANN.
         let sized = storage
-            .decide_algorithm(25_000_000, 768, DistanceMetric::Cosine, false)
+            .decide_algorithm(25_000_000, 768, DistanceMetric::Cosine, false, None, None)
             .await?
             .selected_algorithm;
         assert!(
@@ -8408,6 +8667,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8501,6 +8762,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8598,6 +8861,8 @@ mod tests {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
             .await?;
         let record = |id: String, vector: Vec<f32>| CreateRecordRequest {
@@ -8782,6 +9047,8 @@ mod tests {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
             .await?;
 
@@ -8854,6 +9121,8 @@ mod tests {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
             .await?;
         let request = |id: &str, vector: Vec<f32>| CreateRecordRequest {
@@ -8930,6 +9199,8 @@ mod tests {
                 payload_schema: None,
                 schema_version: 1,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
             .await?;
 

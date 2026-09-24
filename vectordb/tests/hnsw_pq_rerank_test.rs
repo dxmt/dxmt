@@ -102,6 +102,8 @@ async fn a_quantized_table_answers_with_exact_order() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

@@ -105,6 +105,17 @@ pub trait VectorIndex: Send + Sync {
         self.len()
     }
 
+    /// Whether this index scores from compressed codes rather than from the vectors.
+    ///
+    /// The difference is visible to a user as recall and as memory: a quantized graph is a
+    /// tenth the size and answers approximately, with an exact rerank on top. Which regime a
+    /// table is in was not reported anywhere, so "why did recall change at some size" had no
+    /// answer short of reading the logs. An index with no compressed form answers `false`
+    /// forever, which is the truth for it.
+    fn is_quantized(&self) -> bool {
+        false
+    }
+
     /// Whether [`Self::quantization_job`] would return work, without paying for the sample.
     ///
     /// `quantization_job` copies up to 65,536 vectors out of the graph -- 200 MB at 768

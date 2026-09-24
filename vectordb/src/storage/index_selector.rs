@@ -14,6 +14,11 @@ pub enum IndexAlgorithm {
         num_subvectors: usize,
         num_centroids: usize,
         enable_reranking: bool,
+        /// Rows at which the graph trains its codebooks and switches to codes. `None` is the
+        /// index's own default (65,536). A table can raise it above its eventual size to stay
+        /// exact, which is the only way to say "do not quantize this one".
+        #[serde(default)]
+        quantize_at_rows: Option<usize>,
     },
     QuantizedIVF {
         nlist: usize,
@@ -324,6 +329,7 @@ impl IntelligentIndexSelector {
                     num_subvectors,
                     num_centroids: 256,
                     enable_reranking: false,
+                    quantize_at_rows: None,
                 },
                 confidence: 0.90,
                 expected_performance: ExpectedPerformance {
@@ -404,6 +410,7 @@ mod adopt_tests {
             num_subvectors: 96,
             num_centroids: 256,
             enable_reranking: false,
+            quantize_at_rows: None,
         };
         assert!(
             !current.adopt_query_time_params(&want),

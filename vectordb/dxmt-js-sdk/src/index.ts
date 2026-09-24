@@ -84,7 +84,8 @@ export type {
   // Enums
   DistanceMetric,
   IndexType,
-  QuantizationType,
+  HnswParams,
+  QuantizationParams,
 
   // Utility
   HealthCheckResponse,

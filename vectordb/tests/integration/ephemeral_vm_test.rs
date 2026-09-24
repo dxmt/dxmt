@@ -67,6 +67,8 @@ async fn test_snapshot_and_restore() {
             index_type: None,
             text_fields: None,
             enable_full_text_search: false,
+            hnsw: None,
+            quantization: None,
         };
 
         storage.create_table(&table_config).await.unwrap();
@@ -105,6 +107,8 @@ async fn test_snapshot_and_restore() {
             index_type: None,
             text_fields: None,
             enable_full_text_search: false,
+            hnsw: None,
+            quantization: None,
         };
 
         storage.create_table(&table_config).await.unwrap();
@@ -156,6 +160,8 @@ async fn test_recovery_time_under_5min() {
             index_type: None,
             text_fields: None,
             enable_full_text_search: false,
+            hnsw: None,
+            quantization: None,
         };
 
         storage.create_table(&table_config).await.unwrap();
@@ -190,6 +196,8 @@ async fn test_recovery_time_under_5min() {
             index_type: None,
             text_fields: None,
             enable_full_text_search: false,
+            hnsw: None,
+            quantization: None,
         };
 
         storage.create_table(&table_config).await.unwrap();
@@ -253,6 +261,8 @@ async fn test_state_persistence_across_restarts() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     // Original state
@@ -349,6 +359,8 @@ async fn test_index_rebuild_correctness() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let vectors = create_test_vectors(200, 64);
@@ -465,6 +477,8 @@ async fn test_spot_instance_migration() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let vectors = create_test_vectors(500, 128);

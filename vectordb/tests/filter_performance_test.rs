@@ -44,6 +44,8 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -151,6 +153,8 @@ async fn test_post_filtering_with_low_selective_filter() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -241,6 +245,8 @@ async fn test_filter_with_in_operation() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     storage.create_table(table_config).await.unwrap();
 

@@ -680,6 +680,8 @@ impl<S: Storage + 'static> McpServer<S> {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         self.storage.create_table(table_config).await?;

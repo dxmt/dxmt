@@ -167,6 +167,8 @@ impl StorageAwareExecutor {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
         self.storage
             .create_table(config)
@@ -442,6 +444,8 @@ mod tests {
                 payload_schema: None,
                 memory_optimization: None,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
         }
 
@@ -462,6 +466,8 @@ mod tests {
                 payload_schema: None,
                 memory_optimization: None,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             })
         }
 

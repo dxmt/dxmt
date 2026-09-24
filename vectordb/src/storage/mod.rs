@@ -11,6 +11,7 @@ pub mod object;
 pub mod payload_index;
 pub mod punch;
 pub mod record_store;
+pub mod snapshot_v1;
 pub mod tier_promotion;
 pub mod tiered;
 pub mod traits;

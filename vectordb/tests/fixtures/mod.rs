@@ -49,6 +49,8 @@ pub fn create_simple_table_config(name: &str, dimension: usize) -> TableConfig {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     }
 }
 
@@ -72,6 +74,8 @@ pub fn create_fts_table_config(name: &str, dimension: usize) -> TableConfig {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     }
 }
 

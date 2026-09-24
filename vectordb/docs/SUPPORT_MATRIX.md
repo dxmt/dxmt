@@ -19,6 +19,7 @@ The following features are part of the intended single-node Alpha contract:
 | Area | Supported path | Notes |
 | --- | --- | --- |
 | Server | `vectordb serve` | Axum HTTP server; routes live under `/api/v1`, probes at the root. One data model, several protocols (REST, gRPC, GraphQL, WebSocket, MCP) — the `serve --simple` mode that served a second model at `/collections/*` has been removed. |
+| Index tuning | `hnsw` and `quantization` on create | Per table: `m`, `ef_construction`, `ef_search`, and `num_subvectors`, `num_centroids`, `quantize_at_rows`. Persisted, so rebuilds and restarts keep them; `quantize_at_rows` above the table's eventual size keeps a table exact. `GET /tables/{t}/stats` reports `quantized`, which is the regime the index is in and decides both its recall and its memory. |
 | Tables | Create, list, alter, delete, branch | Table configuration is persisted in WAL and snapshots. |
 | Records | Insert/upsert, get, update, delete (by id or filter), list, count | JSON payloads, versions, sparse vectors and named vectors are retained. |
 | Concurrent insert and search | Supported | Verified by `StreamingPerformanceCase`, which ingests and searches at once: recall 0.508 -> 0.993 across the four ingest stages at 1,777 -> 3,301 concurrent QPS. Until `0ed359b` the self-quantization at 65,536 rows trained its codebooks inside the index write lock, freezing every read and write on the table for the duration -- 56 s on the shipped 192-subspace default, and a 47.7 s concurrent p99 in that one window. Training now runs with no lock held. |

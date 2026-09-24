@@ -33,6 +33,8 @@ async fn create_test_table(
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     storage.create_table(config).await?;
 

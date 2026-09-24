@@ -139,6 +139,8 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

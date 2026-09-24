@@ -42,6 +42,8 @@ async fn create_storage(max_size_mb: usize) -> IntelligentIndexedStorage {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
     let _ = storage.create_table(table_config).await.unwrap();
 

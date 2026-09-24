@@ -132,6 +132,8 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

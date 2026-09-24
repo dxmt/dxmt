@@ -39,6 +39,8 @@ async fn table_with_one_record(wal: Option<std::path::PathBuf>) -> IntelligentIn
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

@@ -123,6 +123,10 @@ def ids(response):
     return [hit["id"] for hit in response.json()["data"]["hits"]]
 
 
+def stats_of(name):
+    return get(f"/tables/{name}/stats").json()["data"]
+
+
 def listed(table, **body):
     return post(f"/tables/{table}/records/list", {"limit": 5, **body}).json()["data"]
 
@@ -385,6 +389,39 @@ def _(table):
         .json()["data"]["hits"][0]["payload"]
     )
     assert projected == {"topic": whole["topic"]}, projected
+
+
+@probe("CreateTableRequest", "hnsw")
+def _(table):
+    # The graph parameters a table is built with. Their effect is recall, which this suite
+    # cannot measure, so what is asserted here is that the server keeps them: a create that
+    # dropped them would answer 200 and build the default graph.
+    name = f"probe_hnsw_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4, "hnsw": {"m": 8, "ef_construction": 64}})
+    try:
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["hnsw"] == {"m": 8, "ef_construction": 64, "ef_search": None}, info["hnsw"]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("CreateTableRequest", "quantization")
+def _(table):
+    # `quantize_at_rows` above the table's eventual size is how a table says "stay exact", and
+    # `stats.quantized` is where that shows. `tests/table_index_params_test.rs` asserts the
+    # other direction, which needs 5,000 rows and a minute of k-means.
+    name = f"probe_quant_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4,
+                     "quantization": {"num_subvectors": 2, "quantize_at_rows": 10_000_000}})
+    try:
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["quantization"]["quantize_at_rows"] == 10_000_000, info["quantization"]
+        assert info["quantization"]["num_subvectors"] == 2, info["quantization"]
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "a", "vector": [1.0, 0.0, 0.0, 0.0]}]})
+        assert stats_of(name)["quantized"] is False
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
 
 
 # ---- POST /tables/{t}/records/count ----------------------------------------------------------

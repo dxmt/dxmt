@@ -246,6 +246,14 @@ impl IndexWrapper {
     }
 
     /// Whether a background quantization is in flight. For tests and diagnostics.
+    /// Whether the index scores from codes rather than from vectors right now.
+    ///
+    /// Reported in table stats: an HNSW-PQ index is exact until it has trained, and which side
+    /// of that a table is on decides both its recall and its memory.
+    pub async fn is_quantized(&self) -> bool {
+        self.index.read().await.is_quantized()
+    }
+
     pub fn is_quantizing(&self) -> bool {
         self.quantizing.load(std::sync::atomic::Ordering::SeqCst)
     }

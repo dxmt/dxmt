@@ -62,6 +62,8 @@ async fn test_basic_insert_and_search() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(10).await;
@@ -134,6 +136,8 @@ async fn test_memory_tier_performance() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(512).await;
@@ -221,6 +225,8 @@ async fn test_data_persistence() {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(10).await;

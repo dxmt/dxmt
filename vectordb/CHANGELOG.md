@@ -24,6 +24,30 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Per-table index parameters.** `hnsw` (`m`, `ef_construction`, `ef_search`) and
+  `quantization` (`num_subvectors`, `num_centroids`, `quantize_at_rows`) on `POST /tables`.
+  `m` was hardcoded at 16 and `ef_construction` came from an environment variable, so one
+  server built a 5,000-row lookup table and a 10M-row corpus the same way — and these are the
+  parameters that cannot be recovered afterwards, because searching harder does not add edges
+  the build never made. They are persisted with the table and applied on rebuilds and after a
+  restart, or the first re-evaluation would quietly revert a tuned table to the defaults.
+  `quantize_at_rows` above a table's eventual size is how to say "keep this one exact".
+
+  Putting them in the table also broke every snapshot on disk, which is the interesting part.
+  A `tN.meta` was one bincode record, and bincode stores no field names, so two new fields in
+  `Table` shifted every later byte: `tag for enum is not valid, found 16`, and a server that
+  refuses to start rather than come up with an empty database. Meta files now carry a
+  MessagePack head — the table, the algorithm, `has_index` — in front of the bincode records,
+  so a future field costs nothing, and the records keep the compact encoding because they are
+  the 30 GB. Snapshots written before this are read through
+  `src/storage/snapshot_v1.rs` and rewritten in the new shape at the next snapshot.
+  `tests/compat/` is what caught it and what keeps it caught.
+
+- **`GET /tables/{t}/stats` reports `quantized`.** An HNSW-PQ index is an exact graph until it
+  has enough rows to train codebooks on, and everything about recall and memory changes when
+  it crosses. Which side of that a table is on was not reported anywhere, so "why did recall
+  change at some size" had no answer short of reading the server log.
+
 - **`score_threshold` on a search.** A floor on the similarity the caller sees — higher is
   nearer — not on the internal distance, which runs the other way: a threshold that silently
   meant the distance would return exactly the hits it was asked to remove. It cannot make a

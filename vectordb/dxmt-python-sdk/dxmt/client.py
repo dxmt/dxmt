@@ -349,6 +349,8 @@ class DXMTClient:
         enable_full_text_search: bool = False,
         text_fields: Optional[list[dict[str, Any]]] = None,
         memory_optimization: Optional[bool] = None,
+        hnsw: Optional[dict[str, int]] = None,
+        quantization: Optional[dict[str, int]] = None,
     ) -> dict[str, Any]:
         """Create a new table (collection).
 
@@ -358,6 +360,12 @@ class DXMTClient:
             distance_metric: Distance metric (cosine, euclidean, manhattan, dot).
             index_type: Index type (hnsw, ivf, ivf_pq, lsh, brute_force).
             description: Optional table description.
+            hnsw: Graph parameters for this table: `m`, `ef_construction`, `ef_search`. They
+                decide the graph and cannot be recovered afterwards -- searching harder does
+                not add edges the build never made -- and they are per table because one
+                server holds a small lookup table beside a large corpus.
+            quantization: `num_subvectors`, `num_centroids`, `quantize_at_rows`. Setting
+                `quantize_at_rows` above the table's eventual size keeps it exact.
             enable_full_text_search: Enable full-text search.
             text_fields: Text field configurations.
             memory_optimization: Enable memory optimization (optional).
@@ -381,6 +389,12 @@ class DXMTClient:
             "text_fields": text_fields,
             "memory_optimization": memory_optimization,
         }
+        # Omitted rather than sent as null: the server refuses fields it does not have, and
+        # would have to decide what a null means where None already means "the default".
+        if hnsw is not None:
+            payload["hnsw"] = hnsw
+        if quantization is not None:
+            payload["quantization"] = quantization
         try:
             response = self._client.post("/tables", json=payload)
             response.raise_for_status()

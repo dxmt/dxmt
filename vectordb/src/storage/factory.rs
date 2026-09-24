@@ -675,6 +675,8 @@ impl StorageIntegration {
                 payload_schema: table.payload_schema.clone(),
                 schema_version: table.schema_version,
                 named_vectors: None,
+                hnsw: None,
+                quantization: None,
             };
 
             if let Err(e) = new_storage.create_table(table_config).await {

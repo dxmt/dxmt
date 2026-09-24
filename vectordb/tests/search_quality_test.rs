@@ -61,6 +61,8 @@ fn table_cfg(name: &str, dim: usize, metric: DistanceMetric) -> TableConfig {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     }
 }
 

@@ -61,6 +61,8 @@ async fn test_tier_recall_consistency() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(1).await; // 1MB memory
@@ -128,6 +130,8 @@ async fn test_memory_tier_latency() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(512).await; // 512MB
@@ -201,6 +205,8 @@ async fn test_data_integrity_across_operations() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(1).await;
@@ -296,6 +302,8 @@ async fn test_bulk_operations_consistency() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(10).await; // 10MB
@@ -369,6 +377,8 @@ async fn test_concurrent_access_consistency() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = std::sync::Arc::new(
@@ -440,6 +450,8 @@ async fn test_search_quality_after_cache_eviction() {
         index_type: None,
         text_fields: None,
         enable_full_text_search: false,
+        hnsw: None,
+        quantization: None,
     };
 
     let storage = create_test_storage(2).await; // 2MB small cache

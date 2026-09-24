@@ -37,6 +37,13 @@ pub struct Table {
     /// Named vector spaces configuration (persisted for index recreation)
     #[serde(default)]
     pub named_vectors: Option<Vec<VectorSpaceConfig>>,
+    /// Graph parameters this table was created with, persisted so a rebuild after a restart
+    /// builds the same graph rather than the server's current defaults.
+    #[serde(default)]
+    pub hnsw: Option<HnswParams>,
+    /// Quantization parameters this table was created with, persisted for the same reason.
+    #[serde(default)]
+    pub quantization: Option<QuantizationParams>,
 }
 
 /// 索引类型
@@ -192,6 +199,50 @@ pub struct VectorSpaceConfig {
     pub distance_metric: DistanceMetric,
 }
 
+/// Graph build parameters for a table, overriding the defaults for this table only.
+///
+/// `m` and `ef_construction` decide the graph, and they cannot be recovered afterwards: a
+/// search can look harder (`search_mode`), but no amount of searching adds edges the build
+/// never made. They were a global default and an environment variable, which is the wrong
+/// grain — a 5,000-row lookup table and a 10M-row corpus on one server want different graphs,
+/// and the environment cannot say so per table.
+///
+/// Unset fields keep the server's defaults. They are persisted with the table, so a rebuild
+/// and a restart use the same numbers the table was built with.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HnswParams {
+    /// Edges per node. Higher is a denser graph: better recall, more memory, slower build.
+    pub m: Option<usize>,
+    /// Candidates considered while building. Higher is a better graph and a slower ingest.
+    pub ef_construction: Option<usize>,
+    /// Starting traversal budget at query time. `search_mode` scales it per query, and the
+    /// server widens it as the table grows.
+    pub ef_search: Option<usize>,
+}
+
+/// Product-quantization parameters for a table, overriding the defaults for this table only.
+///
+/// These decide what the codes cost and what they lose. The defaults are calibrated on
+/// 768-dimension corpora (four dimensions per subspace, 256 centroids); a different width or a
+/// different accuracy target wants different numbers, and until now the only way to say so was
+/// to change them for every table on the server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct QuantizationParams {
+    /// Subspaces a vector is split into; one byte of code per subspace at 256 centroids.
+    /// Rounded to a divisor of the dimension.
+    pub num_subvectors: Option<usize>,
+    /// Centroids per subspace. 256 keeps a code to one byte.
+    pub num_centroids: Option<usize>,
+    /// Rows at which the graph trains its codebooks and switches to codes. Below it the index
+    /// is an exact HNSW graph, so this is also how to say "never quantize this table": set it
+    /// higher than the table will ever grow.
+    pub quantize_at_rows: Option<usize>,
+}
+
 /// 创建表的配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
@@ -215,6 +266,12 @@ pub struct TableConfig {
     /// Schema version, incremented on each alter_table call
     #[serde(default = "default_schema_version")]
     pub schema_version: u64,
+    /// Graph parameters for this table, overriding the server defaults.
+    #[serde(default)]
+    pub hnsw: Option<HnswParams>,
+    /// Quantization parameters for this table, overriding the server defaults.
+    #[serde(default)]
+    pub quantization: Option<QuantizationParams>,
     /// Optional named vector spaces (multi-vector support).
     /// When set, `dimension` serves as the default vector space named "default".
     #[serde(default)]
@@ -280,6 +337,10 @@ impl Table {
             payload_schema: config.payload_schema,
             memory_optimization: config.memory_optimization,
             named_vectors: config.named_vectors,
+            // Persisted, so a rebuild after a restart builds the graph this table asked for
+            // rather than whatever the server defaults to that day.
+            hnsw: config.hnsw,
+            quantization: config.quantization,
         })
     }
 
@@ -439,6 +500,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table = Table::new(config)?;
@@ -463,6 +526,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table = Table::new(config)?;
@@ -491,6 +556,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table = Table::new(config_enabled)?;
@@ -509,6 +576,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table2 = Table::new(config_disabled)?;
@@ -527,6 +596,8 @@ mod tests {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         };
 
         let table3 = Table::new(config_default)?;

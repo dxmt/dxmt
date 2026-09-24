@@ -85,6 +85,17 @@ pub struct CreateTableRequest {
     /// get one.
     #[serde(default)]
     pub payload_schema: Option<Vec<crate::types::table::FieldDef>>,
+    /// Graph parameters for this table, overriding the server defaults: `m`,
+    /// `ef_construction`, `ef_search`. They decide the graph and cannot be recovered
+    /// afterwards, and they were a global environment variable until now — the wrong grain for
+    /// a server holding a 5,000-row lookup table beside a 10M-row corpus.
+    #[serde(default)]
+    pub hnsw: Option<crate::types::table::HnswParams>,
+    /// Quantization parameters for this table: `num_subvectors`, `num_centroids`,
+    /// `quantize_at_rows`. Setting `quantize_at_rows` above the table's eventual size is how to
+    /// say "keep this one exact".
+    #[serde(default)]
+    pub quantization: Option<crate::types::table::QuantizationParams>,
 }
 
 /// 批量插入记录的请求
@@ -373,6 +384,8 @@ pub async fn create_table(
         // Deliberately not on `CreateTableRequest`.
         schema_version: 1,
         named_vectors: request.named_vectors,
+        hnsw: request.hnsw,
+        quantization: request.quantization,
     };
 
     match state.storage.create_table(config).await {

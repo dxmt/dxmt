@@ -64,6 +64,8 @@ async fn test_named_vectors_independent_search() {
                     distance_metric: DistanceMetric::Euclidean,
                 },
             ]),
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();
@@ -173,6 +175,8 @@ async fn test_named_vectors_fallback_to_default() {
             payload_schema: None,
             schema_version: 1,
             named_vectors: None,
+            hnsw: None,
+            quantization: None,
         })
         .await
         .unwrap();

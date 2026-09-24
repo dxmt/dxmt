@@ -94,6 +94,8 @@ fn table() -> TableConfig {
         payload_schema: None,
         schema_version: 1,
         named_vectors: None,
+        hnsw: None,
+        quantization: None,
     }
 }
 
