@@ -50,6 +50,9 @@ use crate::types::{
         // index
         crate::api::handlers::rebuild_index,
         crate::api::handlers::drop_index,
+        crate::api::handlers::payload_index_report,
+        crate::api::handlers::index_payload_field,
+        crate::api::handlers::drop_payload_index_field,
         // query
         crate::api::handlers::execute_dxql,
         // maintenance
@@ -83,6 +86,9 @@ use crate::types::{
             crate::types::record::FilterOperation,
             crate::types::sparse_vector::SparseVector,
             crate::types::table::TableAlterRequest,
+            crate::types::table::HnswParams,
+            crate::types::table::QuantizationParams,
+            crate::types::table::PayloadIndexPolicy,
             crate::types::table::TextFieldConfig,
             crate::api::response::ApiResponse,
             crate::api::response::ApiError,

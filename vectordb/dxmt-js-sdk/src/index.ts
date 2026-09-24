@@ -86,6 +86,9 @@ export type {
   IndexType,
   HnswParams,
   QuantizationParams,
+  PayloadIndexPolicy,
+  PayloadIndexField,
+  PayloadIndexReport,
 
   // Utility
   HealthCheckResponse,

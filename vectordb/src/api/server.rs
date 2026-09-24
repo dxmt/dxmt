@@ -1,6 +1,6 @@
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -10,10 +10,11 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::{
     api::handlers::{
         alter_table, branch_table, count_records, create_backup, create_snapshot, create_table,
-        delete_records, delete_table, drop_index, execute_dxql, full_text_search, get_record,
-        get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
-        hybrid_search_combined, insert_records, insert_records_optimized, knn_graph, list_records,
-        list_tables, liveness, prometheus_metrics, readiness, rebuild_index, search_vectors,
+        delete_records, delete_table, drop_index, drop_payload_index_field, execute_dxql,
+        full_text_search, get_record, get_status, get_table, get_table_stats, health_check,
+        health_metrics, hybrid_search, hybrid_search_combined, index_payload_field, insert_records,
+        insert_records_optimized, knn_graph, list_records, list_tables, liveness,
+        payload_index_report, prometheus_metrics, readiness, rebuild_index, search_vectors,
         update_record, AppState,
     },
     config::AppConfig,
@@ -458,6 +459,15 @@ pub async fn create_app_with_storage(
         .route("/tables/:table_name/batch_search", post(search_vectors))
         // 索引管理API
         .route("/tables/:table_name/index", delete(drop_index))
+        // The payload (filter) index, which is a different index from the vector one above.
+        .route(
+            "/tables/:table_name/payload_index",
+            get(payload_index_report),
+        )
+        .route(
+            "/tables/:table_name/payload_index/:field",
+            put(index_payload_field).delete(drop_payload_index_field),
+        )
         .route("/tables/:table_name/index/rebuild", post(rebuild_index))
         // 快照：把所有表落盘，下次启动只回放快照之后的 WAL
         .route("/snapshot", post(create_snapshot))

@@ -62,6 +62,7 @@ async fn test_basic_state_recreation() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     let vectors = create_test_vectors(50, 32);
@@ -166,6 +167,7 @@ async fn test_fast_data_loading() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     let vectors = create_test_vectors(1000, 128);
@@ -237,6 +239,7 @@ async fn test_index_consistency_after_rebuild() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     let vectors = create_test_vectors(200, 64);

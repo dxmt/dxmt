@@ -125,6 +125,15 @@ pub struct PayloadIndex {
     /// Set while the index is being rebuilt from the records in one pass. See
     /// [`PayloadIndex::begin_bulk`].
     bulk: bool,
+    /// Which payload fields this index is for. Default: all of them.
+    ///
+    /// A field outside it is never indexed, which is the whole point -- the memory and the
+    /// rebuild time a field costs are paid whether or not anyone filters on it. It also means
+    /// this index cannot answer a filter that mentions one, and cannot tell that apart from
+    /// "no record has a value there" by looking at its own maps. [`Self::unanswerable_field`]
+    /// is how a caller asks, and refusing is the caller's job: answering empty would be a
+    /// wrong answer that looks exactly like a right one.
+    policy: crate::types::table::PayloadIndexPolicy,
 }
 
 impl PayloadIndex {
@@ -211,6 +220,19 @@ struct Ids {
 }
 
 impl Ids {
+    /// What the shared per-record bookkeeping costs: the ids themselves, the slots addressing
+    /// them, the `id -> ordinal` table and the timestamps.
+    fn heap_size(&self) -> usize {
+        let ids: usize = self
+            .by_ordinal
+            .iter()
+            .map(|slot| slot.as_ref().map_or(0, |id| id.len()))
+            .sum();
+        ids + self.by_ordinal.len() * std::mem::size_of::<Option<Box<str>>>()
+            + self.table.len() * std::mem::size_of::<Ordinal>()
+            + self.created.len() * std::mem::size_of::<i64>()
+    }
+
     fn hash(hasher: &ahash::RandomState, id: &str) -> u64 {
         hasher.hash_one(id)
     }
@@ -396,6 +418,14 @@ impl Postings {
         }
     }
 
+    /// Roughly what this posting list holds on the heap, for the cost report.
+    fn heap_size(&self) -> usize {
+        match self {
+            Postings::One(_) => 0,
+            Postings::Many(many) => many.serialized_size(),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Postings::One(_) => 1,
@@ -454,6 +484,11 @@ impl NumericIndex {
         {
             self.merge();
         }
+    }
+
+    /// Entries across both halves: one per (value, record), not per distinct value.
+    fn entry_count(&self) -> usize {
+        self.sorted.len() + self.pending.len()
     }
 
     /// Append without considering a merge. See [`PayloadIndex::begin_bulk`].
@@ -587,6 +622,16 @@ enum ValueKey {
     Float(OrderedFloat), // 浮点数（需要特殊处理）
     Bool(bool),
     Null,
+}
+
+impl ValueKey {
+    /// What the key itself costs beyond the map slot. Only a string owns anything.
+    fn heap_size(&self) -> usize {
+        match self {
+            ValueKey::String(s) => s.len(),
+            _ => 0,
+        }
+    }
 }
 
 /// A number as the index keys it: every `f64`, exactly, in numeric order.
@@ -792,7 +837,66 @@ impl PayloadIndex {
             ids: Ids::default(),
             unindexed: FastMap::default(),
             bulk: false,
+            policy: crate::types::table::PayloadIndexPolicy::default(),
         }
+    }
+
+    /// Restrict this index to the fields a table's policy names, before anything is indexed.
+    ///
+    /// Called on a fresh index and on the one-pass rebuild, both of which happen before any
+    /// record is in. Narrowing a populated index is done by throwing it away and rebuilding,
+    /// which is what `alter_table` does -- an index cannot un-see what it has already merged
+    /// into a sorted numeric array.
+    pub fn set_policy(&mut self, policy: crate::types::table::PayloadIndexPolicy) {
+        self.policy = policy;
+    }
+
+    /// The policy this index was built under.
+    pub fn policy(&self) -> &crate::types::table::PayloadIndexPolicy {
+        &self.policy
+    }
+
+    /// What each indexed field costs and how selective it is, for `GET /tables/{t}/payload_index`.
+    ///
+    /// The byte figures are computed from the postings rather than measured, and they are the
+    /// index's own structures only -- the ids and timestamps every field shares are reported
+    /// once, separately, because attributing them per field would count them n times.
+    pub fn field_report(&self) -> Vec<FieldIndexReport> {
+        let mut out: Vec<FieldIndexReport> = self
+            .field_indices
+            .iter()
+            .map(|(name, field)| {
+                let keyword_rows: usize = field.value_to_ids.values().map(|p| p.len()).sum();
+                let keyword_bytes: usize = field
+                    .value_to_ids
+                    .iter()
+                    .map(|(value, postings)| value.heap_size() + postings.heap_size())
+                    .sum();
+                let numeric_entries = field.numeric.entry_count();
+                FieldIndexReport {
+                    field: name.clone(),
+                    distinct_values: field.distinct_count,
+                    keyword_values: field.value_to_ids.len(),
+                    keyword_rows,
+                    numeric_entries,
+                    unkeyed_rows: self.unindexed.get(name).map_or(0, |b| b.len() as usize),
+                    estimated_bytes: keyword_bytes + numeric_entries * 16,
+                    numeric_min: field.stats.numeric_min,
+                    numeric_max: field.stats.numeric_max,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.estimated_bytes
+                .cmp(&a.estimated_bytes)
+                .then(a.field.cmp(&b.field))
+        });
+        out
+    }
+
+    /// Rows the index holds, and what the per-record bookkeeping every field shares costs.
+    pub fn shared_bytes(&self) -> usize {
+        self.ids.heap_size()
     }
 
     /// Index a record.
@@ -814,8 +918,11 @@ impl PayloadIndex {
         // conditions read its own id — so the index has to know it exists.
         let ordinal = self.ordinal_for(record_id, created);
         if let Some(obj) = payload.as_object() {
+            let everything = self.policy.indexes_everything();
             for (key, value) in obj {
-                self.index_field(key, value, ordinal);
+                if everything || self.policy.indexes(key) {
+                    self.index_field(key, value, ordinal);
+                }
             }
         }
     }
@@ -843,8 +950,11 @@ impl PayloadIndex {
         };
 
         if let Some(obj) = payload.as_object() {
+            let everything = self.policy.indexes_everything();
             for (key, value) in obj {
-                self.unindex_field(key, value, ordinal);
+                if everything || self.policy.indexes(key) {
+                    self.unindex_field(key, value, ordinal);
+                }
             }
         }
 
@@ -1876,6 +1986,29 @@ impl PayloadIndex {
                 .collect(),
         }
     }
+}
+
+/// What one payload field's index holds, for `GET /tables/{t}/payload_index`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct FieldIndexReport {
+    pub field: String,
+    /// Distinct values across both halves. Close to the row count means a field where the
+    /// index costs the most and buys the least on equality -- an id, a URL, a description.
+    pub distinct_values: usize,
+    /// Distinct string, boolean and null values.
+    pub keyword_values: usize,
+    /// (value, record) pairs on the keyword side.
+    pub keyword_rows: usize,
+    /// (value, record) pairs on the numeric side; an array counts once per element.
+    pub numeric_entries: usize,
+    /// Records whose value here is an array or an object, which is recorded as presence only.
+    pub unkeyed_rows: usize,
+    /// Computed from the postings, not measured: bitmaps at their serialized size, keys at
+    /// their string length, numeric entries at 16 bytes. Excludes what every field shares.
+    pub estimated_bytes: usize,
+    pub numeric_min: Option<f64>,
+    pub numeric_max: Option<f64>,
 }
 
 /// PayloadIndex统计信息

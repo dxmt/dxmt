@@ -66,6 +66,7 @@ async fn test_named_vectors_independent_search() {
             ]),
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();
@@ -177,6 +178,7 @@ async fn test_named_vectors_fallback_to_default() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();

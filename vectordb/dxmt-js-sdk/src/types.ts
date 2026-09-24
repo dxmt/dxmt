@@ -86,6 +86,43 @@ export interface Record {
   score?: number;
 }
 
+/** Which payload fields a table indexes for filtering. Unset indexes every field. */
+export interface PayloadIndexPolicy {
+  /** When set, the only fields indexed. */
+  only?: string[];
+  /** Fields never indexed. A filter naming one is refused, not answered empty. */
+  except?: string[];
+}
+
+/** One field's entry in {@link PayloadIndexReport}. */
+export interface PayloadIndexField {
+  field: string;
+  distinct_values: number;
+  keyword_values: number;
+  keyword_rows: number;
+  numeric_entries: number;
+  unkeyed_rows: number;
+  /** Computed from the postings, not measured. Excludes what every field shares. */
+  estimated_bytes: number;
+  numeric_min: number | null;
+  numeric_max: number | null;
+}
+
+/** What `GET /tables/{t}/payload_index` reports. */
+export interface PayloadIndexReport {
+  table: string;
+  /** False when nothing has filtered yet: the index is built on demand, and describing it is
+   * not worth a pass over every record. `fields` is then empty. */
+  built: boolean;
+  indexes_every_field: boolean;
+  only?: string[] | null;
+  except?: string[] | null;
+  record_count?: number;
+  estimated_bytes?: number;
+  shared_bytes?: number;
+  fields: PayloadIndexField[];
+}
+
 /** Graph parameters for one table; unset fields keep the server's defaults. */
 export interface HnswParams {
   /** Edges per node: denser graph, better recall, more memory, slower build. */
@@ -112,6 +149,8 @@ export interface QuantizationParams {
 export interface TableConfig {
   name: string;
   dimension: number;
+  /** Which payload fields to index for filtering. Unset indexes every field. */
+  payload_index?: PayloadIndexPolicy;
   distance_metric?: DistanceMetric;
   index_type?: IndexType;
   description?: string;

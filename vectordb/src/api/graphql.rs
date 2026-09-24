@@ -166,6 +166,7 @@ impl MutationRoot {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = state.storage.create_table(config).await?;

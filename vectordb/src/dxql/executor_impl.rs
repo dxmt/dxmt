@@ -169,6 +169,7 @@ impl StorageAwareExecutor {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         self.storage
             .create_table(config)
@@ -446,6 +447,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
         }
 
@@ -468,6 +470,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
         }
 

@@ -747,6 +747,11 @@ impl IntelligentTableData {
     fn derived(&self) -> parking_lot::MappedRwLockReadGuard<'_, DerivedIndexes> {
         if self.derived.read().is_none() {
             let mut built = DerivedIndexes::default();
+            // Built under the table's policy, so a field it excludes is never indexed at all:
+            // the memory and the pass over its values are what excluding it saves.
+            if let Some(policy) = &self.table.payload_index {
+                built.payload.set_policy(policy.clone());
+            }
             built.payload.begin_bulk(self.records.len());
             let mut records = 0usize;
             self.records.for_each(|record| {
@@ -1728,6 +1733,7 @@ impl IntelligentIndexedStorage {
                         named_vectors: None,
                         hnsw: None,
                         quantization: None,
+                        payload_index: None,
                     };
                     self.create_table(config).await.map(|_| {
                         tables += 1;
@@ -3328,6 +3334,7 @@ impl IntelligentIndexedStorage {
             memory_optimization: meta.table.memory_optimization,
             hnsw: meta.table.hnsw.clone(),
             quantization: meta.table.quantization.clone(),
+            payload_index: meta.table.payload_index.clone(),
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
@@ -4059,7 +4066,16 @@ impl IntelligentIndexedStorage {
             performance_stats: Arc::new(Mutex::new(PerformanceStats::default())),
             // A table being created has no records, so an empty pair is already correct and
             // there is nothing to rebuild. `restore_table` clears this back to `None`.
-            derived: parking_lot::RwLock::new(Some(DerivedIndexes::default())),
+            derived: parking_lot::RwLock::new(Some(DerivedIndexes {
+                payload: {
+                    let mut payload = crate::storage::payload_index::PayloadIndex::new();
+                    if let Some(policy) = &table.payload_index {
+                        payload.set_policy(policy.clone());
+                    }
+                    payload
+                },
+                ..DerivedIndexes::default()
+            })),
             #[cfg(feature = "text-bm25")]
             full_text_engine,
         };
@@ -4157,9 +4173,45 @@ impl IntelligentIndexedStorage {
         }
     }
 
+    /// Refuse a filter this table's payload index does not cover.
+    ///
+    /// The index is the only thing that answers a filter here: a condition on a field with no
+    /// postings yields an empty set, not a scan. That is right when no record has a value
+    /// there and wrong when the field was deliberately left out of the index, and the two are
+    /// indistinguishable from inside the index. So the policy is consulted before the index
+    /// is, and an excluded field is an error naming the way back rather than an empty page
+    /// that looks like an answer.
+    ///
+    /// Checked against the table's policy, not the built index, so it costs nothing on the
+    /// default table and does not force a lazy index to be built in order to say no.
+    fn check_filter_policy(
+        table: &crate::types::table::Table,
+        filter: Option<&crate::types::Filter>,
+    ) -> crate::Result<()> {
+        let (Some(policy), Some(filter)) = (&table.payload_index, filter) else {
+            return Ok(());
+        };
+        match policy.unanswerable_field(filter) {
+            None => Ok(()),
+            Some(field) => Err(crate::Error::InvalidInput(format!(
+                "table '{}' does not index payload field '{}', so a filter on it cannot be \
+                 answered. Index it with PUT /tables/{}/payload_index/{} (the index is rebuilt \
+                 from the records), or filter on an indexed field -- \
+                 GET /tables/{}/payload_index lists them.",
+                table.name, field, table.name, field, table.name
+            ))),
+        }
+    }
+
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
+        if query.filter.is_some() {
+            let tables = self.read_tables("search").await;
+            if let Some(data) = tables.get(tablename) {
+                Self::check_filter_policy(&data.table, query.filter.as_ref())?;
+            }
+        }
         let start_time = std::time::Instant::now();
         // 优先使用 limit，如果 limit 未设置或为默认值则使用 top_k
         // Python SDK 发送 "limit" 字段，Rust API 使用 "top_k"
@@ -5954,6 +6006,13 @@ impl IntelligentIndexedStorage {
                 .get_mut(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
             let updated = data.table.apply_alter(&req);
+            if req.payload_index.is_some() {
+                // The payload index cannot be narrowed in place -- a field's values are merged
+                // into shared sorted arrays and postings, and there is no undo. Dropping it
+                // makes the next read that needs a filter rebuild it under the new policy,
+                // which is also when a narrowed policy gives its memory back.
+                *data.derived.write() = None;
+            }
             data.table = updated.clone();
             updated
         };
@@ -6448,6 +6507,7 @@ impl IntelligentIndexedStorage {
                 // data under a different index and useless for comparing anything.
                 hnsw: src.table.hnsw.clone(),
                 quantization: src.table.quantization.clone(),
+                payload_index: src.table.payload_index.clone(),
                 payload_schema: src.table.payload_schema.clone(),
                 schema_version: src.table.schema_version,
                 named_vectors: None,
@@ -7756,6 +7816,7 @@ impl IntelligentIndexedStorage {
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        Self::check_filter_policy(&table_data.table, filter)?;
         let fetch = limit.saturating_add(1);
 
         let (mut page, total): (Vec<Record>, usize) = match filter {
@@ -7823,6 +7884,47 @@ impl IntelligentIndexedStorage {
     /// stats carry a record count for the table and nothing for a condition, so a caller
     /// counting matches downloaded them. The page functions already return the total as a
     /// by-product of choosing a page, so a count is that number with a page of zero.
+    /// What this table's payload index holds and what it costs, per field.
+    ///
+    /// Deliberately does not build the index in order to describe it: the build is a pass over
+    /// every record, and a question about cost that costs that much is not one an operator can
+    /// ask. An unbuilt index reports `built: false` and no fields, which is the truth — a
+    /// restored table has none until the first filter.
+    pub async fn payload_index_report(&self, tablename: &str) -> crate::Result<serde_json::Value> {
+        self.ensure_resident(tablename).await?;
+        let tables = self.read_tables("payload_index_report").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+
+        let policy = table_data.table.payload_index.clone().unwrap_or_default();
+        let built = table_data.derived.read();
+        let Some(derived) = built.as_ref() else {
+            return Ok(serde_json::json!({
+                "table": tablename,
+                "built": false,
+                "indexes_every_field": policy.indexes_everything(),
+                "only": policy.only,
+                "except": policy.except,
+                "fields": [],
+                "note": "the payload index is built on the first query that filters; nothing to report yet",
+            }));
+        };
+        let fields = derived.payload.field_report();
+        let total_bytes: usize = fields.iter().map(|f| f.estimated_bytes).sum();
+        Ok(serde_json::json!({
+            "table": tablename,
+            "built": true,
+            "indexes_every_field": policy.indexes_everything(),
+            "only": policy.only,
+            "except": policy.except,
+            "record_count": table_data.records.len(),
+            "estimated_bytes": total_bytes + derived.payload.shared_bytes(),
+            "shared_bytes": derived.payload.shared_bytes(),
+            "fields": fields,
+        }))
+    }
+
     pub async fn count_records(
         &self,
         tablename: &str,
@@ -7834,6 +7936,7 @@ impl IntelligentIndexedStorage {
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        Self::check_filter_policy(&table_data.table, filter)?;
 
         Ok(match filter {
             None => table_data.records.len(),
@@ -7900,6 +8003,7 @@ impl IntelligentIndexedStorage {
         let table_data = tables
             .get(tablename)
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        Self::check_filter_policy(&table_data.table, filter)?;
 
         // On disk, the store can answer a page without decoding the rest of the table -- which
         // is the whole cost here. Unfiltered it was 194 ms for 25 rows out of 120,000, against
@@ -8238,6 +8342,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
             name: table_name.to_string(),
             hnsw: snap.table.hnsw.clone(),
             quantization: snap.table.quantization.clone(),
+            payload_index: snap.table.payload_index.clone(),
             dimension: snap.table.dimension,
             distance_metric: snap.table.distance_metric,
             description: snap.table.description.clone(),
@@ -8361,6 +8466,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
         // and would make this test vacuous. The size-based selector, explicitly: the
@@ -8449,6 +8555,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = storage.create_table(table_config).await?;
@@ -8492,6 +8599,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             };
 
             let table = storage.create_table(table_config).await?;
@@ -8540,6 +8648,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8669,6 +8778,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8764,6 +8874,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         storage.create_table(table_config).await?;
 
@@ -8863,6 +8974,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
             .await?;
         let record = |id: String, vector: Vec<f32>| CreateRecordRequest {
@@ -9049,6 +9161,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
             .await?;
 
@@ -9123,6 +9236,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
             .await?;
         let request = |id: &str, vector: Vec<f32>| CreateRecordRequest {
@@ -9201,6 +9315,7 @@ mod tests {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             })
             .await?;
 

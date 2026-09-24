@@ -25,6 +25,7 @@ fn test_wal_entry_creation() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         },
     };
 

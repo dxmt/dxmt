@@ -104,6 +104,7 @@ async fn a_quantized_table_answers_with_exact_order() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();

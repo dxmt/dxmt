@@ -35,6 +35,7 @@ async fn create_test_table(
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     storage.create_table(config).await?;
 

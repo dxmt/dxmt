@@ -66,6 +66,7 @@ fn table(name: &str, dimension: usize, metric: DistanceMetric) -> TableConfig {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     }
 }
 
@@ -489,6 +490,7 @@ async fn table_alterations_survive_a_restart() {
                         default_value: None,
                     }],
                     drop_fields: Vec::new(),
+                    payload_index: None,
                 },
             )
             .await

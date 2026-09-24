@@ -44,6 +44,9 @@ pub struct Table {
     /// Quantization parameters this table was created with, persisted for the same reason.
     #[serde(default)]
     pub quantization: Option<QuantizationParams>,
+    /// Which payload fields this table indexes for filtering. Unset means every field.
+    #[serde(default)]
+    pub payload_index: Option<PayloadIndexPolicy>,
 }
 
 /// 索引类型
@@ -187,6 +190,10 @@ pub struct TableAlterRequest {
     /// Drop payload field declarations (records keep data, schema drops tracking)
     #[serde(default)]
     pub drop_fields: Vec<String>,
+    /// Replace which payload fields are indexed for filtering. The payload index is rebuilt
+    /// on the next read that needs it, so a narrowed policy frees its memory then.
+    #[serde(default)]
+    pub payload_index: Option<PayloadIndexPolicy>,
 }
 
 /// Named vector space configuration (multi-vector support)
@@ -243,6 +250,99 @@ pub struct QuantizationParams {
     pub quantize_at_rows: Option<usize>,
 }
 
+/// Which payload fields this table keeps a filter index for.
+///
+/// Every payload field is indexed by default, which is what makes a filter fast without anyone
+/// declaring anything — Qdrant and Weaviate both require the declaration, and a filter on an
+/// undeclared field there is a full scan. The cost of doing it for free is memory and rebuild
+/// time, and it is not evenly spread: on a 10M-row table one field holding a distinct string
+/// per row cost 11 s of a 32 s index rebuild, against 3.5 s for a four-valued one. A field
+/// nobody filters on is paying that for nothing.
+///
+/// So a table can narrow it. `only` names the fields to index, and `except` names fields never
+/// to index; a field is indexed when `only` is unset or names it, and `except` does not.
+///
+/// **A filter on a field this policy excludes is refused**, not answered. The index is the only
+/// thing that answers a filter here — there is no scan fallback — so the alternative to an
+/// error is an empty result that looks exactly like "nothing matched". Re-index the field with
+/// `PUT /tables/{t}/payload_index/{field}` and the filter works again.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PayloadIndexPolicy {
+    /// When set, the only payload fields that are indexed. Unset means every field.
+    #[serde(default)]
+    pub only: Option<Vec<String>>,
+    /// Fields never indexed, whether or not `only` names them.
+    #[serde(default)]
+    pub except: Option<Vec<String>>,
+}
+
+impl PayloadIndexPolicy {
+    /// Whether a payload field is indexed under this policy.
+    pub fn indexes(&self, field: &str) -> bool {
+        if self
+            .except
+            .as_ref()
+            .is_some_and(|f| f.iter().any(|n| n == field))
+        {
+            return false;
+        }
+        match &self.only {
+            Some(only) => only.iter().any(|n| n == field),
+            None => true,
+        }
+    }
+
+    /// True when this policy indexes everything, which is the default and the fast path.
+    pub fn indexes_everything(&self) -> bool {
+        self.only.is_none() && self.except.as_ref().is_none_or(|f| f.is_empty())
+    }
+
+    /// Start indexing `field` again: out of `except`, and into `only` when there is one.
+    pub fn include(&mut self, field: &str) {
+        if let Some(except) = &mut self.except {
+            except.retain(|n| n != field);
+        }
+        if let Some(only) = &mut self.only {
+            if !only.iter().any(|n| n == field) {
+                only.push(field.to_string());
+            }
+        }
+    }
+
+    /// The first field in `filter` that this policy does not index, if any.
+    ///
+    /// `id` is not a payload field — a condition on it is answered from the id map — so it is
+    /// always answerable.
+    pub fn unanswerable_field(&self, filter: &crate::types::record::Filter) -> Option<String> {
+        if self.indexes_everything() {
+            return None;
+        }
+        let walk = |conditions: &Option<Vec<crate::types::record::Condition>>| {
+            conditions.as_ref().and_then(|list| {
+                list.iter()
+                    .find(|c| c.key != "id" && !self.indexes(&c.key))
+                    .map(|c| c.key.clone())
+            })
+        };
+        walk(&filter.must)
+            .or_else(|| walk(&filter.should))
+            .or_else(|| walk(&filter.must_not))
+    }
+
+    /// Stop indexing `field`.
+    pub fn exclude(&mut self, field: &str) {
+        if let Some(only) = &mut self.only {
+            only.retain(|n| n != field);
+        }
+        let except = self.except.get_or_insert_with(Vec::new);
+        if !except.iter().any(|n| n == field) {
+            except.push(field.to_string());
+        }
+    }
+}
+
 /// 创建表的配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
@@ -272,6 +372,9 @@ pub struct TableConfig {
     /// Quantization parameters for this table, overriding the server defaults.
     #[serde(default)]
     pub quantization: Option<QuantizationParams>,
+    /// Which payload fields to keep a filter index for. Unset indexes every field.
+    #[serde(default)]
+    pub payload_index: Option<PayloadIndexPolicy>,
     /// Optional named vector spaces (multi-vector support).
     /// When set, `dimension` serves as the default vector space named "default".
     #[serde(default)]
@@ -341,6 +444,7 @@ impl Table {
             // rather than whatever the server defaults to that day.
             hnsw: config.hnsw,
             quantization: config.quantization,
+            payload_index: config.payload_index,
         })
     }
 
@@ -358,6 +462,9 @@ impl Table {
         }
         if let Some(fts) = req.enable_full_text_search {
             updated.enable_full_text_search = fts;
+        }
+        if let Some(policy) = &req.payload_index {
+            updated.payload_index = Some(policy.clone());
         }
 
         // Mutate payload_schema
@@ -502,6 +609,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = Table::new(config)?;
@@ -528,6 +636,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = Table::new(config)?;
@@ -558,6 +667,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = Table::new(config_enabled)?;
@@ -578,6 +688,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table2 = Table::new(config_disabled)?;
@@ -598,6 +709,7 @@ mod tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table3 = Table::new(config_default)?;

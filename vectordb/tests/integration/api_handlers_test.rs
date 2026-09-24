@@ -61,6 +61,7 @@ async fn test_create_table_basic() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     let result = state.storage.create_table(table_config).await;
@@ -95,6 +96,7 @@ async fn test_create_table_duplicate() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     state.storage.create_table(table_config.clone()).await.unwrap();
@@ -121,6 +123,7 @@ async fn test_insert_records_basic() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -170,6 +173,7 @@ async fn test_insert_records_wrong_dimension() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -207,6 +211,7 @@ async fn test_search_basic() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -289,6 +294,7 @@ async fn test_delete_record() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -351,6 +357,7 @@ async fn test_update_record() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -420,6 +427,7 @@ async fn test_list_tables() {
             schema_version: 1,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
         state.storage.create_table(table_config).await.unwrap();
     }
@@ -456,6 +464,7 @@ async fn test_large_batch_insert() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 

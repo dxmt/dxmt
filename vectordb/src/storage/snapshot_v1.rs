@@ -63,6 +63,7 @@ impl From<TableV1> for Table {
             // defaults -- which is what it was built with.
             hnsw: None,
             quantization: None,
+            payload_index: None,
         }
     }
 }

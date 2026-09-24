@@ -141,6 +141,7 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();

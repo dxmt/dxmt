@@ -123,6 +123,7 @@ async fn a_table_with_vectors_on_disk_searches_serves_and_restarts() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();

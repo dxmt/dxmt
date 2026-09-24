@@ -144,6 +144,21 @@ const CONTRACTS: &[Contract] = &[
         caller: "python",
     },
     Contract {
+        method: "GET",
+        path: "/tables/{t}/payload_index",
+        caller: "python",
+    },
+    Contract {
+        method: "PUT",
+        path: "/tables/{t}/payload_index/{f}",
+        caller: "python",
+    },
+    Contract {
+        method: "DELETE",
+        path: "/tables/{t}/payload_index/{f}",
+        caller: "python",
+    },
+    Contract {
         method: "POST",
         path: "/tables/{t}/records/list",
         caller: "dashboard",
@@ -326,7 +341,13 @@ fn every_route_the_sdks_call_exists() {
         } else {
             "contract"
         };
-        let path = contract.path.replace("{t}", table).replace("{r}", "r1");
+        let path = contract
+            .path
+            .replace("{t}", table)
+            .replace("{r}", "r1")
+            // A payload field the contract table carries, so PUT and DELETE act on something
+            // real rather than on a name nothing has.
+            .replace("{f}", "city");
         let result = curl(
             server.port,
             contract.method,

@@ -57,6 +57,7 @@ mod full_text_search_tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         let table = storage.create_table(table_config).await.expect("Failed to create table");
@@ -93,6 +94,7 @@ mod full_text_search_tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -183,6 +185,7 @@ mod full_text_search_tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -275,6 +278,7 @@ mod full_text_search_tests {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");

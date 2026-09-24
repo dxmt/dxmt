@@ -26,6 +26,7 @@ import {
   ScrollOptions,
   UploadOptions,
   UploadResult,
+  PayloadIndexReport,
 } from './types';
 import {
   DXMTError,
@@ -387,6 +388,59 @@ export class DXMTClient {
    * });
    * ```
    */
+  /**
+   * What the payload (filter) index holds for each field, and what it costs.
+   *
+   * Every payload field is indexed by default, which is what makes a filter fast here without
+   * declaring anything — and what a field nobody filters on pays for. This is the answer to
+   * "what is that costing me": distinct values, postings and an estimate of the bytes, worst
+   * field first. It does not build the index in order to describe it, so a table that has not
+   * filtered since it was restored reports `built: false`.
+   */
+  async payloadIndex(tableName: string): Promise<PayloadIndexReport> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    return this.request<PayloadIndexReport>(
+      'GET',
+      `/tables/${encodeURIComponent(tableName)}/payload_index`
+    );
+  }
+
+  /**
+   * Index a payload field for filtering.
+   *
+   * Idempotent, and a no-op on a table that indexes every field — the default — so code
+   * written against a database where indexes must be declared works unchanged. The index is
+   * rebuilt from the records, so rows written before the field was indexed are covered.
+   */
+  async indexPayloadField(tableName: string, field: string): Promise<{ message: string }> {
+    if (!tableName || !field) {
+      throw new DXMTValidationError('Table name and field are required');
+    }
+    return this.request<{ message: string }>(
+      'PUT',
+      `/tables/${encodeURIComponent(tableName)}/payload_index/${encodeURIComponent(field)}`
+    );
+  }
+
+  /**
+   * Stop indexing a payload field, freeing what its postings cost.
+   *
+   * The price is filtering on it: a filter naming an unindexed field is refused with a 400,
+   * because a filter is answered only from the index and the only other honest answer would
+   * be an empty page — which looks exactly like "nothing matched".
+   */
+  async dropPayloadIndexField(tableName: string, field: string): Promise<{ message: string }> {
+    if (!tableName || !field) {
+      throw new DXMTValidationError('Table name and field are required');
+    }
+    return this.request<{ message: string }>(
+      'DELETE',
+      `/tables/${encodeURIComponent(tableName)}/payload_index/${encodeURIComponent(field)}`
+    );
+  }
+
   /**
    * How many records a filter matches, or how many the table holds.
    *

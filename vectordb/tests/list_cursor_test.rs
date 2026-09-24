@@ -54,6 +54,7 @@ async fn storage(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     })
     .await
     .unwrap();

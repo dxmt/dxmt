@@ -103,6 +103,7 @@ async fn test_e2e_recall_small_dataset() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -247,6 +248,7 @@ async fn test_e2e_delete_removes_from_search() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -319,6 +321,7 @@ async fn test_upsert_increments_version() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();
@@ -405,6 +408,7 @@ async fn test_update_record_preserves_vector_when_not_provided() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();
@@ -484,6 +488,7 @@ async fn test_search_with_payload_filter() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();
@@ -580,6 +585,7 @@ async fn test_filtered_search_recall_high_selectivity() {
             named_vectors: None,
             hnsw: None,
             quantization: None,
+            payload_index: None,
         })
         .await
         .unwrap();

@@ -788,6 +788,56 @@ def _(table, alterable=None):
     assert "temporary" not in schema, schema
 
 
+@probe("TableAlterRequest", "payload_index")
+def _(table, alterable=None):
+    # Which payload fields are indexed for filtering. The discriminator is the consequence,
+    # not the round trip: an excluded field's filter is refused, and an included one answers.
+    name = f"probe_pix_alter_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "a", "vector": [1.0, 0.0, 0.0, 0.0], "payload": {"keep": "x", "drop": "y"}}]})
+        equals = lambda field, value: {  # noqa: E731
+            "must": [{"key": field, "operation": {"type": "Equal", "value": value}}]}
+        assert post(f"/tables/{name}/records/count",
+                    {"filter": equals("drop", "y")}).json()["data"]["count"] == 1
+        alter(name, payload_index={"except": ["drop"]})
+        refused = post(f"/tables/{name}/records/count",
+                       {"filter": equals("drop", "y")}, expect_ok=False)
+        assert refused.status_code == 400, refused.text[:300]
+        assert "does not index payload field 'drop'" in refused.text, refused.text[:300]
+        # The field that is still indexed keeps answering, so this narrowed the index rather
+        # than breaking it.
+        assert post(f"/tables/{name}/records/count",
+                    {"filter": equals("keep", "x")}).json()["data"]["count"] == 1
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("CreateTableRequest", "payload_index")
+def _(table):
+    # Declared at creation. Same discriminator, one step earlier: a table that ignored the
+    # policy would answer the filter instead of refusing it.
+    name = f"probe_pix_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4,
+                     "payload_index": {"only": ["category"]}})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "a", "vector": [1.0, 0.0, 0.0, 0.0],
+             "payload": {"category": "a", "notes": "long"}}]})
+        equals = lambda field, value: {  # noqa: E731
+            "must": [{"key": field, "operation": {"type": "Equal", "value": value}}]}
+        assert post(f"/tables/{name}/records/count",
+                    {"filter": equals("category", "a")}).json()["data"]["count"] == 1
+        refused = post(f"/tables/{name}/records/count",
+                       {"filter": equals("notes", "long")}, expect_ok=False)
+        assert refused.status_code == 400, refused.text[:300]
+        report = get(f"/tables/{name}/payload_index").json()["data"]
+        assert [f["field"] for f in report["fields"]] == ["category"], report
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
 # ---- POST /backup ------------------------------------------------------------------------------
 
 @probe("CreateBackupRequest", "path")

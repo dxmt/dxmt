@@ -96,6 +96,12 @@ pub struct CreateTableRequest {
     /// say "keep this one exact".
     #[serde(default)]
     pub quantization: Option<crate::types::table::QuantizationParams>,
+    /// Which payload fields to index for filtering: `only` limits it to those, `except`
+    /// removes them. Unset indexes every field, which is what makes a filter fast here without
+    /// declaring anything — and what a field nobody filters on pays for. A filter on a field
+    /// this excludes is refused rather than answered empty.
+    #[serde(default)]
+    pub payload_index: Option<crate::types::table::PayloadIndexPolicy>,
 }
 
 /// 批量插入记录的请求
@@ -386,6 +392,7 @@ pub async fn create_table(
         named_vectors: request.named_vectors,
         hnsw: request.hnsw,
         quantization: request.quantization,
+        payload_index: request.payload_index,
     };
 
     match state.storage.create_table(config).await {
@@ -526,6 +533,131 @@ pub async fn alter_table(
         }
         Err(e) => error_response(e),
     }
+}
+
+/// What the payload (filter) index holds, per field, and what it costs.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/tables/{table_name}/payload_index",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    responses(
+        (status = 200, description = "Per-field payload index report", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
+/// `GET /api/v1/tables/:table_name/payload_index`
+///
+/// Every payload field is indexed by default, so this is the answer to "what is that costing
+/// me": distinct values, postings, and an estimate of the bytes, worst field first. It does not
+/// build the index to describe it -- on a table that has not filtered since it was restored,
+/// `built` is false and there is nothing to report yet.
+pub async fn payload_index_report(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.payload_index_report(&table_name).await {
+        Ok(report) => ApiResponse::success(report).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Index a payload field for filtering, or stop indexing it.
+async fn set_payload_index_field(
+    state: AppState,
+    table_name: String,
+    field: String,
+    indexed: bool,
+) -> axum::response::Response {
+    let table = match state.storage.get_table(&table_name).await {
+        Ok(table) => table,
+        Err(e) => return error_response(e),
+    };
+    let mut policy = table.payload_index.clone().unwrap_or_default();
+    if indexed {
+        policy.include(&field);
+    } else {
+        policy.exclude(&field);
+    }
+    let req = crate::types::table::TableAlterRequest {
+        payload_index: Some(policy),
+        ..Default::default()
+    };
+    match state.storage.alter_table(&table_name, req).await {
+        Ok(table) => {
+            let message = if indexed {
+                format!(
+                    "Payload field '{}' is indexed on table '{}'. The index is rebuilt from the \
+                     records on the next query that filters.",
+                    field, table_name
+                )
+            } else {
+                format!(
+                    "Payload field '{}' is no longer indexed on table '{}'. A filter on it is \
+                     now refused rather than answered, and the index is rebuilt without it on \
+                     the next query that filters.",
+                    field, table_name
+                )
+            };
+            ApiResponse::success(serde_json::json!({
+                "message": message,
+                "payload_index": table.payload_index,
+            }))
+            .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Index a payload field for filtering.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    put,
+    path = "/api/v1/tables/{table_name}/payload_index/{field}",
+    params(
+        ("table_name" = String, Path, description = "Table name", example = "demo"),
+        ("field" = String, Path, description = "Payload field", example = "category")
+    ),
+    responses(
+        (status = 200, description = "Field is indexed", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
+/// `PUT /api/v1/tables/:table_name/payload_index/:field`
+///
+/// Idempotent, and a no-op on a table that indexes everything -- which is the default, so
+/// client code written against a database where indexes must be declared works unchanged.
+pub async fn index_payload_field(
+    State(state): State<AppState>,
+    Path((table_name, field)): Path<(String, String)>,
+) -> impl IntoResponse {
+    set_payload_index_field(state, table_name, field, true).await
+}
+
+/// Stop indexing a payload field.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    delete,
+    path = "/api/v1/tables/{table_name}/payload_index/{field}",
+    params(
+        ("table_name" = String, Path, description = "Table name", example = "demo"),
+        ("field" = String, Path, description = "Payload field", example = "notes")
+    ),
+    responses(
+        (status = 200, description = "Field is no longer indexed", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
+/// `DELETE /api/v1/tables/:table_name/payload_index/:field`
+///
+/// Frees what that field's postings cost, at the price of filtering on it: a filter naming an
+/// unindexed field is refused, because the only other honest answer this engine could give is
+/// an empty page, and an empty page looks like a result.
+pub async fn drop_payload_index_field(
+    State(state): State<AppState>,
+    Path((table_name, field)): Path<(String, String)>,
+) -> impl IntoResponse {
+    set_payload_index_field(state, table_name, field, false).await
 }
 
 /// Drop the table's index. Searches still answer -- by brute force, exactly and slowly -- until an

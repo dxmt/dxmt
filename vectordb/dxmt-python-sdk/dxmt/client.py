@@ -351,6 +351,7 @@ class DXMTClient:
         memory_optimization: Optional[bool] = None,
         hnsw: Optional[dict[str, int]] = None,
         quantization: Optional[dict[str, int]] = None,
+        payload_index: Optional[dict[str, list[str]]] = None,
     ) -> dict[str, Any]:
         """Create a new table (collection).
 
@@ -366,6 +367,11 @@ class DXMTClient:
                 server holds a small lookup table beside a large corpus.
             quantization: `num_subvectors`, `num_centroids`, `quantize_at_rows`. Setting
                 `quantize_at_rows` above the table's eventual size keeps it exact.
+            payload_index: Which payload fields to index for filtering: `{"only": [...]}` or
+                `{"except": [...]}`. Every field is indexed by default, which is what makes a
+                filter fast without declaring anything; a field nobody filters on pays memory
+                and rebuild time for nothing. A filter on an excluded field is refused, not
+                answered empty.
             enable_full_text_search: Enable full-text search.
             text_fields: Text field configurations.
             memory_optimization: Enable memory optimization (optional).
@@ -395,6 +401,8 @@ class DXMTClient:
             payload["hnsw"] = hnsw
         if quantization is not None:
             payload["quantization"] = quantization
+        if payload_index is not None:
+            payload["payload_index"] = payload_index
         try:
             response = self._client.post("/tables", json=payload)
             response.raise_for_status()
@@ -416,8 +424,11 @@ class DXMTClient:
         enable_full_text_search: bool = False,
         text_fields: Optional[list[dict[str, Any]]] = None,
         memory_optimization: Optional[bool] = None,
+        hnsw: Optional[dict[str, int]] = None,
+        quantization: Optional[dict[str, int]] = None,
+        payload_index: Optional[dict[str, list[str]]] = None,
     ) -> dict[str, Any]:
-        """Async create a new table."""
+        """Async create a new table. See `create_table` for what each argument does."""
         payload = {
             "name": name,
             "dimension": dimension,
@@ -428,6 +439,12 @@ class DXMTClient:
             "text_fields": text_fields,
             "memory_optimization": memory_optimization,
         }
+        if hnsw is not None:
+            payload["hnsw"] = hnsw
+        if quantization is not None:
+            payload["quantization"] = quantization
+        if payload_index is not None:
+            payload["payload_index"] = payload_index
         try:
             response = await self.async_client.post("/tables", json=payload)
             response.raise_for_status()
@@ -914,6 +931,74 @@ class DXMTClient:
         except httpx.RequestError as e:
             msg = f"Connection error updating record {record_id}: {e}"
             raise DXMTConnectionError(msg) from e
+
+    def payload_index(self, table_name: str) -> dict[str, Any]:
+        """What the payload (filter) index holds for each field, and what it costs.
+
+        Every payload field is indexed by default, so this is the answer to "what is that
+        costing me": distinct values, postings and an estimate of the bytes, worst field
+        first. It does not build the index in order to describe it -- on a table that has not
+        filtered since it was restored, `built` is false and `fields` is empty.
+
+        Args:
+            table_name: Name of the table.
+
+        Returns:
+            The report, as the server sends it.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        response = self._client.get(f"/tables/{quote(table_name, safe='')}/payload_index")
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def index_payload_field(self, table_name: str, field: str) -> dict[str, Any]:
+        """Index a payload field for filtering.
+
+        Idempotent, and a no-op on a table that indexes every field -- which is the default,
+        so code written against a database where indexes must be declared works unchanged.
+        The index is rebuilt from the records, so the field is filterable over rows written
+        before it was indexed.
+
+        Args:
+            table_name: Name of the table.
+            field: Payload field name.
+
+        Returns:
+            The server's message and the table's resulting policy.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        response = self._client.put(
+            f"/tables/{quote(table_name, safe='')}/payload_index/{quote(field, safe='')}"
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def drop_payload_index_field(self, table_name: str, field: str) -> dict[str, Any]:
+        """Stop indexing a payload field, freeing what its postings cost.
+
+        The price is filtering on it: a filter naming an unindexed field is refused with a
+        400, because this engine answers a filter only from the index and the only other
+        honest answer would be an empty page -- which looks exactly like "nothing matched".
+
+        Args:
+            table_name: Name of the table.
+            field: Payload field name.
+
+        Returns:
+            The server's message and the table's resulting policy.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        response = self._client.delete(
+            f"/tables/{quote(table_name, safe='')}/payload_index/{quote(field, safe='')}"
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
 
     def count(
         self,

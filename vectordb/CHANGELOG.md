@@ -24,6 +24,22 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Explicit payload index management.** `GET /tables/{t}/payload_index` reports what the
+  filter index holds per field — distinct values, postings, estimated bytes, worst field first
+  — and `PUT`/`DELETE /tables/{t}/payload_index/{field}` turn a field's index on and off;
+  `payload_index` on `POST /tables` and `PATCH /tables/{t}` takes the whole policy (`only`,
+  `except`). Every field stays indexed by default, which is what makes a filter fast here with
+  nothing declared — Qdrant and Weaviate require the declaration — but that cost is uneven: at
+  10M rows a field holding a distinct string per row took 11 s of a 32 s index rebuild against
+  3.5 s for a four-valued one, and a field nobody filters on was paying it for nothing.
+
+  A filter naming an excluded field is **refused with a 400 that names the field and the way
+  back**, on every entry point — search, list, scroll, count, delete-by-filter. This engine
+  answers a filter only from the index: a field with no postings yields an empty set, not a
+  scan, and an empty page is indistinguishable from "nothing matched". The report does not
+  build the index in order to describe it, so asking what it costs does not cost a pass over
+  every record.
+
 - **Per-table index parameters.** `hnsw` (`m`, `ef_construction`, `ef_search`) and
   `quantization` (`num_subvectors`, `num_centroids`, `quantize_at_rows`) on `POST /tables`.
   `m` was hardcoded at 16 and `ef_construction` came from an environment variable, so one

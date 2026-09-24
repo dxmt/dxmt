@@ -677,6 +677,7 @@ impl StorageIntegration {
                 named_vectors: None,
                 hnsw: None,
                 quantization: None,
+                payload_index: None,
             };
 
             if let Err(e) = new_storage.create_table(table_config).await {

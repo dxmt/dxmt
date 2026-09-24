@@ -96,6 +96,7 @@ fn table() -> TableConfig {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     }
 }
 

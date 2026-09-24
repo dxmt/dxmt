@@ -79,6 +79,7 @@ fn test_table_config_memory_optimization_none() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     assert_eq!(
@@ -104,6 +105,7 @@ fn test_table_config_memory_optimization_true() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     assert_eq!(
@@ -130,6 +132,7 @@ fn test_table_config_memory_optimization_false() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     assert_eq!(
@@ -164,6 +167,7 @@ fn test_config_hierarchy_table_overrides_global() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     // 验证配置层级：表级配置应覆盖全局配置
@@ -204,6 +208,7 @@ fn test_config_hierarchy_uses_global_when_none() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     // 验证配置层级：应使用全局配置
@@ -243,6 +248,7 @@ fn test_mixed_table_configurations() {
         named_vectors: None,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     // 表2：显式设置为 false（高精度）
@@ -260,6 +266,7 @@ fn test_mixed_table_configurations() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     // 表3：显式设置为 true（内存优化）
@@ -277,6 +284,7 @@ fn test_mixed_table_configurations() {
         schema_version: 1,
         hnsw: None,
         quantization: None,
+        payload_index: None,
     };
 
     // 验证配置决策
