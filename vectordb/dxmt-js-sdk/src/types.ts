@@ -86,6 +86,27 @@ export interface Record {
   score?: number;
 }
 
+/** One group from {@link DXMTClient.searchGroups}. */
+export interface SearchGroup {
+  /** The value of `group_by` every hit here holds. */
+  group_id: unknown;
+  /** Normalized the way every other method here returns hits: `metadata`, not `payload`. */
+  hits: SearchResult[];
+  /** How many of the fetched candidates fell in this group, which can exceed `hits.length`. */
+  matched: number;
+}
+
+/** What a grouped search returns. */
+export interface SearchGroupsResult {
+  groups: SearchGroup[];
+  /** How wide the window of nearest neighbours got. A short `groups` with this at the
+   * server's cap means the cap bounded the answer, not the data. */
+  candidates_fetched: number;
+  /** Candidates with no value under `group_by`; they belong to no group. */
+  ungrouped: number;
+  tookms: number;
+}
+
 /** Which payload fields a table indexes for filtering. Unset indexes every field. */
 export interface PayloadIndexPolicy {
   /** When set, the only fields indexed. */

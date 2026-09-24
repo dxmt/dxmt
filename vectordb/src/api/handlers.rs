@@ -1194,6 +1194,89 @@ pub async fn count_records(
     }
 }
 
+/// `POST /tables/{t}/search/groups` — a search whose answer is groups, not hits.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SearchGroupsRequest {
+    /// Everything a plain search takes. `top_k` and `limit` are ignored here -- how many hits
+    /// are scored is decided by `groups` and `group_size` and reported back as
+    /// `candidates_fetched` -- and naming them would suggest otherwise.
+    #[serde(flatten)]
+    pub query: SearchQuery,
+    /// The payload field whose value defines a group. A record with no value there is in no
+    /// group, and the answer counts those rather than dropping them quietly.
+    pub group_by: String,
+    /// How many groups to return.
+    #[serde(default = "default_groups")]
+    pub groups: usize,
+    /// How many hits to keep in each group, best first.
+    #[serde(default = "default_group_size")]
+    pub group_size: usize,
+}
+
+fn default_groups() -> usize {
+    10
+}
+
+fn default_group_size() -> usize {
+    3
+}
+
+/// Nearest neighbours grouped by a payload field.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/search/groups",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    request_body(content = SearchGroupsRequest, example = json!({
+        "vector": [0.12, 0.98, 0.31, 0.04],
+        "group_by": "topic",
+        "groups": 3,
+        "group_size": 1
+    })),
+    responses(
+        (status = 200, description = "Groups, best group first", body = ApiResponse),
+        (status = 400, description = "Bad request", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "search"
+))]
+/// `POST /api/v1/tables/:table_name/search/groups`
+///
+/// One document chunked into twenty pieces takes a whole top-10 by itself. Grouping by the
+/// document's id with `group_size: 1` gives ten documents instead. The groups are filled from a
+/// window of nearest neighbours that widens until enough groups appear or a cap is reached, and
+/// `candidates_fetched` reports how wide it got -- a short answer means the data ran out or the
+/// cap did, and the number says which.
+#[axum::debug_handler]
+pub async fn search_groups(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    ApiJson(request): ApiJson<SearchGroupsRequest>,
+) -> impl IntoResponse {
+    if request.query.vector.is_empty() {
+        let error = ApiError::new("INVALID_VECTOR", "Query vector must not be empty");
+        return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
+    }
+    match state
+        .storage
+        .search_groups(
+            &table_name,
+            request.query,
+            &request.group_by,
+            request.groups,
+            request.group_size,
+        )
+        .await
+    {
+        Ok(result) => {
+            let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+            ApiResponse::success(value).into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
 /// Nearest neighbours to a query vector.
 ///
 /// `search_mode` trades recall against latency: `fast` (ef = top_k), `normal` (the default),

@@ -932,6 +932,71 @@ class DXMTClient:
             msg = f"Connection error updating record {record_id}: {e}"
             raise DXMTConnectionError(msg) from e
 
+    def search_groups(
+        self,
+        table_name: str,
+        vector: list[float],
+        group_by: str,
+        *,
+        groups: int = 10,
+        group_size: int = 3,
+        filter: Optional[Filter] = None,
+        with_payload: bool = True,
+        payload_fields: Optional[list[str]] = None,
+        score_threshold: Optional[float] = None,
+        search_mode: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Nearest neighbours grouped by a payload field.
+
+        A document chunked for retrieval takes a whole top-10 by itself: the ten nearest
+        vectors are ten pieces of the same text. Grouping by the document's id with
+        `group_size=1` returns ten documents instead.
+
+        Groups are filled from a window of nearest neighbours that widens until enough groups
+        appear or the server's cap is reached, so `candidates_fetched` in the answer is worth
+        reading: a short result means either the data ran out or the cap did.
+
+        Args:
+            table_name: Name of the table.
+            vector: Query vector.
+            group_by: Payload field whose value defines a group. A record with no value there
+                is in no group and is counted in `ungrouped`.
+            groups: How many groups to return.
+            group_size: How many hits to keep per group, best first.
+            filter: Applied before grouping, as in a plain search.
+            with_payload: Include payloads in the hits.
+            payload_fields: Return only these payload keys.
+            score_threshold: Similarity floor; higher is nearer.
+            search_mode: fast | normal | accurate | auto | exact.
+
+        Returns:
+            `{"groups": [...], "candidates_fetched": n, "ungrouped": n, "tookms": n}`.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        body: dict[str, Any] = {
+            "vector": vector,
+            "group_by": group_by,
+            "groups": groups,
+            "group_size": group_size,
+            "with_payload": with_payload,
+        }
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
+        if payload_fields is not None:
+            body["payload_fields"] = payload_fields
+        if score_threshold is not None:
+            body["score_threshold"] = score_threshold
+        if search_mode is not None:
+            body["search_mode"] = search_mode
+        response = self._client.post(
+            f"/tables/{quote(table_name, safe='')}/search/groups", json=body
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
     def payload_index(self, table_name: str) -> dict[str, Any]:
         """What the payload (filter) index holds for each field, and what it costs.
 

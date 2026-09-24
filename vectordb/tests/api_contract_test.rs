@@ -144,6 +144,11 @@ const CONTRACTS: &[Contract] = &[
         caller: "python",
     },
     Contract {
+        method: "POST",
+        path: "/tables/{t}/search/groups",
+        caller: "python",
+    },
+    Contract {
         method: "GET",
         path: "/tables/{t}/payload_index",
         caller: "python",
@@ -327,6 +332,9 @@ fn every_route_the_sdks_call_exists() {
             p if p.ends_with("/graph") => r#"{"sample":4,"neighbours":2}"#,
             p if p.contains("/records/") => r#"{"vector":[0,0,1,0]}"#,
             p if p.ends_with("/search") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
+            p if p.ends_with("/search/groups") => {
+                r#"{"vector":[1,0,0,0],"group_by":"city","groups":1,"group_size":1}"#
+            }
             p if p.ends_with("/search/text") => r#"{"query":"x","top_k":1}"#,
             p if p.ends_with("/search/hybrid") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
             "/query" => r#"{"query":"SELECT * FROM contract LIMIT 1"}"#,

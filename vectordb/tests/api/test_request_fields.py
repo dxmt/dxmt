@@ -788,6 +788,51 @@ def _(table, alterable=None):
     assert "temporary" not in schema, schema
 
 
+# ---- POST /tables/{t}/search/groups ----------------------------------------------------------
+
+@probe("SearchGroupsRequest", "group_by")
+def _(table):
+    # The shared corpus splits `topic` 3/2, so grouping by it must return two groups where a
+    # plain search returns five hits of whichever topic is nearest.
+    answer = post(f"/tables/{table}/search/groups",
+                  {"vector": VECTORS[0], "group_by": "topic", "groups": 5,
+                   "group_size": 5}).json()["data"]
+    ids = sorted(g["group_id"] for g in answer["groups"])
+    assert ids == ["alpha", "beta"], answer
+
+
+@probe("SearchGroupsRequest", "groups")
+def _(table):
+    answer = post(f"/tables/{table}/search/groups",
+                  {"vector": VECTORS[0], "group_by": "topic", "groups": 1,
+                   "group_size": 5}).json()["data"]
+    assert len(answer["groups"]) == 1, answer
+
+
+@probe("SearchGroupsRequest", "group_size")
+def _(table):
+    # Two hits per group where the group holds three: the cap is the field under test.
+    answer = post(f"/tables/{table}/search/groups",
+                  {"vector": VECTORS[0], "group_by": "topic", "groups": 2,
+                   "group_size": 2}).json()["data"]
+    alpha = next(g for g in answer["groups"] if g["group_id"] == "alpha")
+    assert len(alpha["hits"]) == 2, alpha
+    assert alpha["matched"] == 3, alpha
+
+
+def test_a_grouped_search_still_honours_the_plain_search_body(table):
+    # The search half of the body is flattened in, so what needs proving is that those fields
+    # still apply inside a grouped search -- they are covered by their own probes at
+    # POST /search, which says nothing about this route. The filter is the discriminator: with
+    # it, the alpha group holds one record instead of three.
+    body = {"vector": VECTORS[0], "group_by": "topic", "groups": 2, "group_size": 5,
+            "filter": {"must": [{"key": "n", "operation": {"type": "Equal", "value": 0}}]},
+            "payload_fields": ["n"]}
+    answer = post(f"/tables/{table}/search/groups", body).json()["data"]
+    alpha = next(g for g in answer["groups"] if g["group_id"] == "alpha")
+    assert [h["payload"] for h in alpha["hits"]] == [{"n": 0}], alpha
+
+
 @probe("TableAlterRequest", "payload_index")
 def _(table, alterable=None):
     # Which payload fields are indexed for filtering. The discriminator is the consequence,
@@ -904,15 +949,47 @@ def documented_fields(spec):
             name = reference.rsplit("/", 1)[-1]
             if not name:
                 continue
-            properties = schemas.get(name, {}).get("properties")
-            assert properties is not None, (
+            found = fields_of(schemas, name)
+            assert found is not None, (
                 f"{path} takes a {name} body, and {name} is not in components/schemas — utoipa "
                 f"emitted a $ref to a schema it never defined, so the documentation shows this "
                 f"operation with no fields at all. Add it to `components(schemas(...))` in "
                 f"src/api/swagger.rs."
             )
-            for field in properties:
+            out |= found
+    return out
+
+
+def fields_of(schemas, name, seen=None):
+    """The (schema, property) pairs a body schema exposes, or None if it is not defined.
+
+    A `#[serde(flatten)]` field is an `allOf` in the document -- `SearchGroupsRequest` is
+    `SearchQuery` plus three properties of its own -- so a schema can carry no `properties` key
+    at all and still take a body full of fields. Resolving it here means the flattened half is
+    covered by the probes already written against the schema it came from, and only the new
+    fields need new ones. Without this the test fails on any flattened body with a message
+    about registering the schema, which is not what is wrong.
+    """
+    seen = seen or set()
+    if name in seen:
+        return set()
+    seen.add(name)
+    schema = schemas.get(name)
+    if schema is None:
+        return None
+    out = set()
+    for field in schema.get("properties", {}):
+        out.add((name, field))
+    if "allOf" in schema:
+        for member in schema["allOf"]:
+            if "$ref" in member:
+                nested = fields_of(schemas, member["$ref"].rsplit("/", 1)[-1], seen)
+                if nested:
+                    out |= nested
+            for field in member.get("properties", {}):
                 out.add((name, field))
+    elif not schema.get("properties"):
+        return None
     return out
 
 

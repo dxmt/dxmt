@@ -478,6 +478,40 @@ pub struct SearchHit {
     pub vector: Option<DenseVector>,
 }
 
+/// One group of hits from `POST /tables/{t}/search/groups`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct SearchGroup {
+    /// The value of `group_by` every hit in this group holds. Groups keep the order of their
+    /// best hit, so the first group is the one the best hit belongs to.
+    pub group_id: serde_json::Value,
+    /// Up to `group_size` hits, best first.
+    pub hits: Vec<SearchHit>,
+    /// How many of the candidates fetched fell in this group, which can exceed `hits.len()`.
+    pub matched: usize,
+}
+
+/// What a grouped search returns.
+///
+/// The counts are not decoration. Grouping is done over a *window* of the nearest neighbours,
+/// not over the table: a group whose every member is further away than the window reaches is
+/// not in the answer, and no amount of grouping can know that. `candidates_fetched` says how
+/// wide the window was, so a caller can tell a result from a truncation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct SearchGroupsResult {
+    pub groups: Vec<SearchGroup>,
+    /// Nearest neighbours scored to fill the groups. Grown until enough groups were found or
+    /// the cap was reached; when it equals the cap, and `groups` is short, the answer is
+    /// bounded by the cap rather than by the data.
+    pub candidates_fetched: usize,
+    /// Candidates dropped because they carry no value under `group_by`. A record with no value
+    /// there belongs to no group; reported rather than silently discarded, because a corpus
+    /// where the field is missing on half the rows otherwise looks like a half-empty index.
+    pub ungrouped: usize,
+    pub tookms: u64,
+}
+
 /// 过滤条件
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]

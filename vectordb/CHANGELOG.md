@@ -24,6 +24,20 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Grouped search.** `POST /tables/{t}/search/groups` takes a plain search body plus
+  `group_by`, `groups` and `group_size`, and answers with groups instead of hits. A document
+  chunked for retrieval takes a whole top-10 by itself — the ten nearest vectors are ten pieces
+  of the same text — and grouping by its id with `group_size: 1` returns ten documents. Both
+  SDKs have it (`search_groups`, `searchGroups`).
+
+  It groups a *window*, not the table: there is no index over (field, distance), so the groups
+  are filled by scoring neighbours until enough distinct values appear. The window starts at
+  `groups × group_size × 4` and doubles while it is short, capped at 10,000 candidates, and the
+  answer reports `candidates_fetched` — otherwise a caller cannot tell "there are only three
+  documents near this query" from "the fourth one's chunks are further away than we looked".
+  Records with no value under `group_by` are counted as `ungrouped` rather than dropped
+  silently, and each group reports `matched`, how many of the fetched candidates fell in it.
+
 - **Explicit payload index management.** `GET /tables/{t}/payload_index` reports what the
   filter index holds per field — distinct values, postings, estimated bytes, worst field first
   — and `PUT`/`DELETE /tables/{t}/payload_index/{field}` turn a field's index on and off;

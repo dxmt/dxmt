@@ -87,6 +87,8 @@ export type {
   HnswParams,
   QuantizationParams,
   PayloadIndexPolicy,
+  SearchGroup,
+  SearchGroupsResult,
   PayloadIndexField,
   PayloadIndexReport,
 

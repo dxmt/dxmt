@@ -127,7 +127,11 @@ fn stats(port: u16, table: &str) -> serde_json::Value {
 const DIM: usize = 32;
 /// Above `num_centroids * 16`, which training also requires, and small enough that k-means in
 /// a debug build finishes in well under a minute.
-const ROWS: usize = 5_000;
+// Enough to cross the threshold below and no more. The first version of this test used
+// 5,000 rows against 256 centroids, which is a real k-means: 34 s on an idle machine, and
+// past the 60 s wait below once `cargo test --tests` ran the other targets alongside it.
+// The parameter reaching the index is what is under test, not the size of the codebook.
+const ROWS: usize = 1_000;
 
 #[test]
 fn quantize_at_rows_decides_when_a_table_leaves_the_exact_graph() {
@@ -143,7 +147,7 @@ fn quantize_at_rows_decides_when_a_table_leaves_the_exact_graph() {
         "/api/v1/tables",
         Some(
             r#"{"name":"early","dimension":32,
-            "quantization":{"num_subvectors":8,"num_centroids":256,"quantize_at_rows":4096}}"#,
+            "quantization":{"num_subvectors":8,"num_centroids":16,"quantize_at_rows":512}}"#,
         ),
     );
     call(
@@ -166,7 +170,7 @@ fn quantize_at_rows_decides_when_a_table_leaves_the_exact_graph() {
     }
     assert!(
         quantized,
-        "a table that asked to quantize at 4,096 rows is still exact at {ROWS}; the parameter \
+        "a table that asked to quantize at 512 rows is still exact at {ROWS}; the parameter \
          did not reach the index"
     );
     assert_eq!(

@@ -13,7 +13,8 @@ pub use multimodal::{
     MultimodalSearchResult,
 };
 pub use record::{
-    CreateRecordRequest, Filter, Record, RecordStatus, SearchHit, SearchQuery, SearchResult,
+    CreateRecordRequest, Filter, Record, RecordStatus, SearchGroup, SearchGroupsResult, SearchHit,
+    SearchQuery, SearchResult,
 };
 pub use sparse_vector::*;
 pub use table::*;

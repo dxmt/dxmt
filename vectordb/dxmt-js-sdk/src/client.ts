@@ -27,6 +27,7 @@ import {
   UploadOptions,
   UploadResult,
   PayloadIndexReport,
+  SearchGroupsResult,
 } from './types';
 import {
   DXMTError,
@@ -388,6 +389,75 @@ export class DXMTClient {
    * });
    * ```
    */
+  /**
+   * Nearest neighbours grouped by a payload field.
+   *
+   * A document chunked for retrieval takes a whole top-10 by itself — the ten nearest vectors
+   * are ten pieces of the same text. Grouping by the document's id with `groupSize: 1` returns
+   * ten documents instead.
+   *
+   * @example
+   * ```typescript
+   * const { groups } = await client.searchGroups('chunks', queryVector, 'doc_id', {
+   *   groups: 10,
+   *   groupSize: 1,
+   * });
+   * ```
+   */
+  async searchGroups(
+    tableName: string,
+    vector: number[],
+    groupBy: string,
+    options: {
+      groups?: number;
+      groupSize?: number;
+      filter?: Filter;
+      withPayload?: boolean;
+      payloadFields?: string[];
+      scoreThreshold?: number;
+      searchMode?: 'fast' | 'normal' | 'accurate' | 'auto' | 'exact';
+    } = {}
+  ): Promise<SearchGroupsResult> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    if (!vector || vector.length === 0) {
+      throw new DXMTValidationError('Query vector is required');
+    }
+    if (!groupBy) {
+      throw new DXMTValidationError('group_by is required');
+    }
+    const body: Record<string, unknown> = {
+      vector,
+      group_by: groupBy,
+      groups: options.groups ?? 10,
+      group_size: options.groupSize ?? 3,
+      with_payload: options.withPayload ?? true,
+    };
+    if (options.filter !== undefined) body.filter = options.filter;
+    if (options.payloadFields !== undefined) body.payload_fields = options.payloadFields;
+    if (options.scoreThreshold !== undefined) body.score_threshold = options.scoreThreshold;
+    if (options.searchMode !== undefined) body.search_mode = options.searchMode;
+    const answer = await this.request<
+      Omit<SearchGroupsResult, 'groups'> & {
+        groups: Array<{
+          group_id: unknown;
+          matched: number;
+          hits: Array<SearchResult & { payload?: Metadata }>;
+        }>;
+      }
+    >('POST', `/tables/${encodeURIComponent(tableName)}/search/groups`, body);
+    // Hits come back through the same normalization as every other read here, so a caller
+    // reads `metadata` whichever method they used rather than `payload` in this one alone.
+    return {
+      ...answer,
+      groups: (answer.groups || []).map((group) => ({
+        ...group,
+        hits: (group.hits || []).map((hit) => this.normalizeRecord(hit)),
+      })),
+    };
+  }
+
   /**
    * What the payload (filter) index holds for each field, and what it costs.
    *

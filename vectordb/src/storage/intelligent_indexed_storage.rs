@@ -7884,6 +7884,143 @@ impl IntelligentIndexedStorage {
     /// stats carry a record count for the table and nothing for a condition, so a caller
     /// counting matches downloaded them. The page functions already return the total as a
     /// by-product of choosing a page, so a count is that number with a page of zero.
+    /// Nearest neighbours, grouped by a payload field, at most `group_size` per group.
+    ///
+    /// The case this exists for is a corpus chunked for retrieval: twenty chunks of one
+    /// document, and a top-10 that is the same document ten times. Grouping by `document_id`
+    /// with `group_size: 1` turns that into ten documents.
+    ///
+    /// **It groups a window, not the table.** There is no index over (field, distance), so the
+    /// only way to fill `groups` groups is to score neighbours until that many distinct values
+    /// have appeared. The window starts at `groups * group_size * 4` and doubles while it is
+    /// short, up to `MAX_GROUP_CANDIDATES`; the result says how wide it got, because a caller
+    /// cannot otherwise tell "there are only three documents near this query" from "the fourth
+    /// one's chunks are all further away than we looked".
+    pub async fn search_groups(
+        &self,
+        tablename: &str,
+        query: SearchQuery,
+        group_by: &str,
+        groups: usize,
+        group_size: usize,
+    ) -> crate::Result<crate::types::record::SearchGroupsResult> {
+        /// A cap, not a target. Each round is a real search, and an unbounded loop on a field
+        /// almost every record shares a value of would scan the table one doubling at a time.
+        const MAX_GROUP_CANDIDATES: usize = 10_000;
+
+        let start = std::time::Instant::now();
+        if group_by.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "group_by must name a payload field".to_string(),
+            ));
+        }
+        if groups == 0 || group_size == 0 {
+            return Err(crate::Error::InvalidInput(
+                "groups and group_size must be greater than 0".to_string(),
+            ));
+        }
+
+        // The grouping key has to be read off every hit, whatever the caller asked to see. So
+        // the inner search always returns the payload, projected to the caller's fields plus
+        // this one, and the projection is applied again at the end for what leaves.
+        let wanted_fields = query.payload_fields.clone();
+        let wanted_payload = query.with_payload;
+        let mut inner_fields = wanted_fields.clone();
+        if let Some(fields) = &mut inner_fields {
+            if !fields.iter().any(|f| f == group_by) {
+                fields.push(group_by.to_string());
+            }
+        }
+
+        let mut fetch = groups
+            .saturating_mul(group_size)
+            .saturating_mul(4)
+            .clamp(1, MAX_GROUP_CANDIDATES);
+        loop {
+            let round = SearchQuery {
+                top_k: fetch,
+                limit: fetch,
+                with_payload: true,
+                payload_fields: inner_fields.clone(),
+                ..query.clone()
+            };
+            let found = self.search(tablename, round).await?;
+            let fetched = found.hits.len();
+
+            let mut order: Vec<serde_json::Value> = Vec::new();
+            let mut by_key: std::collections::HashMap<String, (usize, Vec<SearchHit>)> =
+                std::collections::HashMap::new();
+            let mut ungrouped = 0usize;
+            for hit in found.hits {
+                let value = hit
+                    .payload
+                    .as_ref()
+                    .and_then(|p| p.get(group_by))
+                    .filter(|v| !v.is_null())
+                    .cloned();
+                let Some(value) = value else {
+                    ungrouped += 1;
+                    continue;
+                };
+                // Keyed by the value's JSON text: a group id is whatever the payload holds,
+                // and `serde_json::Value` is not `Hash` because floats are not.
+                let key = value.to_string();
+                let entry = by_key.entry(key).or_insert_with(|| {
+                    order.push(value.clone());
+                    (0, Vec::with_capacity(group_size))
+                });
+                entry.0 += 1;
+                if entry.1.len() < group_size {
+                    entry.1.push(hit);
+                }
+            }
+
+            // Short, and the window may be why. Widen it and try again rather than answering
+            // with groups the data does not support.
+            if order.len() < groups && fetched >= fetch && fetch < MAX_GROUP_CANDIDATES {
+                fetch = fetch.saturating_mul(2).min(MAX_GROUP_CANDIDATES);
+                continue;
+            }
+
+            let out: Vec<crate::types::record::SearchGroup> = order
+                .into_iter()
+                .take(groups)
+                .map(|value| {
+                    let (matched, hits) = by_key
+                        .remove(&value.to_string())
+                        .expect("every ordered key was inserted");
+                    crate::types::record::SearchGroup {
+                        group_id: value,
+                        hits: hits
+                            .into_iter()
+                            .map(|mut hit| {
+                                hit.payload = if wanted_payload {
+                                    hit.payload.as_ref().map(|p| {
+                                        crate::types::record::project_payload(
+                                            p,
+                                            wanted_fields.as_deref(),
+                                        )
+                                    })
+                                } else {
+                                    None
+                                };
+                                hit
+                            })
+                            .collect(),
+                        matched,
+                    }
+                })
+                .collect();
+
+            return Ok(crate::types::record::SearchGroupsResult {
+                groups: out,
+                candidates_fetched: fetched,
+                ungrouped,
+                tookms: start.elapsed().as_millis() as u64,
+            });
+        }
+    }
+
     /// What this table's payload index holds and what it costs, per field.
     ///
     /// Deliberately does not build the index in order to describe it: the build is a pass over

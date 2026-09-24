@@ -14,8 +14,8 @@ use crate::{
         full_text_search, get_record, get_status, get_table, get_table_stats, health_check,
         health_metrics, hybrid_search, hybrid_search_combined, index_payload_field, insert_records,
         insert_records_optimized, knn_graph, list_records, list_tables, liveness,
-        payload_index_report, prometheus_metrics, readiness, rebuild_index, search_vectors,
-        update_record, AppState,
+        payload_index_report, prometheus_metrics, readiness, rebuild_index, search_groups,
+        search_vectors, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -452,6 +452,7 @@ pub async fn create_app_with_storage(
         )
         // 搜索API
         .route("/tables/:table_name/search", post(search_vectors))
+        .route("/tables/:table_name/search/groups", post(search_groups))
         .route("/tables/:table_name/hybrid_search", post(hybrid_search))
         // An alias for /search, on purpose and pinned by a test: both claim to answer "what
         // is nearest to this vector" and an alias that quietly starts answering differently is
