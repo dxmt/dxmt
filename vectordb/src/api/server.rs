@@ -15,7 +15,7 @@ use crate::{
         health_check, health_metrics, hybrid_search, hybrid_search_combined, import_table,
         index_payload_field, insert_records, insert_records_optimized, knn_graph, list_records,
         list_tables, liveness, payload_index_report, prometheus_metrics, readiness, rebuild_index,
-        search_groups, search_vectors, update_record, AppState,
+        search_groups, search_vectors, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -453,6 +453,9 @@ pub async fn create_app_with_storage(
         // 搜索API
         .route("/tables/:table_name/search", post(search_vectors))
         .route("/tables/:table_name/search/groups", post(search_groups))
+        // Sparse retrieval on its own, in the default build: the sparse index is pure Rust and
+        // needs no full-text engine behind it.
+        .route("/tables/:table_name/search/sparse", post(sparse_search))
         .route("/tables/:table_name/hybrid_search", post(hybrid_search))
         // An alias for /search, on purpose and pinned by a test: both claim to answer "what
         // is nearest to this vector" and an alias that quietly starts answering differently is

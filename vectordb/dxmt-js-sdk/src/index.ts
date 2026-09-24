@@ -89,6 +89,7 @@ export type {
   PayloadIndexPolicy,
   SearchGroup,
   SearchGroupsResult,
+  SparseVector,
   PayloadIndexField,
   PayloadIndexReport,
 

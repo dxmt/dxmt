@@ -8248,6 +8248,124 @@ impl IntelligentIndexedStorage {
         }
     }
 
+    /// Nearest neighbours by sparse vector alone.
+    ///
+    /// Sparse vectors could be written, were indexed, and could not be retrieved by: the only
+    /// path into `SparseIndex` was `POST /search/hybrid`, which refuses a body with no dense
+    /// vector and no text ("At least one of 'vector' or 'text' must be provided") and needs the
+    /// `text-bm25` build besides. So a table full of SPLADE vectors answered every request with
+    /// the dense side or with an error -- stored, indexed, unreachable.
+    ///
+    /// The scoring is the dot product the sparse index already computes, WAND-pruned. Filters
+    /// are applied to the candidates it returns, by `matches_filter` rather than through the
+    /// payload index, which is why the fetch is widened when there is one: the alternative is
+    /// a page that comes back short because the filter ate it.
+    pub async fn sparse_search(
+        &self,
+        tablename: &str,
+        request: &crate::types::record::SparseSearchQuery,
+    ) -> crate::Result<SearchResult> {
+        let start = std::time::Instant::now();
+        let query = &request.sparse_vector;
+        let limit = request.limit;
+        let filter = request.filter.as_ref();
+        let with_payload = request.with_payload;
+        let with_vector = request.with_vector;
+        let payload_fields = request.payload_fields.as_deref();
+        let score_threshold = request.score_threshold;
+        query
+            .validate()
+            .map_err(|e| crate::Error::InvalidInput(e.to_string()))?;
+        if limit == 0 {
+            return Err(crate::Error::InvalidInput(
+                "limit must be greater than 0".to_string(),
+            ));
+        }
+        Self::check_filter(filter)?;
+        self.ensure_resident(tablename).await?;
+
+        let tables = self.read_tables("sparse_search").await;
+        let table_data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        // Held to the same contract as every other read: a table that excluded a field from
+        // its payload index declared it not filterable, and answering here because this path
+        // happens to filter by scanning the candidates would make that mean different things
+        // at different endpoints.
+        Self::check_filter_policy(&table_data.table, filter)?;
+
+        // Three times the page when filtering, as the hybrid path does. It is a guess either
+        // way: what the filter removes is unknown until it is applied.
+        let fetch = if filter.is_some() {
+            limit.saturating_mul(3)
+        } else {
+            limit
+        };
+        let candidates = table_data.derived().sparse.search(query, fetch);
+
+        let mut scored: Vec<(RecordId, f32)> = candidates
+            .into_iter()
+            .filter(|(id, score)| {
+                if score_threshold.is_some_and(|floor| *score < floor) {
+                    return false;
+                }
+                match filter {
+                    None => true,
+                    Some(filter) => table_data
+                        .records
+                        .get(id)
+                        .is_some_and(|record| record.matches_filter(filter)),
+                }
+            })
+            .collect();
+        // The index returns its own order; the tiebreak by id is what makes a page well defined
+        // when two records score the same, as it does on the dense side.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(limit);
+        let total = scored.len();
+
+        let hits: Vec<SearchHit> = scored
+            .into_iter()
+            .map(|(id, score)| {
+                let (payload, vector) = if with_payload || with_vector {
+                    table_data
+                        .records
+                        .get(&id)
+                        .map(|record| {
+                            (
+                                with_payload.then(|| {
+                                    crate::types::record::project_payload(
+                                        &record.payload,
+                                        payload_fields,
+                                    )
+                                }),
+                                with_vector.then(|| table_data.vector_for(&record)),
+                            )
+                        })
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                };
+                SearchHit {
+                    id,
+                    score,
+                    payload,
+                    vector,
+                }
+            })
+            .collect();
+
+        Ok(SearchResult {
+            hits,
+            total,
+            tookms: start.elapsed().as_millis() as u64,
+        })
+    }
+
     /// What this table's payload index holds and what it costs, per field.
     ///
     /// Deliberately does not build the index in order to describe it: the build is a pass over

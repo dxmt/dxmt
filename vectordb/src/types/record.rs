@@ -806,6 +806,34 @@ impl Record {
     }
 }
 
+/// A query against the sparse index alone: `POST /tables/{t}/search/sparse`.
+///
+/// Deliberately its own type rather than a flag on [`SearchQuery`]. A sparse query has no
+/// dense vector, no `search_mode` and no named vector space -- three fields that would have to
+/// be accepted and ignored on it, which is the shape of bug this file keeps a list of.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SparseSearchQuery {
+    /// The query vector: `indices`, `values`, `dimension`.
+    pub sparse_vector: crate::types::sparse_vector::SparseVector,
+    #[serde(default = "default_top_k", alias = "top_k")]
+    pub limit: usize,
+    #[serde(default)]
+    pub filter: Option<Filter>,
+    #[serde(default = "default_true")]
+    pub with_payload: bool,
+    #[serde(default)]
+    pub with_vector: bool,
+    /// Return only these payload keys, as on a dense search.
+    #[serde(default)]
+    pub payload_fields: Option<Vec<String>>,
+    /// Floor on the dot product, applied before the page is cut. Higher is nearer, and it only
+    /// removes -- a short page means that was all there was above it.
+    #[serde(default)]
+    pub score_threshold: Option<f32>,
+}
+
 impl Default for SearchQuery {
     fn default() -> Self {
         Self {

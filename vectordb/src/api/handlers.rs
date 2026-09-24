@@ -20,6 +20,7 @@ use crate::{
         record::CreateRecordRequest,
         record::HybridSearchQuery,
         record::SearchQuery,
+        record::SparseSearchQuery,
         record::{FullTextSearchRequest, HybridSearchRequest},
         table::IndexType,
         table::{TableAlterRequest, TableConfig},
@@ -1190,6 +1191,43 @@ pub async fn count_records(
         .await
     {
         Ok(count) => ApiResponse::success(serde_json::json!({ "count": count })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Search by sparse vector alone.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/search/sparse",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    request_body(content = SparseSearchQuery, example = json!({
+        "sparse_vector": {"indices": [3, 17, 42], "values": [0.7, 0.2, 0.9], "dimension": 1000},
+        "limit": 5
+    })),
+    responses(
+        (status = 200, description = "Hits, best first", body = ApiResponse),
+        (status = 400, description = "Bad request", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "search"
+))]
+/// `POST /api/v1/tables/:table_name/search/sparse`
+///
+/// Sparse vectors could be written and indexed here long before they could be searched: the
+/// only path into the sparse index was `/search/hybrid`, which refuses a body with no dense
+/// vector and no text, and needs the `text-bm25` build. A table of SPLADE vectors was stored,
+/// indexed and unreachable. This is the default build, no feature required.
+#[axum::debug_handler]
+pub async fn sparse_search(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    ApiJson(request): ApiJson<SparseSearchQuery>,
+) -> impl IntoResponse {
+    match state.storage.sparse_search(&table_name, &request).await {
+        Ok(result) => {
+            let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+            ApiResponse::success(value).into_response()
+        }
         Err(e) => error_response(e),
     }
 }

@@ -35,6 +35,7 @@ WALKTHROUGH = [
     ("GET", "/tables/{t}/stats"),
     ("POST", "/tables/{t}/search"),
     ("POST", "/tables/{t}/search/groups"),
+    ("POST", "/tables/{t}/search/sparse"),
     ("POST", "/tables/{t}/records/list"),
     ("POST", "/tables/{t}/records/count"),
     ("GET", "/tables/{t}/records/{r}"),

@@ -255,3 +255,35 @@ describe('createTable parameters', () => {
     });
   });
 });
+
+describe('sparseSearch', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  it('sends the server field names and normalizes the hits', async () => {
+    fetchMock.mockResolvedValueOnce(
+      ok({ hits: [{ id: 'a', score: 0.9, payload: { lang: 'en' } }], total: 1, tookms: 0 })
+    );
+    const client = new DXMTClient({ baseUrl: 'http://x' });
+    const hits = await client.sparseSearch(
+      't',
+      { indices: [5], values: [1], dimension: 100 },
+      { limit: 3, scoreThreshold: 0.5, payloadFields: ['lang'] }
+    );
+    const body = bodyOf(0);
+    expect(body.sparse_vector).toEqual({ indices: [5], values: [1], dimension: 100 });
+    expect(body.limit).toBe(3);
+    expect(body.score_threshold).toBe(0.5);
+    expect(body.payload_fields).toEqual(['lang']);
+    // `payload` on the wire, `metadata` in the SDK -- the same normalization every other read
+    // here goes through, so a caller does not get one field name from one method.
+    expect(hits[0].metadata).toEqual({ lang: 'en' });
+  });
+
+  it('refuses a query with no indices before it reaches the network', async () => {
+    const client = new DXMTClient({ baseUrl: 'http://x' });
+    await expect(
+      client.sparseSearch('t', { indices: [], values: [], dimension: 10 })
+    ).rejects.toThrow(/sparse vector/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

@@ -28,6 +28,7 @@ import {
   UploadResult,
   PayloadIndexReport,
   SearchGroupsResult,
+  SparseVector,
 } from './types';
 import {
   DXMTError,
@@ -389,6 +390,46 @@ export class DXMTClient {
    * });
    * ```
    */
+  /**
+   * Retrieve by sparse vector alone, ranked by dot product.
+   *
+   * Sparse vectors could be stored and indexed here long before they could be searched: the
+   * only path into the sparse index was the hybrid endpoint, which refuses a body with no
+   * dense vector and no text and needs a `text-bm25` build. This needs neither.
+   */
+  async sparseSearch(
+    tableName: string,
+    sparseVector: SparseVector,
+    options: {
+      limit?: number;
+      filter?: Filter;
+      withPayload?: boolean;
+      withVector?: boolean;
+      payloadFields?: string[];
+      scoreThreshold?: number;
+    } = {}
+  ): Promise<SearchResult[]> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    if (!sparseVector || !sparseVector.indices?.length) {
+      throw new DXMTValidationError('A sparse vector with at least one index is required');
+    }
+    const body: Record<string, unknown> = {
+      sparse_vector: sparseVector,
+      limit: options.limit ?? 10,
+      with_payload: options.withPayload ?? true,
+      with_vector: options.withVector ?? false,
+    };
+    if (options.filter !== undefined) body.filter = options.filter;
+    if (options.payloadFields !== undefined) body.payload_fields = options.payloadFields;
+    if (options.scoreThreshold !== undefined) body.score_threshold = options.scoreThreshold;
+    const answer = await this.request<{
+      hits: Array<SearchResult & { payload?: Metadata }>;
+    }>('POST', `/tables/${encodeURIComponent(tableName)}/search/sparse`, body);
+    return (answer.hits || []).map((hit) => this.normalizeRecord(hit));
+  }
+
   /**
    * Nearest neighbours grouped by a payload field.
    *

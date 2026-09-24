@@ -85,12 +85,24 @@ export interface Filter {
 export interface Record {
   id: string;
   vector: Vector;
+  /** Sent through to the server as written. Searchable with {@link DXMTClient.sparseSearch}. */
+  sparse_vector?: SparseVector;
   metadata?: Metadata;
   /** Raw server payload (DXMT's wire name for metadata). */
   payload?: Metadata;
   /** Present on GET responses serialized by the Rust storage layer. */
   payload_json?: string;
   score?: number;
+}
+
+/** A sparse vector: the non-zero dimensions and their weights. */
+export interface SparseVector {
+  /** The non-zero dimensions, each below `dimension`. */
+  indices: number[];
+  /** One weight per index, in the same order. */
+  values: number[];
+  /** The width of the space the indices are drawn from. */
+  dimension: number;
 }
 
 /** One group from {@link DXMTClient.searchGroups}. */

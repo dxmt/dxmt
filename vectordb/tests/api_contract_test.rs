@@ -150,6 +150,11 @@ const CONTRACTS: &[Contract] = &[
     },
     Contract {
         method: "POST",
+        path: "/tables/{t}/search/sparse",
+        caller: "python",
+    },
+    Contract {
+        method: "POST",
         path: "/tables/{t}/export",
         caller: "python",
     },
@@ -342,6 +347,9 @@ fn every_route_the_sdks_call_exists() {
             p if p.ends_with("/graph") => r#"{"sample":4,"neighbours":2}"#,
             p if p.contains("/records/") => r#"{"vector":[0,0,1,0]}"#,
             p if p.ends_with("/search") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
+            p if p.ends_with("/search/sparse") => {
+                r#"{"sparse_vector":{"indices":[1],"values":[1.0],"dimension":8},"limit":1}"#
+            }
             p if p.ends_with("/search/groups") => {
                 r#"{"vector":[1,0,0,0],"group_by":"city","groups":1,"group_size":1}"#
             }

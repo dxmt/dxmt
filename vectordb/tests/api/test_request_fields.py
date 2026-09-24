@@ -788,6 +788,100 @@ def _(table, alterable=None):
     assert "temporary" not in schema, schema
 
 
+# ---- POST /tables/{t}/search/sparse ----------------------------------------------------------
+#
+# On a table of their own rather than the shared corpus: the record probes rewrite records in
+# that one, and an update that drops a sparse vector would make these fail for a reason that has
+# nothing to do with the field under test.
+
+import contextlib  # noqa: E402
+
+
+@contextlib.contextmanager
+def sparse_table():
+    """Three records, each owning one sparse dimension, plus one with no sparse vector."""
+    name = f"probe_sparse_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "s1", "vector": VECTORS[0], "payload": {"topic": "alpha", "n": 1},
+             "sparse_vector": {"indices": [1], "values": [1.0], "dimension": 16}},
+            {"id": "s2", "vector": VECTORS[1], "payload": {"topic": "beta", "n": 2},
+             "sparse_vector": {"indices": [2], "values": [0.5], "dimension": 16}},
+            {"id": "s3", "vector": VECTORS[2], "payload": {"topic": "beta", "n": 3},
+             "sparse_vector": {"indices": [1, 2], "values": [0.25, 0.25], "dimension": 16}},
+            {"id": "dense", "vector": VECTORS[3], "payload": {"topic": "alpha", "n": 4}},
+        ]})
+        yield name
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+def sparse_hits(table, **body):
+    body.setdefault("sparse_vector", {"indices": [1], "values": [1.0], "dimension": 16})
+    return post(f"/tables/{table}/search/sparse", body).json()["data"]["hits"]
+
+
+@probe("SparseSearchQuery", "sparse_vector")
+def _(table):
+    with sparse_table() as name:
+        # Dimension 1 ranks s1 (1.0) over s3 (0.25) and excludes s2 entirely; dimension 2 is a
+        # different answer, so the query is read rather than ignored.
+        assert [h["id"] for h in sparse_hits(name)] == ["s1", "s3"]
+        other = sparse_hits(
+            name, sparse_vector={"indices": [2], "values": [1.0], "dimension": 16}
+        )
+        assert [h["id"] for h in other] == ["s2", "s3"], other
+
+
+@probe("SparseSearchQuery", "limit")
+def _(table):
+    with sparse_table() as name:
+        assert len(sparse_hits(name)) == 2
+        assert len(sparse_hits(name, limit=1)) == 1
+
+
+@probe("SparseSearchQuery", "filter")
+def _(table):
+    with sparse_table() as name:
+        filtered = sparse_hits(
+            name,
+            filter={"must": [{"key": "topic", "operation": {"type": "Equal", "value": "beta"}}]},
+        )
+        assert [h["id"] for h in filtered] == ["s3"], filtered
+
+
+@probe("SparseSearchQuery", "with_payload")
+def _(table):
+    with sparse_table() as name:
+        assert sparse_hits(name)[0]["payload"] is not None
+        assert sparse_hits(name, with_payload=False)[0]["payload"] is None
+
+
+@probe("SparseSearchQuery", "with_vector")
+def _(table):
+    with sparse_table() as name:
+        assert sparse_hits(name)[0]["vector"] is None
+        assert sparse_hits(name, with_vector=True)[0]["vector"] == VECTORS[0]
+
+
+@probe("SparseSearchQuery", "payload_fields")
+def _(table):
+    with sparse_table() as name:
+        whole = sparse_hits(name)[0]["payload"]
+        projected = sparse_hits(name, payload_fields=["topic"])[0]["payload"]
+        assert set(whole) > {"topic"}, whole
+        assert projected == {"topic": whole["topic"]}, projected
+
+
+@probe("SparseSearchQuery", "score_threshold")
+def _(table):
+    with sparse_table() as name:
+        # s1 scores 1.0 and s3 scores 0.25, so a floor between them keeps exactly one.
+        assert [h["id"] for h in sparse_hits(name, score_threshold=0.5)] == ["s1"]
+        assert sparse_hits(name, score_threshold=1.5) == []
+
+
 # ---- POST /tables/{t}/search/groups ----------------------------------------------------------
 
 @probe("SearchGroupsRequest", "group_by")

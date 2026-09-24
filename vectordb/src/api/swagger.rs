@@ -45,6 +45,7 @@ use crate::types::{
         // search
         crate::api::handlers::search_vectors,
         crate::api::handlers::search_groups,
+        crate::api::handlers::sparse_search,
         crate::api::handlers::full_text_search,
         crate::api::handlers::hybrid_search_combined,
         crate::api::handlers::hybrid_search,
@@ -76,6 +77,7 @@ use crate::types::{
             crate::api::handlers::ListRecordsRequest,
             crate::api::handlers::CountRecordsRequest,
             crate::api::handlers::SearchGroupsRequest,
+            crate::types::record::SparseSearchQuery,
             crate::types::record::SearchGroup,
             crate::types::record::SearchGroupsResult,
             crate::api::handlers::OptimizedBatchInsertRequest,

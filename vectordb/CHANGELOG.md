@@ -24,6 +24,23 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Sparse vectors are searchable.** `POST /tables/{t}/search/sparse` retrieves by sparse
+  vector alone, ranked by the dot product the WAND-pruned sparse index already computed, with
+  `filter`, `score_threshold`, `payload_fields` and `with_vector` behaving as they do on a dense
+  search. In the default build: the sparse index is pure Rust and needs no full-text engine.
+
+  They could be written and were indexed the whole time. The only path into that index was
+  `POST /search/hybrid`, which refuses a body with no dense vector and no text — "At least one
+  of 'vector' or 'text' must be provided" — and needs `text-bm25` besides. So a table of SPLADE
+  vectors was stored, indexed and unreachable: accepted and ignored, which is the failure this
+  repository keeps finding in its own surface.
+
+  The JS SDK could not write them either — `Record` had no `sparse_vector` — so it gains the
+  type as well as `sparseSearch`. Python gains `sparse_search`. And because the sparse index is
+  derived state rebuilt on demand rather than restored, `tests/sparse_search_test.rs` checks it
+  after a restart: the payload index had that exact shape once and every filter silently matched
+  nothing.
+
 - **`IsEmpty` and `IsNull`.** "Which records is this field missing from" had no expression at
   all: `NotEqual` answers a different question, because a record holding some other value
   satisfies it too, so finding the rows a pipeline failed to enrich meant paging the whole

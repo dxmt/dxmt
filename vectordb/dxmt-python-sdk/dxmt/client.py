@@ -932,6 +932,59 @@ class DXMTClient:
             msg = f"Connection error updating record {record_id}: {e}"
             raise DXMTConnectionError(msg) from e
 
+    def sparse_search(
+        self,
+        table_name: str,
+        sparse_vector: dict[str, Any],
+        *,
+        limit: int = 10,
+        filter: Optional[Filter] = None,
+        with_payload: bool = True,
+        with_vector: bool = False,
+        payload_fields: Optional[list[str]] = None,
+        score_threshold: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve by sparse vector alone, ranked by dot product.
+
+        Sparse vectors could be stored and indexed here long before they could be searched:
+        the only path into the sparse index was the hybrid endpoint, which refuses a body with
+        no dense vector and no text, and needs a `text-bm25` build. This needs neither.
+
+        Args:
+            table_name: Name of the table.
+            sparse_vector: `{"indices": [...], "values": [...], "dimension": n}`.
+            limit: How many hits to return.
+            filter: Applied to the candidates the sparse index returns.
+            with_payload: Include payloads.
+            with_vector: Include the dense vectors.
+            payload_fields: Return only these payload keys.
+            score_threshold: Floor on the dot product; higher is nearer, and it only removes.
+
+        Returns:
+            The hits, best first.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        body: dict[str, Any] = {
+            "sparse_vector": sparse_vector,
+            "limit": limit,
+            "with_payload": with_payload,
+            "with_vector": with_vector,
+        }
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
+        if payload_fields is not None:
+            body["payload_fields"] = payload_fields
+        if score_threshold is not None:
+            body["score_threshold"] = score_threshold
+        response = self._client.post(
+            f"/tables/{quote(table_name, safe='')}/search/sparse", json=body
+        )
+        response.raise_for_status()
+        return response.json().get("data", {}).get("hits", [])
+
     def search_groups(
         self,
         table_name: str,
