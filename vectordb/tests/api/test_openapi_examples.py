@@ -61,7 +61,15 @@ RECORD = "doc-1"
 #: Text search needs `text-bm25`, which is off by default; its example is checked for existence
 #: and correctness of shape, and answering `FEATURE_DISABLED` is the right answer for a build
 #: without it.
-NOT_RUN = {("POST", "/backup")}
+NOT_RUN = {
+    ("POST", "/backup"),
+    # Export and import name a path on the server's filesystem, inside DXMT_BACKUP_ROOT. Running
+    # the documented examples would leave a copy of a table on the machine under test and would
+    # need the example's path to be one this run configured -- the same reason `/backup` is here.
+    # `tests/table_export_test.rs` runs both ends against a root it owns.
+    ("POST", "/tables/{t}/export"),
+    ("POST", "/tables/import"),
+}
 MAY_BE_DISABLED = {("POST", "/tables/{t}/search/text")}
 
 

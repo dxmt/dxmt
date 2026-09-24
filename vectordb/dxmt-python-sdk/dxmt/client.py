@@ -997,6 +997,69 @@ class DXMTClient:
         response.raise_for_status()
         return response.json().get("data", {})
 
+    def export_table(self, table_name: str, path: str) -> dict[str, Any]:
+        """Write one table -- configuration and every record, vectors included -- to a file.
+
+        This is the unit `POST /backup` is not: a backup is the whole instance and restoring it
+        means stopping the server and replacing its directory. The file is written **by the
+        server**, on the server's filesystem, inside its `DXMT_BACKUP_ROOT`; `path` is not a
+        path on this machine unless the two are the same machine.
+
+        The graph is not in the file. `import_table` rebuilds it from the records, which is the
+        same cost a restore from the WAL pays.
+
+        Args:
+            table_name: Table to export.
+            path: Destination file on the server, inside `DXMT_BACKUP_ROOT`.
+
+        Returns:
+            `{"table", "path", "records", "bytes", "records_without_vectors"}`.
+            `records_without_vectors` is zero on a healthy table; anything else is a record
+            whose vector was neither in memory nor readable from the row file.
+
+        Raises:
+            DXMTError: If the path is outside the root, or the table does not exist.
+        """
+        response = self._client.post(
+            f"/tables/{quote(table_name, safe='')}/export", json={"path": path}
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def import_table(
+        self,
+        path: str,
+        *,
+        name: Optional[str] = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Read a table back out of a file written by `export_table`.
+
+        Records keep their ids, payloads, versions and `created_at`: they are applied the way
+        WAL replay applies them rather than re-inserted through the API, so an import does not
+        restamp every row and reorder listings.
+
+        Args:
+            path: The file on the server, inside `DXMT_BACKUP_ROOT`.
+            name: Import under this name instead of the one in the file -- which is how a table
+                is copied beside itself, to try a different index on the same data.
+            overwrite: Replace a table of that name if one exists. Without it an import onto a
+                live name is refused, because a merge and a replacement are different
+                operations and neither is the obvious reading of "import".
+
+        Returns:
+            `{"table", "path", "records", "records_in_file", "replaced"}`.
+
+        Raises:
+            DXMTError: If the file is unreadable, outside the root, or the name is in use.
+        """
+        body: dict[str, Any] = {"path": path, "overwrite": overwrite}
+        if name is not None:
+            body["name"] = name
+        response = self._client.post("/tables/import", json=body)
+        response.raise_for_status()
+        return response.json().get("data", {})
+
     def payload_index(self, table_name: str) -> dict[str, Any]:
         """What the payload (filter) index holds for each field, and what it costs.
 

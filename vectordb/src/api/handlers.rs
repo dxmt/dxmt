@@ -1633,6 +1633,104 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
 
 // ============ 备份API ============
 
+/// `POST /tables/{t}/export` — write one table to a file on the server.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ExportTableRequest {
+    /// File the table is written to, inside `DXMT_BACKUP_ROOT`. Its parent must exist.
+    pub path: String,
+}
+
+/// `POST /tables/import` — read a table back out of such a file.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ImportTableRequest {
+    /// The file to read, inside `DXMT_BACKUP_ROOT`.
+    pub path: String,
+    /// Import it under this name instead of the one in the file. This is how a table is copied
+    /// beside itself -- to try a different index on the same data, say.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Replace a table of that name if one exists. Without it, an import onto an existing name
+    /// is refused rather than merged: a merge and a replacement are different operations and
+    /// neither is the obvious reading of "import".
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// Write one table -- configuration and every record, vectors included -- to a file.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/export",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    request_body(content = ExportTableRequest, example = json!({"path": "demo.dxmt"})),
+    responses(
+        (status = 200, description = "Exported", body = ApiResponse),
+        (status = 400, description = "Path outside DXMT_BACKUP_ROOT, or no durable storage",
+         body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "maintenance"
+))]
+/// `POST /api/v1/tables/:table_name/export`
+///
+/// The unit `POST /backup` is not: a backup is the whole instance and restoring it means
+/// stopping the server and replacing its directory. This moves one table. The file is the
+/// snapshot format, vectors included; the graph is not in it and the import rebuilds it.
+#[axum::debug_handler]
+pub async fn export_table(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    ApiJson(request): ApiJson<ExportTableRequest>,
+) -> impl IntoResponse {
+    match state
+        .storage
+        .export_table(&table_name, std::path::Path::new(&request.path))
+        .await
+    {
+        Ok(report) => ApiResponse::success(report).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Read a table back out of a file written by the export above.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/import",
+    request_body(content = ImportTableRequest, example = json!({"path": "demo.dxmt"})),
+    responses(
+        (status = 200, description = "Imported", body = ApiResponse),
+        (status = 400, description = "Unreadable file, a name already in use, or a path outside \
+                                      DXMT_BACKUP_ROOT", body = ApiResponse)
+    ),
+    tag = "maintenance"
+))]
+/// `POST /api/v1/tables/import`
+///
+/// Records keep their ids, payloads, versions and `created_at` -- they are applied the way WAL
+/// replay applies them, not re-inserted through the API, so an import does not restamp every
+/// row. Each is logged, so the table survives a restart without waiting for a snapshot.
+#[axum::debug_handler]
+pub async fn import_table(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ImportTableRequest>,
+) -> impl IntoResponse {
+    match state
+        .storage
+        .import_table(
+            std::path::Path::new(&request.path),
+            request.name.as_deref(),
+            request.overwrite,
+        )
+        .await
+    {
+        Ok(report) => ApiResponse::success(report).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]

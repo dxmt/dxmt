@@ -24,6 +24,26 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Per-table export and import.** `POST /tables/{t}/export` writes one table — its
+  configuration and every record, vectors included — to a file on the server inside
+  `DXMT_BACKUP_ROOT`, and `POST /tables/import` reads it back, here or on another machine,
+  optionally under a different name. Both SDKs have it. `POST /backup` is the whole instance
+  and restoring it means stopping the server and replacing its directory; moving one table had
+  no answer short of paging it out through the API and writing the insert loop yourself.
+
+  Two things it deliberately does not do. It does not restamp records: they are applied the way
+  WAL replay applies them, so ids, payloads, versions and `created_at` survive and an import
+  does not silently reorder `records/list`. And it does not carry the graph — that is a pure
+  function of the records, the import rebuilds it, and shipping it would tie the file to an
+  index format as well as to a record format. The file *is* the snapshot format, which
+  `tests/compat/` already guards, so an export taken today opens on a later build.
+
+  The first version of it wrote empty files and said so in the wrong way: it built the record
+  list the way a snapshot does, and `snapshot_records` returns nothing for a disk-backed table
+  on purpose, because the row files are the durable copy on that machine. It reported
+  `"records": 0` rather than failing. An export now walks the store and reads each vector back
+  out of the row file, and reports `records_without_vectors` — zero on a healthy table.
+
 - **Grouped search.** `POST /tables/{t}/search/groups` takes a plain search body plus
   `group_by`, `groups` and `group_size`, and answers with groups instead of hits. A document
   chunked for retrieval takes a whole top-10 by itself — the ten nearest vectors are ten pieces

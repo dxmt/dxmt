@@ -11,11 +11,11 @@ use crate::{
     api::handlers::{
         alter_table, branch_table, count_records, create_backup, create_snapshot, create_table,
         delete_records, delete_table, drop_index, drop_payload_index_field, execute_dxql,
-        full_text_search, get_record, get_status, get_table, get_table_stats, health_check,
-        health_metrics, hybrid_search, hybrid_search_combined, index_payload_field, insert_records,
-        insert_records_optimized, knn_graph, list_records, list_tables, liveness,
-        payload_index_report, prometheus_metrics, readiness, rebuild_index, search_groups,
-        search_vectors, update_record, AppState,
+        export_table, full_text_search, get_record, get_status, get_table, get_table_stats,
+        health_check, health_metrics, hybrid_search, hybrid_search_combined, import_table,
+        index_payload_field, insert_records, insert_records_optimized, knn_graph, list_records,
+        list_tables, liveness, payload_index_report, prometheus_metrics, readiness, rebuild_index,
+        search_groups, search_vectors, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -484,6 +484,10 @@ pub async fn create_app_with_storage(
         )
         // 备份：写一份自洽的备份目录。恢复是离线操作，见 docs/operations/backup-restore.md
         .route("/backup", post(create_backup))
+        // One table, rather than the whole instance: written to a file, read back on this
+        // server or another one.
+        .route("/tables/:table_name/export", post(export_table))
+        .route("/tables/import", post(import_table))
         // Keep system probes available under the SDK base URL as well as at the root.
         .route("/health", get(health_check))
         .route("/health/live", get(liveness))

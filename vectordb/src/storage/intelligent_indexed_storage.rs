@@ -2408,6 +2408,233 @@ impl IntelligentIndexedStorage {
         Ok(parent.join(name))
     }
 
+    /// The path a table export may be written to or read from, checked against
+    /// `DXMT_BACKUP_ROOT`.
+    ///
+    /// Both directions need this and for the same reason. The path comes off the wire and this
+    /// server has no authentication: unbounded, an export is a write primitive that can drop a
+    /// copy of a table anywhere the process can write, and an import is a read primitive that
+    /// will happily try to parse `/etc/shadow`. The root is the same one `POST /backup` is held
+    /// to, so an operator configures one directory and both obey it.
+    fn resolve_export_path(&self, path: &std::path::Path) -> crate::Result<PathBuf> {
+        let Some(ref wal_dir) = self.wal_dir else {
+            return Err(crate::Error::InvalidInput(
+                "export and import need WAL-backed storage; this instance has no durable state"
+                    .to_string(),
+            ));
+        };
+        let resolved = Self::resolve_backup_destination(path)?;
+        let root = Self::backup_root(wal_dir);
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !resolved.starts_with(&root) {
+            return Err(crate::Error::InvalidInput(format!(
+                "{} is outside {}; set DXMT_BACKUP_ROOT to the directory exports may be read \
+                 from and written to",
+                path.display(),
+                root.display()
+            )));
+        }
+        Ok(resolved)
+    }
+
+    /// Write one table -- its configuration and every record, vectors included -- to a file.
+    ///
+    /// This is the unit `POST /backup` is not. A backup is the whole instance and restoring it
+    /// means stopping the server and replacing its directory; moving one table to another
+    /// machine, or keeping a copy of it before a migration, had no answer short of paging it
+    /// out through the API and writing the insert loop yourself.
+    ///
+    /// The file is a `tN.meta` in the snapshot format, which is the format `tests/compat/`
+    /// already guards, so an export taken today opens on a later build for the same reason a
+    /// snapshot does. **Vectors are read back out of the row files** and written into it: a
+    /// local snapshot leaves them there on purpose, because the row files are the durable copy
+    /// on this machine, and an export that did the same would arrive somewhere else with every
+    /// vector empty.
+    ///
+    /// The graph is not exported. It is a pure function of the records, the import rebuilds it,
+    /// and shipping it would tie the file to an index format as well as to a record format --
+    /// so the cost is a rebuild on import, which is the same cost a restore from a WAL pays.
+    pub async fn export_table(
+        &self,
+        name: &str,
+        dest: &std::path::Path,
+    ) -> crate::Result<serde_json::Value> {
+        let path = self.resolve_export_path(dest)?;
+        self.ensure_resident(name).await?;
+
+        // Copied out under the read lock so the export is a point in time, and the vectors are
+        // read from the row file afterwards -- the same split `snapshot` makes, for the same
+        // reason: holding the map across the file reads stops every other table.
+        let (table, records, vector_file, rows) = {
+            let tables = self.read_tables("export_table").await;
+            let data = tables
+                .get(name)
+                .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            // `snapshot_records` is not what to use here: it returns nothing for a
+            // disk-backed table, deliberately, because a local snapshot leaves the rows in the
+            // row files. An export has to carry them, so the records are walked out of the
+            // store the way the object-storage mirror does -- and this is the expensive half
+            // of an export on a disk table, one decode per record.
+            let mut records: Vec<Arc<Record>> = Vec::with_capacity(data.records.len());
+            let mut rows: Vec<Option<u64>> = Vec::with_capacity(data.records.len());
+            data.records.for_each(|record| {
+                rows.push(data.vector_row(&record.id));
+                records.push(record);
+            });
+            (data.table.clone(), records, data.vector_file.clone(), rows)
+        };
+
+        let mut missing_vectors = 0usize;
+        let records: Vec<Arc<Record>> = records
+            .into_iter()
+            .zip(rows)
+            .map(|(record, row)| {
+                if !record.vector.is_empty() {
+                    return record;
+                }
+                match vector_file.as_ref().zip(row).and_then(|(f, r)| f.read(r)) {
+                    Some(vector) => {
+                        let mut with_vector = (*record).clone();
+                        with_vector.vector = vector;
+                        Arc::new(with_vector)
+                    }
+                    None => {
+                        missing_vectors += 1;
+                        record
+                    }
+                }
+            })
+            .collect();
+
+        let count = records.len();
+        let head = rmp_serde::to_vec_named(&SnapshotHead {
+            table: table.clone(),
+            algorithm: IndexAlgorithm::BruteForce {
+                enable_parallel: false,
+            },
+            has_index: false,
+        })
+        .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        crate::search::index_persistence::write_index(
+            &path,
+            SNAPSHOT_KIND,
+            &TableSnapshotFile { head, records },
+        )?;
+
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        info!(
+            "Exported table '{}' to {}: {} records, {} bytes",
+            name,
+            path.display(),
+            count,
+            bytes
+        );
+        Ok(serde_json::json!({
+            "table": name,
+            "path": path.display().to_string(),
+            "records": count,
+            "bytes": bytes,
+            // Zero on any healthy table. Anything else means a record whose vector was neither
+            // in memory nor readable from the row file, and saying so beats an import that
+            // quietly lands rows that cannot be searched.
+            "records_without_vectors": missing_vectors,
+        }))
+    }
+
+    /// Read a table back out of a file written by [`Self::export_table`].
+    ///
+    /// Records keep their ids, payloads, versions and `created_at`: they are applied through the
+    /// same path WAL replay uses, not re-inserted through the API, so an import does not quietly
+    /// restamp every row and reorder `records/list`. Each one is logged, so the imported table
+    /// survives a restart without waiting for a snapshot.
+    ///
+    /// The index is rebuilt from the records as they land, because the file carries no graph.
+    pub async fn import_table(
+        &self,
+        src: &std::path::Path,
+        rename: Option<&str>,
+        overwrite: bool,
+    ) -> crate::Result<serde_json::Value> {
+        self.ensure_writable()?;
+        let path = self.resolve_export_path(src)?;
+        if !path.is_file() {
+            return Err(crate::Error::InvalidInput(format!(
+                "{} is not a file written by POST /tables/{{t}}/export",
+                src.display()
+            )));
+        }
+
+        let meta = read_snapshot_meta(&path)?;
+        let name = rename.unwrap_or(&meta.table.name).to_string();
+        if name.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "the imported table needs a name".to_string(),
+            ));
+        }
+
+        let exists = self.read_tables("import_table").await.contains_key(&name);
+        if exists {
+            if !overwrite {
+                return Err(crate::Error::InvalidInput(format!(
+                    "table '{name}' already exists; pass \"overwrite\": true to replace it, or \
+                     \"name\" to import it under a different one"
+                )));
+            }
+            self.delete_table(&name).await?;
+        }
+
+        let config = TableConfig {
+            name: name.clone(),
+            dimension: meta.table.dimension,
+            distance_metric: meta.table.distance_metric,
+            description: meta.table.description.clone(),
+            index_type: None,
+            text_fields: meta.table.text_fields.clone(),
+            enable_full_text_search: meta.table.enable_full_text_search,
+            memory_optimization: meta.table.memory_optimization,
+            hnsw: meta.table.hnsw.clone(),
+            quantization: meta.table.quantization.clone(),
+            payload_index: meta.table.payload_index.clone(),
+            payload_schema: meta.table.payload_schema.clone(),
+            schema_version: meta.table.schema_version,
+            named_vectors: meta.table.named_vectors.clone(),
+        };
+        self.create_table(config).await?;
+
+        let total = meta.records.len();
+        let mut imported = 0usize;
+        // In batches: one `wal_append` per record would fsync once per record, and holding all
+        // of them for a single append would double the memory of a large import.
+        const BATCH: usize = 1_000;
+        for chunk in meta.records.chunks(BATCH) {
+            let mut entries = Vec::with_capacity(chunk.len());
+            for record in chunk {
+                let record = (**record).clone();
+                entries.push(WalEntry::UpsertRecordV2 {
+                    table: name.clone(),
+                    record: record.clone(),
+                });
+                self.restore_record_from_wal(&name, record).await?;
+                imported += 1;
+            }
+            self.wal_append(entries).await?;
+        }
+
+        info!(
+            "Imported table '{}' from {}: {} records",
+            name,
+            path.display(),
+            imported
+        );
+        Ok(serde_json::json!({
+            "table": name,
+            "path": path.display().to_string(),
+            "records": imported,
+            "records_in_file": total,
+            "replaced": exists,
+        }))
+    }
+
     pub async fn backup_to(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(

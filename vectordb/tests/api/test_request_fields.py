@@ -908,6 +908,85 @@ def _(table):
         shutil.rmtree(destination, ignore_errors=True)
 
 
+# ---- POST /tables/{t}/export and POST /tables/import -----------------------------------------
+
+def export_root():
+    root = os.environ.get("DXMT_BACKUP_ROOT")
+    if not root:
+        pytest.skip("DXMT_BACKUP_ROOT is not set; run through scripts/api_tests.sh")
+    return root
+
+
+def exported(table, suffix=""):
+    """Export `table` to a fresh file under the root and return its path."""
+    path = os.path.join(export_root(), f"probe-{uuid.uuid4().hex[:8]}{suffix}.dxmt")
+    response = post(f"/tables/{table}/export", {"path": path}, expect_ok=False)
+    assert response.json().get("success"), response.text[:300]
+    return path
+
+
+@probe("ExportTableRequest", "path")
+def _(table):
+    # The discriminator is the file: a request whose path was ignored would answer 200 and
+    # leave nothing there.
+    path = exported(table)
+    try:
+        assert os.path.isfile(path), f"nothing was written to {path}"
+        assert os.path.getsize(path) > 0, f"{path} is empty"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+@probe("ImportTableRequest", "path")
+def _(table):
+    path = exported(table)
+    name = f"probe_import_{uuid.uuid4().hex[:8]}"
+    try:
+        answer = post("/tables/import", {"path": path, "name": name}).json()["data"]
+        assert answer["records"] == 5, answer
+        assert get(f"/tables/{name}").json()["data"]["record_count"] == 5
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+        if os.path.exists(path):
+            os.remove(path)
+
+
+@probe("ImportTableRequest", "name")
+def _(table):
+    # Without `name` the table comes back under the one in the file, which is already in use
+    # here -- so a `name` that was ignored would turn this into a refusal.
+    path = exported(table)
+    name = f"probe_rename_{uuid.uuid4().hex[:8]}"
+    try:
+        answer = post("/tables/import", {"path": path, "name": name}).json()["data"]
+        assert answer["table"] == name, answer
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+        if os.path.exists(path):
+            os.remove(path)
+
+
+@probe("ImportTableRequest", "overwrite")
+def _(table):
+    # Onto a name that exists: refused without the flag, replaced with it. Both halves, because
+    # an `overwrite` that was ignored would still pass the second on its own.
+    path = exported(table)
+    name = f"probe_overwrite_{uuid.uuid4().hex[:8]}"
+    try:
+        post("/tables/import", {"path": path, "name": name})
+        refused = post("/tables/import", {"path": path, "name": name}, expect_ok=False)
+        assert refused.status_code == 400, refused.text[:300]
+        replaced = post(
+            "/tables/import", {"path": path, "name": name, "overwrite": True}
+        ).json()["data"]
+        assert replaced["replaced"] is True, replaced
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+        if os.path.exists(path):
+            os.remove(path)
+
+
 # --------------------------------------------------------------------------------------------
 # The two tests.
 # --------------------------------------------------------------------------------------------

@@ -58,7 +58,9 @@ use crate::types::{
         crate::api::handlers::execute_dxql,
         // maintenance
         crate::api::handlers::create_snapshot,
-        crate::api::handlers::create_backup),
+        crate::api::handlers::create_backup,
+        crate::api::handlers::export_table,
+        crate::api::handlers::import_table),
     components(
         // Every type a request body names has to be listed here, or utoipa emits a `$ref` to a
         // schema it never defines and the page renders that operation with **no fields at all**.
@@ -78,6 +80,8 @@ use crate::types::{
             crate::types::record::SearchGroupsResult,
             crate::api::handlers::OptimizedBatchInsertRequest,
             crate::api::handlers::CreateBackupRequest,
+            crate::api::handlers::ExportTableRequest,
+            crate::api::handlers::ImportTableRequest,
             crate::api::handlers::KnnGraphRequest,
             crate::api::handlers::PayloadUpdateMode,
             crate::types::record::FullTextSearchRequest,

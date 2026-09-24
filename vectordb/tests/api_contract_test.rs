@@ -149,6 +149,16 @@ const CONTRACTS: &[Contract] = &[
         caller: "python",
     },
     Contract {
+        method: "POST",
+        path: "/tables/{t}/export",
+        caller: "python",
+    },
+    Contract {
+        method: "POST",
+        path: "/tables/import",
+        caller: "python",
+    },
+    Contract {
         method: "GET",
         path: "/tables/{t}/payload_index",
         caller: "python",

@@ -459,6 +459,58 @@ export class DXMTClient {
   }
 
   /**
+   * Write one table — configuration and every record, vectors included — to a file.
+   *
+   * The unit `POST /backup` is not: a backup is the whole instance and restoring it means
+   * stopping the server and replacing its directory. The file is written **by the server, on
+   * the server's filesystem**, inside its `DXMT_BACKUP_ROOT` — `path` is not a path on this
+   * machine unless the two are the same machine.
+   */
+  async exportTable(
+    tableName: string,
+    path: string
+  ): Promise<{
+    table: string;
+    path: string;
+    records: number;
+    bytes: number;
+    records_without_vectors: number;
+  }> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    if (!path) {
+      throw new DXMTValidationError('A destination path is required');
+    }
+    return this.request('POST', `/tables/${encodeURIComponent(tableName)}/export`, { path });
+  }
+
+  /**
+   * Read a table back out of a file written by {@link exportTable}.
+   *
+   * Records keep their ids, payloads, versions and `created_at`. An import onto a name already
+   * in use is refused unless `overwrite` is set: a merge and a replacement are different
+   * operations and neither is the obvious reading of "import".
+   */
+  async importTable(
+    path: string,
+    options: { name?: string; overwrite?: boolean } = {}
+  ): Promise<{
+    table: string;
+    path: string;
+    records: number;
+    records_in_file: number;
+    replaced: boolean;
+  }> {
+    if (!path) {
+      throw new DXMTValidationError('A source path is required');
+    }
+    const body: Record<string, unknown> = { path, overwrite: options.overwrite ?? false };
+    if (options.name !== undefined) body.name = options.name;
+    return this.request('POST', '/tables/import', body);
+  }
+
+  /**
    * What the payload (filter) index holds for each field, and what it costs.
    *
    * Every payload field is indexed by default, which is what makes a filter fast here without
