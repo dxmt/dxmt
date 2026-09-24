@@ -280,16 +280,26 @@ pub struct PayloadIndexPolicy {
 
 impl PayloadIndexPolicy {
     /// Whether a payload field is indexed under this policy.
+    ///
+    /// Names match subtrees: `except: ["blob"]` also excludes `blob.text`, and
+    /// `only: ["meta"]` also indexes `meta.lang`. A nested payload is indexed path by path, so
+    /// a policy that matched only whole paths would make `except` useless against the field
+    /// that actually costs something -- the object with twenty keys under it -- and would make
+    /// `only` name every leaf by hand.
     pub fn indexes(&self, field: &str) -> bool {
-        if self
-            .except
-            .as_ref()
-            .is_some_and(|f| f.iter().any(|n| n == field))
-        {
+        fn covers(names: &[String], field: &str) -> bool {
+            names.iter().any(|name| {
+                field == name
+                    || (field.len() > name.len()
+                        && field.starts_with(name.as_str())
+                        && field.as_bytes()[name.len()] == b'.')
+            })
+        }
+        if self.except.as_ref().is_some_and(|f| covers(f, field)) {
             return false;
         }
         match &self.only {
-            Some(only) => only.iter().any(|n| n == field),
+            Some(only) => covers(only, field),
             None => true,
         }
     }

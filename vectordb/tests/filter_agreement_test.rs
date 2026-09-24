@@ -89,6 +89,27 @@ fn payload(i: usize) -> serde_json::Value {
     if i.is_multiple_of(11) {
         p.insert("id".into(), "not-the-record-id".into());
     }
+    // Nested objects, filtered by path. Every shape that made the top level interesting:
+    // a plain scalar, a number, an array, a level deeper, and a record where the sub-object
+    // is missing entirely.
+    if !i.is_multiple_of(5) {
+        let mut meta = serde_json::Map::new();
+        meta.insert("lang".into(), ["en", "zh"][i % 2].into());
+        meta.insert("score".into(), ((i % 7) as i64).into());
+        if i.is_multiple_of(3) {
+            meta.insert("tags".into(), serde_json::json!(["x", "y"]));
+        }
+        meta.insert(
+            "inner".into(),
+            serde_json::json!({"deep": {"deeper": format!("d{}", i % 4)}}),
+        );
+        p.insert("meta".into(), serde_json::Value::Object(meta));
+    }
+    // A literal key with a dot in it, on records that also carry `meta` -- the matcher prefers
+    // the key as written, and the index has to agree with it rather than merging the two.
+    if i.is_multiple_of(9) {
+        p.insert("meta.lang".into(), "written-not-derived".into());
+    }
     serde_json::Value::Object(p)
 }
 
@@ -152,6 +173,28 @@ fn filters() -> Vec<(&'static str, Filter)> {
         (
             "us > …001",
             one("us", GreaterThan(json!(1_700_000_000_000_001i64))),
+        ),
+        ("meta.lang == en", one("meta.lang", Equal(json!("en")))),
+        ("meta.lang != en", one("meta.lang", NotEqual(json!("en")))),
+        (
+            "meta.lang not in [en]",
+            one("meta.lang", NotIn(vec![json!("en")])),
+        ),
+        (
+            "meta.score >= 4",
+            one("meta.score", GreaterThanOrEqual(json!(4))),
+        ),
+        (
+            "meta.tags == x (array under a path)",
+            one("meta.tags", Equal(json!("x"))),
+        ),
+        (
+            "meta.inner.deep.deeper == d2 (four levels)",
+            one("meta.inner.deep.deeper", Equal(json!("d2"))),
+        ),
+        (
+            "meta.nope == anything (a path nothing has)",
+            one("meta.nope", Equal(json!("anything"))),
         ),
         (
             "must_not topic != beta",

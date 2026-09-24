@@ -24,6 +24,27 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Filters reach into a nested payload.** `meta.lang` reads the `lang` of the object under
+  `meta`, at any depth, on `search`, `records/list`, `records/count` and delete-by-filter. A
+  payload is arbitrary JSON and people nest it; until now only the top-level keys were
+  filterable, `meta` held an object, an object matches nothing scalar, and a filter on
+  `meta.lang` matched **nothing at all** — an empty page, not an error.
+
+  A key that really contains a dot still wins over the path reading of the same string, so a
+  payload written as `{"user.name": "..."}` is still filterable under the name it was written
+  with. A record holding both that and `{"user": {"name": ...}}` files only the literal one, so
+  the index and the record-by-record matcher cannot disagree about which of the two a filter
+  means — `tests/filter_agreement_test.rs` carries that payload now, in memory and on disk.
+
+  Paths are indexed path by path, which is what makes them answerable at all here, and they show
+  up in `GET /tables/{t}/payload_index` with what each one costs. `payload_index` names match
+  subtrees, so `except: ["blob"]` stops indexing everything under `blob` — otherwise the
+  exclusion would miss the field that actually costs something. An array under a path behaves
+  like one at the top level: any element matching is a match. An array *of objects* is not
+  walked into, because `items.price` over `[{"price": 1}]` would have to mean "any element's
+  price", and that deserves an operator that says so rather than a path that quietly means two
+  things.
+
 - **Per-table export and import.** `POST /tables/{t}/export` writes one table — its
   configuration and every record, vectors included — to a file on the server inside
   `DXMT_BACKUP_ROOT`, and `POST /tables/import` reads it back, here or on another machine,

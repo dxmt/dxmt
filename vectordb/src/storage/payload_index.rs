@@ -136,6 +136,19 @@ pub struct PayloadIndex {
     policy: crate::types::table::PayloadIndexPolicy,
 }
 
+/// The record's own top-level keys that contain a dot, or `None` when it has none.
+fn dotted_keys(obj: &serde_json::Map<String, serde_json::Value>) -> Option<FastSet<&str>> {
+    if !obj.keys().any(|k| k.contains('.')) {
+        return None;
+    }
+    Some(
+        obj.keys()
+            .filter(|k| k.contains('.'))
+            .map(String::as_str)
+            .collect(),
+    )
+}
+
 impl PayloadIndex {
     /// Stop merging the numeric half after every few thousand inserts, until [`Self::end_bulk`].
     ///
@@ -919,9 +932,10 @@ impl PayloadIndex {
         let ordinal = self.ordinal_for(record_id, created);
         if let Some(obj) = payload.as_object() {
             let everything = self.policy.indexes_everything();
+            let literals = dotted_keys(obj);
             for (key, value) in obj {
                 if everything || self.policy.indexes(key) {
-                    self.index_field(key, value, ordinal);
+                    self.index_field(key, value, ordinal, literals.as_ref());
                 }
             }
         }
@@ -951,9 +965,10 @@ impl PayloadIndex {
 
         if let Some(obj) = payload.as_object() {
             let everything = self.policy.indexes_everything();
+            let literals = dotted_keys(obj);
             for (key, value) in obj {
                 if everything || self.policy.indexes(key) {
-                    self.unindex_field(key, value, ordinal);
+                    self.unindex_field(key, value, ordinal, literals.as_ref());
                 }
             }
         }
@@ -1802,7 +1817,22 @@ impl PayloadIndex {
     /// condition on an array field is satisfied when any element satisfies it (see
     /// `any_element` in `types::record`): `tags: ["a", "b"]` is filed under `"a"` and under
     /// `"b"`, and `tags == "a"` finds it by the same lookup a scalar field uses.
-    fn index_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
+    /// `literals` names the record's own top-level keys that contain a dot, and is `None` when
+    /// it has none -- which is every ordinary payload, so the check below costs nothing there.
+    ///
+    /// It exists because `Record::get_field_value` prefers a literal key to a path: a payload
+    /// holding `{"user.name": "written"}` is filterable under the name it was written with. A
+    /// record holding *both* that and `{"user": {"name": "derived"}}` would otherwise have two
+    /// values filed under one key here while the matcher sees one, and the index would answer
+    /// `user.name == "derived"` with a record that does not match it. Rare, and exactly the
+    /// kind of disagreement this index is not allowed to have.
+    fn index_field(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        ordinal: Ordinal,
+        literals: Option<&FastSet<&str>>,
+    ) {
         match value {
             serde_json::Value::Array(elements) => {
                 // Also recorded as present, which the elements alone do not say for `[]` or an
@@ -1817,15 +1847,39 @@ impl PayloadIndex {
                     }
                 }
             }
-            // Matched by shape, not by asking `to_value_key`: that clones a string to
-            // answer, and this runs for every field of every record in a rebuild.
-            serde_json::Value::Object(_) => self.mark_unindexed(key, ordinal),
+            // An object is recorded as present under its own key -- `NotIn` needs that -- and
+            // its fields are indexed under `key.field`, which is what makes a filter on a
+            // nested path answerable. Without it a payload of
+            // `{"meta": {"lang": "en"}}` could be filtered only on `meta`, whose value is an
+            // object and matches nothing scalar.
+            serde_json::Value::Object(fields) => {
+                self.mark_unindexed(key, ordinal);
+                // All the way down, with no depth limit. A limit was the first version of
+                // this, and it would have been a silent hole exactly where the excluded-field
+                // refusal closed one: a filter on a path below the cut-off is not indexed, and
+                // an unindexed field here answers empty rather than erroring. Depth is also
+                // not what this costs -- the entries come from the leaves, and a payload with
+                // too many of those is what `except` is for.
+                for (name, nested) in fields {
+                    let path = format!("{key}.{name}");
+                    if literals.is_some_and(|l| l.contains(path.as_str())) {
+                        continue;
+                    }
+                    self.index_field(&path, nested, ordinal, literals);
+                }
+            }
             _ => self.index_scalar(key, value, ordinal),
         }
     }
 
     /// The reverse of [`Self::index_field`], for the payload the record was indexed with.
-    fn unindex_field(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
+    fn unindex_field(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+        ordinal: Ordinal,
+        literals: Option<&FastSet<&str>>,
+    ) {
         match value {
             serde_json::Value::Array(elements) => {
                 self.unmark_unindexed(key, ordinal);
@@ -1841,7 +1895,19 @@ impl PayloadIndex {
                     }
                 }
             }
-            serde_json::Value::Object(_) => self.unmark_unindexed(key, ordinal),
+            // Mirrors `index_field` exactly, including the depth limit: a path indexed there
+            // and not removed here leaves a posting naming an ordinal that will be handed out
+            // again, which is the one way this index can return a wrong record.
+            serde_json::Value::Object(fields) => {
+                self.unmark_unindexed(key, ordinal);
+                for (name, nested) in fields {
+                    let path = format!("{key}.{name}");
+                    if literals.is_some_and(|l| l.contains(path.as_str())) {
+                        continue;
+                    }
+                    self.unindex_field(&path, nested, ordinal, literals);
+                }
+            }
             _ => self.unindex_scalar(key, value, ordinal),
         }
     }

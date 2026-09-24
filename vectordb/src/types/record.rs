@@ -756,15 +756,33 @@ impl Record {
     /// anything. `id` is the one key with no `Value` to borrow, so it is the one that still
     /// builds one.
     fn get_field_value(&self, key: &str) -> Option<std::borrow::Cow<'_, serde_json::Value>> {
-        match key {
-            "id" => Some(std::borrow::Cow::Owned(serde_json::Value::String(
+        if key == "id" {
+            return Some(std::borrow::Cow::Owned(serde_json::Value::String(
                 self.id.clone(),
-            ))),
-            _ => match &self.payload {
-                serde_json::Value::Object(map) => map.get(key).map(std::borrow::Cow::Borrowed),
-                _ => None,
-            },
+            )));
         }
+        let serde_json::Value::Object(map) = &self.payload else {
+            return None;
+        };
+        // The whole key first, so a payload that really holds `{"user.name": "..."}` is still
+        // filterable by the name it was written under. Only if there is no such key is the dot
+        // read as a path -- which is the cheaper order as well as the compatible one, since an
+        // unnested payload never walks.
+        if let Some(value) = map.get(key) {
+            return Some(std::borrow::Cow::Borrowed(value));
+        }
+        if !key.contains('.') {
+            return None;
+        }
+        let mut parts = key.split('.');
+        let mut value = map.get(parts.next()?)?;
+        for part in parts {
+            // Objects only. An array of objects is not walked into: `items.price` over
+            // `[{"price": 1}]` would have to mean "any element's price", and the honest way to
+            // offer that is an operator that says so, not a path that quietly means two things.
+            value = value.as_object()?.get(part)?;
+        }
+        Some(std::borrow::Cow::Borrowed(value))
     }
 }
 

@@ -196,6 +196,10 @@ class Field:
     """A payload field (or `"id"`, the record id), to build conditions on.
 
     >>> (Field("year") >= 2020) & (Field("lang") == "en")
+
+    A dot reads into a nested payload -- `Field("meta.lang")` is the `lang` of the object under
+    `meta`, at any depth. A payload that really holds a key with a dot in it keeps working:
+    the server tries the whole name as a key before reading it as a path.
     """
 
     __slots__ = ("key",)
