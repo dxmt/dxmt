@@ -165,6 +165,21 @@ const CONTRACTS: &[Contract] = &[
     },
     Contract {
         method: "GET",
+        path: "/aliases",
+        caller: "python",
+    },
+    Contract {
+        method: "PUT",
+        path: "/aliases/{a}",
+        caller: "python",
+    },
+    Contract {
+        method: "DELETE",
+        path: "/aliases/{a}",
+        caller: "python",
+    },
+    Contract {
+        method: "GET",
         path: "/tables/{t}/payload_index",
         caller: "python",
     },
@@ -347,6 +362,7 @@ fn every_route_the_sdks_call_exists() {
             p if p.ends_with("/graph") => r#"{"sample":4,"neighbours":2}"#,
             p if p.contains("/records/") => r#"{"vector":[0,0,1,0]}"#,
             p if p.ends_with("/search") => r#"{"vector":[1,0,0,0],"top_k":1}"#,
+            p if p.starts_with("/aliases/") => r#"{"table":"contract"}"#,
             p if p.ends_with("/search/sparse") => {
                 r#"{"sparse_vector":{"indices":[1],"values":[1.0],"dimension":8},"limit":1}"#
             }
@@ -373,7 +389,10 @@ fn every_route_the_sdks_call_exists() {
             .replace("{r}", "r1")
             // A payload field the contract table carries, so PUT and DELETE act on something
             // real rather than on a name nothing has.
-            .replace("{f}", "city");
+            .replace("{f}", "city")
+            // An alias the contract server sets up on the way past: PUT creates it, DELETE
+            // removes it, and both act on something real.
+            .replace("{a}", "contract_alias");
         let result = curl(
             server.port,
             contract.method,

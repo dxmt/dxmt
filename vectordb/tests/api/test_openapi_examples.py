@@ -46,6 +46,8 @@ WALKTHROUGH = [
     ("POST", "/query"),
     ("PATCH", "/tables/{t}"),
     ("POST", "/tables/{t}/branch"),
+    ("PUT", "/aliases/{a}"),
+    ("DELETE", "/aliases/{a}"),
     ("POST", "/tables/{t}/index/rebuild"),
     ("DELETE", "/tables/{t}/index"),
     ("POST", "/snapshot"),
@@ -55,6 +57,8 @@ WALKTHROUGH = [
 
 TABLE = "demo"
 RECORD = "doc-1"
+#: The alias the documented example points at `demo`; created and removed by the walkthrough.
+ALIAS = "docs"
 
 #: `POST /backup` and `POST /tables/{t}/search/text` are documented and excluded from the run,
 #: for opposite reasons. Backup writes a directory tree wherever its `path` says, and running a
@@ -75,7 +79,12 @@ MAY_BE_DISABLED = {("POST", "/tables/{t}/search/text")}
 
 
 def spec_path(template):
-    return "/api/v1" + template.replace("{t}", "{table_name}").replace("{r}", "{record_id}")
+    return (
+        "/api/v1"
+        + template.replace("{t}", "{table_name}")
+        .replace("{r}", "{record_id}")
+        .replace("{a}", "{alias}")
+    )
 
 
 def declared(feature):
@@ -153,7 +162,7 @@ def test_the_documented_walkthrough_runs(spec, clean_slate):
     failures = []
     for method, template in WALKTHROUGH:
         body = example_for(spec, method, template)
-        path = template.replace("{t}", TABLE).replace("{r}", RECORD)
+        path = template.replace("{t}", TABLE).replace("{r}", RECORD).replace("{a}", ALIAS)
         response = call(method, path, body, expect_ok=False)
         if (method, template) in MAY_BE_DISABLED and disabled_feature(response):
             continue

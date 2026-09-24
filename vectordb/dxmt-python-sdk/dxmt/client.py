@@ -1050,6 +1050,58 @@ class DXMTClient:
         response.raise_for_status()
         return response.json().get("data", {})
 
+    def aliases(self) -> dict[str, str]:
+        """Every alias and the table it points at.
+
+        Returns:
+            `{alias: table}`.
+
+        Raises:
+            DXMTError: If the request fails.
+        """
+        response = self._client.get("/aliases")
+        response.raise_for_status()
+        return response.json().get("data", {}).get("aliases", {})
+
+    def set_alias(self, alias: str, table_name: str) -> dict[str, Any]:
+        """Point an alias at a table, creating it or moving it.
+
+        This is how a table is rebuilt without a client deploy: build the new one under its own
+        name, load it, then move the alias. Every reader that arrives during the move sees one
+        table or the other, never neither. An alias may be used anywhere a table name is.
+
+        Args:
+            alias: The alias name. It may not be the name of an existing table.
+            table_name: The table it resolves to.
+
+        Returns:
+            `{"alias", "table"}`.
+
+        Raises:
+            DXMTError: If the table does not exist, or a table already has that name.
+        """
+        response = self._client.put(
+            f"/aliases/{quote(alias, safe='')}", json={"table": table_name}
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def delete_alias(self, alias: str) -> dict[str, Any]:
+        """Remove an alias. The table it pointed at is untouched.
+
+        Args:
+            alias: The alias name.
+
+        Returns:
+            The server's message.
+
+        Raises:
+            DXMTError: If there is no such alias.
+        """
+        response = self._client.delete(f"/aliases/{quote(alias, safe='')}")
+        response.raise_for_status()
+        return response.json().get("data", {})
+
     def export_table(self, table_name: str, path: str) -> dict[str, Any]:
         """Write one table -- configuration and every record, vectors included -- to a file.
 

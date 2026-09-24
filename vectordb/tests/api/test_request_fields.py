@@ -1002,6 +1002,31 @@ def _(table):
         shutil.rmtree(destination, ignore_errors=True)
 
 
+# ---- PUT /aliases/{alias} --------------------------------------------------------------------
+
+@probe("SetAliasRequest", "table")
+def _(table):
+    # The discriminator is which table the alias reads: point it at one, read through it, move
+    # it, read again. An alias whose `table` was ignored could not answer the second read.
+    alias = f"probe_alias_{uuid.uuid4().hex[:8]}"
+    other = f"probe_alias_target_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": other, "dimension": 4})
+    try:
+        post(f"/tables/{other}/records", {"records": [
+            {"id": "only", "vector": VECTORS[0]}]})
+        put(f"/aliases/{alias}", {"table": table})
+        # The shared corpus may have gained or lost records by the time this probe runs, so
+        # the assertion is that the two reads differ, not that either is a fixed number.
+        through = post(f"/tables/{alias}/records/count", {}).json()["data"]["count"]
+        assert through == post(f"/tables/{table}/records/count", {}).json()["data"]["count"]
+        assert through != 1, "the two tables have to differ for this probe to discriminate"
+        put(f"/aliases/{alias}", {"table": other})
+        assert post(f"/tables/{alias}/records/count", {}).json()["data"]["count"] == 1
+    finally:
+        delete(f"/aliases/{alias}", expect_ok=False)
+        delete(f"/tables/{other}", expect_ok=False)
+
+
 # ---- POST /tables/{t}/export and POST /tables/import -----------------------------------------
 
 def export_root():

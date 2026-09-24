@@ -1698,6 +1698,96 @@ pub struct ImportTableRequest {
     pub overwrite: bool,
 }
 
+/// `PUT /aliases/{alias}` — point an alias at a table.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SetAliasRequest {
+    /// The table the alias resolves to. May itself be an alias, which is followed once so no
+    /// reader ever has to follow a chain.
+    pub table: String,
+}
+
+/// Every alias and the table it points at.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/aliases",
+    responses((status = 200, description = "Aliases, by name", body = ApiResponse)),
+    tag = "tables"
+))]
+/// `GET /api/v1/aliases`
+#[axum::debug_handler]
+pub async fn list_aliases(State(state): State<AppState>) -> impl IntoResponse {
+    let aliases = state.storage.list_aliases();
+    ApiResponse::success(serde_json::json!({
+        "aliases": aliases,
+        "count": aliases.len(),
+    }))
+    .into_response()
+}
+
+/// Point an alias at a table, creating it or moving it.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    put,
+    path = "/api/v1/aliases/{alias}",
+    params(("alias" = String, Path, description = "Alias name", example = "docs")),
+    request_body(content = SetAliasRequest, example = json!({"table": "demo"})),
+    responses(
+        (status = 200, description = "The alias points at the table", body = ApiResponse),
+        (status = 400, description = "A table already has that name", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "tables"
+))]
+/// `PUT /api/v1/aliases/:alias`
+///
+/// What this is for is a swap. Rebuilding a table with different index parameters means
+/// building a second one and moving traffic across, and without an alias that move is a client
+/// deploy. Moving an alias is one map write, so a reader arriving mid-swap sees one table or
+/// the other, never neither.
+#[axum::debug_handler]
+pub async fn set_alias(
+    State(state): State<AppState>,
+    Path(alias): Path<String>,
+    ApiJson(request): ApiJson<SetAliasRequest>,
+) -> impl IntoResponse {
+    match state.storage.set_alias(&alias, &request.table).await {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "alias": alias,
+            "table": request.table,
+        }))
+        .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Remove an alias. The table it pointed at is untouched.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    delete,
+    path = "/api/v1/aliases/{alias}",
+    params(("alias" = String, Path, description = "Alias name", example = "docs")),
+    responses(
+        (status = 200, description = "Removed", body = ApiResponse),
+        (status = 404, description = "No such alias", body = ApiResponse)
+    ),
+    tag = "tables"
+))]
+/// `DELETE /api/v1/aliases/:alias`
+#[axum::debug_handler]
+pub async fn delete_alias(
+    State(state): State<AppState>,
+    Path(alias): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.delete_alias(&alias).await {
+        Ok(()) => ApiResponse::success(serde_json::json!({
+            "alias": alias,
+            "message": format!("Alias '{alias}' removed; the table it pointed at is unchanged."),
+        }))
+        .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Write one table -- configuration and every record, vectors included -- to a file.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,

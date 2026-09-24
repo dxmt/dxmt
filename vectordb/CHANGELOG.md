@@ -24,6 +24,29 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Table aliases.** `PUT /aliases/{alias}` points a name at a table, `DELETE` removes it,
+  `GET /aliases` lists them, and an alias can be used anywhere a table name can. Both SDKs have
+  them.
+
+  What they are for is the swap. Rebuilding a table with different index parameters means
+  building a second one and moving traffic across, and without an alias that move is a client
+  deploy — every caller has to learn the new name at the same moment. With the export and
+  import from the previous change it is now: export, import under a new name, top it up, move
+  the alias. Moving an alias is one map write, so a reader arriving mid-swap gets one table or
+  the other, never neither.
+
+  Aliases live in `{DXMT_WAL_DIR}/aliases`, written atomically on every change, rather than in
+  the WAL — they change rarely, and a WAL entry would mean the snapshot has to carry them too,
+  which is the bincode manifest and the break `src/storage/snapshot_v1.rs` exists to document.
+  A missing file is no aliases, which is what every database written before this has.
+
+  An alias and a table cannot share a name in either direction, because which one a name meant
+  would otherwise depend on the order of two maps; dropping a table drops the aliases pointing
+  at it, or they would resolve to a name nothing holds and the error would talk about a table
+  the caller never mentioned. `tests/table_alias_test.rs` walks *every* table-scoped route with
+  an alias in the path: one that resolved on `search` and not on `records/count` would work
+  until the one call that does not.
+
 - **Sparse vectors are searchable.** `POST /tables/{t}/search/sparse` retrieves by sparse
   vector alone, ranked by the dot product the WAND-pruned sparse index already computed, with
   `filter`, `score_threshold`, `payload_fields` and `with_vector` behaving as they do on a dense

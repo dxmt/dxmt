@@ -603,6 +603,20 @@ pub struct IntelligentIndexedStorage {
     /// GPU distance calculator (None if no GPU available or feature not enabled)
     #[cfg(feature = "gpu")]
     gpu_calculator: Option<Arc<crate::acceleration::GpuDistanceCalculator>>,
+
+    /// Alternative names for tables: `alias -> table`.
+    ///
+    /// What they are for is a swap. Rebuilding a table with different index parameters means
+    /// building a second one and moving traffic to it, and without an alias that move is a
+    /// client-side deploy. With one it is a single request, and every reader that arrives
+    /// mid-swap sees one table or the other rather than a missing one.
+    ///
+    /// Kept in their own file (`{wal_dir}/aliases`) rather than in the WAL. They change rarely,
+    /// they are tiny, and putting them in the log would mean the snapshot has to carry them too
+    /// -- the manifest is bincode, and adding a field to it is the break that
+    /// `src/storage/snapshot_v1.rs` exists to document. A missing file means no aliases, which
+    /// is what every database written before this has.
+    aliases: Arc<parking_lot::RwLock<std::collections::BTreeMap<String, String>>>,
 }
 
 /// 智能表数据
@@ -1489,6 +1503,11 @@ impl IntelligentIndexedStorage {
                 storage.load_wal_manifest().await?;
             }
 
+            // The aliases are names, not data, and are read before either: a request that
+            // arrives while the log is still replaying should resolve to the right table, not
+            // to nothing.
+            storage.load_aliases();
+
             // Snapshot first, then only the log written after it. Replay has to run with the
             // snapshot already in place: the tail may delete or overwrite records the snapshot
             // restored, and applying it to an empty store would lose those edits.
@@ -1640,6 +1659,7 @@ impl IntelligentIndexedStorage {
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             #[cfg(feature = "gpu")]
             gpu_calculator,
+            aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         })
     }
 
@@ -2437,6 +2457,157 @@ impl IntelligentIndexedStorage {
         Ok(resolved)
     }
 
+    /// The file aliases live in, beside the WAL.
+    fn aliases_path(wal_dir: &std::path::Path) -> PathBuf {
+        wal_dir.join("aliases")
+    }
+
+    /// Read the alias file at startup. A missing or unreadable file means no aliases.
+    ///
+    /// Unreadable is a warning rather than a startup error, unlike an unreadable snapshot: an
+    /// alias is a name, not data, and refusing to start because one cannot be read would take a
+    /// database offline over a pointer to it. The names are in the log of the requests that
+    /// created them and can be set again.
+    pub(crate) fn load_aliases(&self) {
+        let Some(ref wal_dir) = self.wal_dir else {
+            return;
+        };
+        let path = Self::aliases_path(wal_dir);
+        if !path.exists() {
+            return;
+        }
+        match std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                rmp_serde::from_slice::<std::collections::BTreeMap<String, String>>(&bytes)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(loaded) => {
+                if !loaded.is_empty() {
+                    info!("Loaded {} table alias(es)", loaded.len());
+                }
+                *self.aliases.write() = loaded;
+            }
+            Err(e) => warn!(
+                "{} could not be read ({e}); starting with no aliases",
+                path.display()
+            ),
+        }
+    }
+
+    /// Write the alias file, atomically.
+    fn save_aliases(&self) -> crate::Result<()> {
+        let Some(ref wal_dir) = self.wal_dir else {
+            return Ok(());
+        };
+        let path = Self::aliases_path(wal_dir);
+        let bytes = {
+            let aliases = self.aliases.read();
+            rmp_serde::to_vec_named(&*aliases)
+                .map_err(|e| crate::Error::Serialization(e.to_string()))?
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Through a temporary file: a crash during the write must leave the previous set, not a
+        // half-written one that loads as "no aliases" and points every caller at nothing.
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// The table a name refers to: itself, or what an alias points at.
+    ///
+    /// A real table wins over an alias of the same name. That cannot normally happen --
+    /// [`Self::set_alias`] refuses a name a table already has, and `create_table` refuses a name
+    /// an alias already has -- but a file edited by hand or a table created before the alias
+    /// file was read should resolve to the thing that holds data.
+    fn resolve<'a>(&self, name: &'a str) -> std::borrow::Cow<'a, str> {
+        {
+            let aliases = self.aliases.read();
+            if aliases.is_empty() {
+                return std::borrow::Cow::Borrowed(name);
+            }
+            if let Some(target) = aliases.get(name) {
+                // Unless a table actually has this name. `try_read` because `resolve` is called
+                // from paths that already hold the map, and a failed try must mean "resolve the
+                // alias" rather than "do not" -- shadowing is refused at creation time, so the
+                // alias is the answer in every case this cannot check.
+                let shadowed = self
+                    .tables
+                    .try_read()
+                    .map(|tables| tables.contains_key(name))
+                    .unwrap_or(false);
+                if !shadowed {
+                    return std::borrow::Cow::Owned(target.clone());
+                }
+            }
+        }
+        std::borrow::Cow::Borrowed(name)
+    }
+
+    /// Point `alias` at `table`, creating it or moving it.
+    ///
+    /// Moving an existing alias is the swap this exists for, and it is one map write: a reader
+    /// arriving during it sees the old table or the new one, never neither.
+    pub async fn set_alias(&self, alias: &str, table: &str) -> crate::Result<()> {
+        self.ensure_writable()?;
+        crate::utils::validate_table_name(alias)
+            .map_err(|e| crate::Error::InvalidInput(format!("alias {e}")))?;
+        if !self.read_tables("set_alias").await.contains_key(table) {
+            // Resolved through an alias first, so an alias may point at another alias's target,
+            // which is a chain a reader never has to follow.
+            let resolved = self.resolve(table).into_owned();
+            if !self.read_tables("set_alias").await.contains_key(&resolved) {
+                return Err(crate::Error::TableNotFound(table.to_string()));
+            }
+        }
+        let target = self.resolve(table).into_owned();
+        if self.read_tables("set_alias").await.contains_key(alias) {
+            return Err(crate::Error::InvalidInput(format!(
+                "'{alias}' is a table on this server; an alias cannot shadow one"
+            )));
+        }
+        self.aliases.write().insert(alias.to_string(), target);
+        self.save_aliases()?;
+        Ok(())
+    }
+
+    /// Remove an alias. The table it pointed at is untouched.
+    pub async fn delete_alias(&self, alias: &str) -> crate::Result<()> {
+        self.ensure_writable()?;
+        if self.aliases.write().remove(alias).is_none() {
+            return Err(crate::Error::TableNotFound(format!("alias '{alias}'")));
+        }
+        self.save_aliases()?;
+        Ok(())
+    }
+
+    /// Every alias and what it points at.
+    pub fn list_aliases(&self) -> std::collections::BTreeMap<String, String> {
+        self.aliases.read().clone()
+    }
+
+    /// Drop every alias pointing at a table, for when the table goes.
+    ///
+    /// An alias left behind would resolve to a name nothing holds, and the error a caller got
+    /// would name the table rather than the alias they used.
+    fn drop_aliases_for(&self, table: &str) {
+        let removed = {
+            let mut aliases = self.aliases.write();
+            let before = aliases.len();
+            aliases.retain(|_, target| target != table);
+            before != aliases.len()
+        };
+        if removed {
+            if let Err(e) = self.save_aliases() {
+                warn!("aliases for the deleted table '{table}' were not written out: {e}");
+            }
+        }
+    }
+
     /// Write one table -- its configuration and every record, vectors included -- to a file.
     ///
     /// This is the unit `POST /backup` is not. A backup is the whole instance and restoring it
@@ -2459,6 +2630,7 @@ impl IntelligentIndexedStorage {
         name: &str,
         dest: &std::path::Path,
     ) -> crate::Result<serde_json::Value> {
+        let name = &*self.resolve(name);
         let path = self.resolve_export_path(dest)?;
         self.ensure_resident(name).await?;
 
@@ -2743,6 +2915,15 @@ impl IntelligentIndexedStorage {
         //
         // 快照点之后的日志尾巴。刚做完快照通常很短，但不能不带——恢复要靠它补上
         // 快照与备份完成之间的那几条写入。
+        // The aliases, which are not in the log and not in the snapshot: a backup restored
+        // without them comes up with the tables and none of the names anything calls them by.
+        let aliases = Self::aliases_path(wal_dir);
+        if aliases.exists() {
+            let n = std::fs::copy(&aliases, dest.join("aliases"))?;
+            bytes += n;
+            copied.push("aliases".to_string());
+        }
+
         let wal_log = wal_dir.join("wal.log");
         if wal_log.exists() {
             let n = std::fs::copy(&wal_log, dest.join("wal.log"))?;
@@ -4145,6 +4326,14 @@ impl IntelligentIndexedStorage {
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
+        // An alias and a table of the same name would make one of the two unreachable, and
+        // which one it is depends on the order of two maps. Refuse it here rather than pick.
+        if self.aliases.read().contains_key(&config.name) {
+            return Err(crate::Error::InvalidInput(format!(
+                "'{}' is an alias on this server; drop it or choose another name",
+                config.name
+            )));
+        }
         self.create_table_inner(config, true).await
     }
 
@@ -4327,6 +4516,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        let tablename = &*self.resolve(tablename);
         self.ensure_writable()?;
         self.ensure_memory_headroom()?;
         // Writing to an evicted table has to bring it back first, or the insert lands in a
@@ -4385,6 +4575,7 @@ impl IntelligentIndexedStorage {
     /// `ef_search`, partition counts — which is what anyone diagnosing a recall or latency
     /// question actually needs.
     pub async fn describe_index(&self, tablename: &str) -> Option<IndexAlgorithm> {
+        let tablename = &*self.resolve(tablename);
         let tables = self.read_tables("describe_index").await;
         tables
             .get(tablename)
@@ -4431,6 +4622,7 @@ impl IntelligentIndexedStorage {
     }
 
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
         if query.filter.is_some() {
@@ -5157,6 +5349,7 @@ impl IntelligentIndexedStorage {
         seed: u64,
         with_payload: bool,
     ) -> crate::Result<KnnGraph> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
 
@@ -5652,6 +5845,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
         // The engine is behind an Arc, so take it out of the map and drop the guard rather than
@@ -5952,6 +6146,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
 
@@ -6175,6 +6370,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
+        let name = &*self.resolve(name);
         self.ensure_resident(name).await?;
         let tables = self.read_tables("get_table").await;
 
@@ -6224,6 +6420,7 @@ impl IntelligentIndexedStorage {
 
     /// 修改表元数据，并把变更写入 WAL。
     pub async fn alter_table(&self, name: &str, req: TableAlterRequest) -> crate::Result<Table> {
+        let name = &*self.resolve(name);
         self.ensure_writable()?;
         self.ensure_resident(name).await?;
 
@@ -6265,6 +6462,11 @@ impl IntelligentIndexedStorage {
 
     pub async fn delete_table(&self, name: &str) -> crate::Result<()> {
         self.ensure_writable()?;
+        let name = &*self.resolve(name);
+        // Before the table goes, so nothing can resolve an alias to a name that no longer
+        // holds anything -- the error a caller got would name the table, not the alias they
+        // asked for.
+        self.drop_aliases_for(name);
         let table_id = {
             let mut tables = self.write_tables("delete_table").await;
             let data = tables
@@ -6418,6 +6620,7 @@ impl IntelligentIndexedStorage {
     /// Exposed as an explicit operation rather than an automatic eviction so that
     /// callers control when the memory is released relative to their query load.
     pub async fn drop_index(&self, table_name: &str) -> crate::Result<()> {
+        let table_name = &*self.resolve(table_name);
         // Phase 1: snapshot records and create new brute-force wrapper under the write lock
         let (new_wrapper, records_snapshot) = {
             let mut tables = self.write_tables("drop_index").await;
@@ -6468,6 +6671,7 @@ impl IntelligentIndexedStorage {
     /// 1. Snapshot records + choose algorithm + swap in a fresh empty index (write lock).
     /// 2. Re-insert all record vectors into the new index (outside lock).
     pub async fn rebuild_index(&self, table_name: &str) -> crate::Result<()> {
+        let table_name = &*self.resolve(table_name);
         let started = std::time::Instant::now();
 
         // Phase 1: snapshot + select + swap (write lock)
@@ -6768,6 +6972,7 @@ impl IntelligentIndexedStorage {
 
     /// 列出表中所有记录 ID（用于一致性检查和数据迁移）
     pub async fn list_all_record_ids(&self, tablename: &str) -> crate::Result<Vec<RecordId>> {
+        let tablename = &*self.resolve(tablename);
         let tables = self.read_tables("list_all_record_ids").await;
         let table_data = tables
             .get(tablename)
@@ -6777,6 +6982,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取向量索引中的记录数（用于一致性检查）
     pub async fn get_index_record_count(&self, tablename: &str) -> crate::Result<usize> {
+        let tablename = &*self.resolve(tablename);
         let tables = self.read_tables("get_index_record_count").await;
         let table_data = tables
             .get(tablename)
@@ -6789,6 +6995,7 @@ impl IntelligentIndexedStorage {
     /// 字段名对齐 dxmt-js-sdk 的 `TableStats`——它的 `getTableStats()` 一直在调用一个不存在的
     /// 路由，所以这个方法对每个 JS 客户端用户都是抛异常的。
     pub async fn get_table_stats(&self, tablename: &str) -> crate::Result<serde_json::Value> {
+        let tablename = &*self.resolve(tablename);
         // Residency *before* touching it, or the answer is always true — asking is what makes
         // it resident.
         let was_resident = self
@@ -6865,6 +7072,7 @@ impl IntelligentIndexedStorage {
 
     /// 获取表的性能统计
     pub async fn get_performance_stats(&self, tablename: &str) -> crate::Result<PerformanceStats> {
+        let tablename = &*self.resolve(tablename);
         let tables = self.read_tables("get_performance_stats").await;
 
         let table_data = tables
@@ -7384,6 +7592,7 @@ impl IntelligentIndexedStorage {
     /// Deferred index insert
     /// Get a single record
     pub async fn get_record(&self, tablename: &str, record_id: &RecordId) -> crate::Result<Record> {
+        let tablename = &*self.resolve(tablename);
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("get_record").await;
         let table = tables
@@ -7484,6 +7693,7 @@ impl IntelligentIndexedStorage {
         record_id: &RecordId,
         request: CreateRecordRequest,
     ) -> crate::Result<Record> {
+        let tablename = &*self.resolve(tablename);
         self.ensure_writable()?;
         self.ensure_memory_headroom()?;
         self.ensure_resident(tablename).await?;
@@ -7695,6 +7905,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         record_ids: Vec<RecordId>,
     ) -> crate::Result<usize> {
+        let tablename = &*self.resolve(tablename);
         self.ensure_writable()?;
         self.ensure_resident(tablename).await?;
 
@@ -8036,6 +8247,7 @@ impl IntelligentIndexedStorage {
         usize,
         Option<crate::storage::payload_index::ListCursor>,
     )> {
+        let tablename = &*self.resolve(tablename);
         use crate::storage::payload_index::{created_key, ListCursor};
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
@@ -8131,6 +8343,7 @@ impl IntelligentIndexedStorage {
         groups: usize,
         group_size: usize,
     ) -> crate::Result<crate::types::record::SearchGroupsResult> {
+        let tablename = &*self.resolve(tablename);
         /// A cap, not a target. Each round is a real search, and an unbounded loop on a field
         /// almost every record shares a value of would scan the table one doubling at a time.
         const MAX_GROUP_CANDIDATES: usize = 10_000;
@@ -8265,6 +8478,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         request: &crate::types::record::SparseSearchQuery,
     ) -> crate::Result<SearchResult> {
+        let tablename = &*self.resolve(tablename);
         let start = std::time::Instant::now();
         let query = &request.sparse_vector;
         let limit = request.limit;
@@ -8373,6 +8587,7 @@ impl IntelligentIndexedStorage {
     /// ask. An unbuilt index reports `built: false` and no fields, which is the truth — a
     /// restored table has none until the first filter.
     pub async fn payload_index_report(&self, tablename: &str) -> crate::Result<serde_json::Value> {
+        let tablename = &*self.resolve(tablename);
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("payload_index_report").await;
         let table_data = tables
@@ -8412,6 +8627,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         filter: Option<&crate::types::Filter>,
     ) -> crate::Result<usize> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("count_records").await;
@@ -8447,6 +8663,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         filter: &crate::types::Filter,
     ) -> crate::Result<usize> {
+        let tablename = &*self.resolve(tablename);
         const BATCH: usize = 1_000;
 
         Self::check_filter(Some(filter))?;
@@ -8479,6 +8696,7 @@ impl IntelligentIndexedStorage {
         offset: usize,
         with_vector: bool,
     ) -> crate::Result<(Vec<Record>, usize)> {
+        let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
         let tables = self.read_tables("list_records").await;

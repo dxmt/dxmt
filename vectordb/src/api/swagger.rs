@@ -34,6 +34,9 @@ use crate::types::{
         crate::api::handlers::delete_table,
         crate::api::handlers::get_table_stats,
         crate::api::handlers::branch_table,
+        crate::api::handlers::list_aliases,
+        crate::api::handlers::set_alias,
+        crate::api::handlers::delete_alias,
         // records
         crate::api::handlers::insert_records,
         crate::api::handlers::insert_records_optimized,
@@ -83,6 +86,7 @@ use crate::types::{
             crate::api::handlers::OptimizedBatchInsertRequest,
             crate::api::handlers::CreateBackupRequest,
             crate::api::handlers::ExportTableRequest,
+            crate::api::handlers::SetAliasRequest,
             crate::api::handlers::ImportTableRequest,
             crate::api::handlers::KnnGraphRequest,
             crate::api::handlers::PayloadUpdateMode,

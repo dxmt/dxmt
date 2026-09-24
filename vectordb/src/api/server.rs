@@ -10,12 +10,13 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::{
     api::handlers::{
         alter_table, branch_table, count_records, create_backup, create_snapshot, create_table,
-        delete_records, delete_table, drop_index, drop_payload_index_field, execute_dxql,
-        export_table, full_text_search, get_record, get_status, get_table, get_table_stats,
-        health_check, health_metrics, hybrid_search, hybrid_search_combined, import_table,
-        index_payload_field, insert_records, insert_records_optimized, knn_graph, list_records,
-        list_tables, liveness, payload_index_report, prometheus_metrics, readiness, rebuild_index,
-        search_groups, search_vectors, sparse_search, update_record, AppState,
+        delete_alias, delete_records, delete_table, drop_index, drop_payload_index_field,
+        execute_dxql, export_table, full_text_search, get_record, get_status, get_table,
+        get_table_stats, health_check, health_metrics, hybrid_search, hybrid_search_combined,
+        import_table, index_payload_field, insert_records, insert_records_optimized, knn_graph,
+        list_aliases, list_records, list_tables, liveness, payload_index_report,
+        prometheus_metrics, readiness, rebuild_index, search_groups, search_vectors, set_alias,
+        sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -491,6 +492,10 @@ pub async fn create_app_with_storage(
         // server or another one.
         .route("/tables/:table_name/export", post(export_table))
         .route("/tables/import", post(import_table))
+        // Aliases: another name for a table, and the way to swap one for another without a
+        // client-side deploy.
+        .route("/aliases", get(list_aliases))
+        .route("/aliases/:alias", put(set_alias).delete(delete_alias))
         // Keep system probes available under the SDK base URL as well as at the root.
         .route("/health", get(health_check))
         .route("/health/live", get(liveness))

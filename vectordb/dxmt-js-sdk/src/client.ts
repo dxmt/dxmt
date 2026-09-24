@@ -499,6 +499,34 @@ export class DXMTClient {
     };
   }
 
+  /** Every alias and the table it points at. */
+  async aliases(): Promise<Record<string, string>> {
+    const answer = await this.request<{ aliases: Record<string, string> }>('GET', '/aliases');
+    return answer.aliases || {};
+  }
+
+  /**
+   * Point an alias at a table, creating it or moving it.
+   *
+   * How a table is rebuilt without a client deploy: build the new one under its own name, load
+   * it, then move the alias. A reader arriving during the move sees one table or the other,
+   * never neither. An alias can be used anywhere a table name can.
+   */
+  async setAlias(alias: string, tableName: string): Promise<{ alias: string; table: string }> {
+    if (!alias || !tableName) {
+      throw new DXMTValidationError('An alias and a table name are required');
+    }
+    return this.request('PUT', `/aliases/${encodeURIComponent(alias)}`, { table: tableName });
+  }
+
+  /** Remove an alias. The table it pointed at is untouched. */
+  async deleteAlias(alias: string): Promise<{ alias: string; message: string }> {
+    if (!alias) {
+      throw new DXMTValidationError('An alias is required');
+    }
+    return this.request('DELETE', `/aliases/${encodeURIComponent(alias)}`);
+  }
+
   /**
    * Write one table — configuration and every record, vectors included — to a file.
    *
