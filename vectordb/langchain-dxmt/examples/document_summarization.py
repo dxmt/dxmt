@@ -21,11 +21,14 @@ Use case:
 import os
 from typing import List
 
-from langchain_classic.chains.summarize import load_summarize_chain
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# `langchain_classic` is imported inside `main`, not here: it is a separate package,
+# and without it this example died at import time before it could say so.
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension, needs_an_llm
+
+# `langchain_openai` is imported where it is used, not here: without the
+# package this example died at import time, before it could say what it needed.
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -165,10 +168,14 @@ def main():
     print("=" * 80)
 
     # Check API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("\n❌ Error: OPENAI_API_KEY not set")
-        print("Set it with: export OPENAI_API_KEY='sk-...'")
+    if not needs_an_llm("this example"):
         return
+
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    from langchain_classic.chains.summarize import load_summarize_chain
+
+    from langchain_openai import ChatOpenAI
 
     # 1. Get document
     print("\n1. Loading document...")
@@ -207,12 +214,12 @@ def main():
 
     # 3. Store in DXMT vector store
     print("\n3. Storing chunks in DXMT vector store...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     vectorstore = DXMTVectorDB(
         table_name="doc_summarization_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         distance_metric="cosine",

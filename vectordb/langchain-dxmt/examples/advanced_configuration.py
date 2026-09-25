@@ -18,7 +18,7 @@ import time
 from typing import Any
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -27,7 +27,7 @@ def example_index_types() -> None:
     """Demonstrate different index types."""
     print("=== Index Types Comparison ===\n")
 
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # Test documents
     documents = [
@@ -78,7 +78,7 @@ def example_index_types() -> None:
             store = DXMTVectorDB(
                 table_name=f"index_test_{config['type']}",
                 embedding=embeddings,
-                dimension=1536,
+                dimension=embed_dimension(embeddings),
                 index_type=config["type"],
                 distance_metric="cosine",
             )
@@ -108,7 +108,7 @@ def example_distance_metrics() -> None:
     """Demonstrate different distance metrics."""
     print("=== Distance Metrics Comparison ===\n")
 
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # Test documents
     documents = [
@@ -150,7 +150,9 @@ def example_distance_metrics() -> None:
         },
         {
             "name": "Dot Product",
-            "type": "dot_product",
+            # `dot`, not `dot_product`: the server's name for it, and the one it accepts. The
+            # other spelling was in this list and answered INVALID_DISTANCE_METRIC every run.
+            "type": "dot",
             "description": "Inner product of vectors",
             "range": "(-∞, ∞) (higher=more similar)",
             "use_case": "Normalized vectors, collaborative filtering",
@@ -170,7 +172,7 @@ def example_distance_metrics() -> None:
             store = DXMTVectorDB(
                 table_name=f"metric_test_{metric['type']}",
                 embedding=embeddings,
-                dimension=1536,
+                dimension=embed_dimension(embeddings),
                 index_type="hnsw",
                 distance_metric=metric["type"],
             )
@@ -199,7 +201,7 @@ def example_production_config() -> None:
     """Demonstrate production-ready configuration."""
     print("=== Production Configuration Example ===\n")
 
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # High-performance configuration
     print("1. High-Performance Configuration:")
@@ -208,7 +210,7 @@ def example_production_config() -> None:
     store_high_perf = DXMTVectorDB(
         table_name="production_high_perf",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         # Performance optimizations
@@ -229,7 +231,7 @@ def example_production_config() -> None:
     store_memory_eff = DXMTVectorDB(
         table_name="production_memory_eff",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         # Memory optimizations
@@ -250,7 +252,7 @@ def example_production_config() -> None:
     store_accurate = DXMTVectorDB(
         table_name="production_accurate",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         # Accuracy optimizations
@@ -279,38 +281,34 @@ def example_connection_options() -> None:
     """Demonstrate connection configuration options."""
     print("=== Connection Configuration Options ===\n")
 
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # 1. Basic connection
     print("1. Basic Connection (default):")
     store1 = DXMTVectorDB(
         table_name="conn_test_1",
         embedding=embeddings,
-        dimension=1536,
-        # Defaults: localhost:9999, no SSL
+        dimension=embed_dimension(embeddings),
     )
     print(f"   ✓ Connected to: localhost:9999")
     print(f"   - SSL: No\n")
 
     # 2. Custom host/port
-    print("2. Custom Host/Port:")
-    store2 = DXMTVectorDB(
-        table_name="conn_test_2",
-        embedding=embeddings,
-        dimension=1536,
-        host="my-dxmt-server.example.com",
-        port=8080,
-        ssl=True,  # Enable SSL for production
-    )
-    print(f"   ✓ Would connect to: https://my-dxmt-server.example.com:8080")
-    print(f"   - SSL: Yes\n")
+    #
+    # Shown as arguments rather than built: the constructor creates the table, so it connects,
+    # and pointing it at an illustrative hostname made this example fail with a DNS error under
+    # a line that said "✓ Would connect to".
+    print("2. Custom Host/Port (arguments, not a live connection):")
+    print("   DXMTVectorDB(table_name=..., embedding=..., dimension=...,")
+    print("                host='my-dxmt-server.example.com', port=8080, ssl=True)")
+    print("   - SSL: Yes\n")
 
     # 3. Custom headers (authentication, etc.)
     print("3. With Custom Headers:")
     store3 = DXMTVectorDB(
         table_name="conn_test_3",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         headers={
             "Authorization": "Bearer YOUR_API_TOKEN",
             "X-Custom-Header": "custom-value",
@@ -322,7 +320,10 @@ def example_connection_options() -> None:
 
     # 4. Reuse existing client
     print("4. Reuse Existing Client:")
-    from langchain_dxmt.client import DXMTClient
+    # From the SDK, which is where the client lives: `langchain_dxmt.client` has never been a
+    # module in this package, so this line raised ModuleNotFoundError every time anyone ran
+    # the example this far.
+    from dxmt import DXMTClient
 
     # Create client once
     client = DXMTClient(host="localhost", port=9999)
@@ -331,14 +332,14 @@ def example_connection_options() -> None:
     store4a = DXMTVectorDB(
         table_name="conn_test_4a",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         client=client,  # Reuse client
     )
 
     store4b = DXMTVectorDB(
         table_name="conn_test_4b",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         client=client,  # Same client
     )
 

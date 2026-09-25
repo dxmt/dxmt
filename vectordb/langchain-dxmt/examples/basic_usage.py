@@ -12,7 +12,7 @@ Run:
 """
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -23,14 +23,14 @@ def main() -> None:
 
     # 1. Initialize embeddings
     print("1. Initializing OpenAI embeddings...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # 2. Create vector store
     print("2. Creating DXMT vector store...")
     vector_store = DXMTVectorDB(
         table_name="langchain_demo",
         embedding=embeddings,
-        dimension=1536,  # OpenAI ada-002 dimension
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         index_type="hnsw",

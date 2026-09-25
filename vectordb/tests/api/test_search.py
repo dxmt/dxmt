@@ -81,3 +81,19 @@ def test_a_wrong_dimension_is_refused(table):
         "a 2-dimensional query against a 4-dimensional table must not answer; "
         f"got {response.status_code}"
     )
+
+
+def test_total_is_the_page_length_and_not_the_match_count(table):
+    """`total` names the page, not the matches.
+
+    The name invites the other reading, and a caller who takes it for "how many records match
+    this filter" gets a number that is right only when the page happens to hold all of them.
+    `records/count` is the answer to that question; this pins which of the two `total` is, so a
+    later change to make it the other thing has to change this test and think about it.
+    """
+    body = {"vector": query_at("r1"), "top_k": 2}
+    answer = post(f"/tables/{table}/search", body).json()["data"]
+    assert answer["total"] == len(answer["hits"]) == 2
+
+    counted = post(f"/tables/{table}/records/count", {}).json()["data"]["count"]
+    assert counted > 2, "the corpus has to be bigger than the page for this to prove anything"

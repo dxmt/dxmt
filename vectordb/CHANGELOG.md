@@ -24,6 +24,31 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **The LangChain examples run without an API key**, the way the LlamaIndex ones already did.
+  Fifteen of the seventeen opened with `OpenAIEmbeddings()`, so the first thing anyone
+  evaluating DXMT through LangChain met was a missing key — for examples whose subject is a
+  vector database, not an embedding provider. `examples/embedding.py` picks OpenAI when
+  `OPENAI_API_KEY` is set, sentence-transformers when it is installed, and otherwise a hashed
+  bag of words, printing which; the table's dimension follows the model instead of a hardcoded
+  1536. Seven now run end to end with no key; the rest do their retrieval half and print one
+  line where the generation step would be, and their optional imports moved inside that branch,
+  because an example that dies at `import` cannot tell you what it needed.
+
+  Running all seventeen turned up three things that had nothing to do with keys. The
+  configuration example constructed a store against `my-dxmt-server.example.com` to *illustrate*
+  a setting — but the constructor creates the table, so it really connected, and failed with a
+  DNS error under a line reading "✓ Would connect to". It listed `dot_product` among the
+  distance metrics, which the server answers `INVALID_DISTANCE_METRIC` to; the name is `dot`.
+  And it imported `langchain_dxmt.client`, a module that has never existed in that package.
+  The search engine example crashed with `EOFError` when run without a terminal, at the end of
+  a run that had otherwise worked.
+
+- **`total` on a search result says what it is.** It is the number of hits in the page, which is
+  what the code always returned, and the name invites the other reading: a caller taking it for
+  "how many records match this filter" gets a number that is right only when the page happens to
+  hold all of them. `records/count` answers that question; the field now says so, and
+  `tests/api/test_search.py` pins which of the two it is.
+
 - **The support matrix says what each client covers.** Six clients ship from this repository
   and they are not equivalent: Python and JavaScript follow the whole HTTP surface, Rust and Go
   wrap the table lifecycle, the record routes and `search`, and LangChain and LlamaIndex go

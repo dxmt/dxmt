@@ -17,7 +17,7 @@ Use cases:
 
 import os
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 from langchain_dxmt import DXMTVectorDB
 
 
@@ -30,22 +30,18 @@ def print_section(title: str):
 
 def main():
     # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ Error: OPENAI_API_KEY environment variable not set")
-        print("Please set it with: export OPENAI_API_KEY='sk-...'")
-        return
 
     print_section("MMR (Maximal Marginal Relevance) Diversity Search")
 
     # Initialize embeddings
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+    embeddings = default_embeddings()
 
     # Create vector store
     print("Initializing DXMT vector store...")
     vectorstore = DXMTVectorDB(
         table_name="mmr_diversity_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         distance_metric="cosine",
@@ -64,7 +60,7 @@ def main():
     vectorstore = DXMTVectorDB(
         table_name="mmr_diversity_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         distance_metric="cosine",

@@ -467,6 +467,12 @@ fn default_true() -> bool {
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub struct SearchResult {
     pub hits: Vec<SearchHit>,
+    /// How many hits are in `hits`, which is not how many records match.
+    ///
+    /// The name invites the other reading, so: a search returns a page and this is that page's
+    /// length. Nothing here counts the matches — an approximate index does not know how many
+    /// there are without scanning, which is what `POST /tables/{t}/records/count` is for, with
+    /// the same filter and no vector.
     pub total: usize,
     pub tookms: u64,
 }

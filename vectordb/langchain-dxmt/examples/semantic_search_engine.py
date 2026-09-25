@@ -19,10 +19,11 @@ Use case:
 """
 
 import os
+import sys
 from typing import List
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -257,19 +258,15 @@ def main():
     print("=" * 80)
 
     # Check API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("\n❌ Error: OPENAI_API_KEY not set")
-        print("Set it with: export OPENAI_API_KEY='sk-...'")
-        return
 
     # 1. Initialize
     print("\n1. Initializing search engine...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     vectorstore = DXMTVectorDB(
         table_name="semantic_search_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         distance_metric="cosine",
@@ -385,6 +382,12 @@ def main():
     print("   - 'machine learning for beginners'")
     print("   - 'data storage solutions'")
     print("\nCommands: 'stats' for database stats, 'quit' to exit\n")
+
+    if not sys.stdin.isatty():
+        # Run from a script or a pipe: the loop below would read EOF on its first turn and
+        # crash out of an example that had just done all its work correctly.
+        print("(not a terminal -- skipping the interactive loop)")
+        return
 
     try:
         while True:

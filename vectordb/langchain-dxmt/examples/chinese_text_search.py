@@ -13,7 +13,7 @@ Run:
 """
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -24,14 +24,14 @@ def main() -> None:
 
     # 1. Initialize embeddings
     print("1. 初始化 OpenAI embeddings...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # 2. Create vector store with Chinese full-text search
     print("2. 创建支持中文全文检索的向量存储...")
     vector_store = DXMTVectorDB(
         table_name="chinese_docs",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         index_type="hnsw",

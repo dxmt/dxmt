@@ -25,7 +25,10 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension, needs_an_llm
+
+# `langchain_openai` is imported where it is used, not here: without the
+# package this example died at import time, before it could say what it needed.
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -148,19 +151,19 @@ def main():
     print("=" * 80)
 
     # Check API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("\n❌ Error: OPENAI_API_KEY not set")
-        print("Set it with: export OPENAI_API_KEY='sk-...'")
+    if not needs_an_llm("this example"):
         return
+
+    from langchain_openai import ChatOpenAI
 
     # 1. Initialize embeddings and vector store
     print("\n1. Initializing embeddings and vector store...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     vectorstore = DXMTVectorDB(
         table_name="rag_qa_demo",
         embedding=embeddings,
-        dimension=1536,  # OpenAI ada-002 dimension
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         distance_metric="cosine",

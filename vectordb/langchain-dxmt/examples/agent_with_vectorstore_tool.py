@@ -29,7 +29,10 @@ from typing import Optional, Type
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from embedding import default_embeddings, embed_dimension, needs_an_llm
+
+# `langchain_openai` is imported where it is used, not here: without the
+# package this example died at import time, before it could say what it needed.
 from langchain_dxmt import DXMTVectorDB
 from pydantic import BaseModel, Field
 
@@ -108,15 +111,15 @@ class DXMTVectorSearchTool(BaseTool):
 
 def main():
     # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ Error: OPENAI_API_KEY environment variable not set")
-        print("Please set it with: export OPENAI_API_KEY='sk-...'")
+    if not needs_an_llm("this example"):
         return
+
+    from langchain_openai import ChatOpenAI
 
     print_section("Agent with Vector Store Tool")
 
     # Initialize components
-    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+    embeddings = default_embeddings()
     llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
     # Create vector store
@@ -124,7 +127,7 @@ def main():
     vectorstore = DXMTVectorDB(
         table_name="agent_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
     )
@@ -142,7 +145,7 @@ def main():
     vectorstore = DXMTVectorDB(
         table_name="agent_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
     )

@@ -14,7 +14,7 @@ Run:
 import asyncio
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from embedding import default_embeddings, embed_dimension
 
 from langchain_dxmt import DXMTVectorDB
 
@@ -25,14 +25,14 @@ async def main() -> None:
 
     # 1. Initialize embeddings
     print("1. Initializing OpenAI embeddings...")
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # 2. Create vector store
     print("2. Creating DXMT vector store...")
     vector_store = DXMTVectorDB(
         table_name="async_demo",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
         host="localhost",
         port=9999,
         index_type="hnsw",
@@ -152,19 +152,19 @@ async def benchmark_comparison() -> None:
 
     print("=== Sync vs Async Performance Comparison ===\n")
 
-    embeddings = OpenAIEmbeddings()
+    embeddings = default_embeddings()
 
     # Create two stores
     sync_store = DXMTVectorDB(
         table_name="sync_benchmark",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
     )
 
     async_store = DXMTVectorDB(
         table_name="async_benchmark",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embed_dimension(embeddings),
     )
 
     # Add test documents
