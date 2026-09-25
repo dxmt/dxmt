@@ -1042,6 +1042,10 @@ export class DXMTClient {
           ...(params.payload_fields === undefined
             ? {}
             : { payload_fields: params.payload_fields }),
+          // Page two of a search. The server asks the index for `offset + k` and drops the
+          // prefix — an approximate index cannot start in the middle of a ranking it has not
+          // computed — so a deep offset costs what the whole prefix costs. `scroll` stays flat.
+          ...(params.offset ? { offset: params.offset } : {}),
         }
       );
 

@@ -261,6 +261,18 @@ pub struct SearchQuery {
     /// the floor.
     #[serde(default)]
     pub score_threshold: Option<f32>,
+    /// Skip this many hits before the page starts.
+    ///
+    /// Page two of a search, which otherwise meant asking for `2 * top_k` and throwing half of
+    /// it away on the client -- over the wire, with the payloads attached.
+    ///
+    /// It is not free and cannot be: the index is asked for `offset + top_k` neighbours and the
+    /// first `offset` are dropped, because an approximate index has no way to start in the
+    /// middle of a ranking it has not computed. A deep offset therefore costs what the whole
+    /// prefix costs. For walking an entire table, `records/list` with a cursor is the paging
+    /// that stays flat.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 /// 混合搜索查询
@@ -847,6 +859,7 @@ impl Default for SearchQuery {
             vector_name: None,
             payload_fields: None,
             score_threshold: None,
+            offset: 0,
         }
     }
 }

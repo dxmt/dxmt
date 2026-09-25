@@ -362,6 +362,17 @@ def _(table):
         delete(f"/tables/{name}", expect_ok=False)
 
 
+@probe("SearchQuery", "offset")
+def _(table):
+    # The pages have to tile: page two is the tail of the unpaged answer, not a second copy of
+    # page one. An `offset` that was accepted and ignored would return r0 twice.
+    # `limit`, not `top_k`: the shared helper sends both, and the server prefers `limit` when
+    # it is set to anything but its default -- so overriding `top_k` alone changes nothing.
+    whole = [h["id"] for h in search(table, limit=4).json()["data"]["hits"]]
+    second = [h["id"] for h in search(table, limit=2, offset=2).json()["data"]["hits"]]
+    assert second == whole[2:4], (whole, second)
+
+
 @probe("SearchQuery", "score_threshold")
 def _(table):
     # A floor on the similarity, not on the internal distance -- those run in opposite

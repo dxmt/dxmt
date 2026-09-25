@@ -1493,6 +1493,7 @@ class DXMTClient:
         search_mode: Optional[str] = None,
         score_threshold: Optional[float] = None,
         payload_fields: Optional[list[str]] = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
 
@@ -1507,6 +1508,12 @@ class DXMTClient:
                 accepted this on every search since SearchMode existed; the SDK simply never
                 passed it, so no caller could reach the recall/latency trade it offers.
                 Omitted from the request when None, leaving the server's default.
+
+            offset: Skip this many hits before the page starts -- page two of a search,
+                without fetching page one again. Not free: the server asks the index for
+                `offset + k` and drops the prefix, because an approximate index cannot start in
+                the middle of a ranking it has not computed. To walk a whole table, `scroll`
+                pages by cursor and stays flat.
 
         Returns:
             List of search results.
@@ -1539,6 +1546,11 @@ class DXMTClient:
         # came from, so a page of hits can be a megabyte of JSON to deliver two fields.
         if payload_fields is not None:
             payload["payload_fields"] = payload_fields
+        if offset:
+            # Page two of a search. Not free: the server asks the index for `offset + k` and
+            # drops the prefix, because an approximate index cannot start in the middle of a
+            # ranking it has not computed. To walk a whole table, `scroll` stays flat.
+            payload["offset"] = offset
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search",
@@ -1564,6 +1576,7 @@ class DXMTClient:
         search_mode: Optional[str] = None,
         score_threshold: Optional[float] = None,
         payload_fields: Optional[list[str]] = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
@@ -1598,6 +1611,8 @@ class DXMTClient:
         # came from, so a page of hits can be a megabyte of JSON to deliver two fields.
         if payload_fields is not None:
             payload["payload_fields"] = payload_fields
+        if offset:
+            payload["offset"] = offset
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search",

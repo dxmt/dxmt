@@ -359,12 +359,21 @@ fn a_backup_outside_the_root_is_refused() {
         .spawn()
         .expect("failed to spawn the vectordb binary");
     let server = Server { child, port };
+    // Asserted, not just waited for. `break` alone meant that a server which never came up --
+    // because the port `free_port` picked was taken between the probe and the bind, which is a
+    // race this harness cannot close -- left the test talking to whatever else answered there.
+    // That produced one run in which this very test reported that a backup outside the root had
+    // been accepted: a security check apparently failing, from a port collision. A refusal to
+    // start has to be a failure about starting.
+    let mut ready = false;
     for _ in 0..160 {
         if curl(server.port, "GET", "/health", None).is_some() {
+            ready = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    assert!(ready, "server did not become ready on port {}", server.port);
 
     let backup = |destination: String| -> serde_json::Value {
         let (_status, body) = curl(

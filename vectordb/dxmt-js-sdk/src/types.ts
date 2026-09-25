@@ -258,6 +258,8 @@ export interface SearchParams {
    * request outright. `exact` scores every row, which is how recall is measured on real data.
    */
   search_mode?: 'fast' | 'normal' | 'accurate' | 'auto' | 'exact';
+  /** Skip this many hits before the page starts. Not free; see {@link DXMTClient.search}. */
+  offset?: number;
   /** Drop hits scoring below this. Scores are similarities, so it is a floor: higher is nearer. */
   score_threshold?: number;
   /** Return only these payload keys instead of the whole payload. */

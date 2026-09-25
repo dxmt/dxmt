@@ -4634,11 +4634,16 @@ impl IntelligentIndexedStorage {
         let start_time = std::time::Instant::now();
         // 优先使用 limit，如果 limit 未设置或为默认值则使用 top_k
         // Python SDK 发送 "limit" 字段，Rust API 使用 "top_k"
-        let result_limit = if query.limit > 0 && query.limit != 10 {
+        let page = if query.limit > 0 && query.limit != 10 {
             query.limit
         } else {
             query.top_k
         };
+        // Everything below fetches, scores and truncates to `result_limit`; the page is cut out
+        // of that prefix in `assemble_hits`. An approximate index cannot start in the middle of
+        // a ranking it has not computed, so an offset is paid for by computing the prefix --
+        // which is what the field's documentation says it costs.
+        let result_limit = page.saturating_add(query.offset);
 
         // `Exact` is not a setting of the machinery below -- it is the absence of it. Every
         // branch from here on picks an `ef`, a candidate count, or a filter strategy, and all
@@ -5832,7 +5837,11 @@ impl IntelligentIndexedStorage {
                     vector,
                 })
             })
-            .take(result_limit) // 过滤后只保留指定数量的结果
+            // The offset is dropped here rather than before scoring: `score_threshold` and the
+            // post-filter both remove hits, and skipping first would skip rows that were never
+            // going to be in the answer.
+            .skip(query.offset)
+            .take(result_limit.saturating_sub(query.offset))
             .collect();
 
         Ok(hits)

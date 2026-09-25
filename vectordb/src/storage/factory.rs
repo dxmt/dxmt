@@ -702,6 +702,7 @@ impl StorageIntegration {
                 vector_name: None,
                 payload_fields: None,
                 score_threshold: None,
+                offset: 0,
             };
 
             match current_storage.search(&table.name, query).await {

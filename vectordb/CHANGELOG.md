@@ -24,6 +24,18 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **`offset` on a search.** Page two without fetching page one twice: paging meant asking for
+  `2 * top_k` and throwing half of it away on the client, over the wire, with the payloads
+  attached. Both SDKs take it.
+
+  It is not free, and the field says so: the index is asked for `offset + top_k` and the prefix
+  is dropped, because an approximate index cannot start in the middle of a ranking it has not
+  computed. For walking a whole table, `records/list` with a cursor is the paging that stays
+  flat. The offset is taken *after* the filter and the score floor — skipping rows that were
+  never going to be in the answer would make page two start somewhere other than where page one
+  ended — and `tests/api/test_search_offset.py` checks that the pages tile the unpaged ranking
+  exactly, on the exact mode as well as the approximate one.
+
 - **Table aliases.** `PUT /aliases/{alias}` points a name at a table, `DELETE` removes it,
   `GET /aliases` lists them, and an alias can be used anywhere a table name can. Both SDKs have
   them.
