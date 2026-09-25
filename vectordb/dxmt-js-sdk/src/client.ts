@@ -1046,6 +1046,7 @@ export class DXMTClient {
           // prefix — an approximate index cannot start in the middle of a ranking it has not
           // computed — so a deep offset costs what the whole prefix costs. `scroll` stays flat.
           ...(params.offset ? { offset: params.offset } : {}),
+          ...(params.mmr === undefined ? {} : { mmr: params.mmr }),
         }
       );
 

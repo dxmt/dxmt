@@ -24,6 +24,27 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Diversity reranking (`mmr`) on a search, done by the server.** A chunked corpus answers a
+  query with several near-copies of one passage; they really are the nearest neighbours, and
+  together they say one thing. `mmr: {"lambda_mult": 0.5, "fetch_k": 20}` picks each next hit by
+  how near it is to the query minus how near it already is to what has been picked. 1.0 is the
+  plain ranking, 0.0 ignores the query. Unlike `search/groups` it needs no field saying two
+  records belong together — the vectors say it.
+
+  **The LangChain integration was re-embedding to do this.** `max_marginal_relevance_search`
+  fetched `fetch_k` documents and called `embed_documents` on their text to get vectors to
+  diversify with — "not optimal but works", as the comment said. It is an embedding call per
+  search, paid in latency and in money, and it diversifies over vectors that are *not* the ones
+  in the index: a document whose stored vector came from different text, or from an earlier
+  version of the model, was being compared against something the database had never seen. That
+  method now calls the server, which has the vectors, and 71 lines of client-side numpy went
+  with it.
+
+  The cost is `fetch_k`: diversity can only come from candidates that were fetched, and with
+  `fetch_k` at the page size the answer is the plain ranking — which the tests pin, because
+  silently returning the undiversified page is the failure mode this would otherwise have.
+  Pages of a diversified search tile, since the offset applies to the reranked order.
+
 - **`offset` on a search.** Page two without fetching page one twice: paging meant asking for
   `2 * top_k` and throwing half of it away on the client, over the wire, with the payloads
   attached. Both SDKs take it.

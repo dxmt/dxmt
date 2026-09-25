@@ -804,119 +804,34 @@ class DXMTVectorDB(VectorStore):
     ) -> list[Document]:
         """Return docs selected using maximal marginal relevance.
 
+        The reranking happens **on the server**, which already holds the vectors. This used to
+        fetch `fetch_k` documents and re-embed their text to get vectors to diversify with:
+        an embedding call per search, paid in latency and in money, and -- worse -- diversity
+        computed over vectors that are not the ones in the index. A document whose stored vector
+        came from different text, or from an earlier version of the model, was diversified
+        against something the database had never seen.
+
         Args:
             embedding: Embedding vector.
             k: Number of Document objects to return.
-            fetch_k: Number of Document objects to fetch.
-            lambda_mult: Diversity parameter (0=max diversity, 1=min diversity).
+            fetch_k: Number of candidates the server reranks. Diversity can only come from
+                candidates that were fetched, so this is the cost knob.
+            lambda_mult: 0 is maximum diversity, 1 is the plain ranking.
             filter: Optional metadata filter.
             **kwargs: Additional keyword arguments.
 
         Returns:
             List of Document objects selected by maximal marginal relevance.
         """
-        # Fetch more candidates than needed
-        docs_and_scores = self.similarity_search_with_score_by_vector(
-            embedding, k=fetch_k, filter=filter, **kwargs
+        results = self._client.search(
+            table_name=self._table_name,
+            vector=embedding,
+            k=k,
+            filter=filter,
+            mmr={"lambda_mult": lambda_mult, "fetch_k": fetch_k},
+            **kwargs,
         )
-
-        if not docs_and_scores:
-            return []
-
-        # Extract documents and embeddings
-        # We need to get embeddings for MMR calculation
-        # For now, re-embed the documents (not optimal but works)
-        if self._embedding is None:
-            msg = "embedding function is required for MMR search"
-            raise ValueError(msg)
-
-        # Get embeddings for all candidate documents
-        candidate_docs = [doc for doc, _ in docs_and_scores]
-        candidate_texts = [doc.page_content for doc in candidate_docs]
-
-        # Batch embed all candidates
-        candidate_embeddings = self._embedding.embed_documents(candidate_texts)
-
-        # Perform MMR selection
-        selected_indices = self._mmr_selection(
-            embedding,
-            candidate_embeddings,
-            k=min(k, len(candidate_docs)),
-            lambda_mult=lambda_mult,
-        )
-
-        return [candidate_docs[i] for i in selected_indices]
-
-    @staticmethod
-    def _mmr_selection(
-        query_embedding: list[float],
-        candidate_embeddings: list[list[float]],
-        k: int,
-        lambda_mult: float,
-    ) -> list[int]:
-        """Perform MMR selection.
-
-        Args:
-            query_embedding: Query embedding vector.
-            candidate_embeddings: List of candidate embedding vectors.
-            k: Number of documents to select.
-            lambda_mult: Diversity parameter.
-
-        Returns:
-            List of selected indices.
-        """
-        import numpy as np
-
-        # Convert to numpy arrays
-        query_emb = np.array(query_embedding)
-        candidates = np.array(candidate_embeddings)
-
-        # Calculate similarities to query
-        query_sims = np.dot(candidates, query_emb) / (
-            np.linalg.norm(candidates, axis=1) * np.linalg.norm(query_emb)
-        )
-
-        # Initialize selected indices
-        selected = []
-        remaining = list(range(len(candidate_embeddings)))
-
-        # Select first document (most similar to query)
-        first_idx = int(np.argmax(query_sims))
-        selected.append(first_idx)
-        remaining.remove(first_idx)
-
-        # Select remaining k-1 documents
-        while len(selected) < k and remaining:
-            best_score = float("-inf")
-            best_idx = None
-
-            for idx in remaining:
-                # Calculate similarity to query
-                query_sim = query_sims[idx]
-
-                # Calculate maximum similarity to already selected documents
-                selected_embs = candidates[selected]
-                candidate_emb = candidates[idx]
-
-                sims_to_selected = np.dot(selected_embs, candidate_emb) / (
-                    np.linalg.norm(selected_embs, axis=1) * np.linalg.norm(candidate_emb)
-                )
-                max_sim_to_selected = np.max(sims_to_selected)
-
-                # Calculate MMR score
-                mmr_score = lambda_mult * query_sim - (1 - lambda_mult) * max_sim_to_selected
-
-                if mmr_score > best_score:
-                    best_score = mmr_score
-                    best_idx = idx
-
-            if best_idx is not None:
-                selected.append(best_idx)
-                remaining.remove(best_idx)
-
-        return selected
-
-    # DXMT-specific methods
+        return [doc for doc, _ in self._results_to_docs_and_scores(results)]
 
     def hybrid_search(
         self,

@@ -1494,6 +1494,7 @@ class DXMTClient:
         score_threshold: Optional[float] = None,
         payload_fields: Optional[list[str]] = None,
         offset: int = 0,
+        mmr: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
 
@@ -1551,6 +1552,12 @@ class DXMTClient:
             # drops the prefix, because an approximate index cannot start in the middle of a
             # ranking it has not computed. To walk a whole table, `scroll` stays flat.
             payload["offset"] = offset
+        if mmr is not None:
+            # Diversity reranking, done by the server, which already holds the vectors:
+            # `{"lambda_mult": 0.5, "fetch_k": 20}`. 1.0 is the plain ranking, 0.0 ignores the
+            # query. Only candidates that were fetched can contribute diversity, so `fetch_k`
+            # is what it costs.
+            payload["mmr"] = mmr
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search",
@@ -1577,6 +1584,7 @@ class DXMTClient:
         score_threshold: Optional[float] = None,
         payload_fields: Optional[list[str]] = None,
         offset: int = 0,
+        mmr: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
@@ -1613,6 +1621,8 @@ class DXMTClient:
             payload["payload_fields"] = payload_fields
         if offset:
             payload["offset"] = offset
+        if mmr is not None:
+            payload["mmr"] = mmr
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search",

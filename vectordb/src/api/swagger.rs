@@ -95,6 +95,7 @@ use crate::types::{
             crate::types::record::HybridSearchQuery,
             crate::types::record::FusionMethod,
             crate::types::record::SearchMode,
+            crate::types::record::MmrParams,
             crate::types::record::Filter,
             crate::types::record::Condition,
             crate::types::record::FilterOperation,

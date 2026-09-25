@@ -4634,16 +4634,17 @@ impl IntelligentIndexedStorage {
         let start_time = std::time::Instant::now();
         // 优先使用 limit，如果 limit 未设置或为默认值则使用 top_k
         // Python SDK 发送 "limit" 字段，Rust API 使用 "top_k"
-        let page = if query.limit > 0 && query.limit != 10 {
-            query.limit
-        } else {
-            query.top_k
-        };
+        let page = Self::page_size(&query);
         // Everything below fetches, scores and truncates to `result_limit`; the page is cut out
         // of that prefix in `assemble_hits`. An approximate index cannot start in the middle of
         // a ranking it has not computed, so an offset is paid for by computing the prefix --
         // which is what the field's documentation says it costs.
-        let result_limit = page.saturating_add(query.offset);
+        let result_limit = match &query.mmr {
+            // Diversity can only come from candidates that were fetched, so the index is asked
+            // for `fetch_k` and the page is chosen out of it in `assemble_hits`.
+            Some(mmr) => mmr.fetch_k.max(page.saturating_add(query.offset)),
+            None => page.saturating_add(query.offset),
+        };
 
         // `Exact` is not a setting of the machinery below -- it is the absence of it. Every
         // branch from here on picks an `ef`, a candidate count, or a filter strategy, and all
@@ -5743,6 +5744,81 @@ impl IntelligentIndexedStorage {
     /// Separate from `search` because a short post-filtered result has to be reassembled after
     /// a larger fetch, and the map lock must not be held across that fetch.
     #[allow(clippy::too_many_arguments)]
+    /// How many hits the caller asked for, from the two fields that can say it.
+    ///
+    /// `limit` wins when it is set to anything but its default, because the Python SDK sends it
+    /// and the Rust API is written around `top_k`. One definition, because `search` sizes the
+    /// fetch from it and `assemble_hits` cuts the page with it, and the two disagreeing would
+    /// show up as a page of the wrong length.
+    fn page_size(query: &SearchQuery) -> usize {
+        if query.limit > 0 && query.limit != 10 {
+            query.limit
+        } else {
+            query.top_k
+        }
+    }
+
+    /// Reorder hits for diversity: maximal marginal relevance over the candidates.
+    ///
+    /// Greedy and O(k · candidates) in similarity computations, which is why `fetch_k` is the
+    /// knob that matters. Similarity between two candidates is the table's own metric turned
+    /// into a similarity the same way a score is, so "near" means here what it means in the
+    /// ranking -- computing cosine on a table built for euclidean would diversify against a
+    /// notion of nearness the index does not use.
+    ///
+    /// A candidate whose vector cannot be read is kept in its original position rather than
+    /// dropped: a row whose vector is missing is a bug elsewhere, and losing it from a result
+    /// it legitimately earned would hide that.
+    fn mmr_rerank(
+        query_vector: &[f32],
+        candidates: Vec<(SearchHit, Option<Vec<f32>>)>,
+        metric: DistanceMetric,
+        want: usize,
+        lambda: f32,
+    ) -> Vec<SearchHit> {
+        let similarity = |a: &[f32], b: &[f32]| -> f32 {
+            metric
+                .calculate(a, b)
+                .map(|d| Self::similarity_from_distance(metric, d))
+                .unwrap_or(0.0)
+        };
+        let lambda = lambda.clamp(0.0, 1.0);
+
+        let mut pool: Vec<(SearchHit, Option<Vec<f32>>)> = candidates;
+        let mut chosen: Vec<SearchHit> = Vec::with_capacity(want.min(pool.len()));
+        let mut chosen_vectors: Vec<Vec<f32>> = Vec::with_capacity(want.min(pool.len()));
+
+        while chosen.len() < want && !pool.is_empty() {
+            let mut best = 0usize;
+            let mut best_score = f32::NEG_INFINITY;
+            for (i, (hit, vector)) in pool.iter().enumerate() {
+                let to_query = hit.score;
+                let redundancy = match vector {
+                    // Without a vector there is nothing to compare, so it competes on its
+                    // distance to the query alone.
+                    None => 0.0,
+                    Some(v) => chosen_vectors
+                        .iter()
+                        .map(|c| similarity(v, c))
+                        .fold(f32::NEG_INFINITY, f32::max)
+                        .max(0.0),
+                };
+                let score = lambda * to_query - (1.0 - lambda) * redundancy;
+                // `>` not `>=`, so ties keep the order the ranking put them in.
+                if score > best_score {
+                    best_score = score;
+                    best = i;
+                }
+            }
+            let (hit, vector) = pool.remove(best);
+            if let Some(v) = vector {
+                chosen_vectors.push(v);
+            }
+            chosen.push(hit);
+        }
+        chosen
+    }
+
     async fn assemble_hits(
         &self,
         tablename: &str,
@@ -5840,11 +5916,40 @@ impl IntelligentIndexedStorage {
             // The offset is dropped here rather than before scoring: `score_threshold` and the
             // post-filter both remove hits, and skipping first would skip rows that were never
             // going to be in the answer.
-            .skip(query.offset)
-            .take(result_limit.saturating_sub(query.offset))
+            .skip(if query.mmr.is_some() { 0 } else { query.offset })
+            .take(if query.mmr.is_some() {
+                result_limit
+            } else {
+                result_limit.saturating_sub(query.offset)
+            })
             .collect();
 
-        Ok(hits)
+        let Some(mmr) = &query.mmr else {
+            return Ok(hits);
+        };
+
+        // Diversity reranking, still under the map lock, because it needs the candidates'
+        // vectors and this is where they can be read without a second pass over the table. The
+        // page is cut afterwards: the offset applies to the reranked order, so pages of a
+        // diversified search still tile.
+        let want = Self::page_size(query).saturating_add(query.offset);
+        let with_vectors: Vec<(SearchHit, Option<Vec<f32>>)> = hits
+            .into_iter()
+            .map(|hit| {
+                let vector = table_data
+                    .records
+                    .get(&hit.id)
+                    .map(|record| table_data.vector_for(&record))
+                    .filter(|v| !v.is_empty());
+                (hit, vector)
+            })
+            .collect();
+        let mut reranked =
+            Self::mmr_rerank(&query.vector, with_vectors, metric, want, mmr.lambda_mult);
+        if query.offset > 0 {
+            reranked.drain(..query.offset.min(reranked.len()));
+        }
+        Ok(reranked)
     }
 
     /// 全文搜索

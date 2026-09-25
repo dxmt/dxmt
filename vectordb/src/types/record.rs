@@ -261,6 +261,17 @@ pub struct SearchQuery {
     /// the floor.
     #[serde(default)]
     pub score_threshold: Option<f32>,
+    /// Rerank the page for diversity instead of taking the nearest `top_k`.
+    ///
+    /// A chunked corpus answers a query with several near-copies of the same passage: all of
+    /// them are genuinely the nearest neighbours, and together they say one thing. Maximal
+    /// marginal relevance picks the next hit by how near it is to the query *minus* how near it
+    /// already is to what has been picked.
+    ///
+    /// Distinct from `search/groups`, which needs a field that says two records belong
+    /// together. This needs nothing: the vectors say it.
+    #[serde(default)]
+    pub mmr: Option<MmrParams>,
     /// Skip this many hits before the page starts.
     ///
     /// Page two of a search, which otherwise meant asking for `2 * top_k` and throwing half of
@@ -818,6 +829,41 @@ impl Record {
     }
 }
 
+/// Diversity reranking for a search. See [`SearchQuery::mmr`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MmrParams {
+    /// How much to weigh nearness to the query against distance from what is already picked.
+    /// 1.0 is the plain ranking, 0.0 ignores the query entirely. Default 0.5.
+    ///
+    /// Named as LangChain names it, because that is where most callers meet the idea.
+    #[serde(default = "default_lambda_mult")]
+    pub lambda_mult: f32,
+    /// How many neighbours to rerank. The diversity can only come from candidates that were
+    /// fetched, so this is the real cost knob: it is what the index is asked for, and their
+    /// vectors are read to compare them with each other. Default 20, as LangChain's is.
+    #[serde(default = "default_fetch_k")]
+    pub fetch_k: usize,
+}
+
+fn default_lambda_mult() -> f32 {
+    0.5
+}
+
+fn default_fetch_k() -> usize {
+    20
+}
+
+impl Default for MmrParams {
+    fn default() -> Self {
+        Self {
+            lambda_mult: default_lambda_mult(),
+            fetch_k: default_fetch_k(),
+        }
+    }
+}
+
 /// A query against the sparse index alone: `POST /tables/{t}/search/sparse`.
 ///
 /// Deliberately its own type rather than a flag on [`SearchQuery`]. A sparse query has no
@@ -860,6 +906,7 @@ impl Default for SearchQuery {
             payload_fields: None,
             score_threshold: None,
             offset: 0,
+            mmr: None,
         }
     }
 }

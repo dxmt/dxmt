@@ -362,6 +362,20 @@ def _(table):
         delete(f"/tables/{name}", expect_ok=False)
 
 
+@probe("SearchQuery", "mmr")
+def _(table):
+    # The shared corpus is a line of five vectors sweeping from r0 to r4, so the plain top-2 is
+    # r0, r1 -- adjacent and nearly the same. At full diversity the second pick is the far end.
+    plain = ids(search(table, limit=2))
+    assert plain == ["r0", "r1"], plain
+    diverse = ids(search(table, limit=2, mmr={"lambda_mult": 0.0, "fetch_k": 5}))
+    assert diverse[0] == "r0", diverse
+    assert diverse[1] != "r1", f"nothing was diversified: {diverse}"
+    # And 1.0 is the plain ranking, which is the half that proves the parameter is read rather
+    # than the endpoint simply behaving differently when `mmr` is present.
+    assert ids(search(table, limit=2, mmr={"lambda_mult": 1.0, "fetch_k": 5})) == plain
+
+
 @probe("SearchQuery", "offset")
 def _(table):
     # The pages have to tile: page two is the tail of the unpaged answer, not a second copy of

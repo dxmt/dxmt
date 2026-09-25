@@ -260,6 +260,10 @@ export interface SearchParams {
   search_mode?: 'fast' | 'normal' | 'accurate' | 'auto' | 'exact';
   /** Skip this many hits before the page starts. Not free; see {@link DXMTClient.search}. */
   offset?: number;
+  /** Rerank the page for diversity: `{ lambda_mult, fetch_k }`. 1.0 is the plain ranking,
+   * 0.0 ignores the query. Only fetched candidates can contribute diversity, so `fetch_k` is
+   * the cost. Done server-side, over the vectors the index already holds. */
+  mmr?: { lambda_mult?: number; fetch_k?: number };
   /** Drop hits scoring below this. Scores are similarities, so it is a floor: higher is nearer. */
   score_threshold?: number;
   /** Return only these payload keys instead of the whole payload. */
