@@ -84,6 +84,7 @@ async fn write_pass(storage: &IntelligentIndexedStorage, pass: usize) {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(serde_json::json!({ "pass": pass })),
+                text: None,
             })
             .collect();
         storage.insert_records("t", batch).await.expect("insert");
@@ -117,6 +118,7 @@ async fn upserts_give_their_disk_back_and_every_live_row_survives() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .expect("create table");
@@ -232,6 +234,7 @@ async fn a_reclaimed_table_still_recovers_from_its_row_files() {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await
             .expect("create table");

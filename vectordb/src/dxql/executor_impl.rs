@@ -86,6 +86,7 @@ impl StorageAwareExecutor {
                 sparse_vector: None,
                 payload: Some(Json::Object(row.payload)),
                 named_vectors: None,
+                text: None,
             };
             self.storage
                 .insert_record(&insert.table, request)
@@ -119,6 +120,7 @@ impl StorageAwareExecutor {
                 sparse_vector: row.sparse_vector,
                 payload: Some(Json::Object(payload)),
                 named_vectors: row.named_vectors,
+                text: None,
             };
             self.storage
                 .update_record(&update.table, &row.id, request)
@@ -170,6 +172,7 @@ impl StorageAwareExecutor {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         self.storage
             .create_table(config)
@@ -448,6 +451,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
         }
 
@@ -471,6 +475,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
         }
 

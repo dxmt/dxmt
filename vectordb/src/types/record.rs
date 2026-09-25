@@ -123,7 +123,18 @@ impl<'de> Deserialize<'de> for Record {
 #[serde(deny_unknown_fields)]
 pub struct CreateRecordRequest {
     pub id: RecordId,
+    /// The vector, when the caller computed it. Empty means the server is expected to, from
+    /// `text` or from the payload field the table's `embedding` names — and a table with no
+    /// `embedding` refuses an empty vector rather than storing one.
+    #[serde(default)]
     pub vector: DenseVector,
+    /// Text to embed, on a table that declares an `embedding` model.
+    ///
+    /// It is written into the payload under that config's `field` (default `text`), so the
+    /// text a hit came from comes back with the hit. That is what a retrieval caller needs
+    /// next, and the alternative is every caller storing a second copy of it.
+    #[serde(default)]
+    pub text: Option<String>,
     pub sparse_vector: Option<SparseVector>,
     /// Named vectors for multi-vector tables (key = vector space name).
     #[serde(default)]
@@ -222,7 +233,15 @@ impl SearchMode {
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SearchQuery {
+    /// The query vector. Empty is valid only together with `text` on a table that declares an
+    /// `embedding` model; the server then embeds the text with that model.
+    #[serde(default)]
     pub vector: DenseVector,
+    /// Query text, embedded by the table's model. Rejected alongside a `vector`: two queries
+    /// in one body, and silently preferring one of them is how a caller ends up measuring the
+    /// wrong thing.
+    #[serde(default)]
+    pub text: Option<String>,
     #[serde(default = "default_top_k", alias = "k")]
     pub top_k: usize,
     pub filter: Option<Filter>,
@@ -913,6 +932,7 @@ impl Default for SearchQuery {
             score_threshold: None,
             offset: 0,
             mmr: None,
+            text: None,
         }
     }
 }
@@ -994,6 +1014,7 @@ mod tests {
             sparse_vector: None,
             payload: Some(serde_json::json!({"category": "test"})),
             named_vectors: None,
+            text: None,
         };
 
         let record = Record::new(request, 3)?;
@@ -1013,6 +1034,7 @@ mod tests {
                 "price": 99.99
             })),
             named_vectors: None,
+            text: None,
         };
 
         let record = Record::new(request, 2)?;
@@ -1041,6 +1063,7 @@ mod tests {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"x": 1})),
                 named_vectors: None,
+                text: None,
             },
             2,
         )?;
@@ -1079,6 +1102,7 @@ mod tests {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"category": "food", "price": 5.0})),
                 named_vectors: None,
+                text: None,
             },
             2,
         )?;

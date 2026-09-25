@@ -84,7 +84,10 @@ export interface Filter {
  */
 export interface Record {
   id: string;
-  vector: Vector;
+  /** The vector. Omit it and send `text` on a table that declares an `embedding` model. */
+  vector?: Vector;
+  /** Text for the server to embed, filed into the payload under the config's `field`. */
+  text?: string;
   /** Sent through to the server as written. Searchable with {@link DXMTClient.sparseSearch}. */
   sparse_vector?: SparseVector;
   metadata?: Metadata;
@@ -184,6 +187,29 @@ export interface QuantizationParams {
 }
 
 /**
+ * How a table turns text into a vector, server-side.
+ *
+ * With it set, records may carry `text` instead of `vector` and {@link SearchParams.text}
+ * embeds a query with this same model. `base_url` reaches anything speaking the OpenAI
+ * `/embeddings` protocol — text-embeddings-inference, Infinity, ollama, vLLM, llama.cpp.
+ *
+ * There is deliberately no field for the key: `api_key_env` names an environment variable of
+ * the *server*, so no key travels in a request body or lands in a snapshot.
+ */
+export interface EmbeddingConfig {
+  /** Passed to the provider verbatim, e.g. `text-embedding-3-small` or `BAAI/bge-m3`. */
+  model: string;
+  /** API root, without the trailing `/embeddings`. Default `https://api.openai.com/v1`. */
+  base_url?: string;
+  /** Payload field holding the text. Default `text`; a record's `text` is written here. */
+  field?: string;
+  /** Environment variable on the server holding the key. Default `OPENAI_API_KEY`. */
+  api_key_env?: string;
+  /** Texts per request to the provider. Default 64. */
+  batch_size?: number;
+}
+
+/**
  * Table configuration for creating tables.
  */
 export interface TableConfig {
@@ -206,6 +232,8 @@ export interface TableConfig {
   hnsw?: HnswParams;
   /** Quantization parameters for this table. */
   quantization?: QuantizationParams;
+  /** The model this table embeds text with. Without it, the caller sends vectors. */
+  embedding?: EmbeddingConfig;
 }
 
 /**
@@ -244,7 +272,17 @@ export interface InsertRecordsParams {
  */
 export interface SearchParams {
   table_name: string;
-  vector: Vector;
+  /** The query vector. Omit it when passing {@link SearchParams.text}. */
+  vector?: Vector;
+  /**
+   * Query text, embedded by the *table's* model — the only model it may be embedded with,
+   * since a query vector from a different model than the corpus is not a worse answer but an
+   * unrelated one. Needs the table to have been created with an `embedding` config.
+   *
+   * Exclusive with `vector`: the server refuses a body carrying both rather than preferring
+   * one silently.
+   */
+  text?: string;
   k?: number;
   filter?: Filter;
   include_metadata?: boolean;

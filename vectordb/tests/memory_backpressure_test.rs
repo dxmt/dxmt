@@ -47,6 +47,7 @@ fn table(name: &str, dimension: usize) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -57,6 +58,7 @@ fn record(id: &str, vector: Vec<f32>) -> CreateRecordRequest {
         sparse_vector: None,
         named_vectors: None,
         payload: None,
+        text: None,
     }
 }
 

@@ -45,6 +45,7 @@ async fn create_storage(max_size_mb: usize) -> IntelligentIndexedStorage {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     let _ = storage.create_table(table_config).await.unwrap();
 
@@ -60,6 +61,7 @@ fn generate_records(start_id: usize, count: usize) -> Vec<CreateRecordRequest> {
             payload: Some(serde_json::json!({"index": i})),
             sparse_vector: None,
             named_vectors: None,
+            text: None,
         })
         .collect()
 }
@@ -84,6 +86,7 @@ async fn bench_single_insert_baseline() {
             payload: None,
             sparse_vector: None,
             named_vectors: None,
+            text: None,
         }];
         let _ = storage.insert_records("benchmark_table", records).await.unwrap();
     }
@@ -157,6 +160,7 @@ async fn bench_mixed_workload() {
             payload: None,
             sparse_vector: None,
             named_vectors: None,
+            text: None,
         }];
         let _ = storage.insert_records("benchmark_table", records).await.unwrap();
 
@@ -243,6 +247,7 @@ async fn bench_comparison_summary() {
                 payload: None,
                 sparse_vector: None,
                 named_vectors: None,
+                text: None,
             }];
             let _ = storage.insert_records("benchmark_table", records).await.unwrap();
         }

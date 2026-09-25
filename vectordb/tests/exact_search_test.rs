@@ -59,6 +59,7 @@ fn table(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn record(i: usize) -> CreateRecordRequest {
         sparse_vector: None,
         named_vectors: None,
         payload: Some(serde_json::json!({ "bucket": i % 10, "n": i })),
+        text: None,
     }
 }
 
@@ -431,6 +433,7 @@ async fn a_negative_similarity_is_reported_as_it_is() {
                     sparse_vector: None,
                     named_vectors: None,
                     payload: None,
+                    text: None,
                 })
                 .collect(),
         )

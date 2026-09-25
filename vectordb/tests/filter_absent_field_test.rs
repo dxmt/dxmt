@@ -59,6 +59,7 @@ fn table() -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -105,6 +106,7 @@ async fn storage_with(payload: impl Fn(usize) -> serde_json::Value) -> Intellige
             sparse_vector: None,
             named_vectors: None,
             payload: Some(payload(i)),
+            text: None,
         })
         .collect();
     storage.insert_records("t", rows).await.unwrap();

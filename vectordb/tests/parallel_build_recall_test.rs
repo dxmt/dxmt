@@ -135,6 +135,7 @@ async fn a_table_built_in_parallel_batches_finds_what_an_exact_scan_finds() {
             }),
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -147,6 +148,7 @@ async fn a_table_built_in_parallel_batches_finds_what_an_exact_scan_finds() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             })
             .collect();
         storage.insert_records("t", records).await.unwrap();

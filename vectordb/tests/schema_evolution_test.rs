@@ -35,6 +35,7 @@ fn make_table_config(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 

@@ -47,6 +47,7 @@ fn table(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -72,6 +73,7 @@ fn rows() -> Vec<CreateRecordRequest> {
             sparse_vector: None,
             named_vectors: None,
             payload: Some(serde_json::json!({ "i": i })),
+            text: None,
         })
         .collect()
 }
@@ -265,6 +267,7 @@ async fn a_table_with_files_on_disk_keeps_them_when_the_environment_says_memory(
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             }],
         )
         .await
@@ -338,6 +341,7 @@ async fn an_insert_after_the_last_snapshot_is_searchable_after_a_restart() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             }],
         )
         .await

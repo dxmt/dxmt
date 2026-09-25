@@ -105,6 +105,7 @@ async fn a_quantized_table_answers_with_exact_order() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -119,6 +120,7 @@ async fn a_quantized_table_answers_with_exact_order() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(serde_json::json!({ "bucket": i % 5 })),
+                text: None,
             })
             .collect();
         storage.insert_records("t", batch).await.unwrap();

@@ -70,6 +70,7 @@ async fn write_pass(storage: &IntelligentIndexedStorage, pass: usize) {
             sparse_vector: None,
             named_vectors: None,
             payload: Some(serde_json::json!({ "pass": pass })),
+            text: None,
         })
         .collect();
     storage.insert_records("t", batch).await.expect("insert");
@@ -126,6 +127,7 @@ async fn upserts_leave_tombstones_and_the_sweep_rebuilds_them_away() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .expect("create table");

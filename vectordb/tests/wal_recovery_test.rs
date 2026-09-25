@@ -67,6 +67,7 @@ fn table(name: &str, dimension: usize, metric: DistanceMetric) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -77,6 +78,7 @@ fn record(id: &str, vector: Vec<f32>) -> CreateRecordRequest {
         sparse_vector: None,
         named_vectors: None,
         payload: None,
+        text: None,
     }
 }
 
@@ -414,6 +416,7 @@ async fn upsert_replaces_secondary_indexes_and_survives_restart() {
                 sparse_vector: Some(SparseVector::new(vec![0], vec![2.0], 4).unwrap()),
                 named_vectors: Some(x_old_named),
                 payload: Some(serde_json::json!({"tag": "old"})),
+                text: None,
             },
             CreateRecordRequest {
                 id: "y".to_string(),
@@ -421,6 +424,7 @@ async fn upsert_replaces_secondary_indexes_and_survives_restart() {
                 sparse_vector: Some(SparseVector::new(vec![0], vec![1.0], 4).unwrap()),
                 named_vectors: Some(y_named),
                 payload: Some(serde_json::json!({"tag": "keep"})),
+                text: None,
             },
         ];
         // More than twenty rows force a one-row stale payload posting into the exact
@@ -439,6 +443,7 @@ async fn upsert_replaces_secondary_indexes_and_survives_restart() {
                     sparse_vector: Some(SparseVector::new(vec![1], vec![2.0], 4).unwrap()),
                     named_vectors: Some(x_new_named),
                     payload: Some(serde_json::json!({"tag": "new"})),
+                    text: None,
                 }],
             )
             .await
@@ -491,6 +496,7 @@ async fn table_alterations_survive_a_restart() {
                     }],
                     drop_fields: Vec::new(),
                     payload_index: None,
+                    embedding: None,
                 },
             )
             .await
@@ -2018,6 +2024,7 @@ async fn a_selective_filter_works_on_a_partitioned_table() {
                 payload: Some(serde_json::json!({
                     "tag": if i % 50 == 0 { "rare" } else { "common" }
                 })),
+                text: None,
             }
         })
         .collect();
@@ -2743,6 +2750,7 @@ async fn an_update_is_replayed_with_its_vector() {
                         sparse_vector: None,
                         named_vectors: None,
                         payload: Some(serde_json::json!({ "updated": i })),
+                        text: None,
                     },
                 )
                 .await
@@ -2807,6 +2815,7 @@ async fn a_filtered_list_keeps_its_order_across_a_crash() {
         sparse_vector: None,
         named_vectors: None,
         payload: Some(serde_json::json!({ "k": 1 })),
+        text: None,
     };
     {
         let storage = open(&wal).await;

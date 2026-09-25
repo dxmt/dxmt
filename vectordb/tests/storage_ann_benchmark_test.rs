@@ -143,6 +143,7 @@ async fn test_storage_ann_10k_recall_and_latency() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -157,6 +158,7 @@ async fn test_storage_ann_10k_recall_and_latency() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
 
@@ -281,6 +283,7 @@ async fn test_search_effort_is_live() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -298,6 +301,7 @@ async fn test_search_effort_is_live() {
                     sparse_vector: None,
                     payload: None,
                     named_vectors: None,
+                    text: None,
                 })
                 .collect(),
         )

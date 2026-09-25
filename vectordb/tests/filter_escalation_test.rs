@@ -97,6 +97,7 @@ fn table() -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -160,6 +161,7 @@ async fn storage() -> IntelligentIndexedStorage {
                 "bucket": if i % 10 == 0 { HIGH } else { LOW },
                 "parity": if i % 10 == 0 { 0 } else { 1 },
             })),
+            text: None,
         })
         .collect();
     storage.insert_records("t", rows).await.unwrap();

@@ -13,7 +13,7 @@ pub mod utils;
 
 // Experimental modules are opt-in. Keeping them out of the default dependency graph is part of
 // the supported single-node Alpha contract.
-#[cfg(feature = "embeddings")]
+#[cfg(any(feature = "embeddings", feature = "server-embedding"))]
 pub mod embeddings;
 #[cfg(feature = "multimodal")]
 pub mod multimodal;

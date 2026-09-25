@@ -36,6 +36,7 @@ async fn create_test_table(
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(config).await?;
 
@@ -69,6 +70,7 @@ async fn create_test_table(
                     "index": i,
                     "batch": batch_start / batch_size,
                 })),
+                text: None,
             };
             records.push(record);
         }

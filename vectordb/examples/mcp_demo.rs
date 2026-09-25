@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await?;
 
@@ -66,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "price": 2499
             })),
             named_vectors: None,
+            text: None,
         },
         CreateRecordRequest {
             id: "laptop_2".to_string(),
@@ -77,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "price": 1899
             })),
             named_vectors: None,
+            text: None,
         },
         CreateRecordRequest {
             id: "phone_1".to_string(),
@@ -88,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "price": 1199
             })),
             named_vectors: None,
+            text: None,
         },
     ];
     storage.insert_records("products", records).await?;

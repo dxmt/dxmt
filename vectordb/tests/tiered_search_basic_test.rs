@@ -32,6 +32,7 @@ fn create_test_table_config(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn create_test_vectors(count: usize, dimension: usize) -> Vec<CreateRecordReques
                 "category": if i % 2 == 0 { "even" } else { "odd" }
             })),
             named_vectors: None,
+            text: None,
         })
         .collect()
 }

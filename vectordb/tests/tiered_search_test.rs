@@ -36,6 +36,7 @@ fn create_test_table_config(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -51,6 +52,7 @@ fn create_test_vectors(count: usize, dimension: usize) -> Vec<CreateRecordReques
                 "category": if i % 2 == 0 { "even" } else { "odd" }
             })),
             named_vectors: None,
+            text: None,
         })
         .collect()
 }
@@ -149,6 +151,7 @@ async fn test_tiered_search_with_warm_tier() {
                 "tier": "warm"
             })),
             named_vectors: None,
+            text: None,
         })
         .collect();
     warm_tier
@@ -217,6 +220,7 @@ async fn test_tiered_search_all_tiers() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
     warm_tier
@@ -230,6 +234,7 @@ async fn test_tiered_search_all_tiers() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
     cold_tier
@@ -369,6 +374,7 @@ async fn test_search_result_reranking() {
         sparse_vector: None,
         payload: None,
         named_vectors: None,
+        text: None,
     }];
     hot_tier
         .insert_records("test_reranking", hot_vectors)
@@ -381,6 +387,7 @@ async fn test_search_result_reranking() {
         sparse_vector: None,
         payload: None,
         named_vectors: None,
+        text: None,
     }];
     warm_tier
         .insert_records("test_reranking", warm_vectors)
@@ -393,6 +400,7 @@ async fn test_search_result_reranking() {
         sparse_vector: None,
         payload: None,
         named_vectors: None,
+        text: None,
     }];
     cold_tier
         .insert_records("test_reranking", cold_vectors)

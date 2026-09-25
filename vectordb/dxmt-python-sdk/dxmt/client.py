@@ -352,6 +352,7 @@ class DXMTClient:
         hnsw: Optional[dict[str, int]] = None,
         quantization: Optional[dict[str, int]] = None,
         payload_index: Optional[dict[str, list[str]]] = None,
+        embedding: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Create a new table (collection).
 
@@ -372,6 +373,12 @@ class DXMTClient:
                 filter fast without declaring anything; a field nobody filters on pays memory
                 and rebuild time for nothing. A filter on an excluded field is refused, not
                 answered empty.
+            embedding: Server-side embedding for this table, e.g.
+                `{"model": "text-embedding-3-small"}` or
+                `{"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1"}`. Records may
+                then be inserted with `text` in place of `vector`, and `search(text=...)`
+                embeds the query with this same model. The key is read from the server's
+                environment (`api_key_env`, default `OPENAI_API_KEY`), never sent from here.
             enable_full_text_search: Enable full-text search.
             text_fields: Text field configurations.
             memory_optimization: Enable memory optimization (optional).
@@ -403,6 +410,12 @@ class DXMTClient:
             payload["quantization"] = quantization
         if payload_index is not None:
             payload["payload_index"] = payload_index
+        # The model the server embeds text with: `{"model": "text-embedding-3-small"}`, plus
+        # an optional `base_url` for anything else speaking the OpenAI /embeddings protocol.
+        # With it, records and searches may carry `text` instead of a vector. The API key is
+        # not in here -- `api_key_env` names an environment variable of the *server*.
+        if embedding is not None:
+            payload["embedding"] = embedding
         try:
             response = self._client.post("/tables", json=payload)
             response.raise_for_status()
@@ -427,6 +440,7 @@ class DXMTClient:
         hnsw: Optional[dict[str, int]] = None,
         quantization: Optional[dict[str, int]] = None,
         payload_index: Optional[dict[str, list[str]]] = None,
+        embedding: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Async create a new table. See `create_table` for what each argument does."""
         payload = {
@@ -445,6 +459,12 @@ class DXMTClient:
             payload["quantization"] = quantization
         if payload_index is not None:
             payload["payload_index"] = payload_index
+        # The model the server embeds text with: `{"model": "text-embedding-3-small"}`, plus
+        # an optional `base_url` for anything else speaking the OpenAI /embeddings protocol.
+        # With it, records and searches may carry `text` instead of a vector. The API key is
+        # not in here -- `api_key_env` names an environment variable of the *server*.
+        if embedding is not None:
+            payload["embedding"] = embedding
         try:
             response = await self.async_client.post("/tables", json=payload)
             response.raise_for_status()
@@ -1486,7 +1506,7 @@ class DXMTClient:
     def search(
         self,
         table_name: str,
-        vector: list[float],
+        vector: Optional[list[float]] = None,
         k: Optional[int] = None,
         limit: Optional[int] = None,
         filter: Optional[Filter] = None,
@@ -1495,12 +1515,17 @@ class DXMTClient:
         payload_fields: Optional[list[str]] = None,
         offset: int = 0,
         mmr: Optional[dict[str, Any]] = None,
+        text: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
 
         Args:
             table_name: Name of the table.
-            vector: Query vector.
+            vector: Query vector. Omit it when passing `text`.
+            text: Query text, embedded by the table's own model -- which is the only model it
+                may be embedded with, since a query vector from a different model than the
+                corpus is not a worse answer but an unrelated one. Requires the table to have
+                been created with `embedding=...`.
             k: Number of results to return (preferred parameter name).
             limit: Number of results to return (alias for k, for compatibility).
             filter: Optional metadata filter.
@@ -1532,12 +1557,21 @@ class DXMTClient:
             # Both provided but different - prefer k
             pass
 
-        payload = {
-            "vector": vector,
+        # `text` is embedded by the table's own model, server-side. The two are exclusive
+        # and the server refuses a body carrying both, rather than quietly preferring one --
+        # which is how a caller ends up measuring the wrong query for a week.
+        if (vector is None) == (text is None):
+            msg = "search takes either a vector or text, not both and not neither"
+            raise ValueError(msg)
+        payload: dict[str, Any] = {
             "top_k": k,
             "limit": k,
             "filter": convert_simple_filter_to_dxmt(filter),
         }
+        if text is not None:
+            payload["text"] = text
+        else:
+            payload["vector"] = vector
         if search_mode is not None:
             payload["search_mode"] = search_mode
         # A floor on the similarity the server returns (higher is nearer), not on a distance.
@@ -1576,7 +1610,7 @@ class DXMTClient:
     async def asearch(
         self,
         table_name: str,
-        vector: list[float],
+        vector: Optional[list[float]] = None,
         k: Optional[int] = None,
         limit: Optional[int] = None,
         filter: Optional[Filter] = None,
@@ -1585,12 +1619,17 @@ class DXMTClient:
         payload_fields: Optional[list[str]] = None,
         offset: int = 0,
         mmr: Optional[dict[str, Any]] = None,
+        text: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
         Args:
             table_name: Name of the table.
-            vector: Query vector.
+            vector: Query vector. Omit it when passing `text`.
+            text: Query text, embedded by the table's own model -- which is the only model it
+                may be embedded with, since a query vector from a different model than the
+                corpus is not a worse answer but an unrelated one. Requires the table to have
+                been created with `embedding=...`.
             k: Number of results to return (preferred parameter name).
             limit: Number of results to return (alias for k, for compatibility).
             filter: Optional metadata filter.
@@ -1604,12 +1643,21 @@ class DXMTClient:
         elif k is None:
             k = limit
 
-        payload = {
-            "vector": vector,
+        # `text` is embedded by the table's own model, server-side. The two are exclusive
+        # and the server refuses a body carrying both, rather than quietly preferring one --
+        # which is how a caller ends up measuring the wrong query for a week.
+        if (vector is None) == (text is None):
+            msg = "search takes either a vector or text, not both and not neither"
+            raise ValueError(msg)
+        payload: dict[str, Any] = {
             "top_k": k,
             "limit": k,
             "filter": convert_simple_filter_to_dxmt(filter),
         }
+        if text is not None:
+            payload["text"] = text
+        else:
+            payload["vector"] = vector
         if search_mode is not None:
             payload["search_mode"] = search_mode
         # A floor on the similarity the server returns (higher is nearer), not on a distance.

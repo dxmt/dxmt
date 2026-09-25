@@ -1295,3 +1295,94 @@ def _(table):
         assert stored is not None and "topic" in json.dumps(stored), stored
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("CreateTableRequest", "embedding")
+def _(table):
+    # The model a table embeds text with. This suite has no embedding provider, so what is
+    # checked is the half that does not need one: the config is accepted, kept, and comes back
+    # -- a create that dropped it would answer 200 and then refuse every text insert, hours
+    # later and somewhere else.
+    name = f"probe_embed_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4,
+                     "embedding": {"model": "text-embedding-3-small",
+                                   "base_url": "http://127.0.0.1:1/v1"}})
+    try:
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["embedding"]["model"] == "text-embedding-3-small", info["embedding"]
+        assert info["embedding"]["base_url"] == "http://127.0.0.1:1/v1", info["embedding"]
+
+        # And the provider being down is a 503, not a stored placeholder vector. This is the
+        # one failure mode that has to be loud: a zero vector would insert cleanly and rank
+        # wrongly forever.
+        r = post(f"/tables/{name}/records", {"records": [{"id": "a", "text": "hello"}]},
+                 expect_ok=False)
+        assert r.status_code == 503, (r.status_code, r.text[:200])
+        assert get(f"/tables/{name}").json()["data"]["record_count"] == 0
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("SearchQuery", "text")
+def _(table):
+    # A text query on a table with no model is refused, rather than answered against nothing.
+    r = post(f"/tables/{table}/search", {"text": "hello", "top_k": 3}, expect_ok=False)
+    assert r.status_code == 400, (r.status_code, r.text[:200])
+    assert "embedding model" in r.text, r.text[:200]
+
+
+def test_a_record_carrying_text_into_a_table_with_no_model_says_so(table):
+    """Not a `@probe`: that registry covers the fields of a top-level request body, and a
+    record is nested inside `BatchInsertRequest.records`, so `CreateRecordRequest` never
+    appears in the document's own field list.
+
+    The message is the point. `validate_batch_insert` used to answer this with "Vector cannot
+    be empty" -- a complaint about a field the caller never claimed to send, and no hint that
+    what is missing is a model on the table.
+    """
+    r = post(f"/tables/{table}/records", {"records": [{"id": "t1", "text": "hello"}]},
+             expect_ok=False)
+    assert r.status_code == 400, (r.status_code, r.text[:200])
+    assert "embedding model" in r.text, r.text[:200]
+
+
+@probe("TableAlterRequest", "embedding")
+def _(table):
+    # Repointing a moved provider. The guard that matters is the one this asserts: the model
+    # may not change under a table that holds rows, because those vectors came from the old
+    # one and a query embedded by a different model is not a worse answer but an unrelated one.
+    name = f"probe_alter_embed_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4,
+                     "embedding": {"model": "m1", "base_url": "http://127.0.0.1:1/v1"}})
+    try:
+        moved = alter(name, embedding={"model": "m1", "base_url": "http://127.0.0.1:2/v1"})
+        assert moved.status_code == 200, (moved.status_code, moved.text[:200])
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["embedding"]["base_url"] == "http://127.0.0.1:2/v1", info["embedding"]
+
+        post(f"/tables/{name}/records",
+             {"records": [{"id": "a", "vector": [1.0, 0, 0, 0]}]})
+        r = call("PATCH", f"/tables/{name}",
+                 {"embedding": {"model": "m2", "base_url": "http://127.0.0.1:2/v1"}},
+                 expect_ok=False)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+        assert "re-embedded" in r.text, r.text[:200]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("UpdateRecordRequest", "text")
+def _(table):
+    # Re-embedding a record whose text changed, without losing its created_at and version.
+    # This suite has no provider, so what is pinned is the refusal: on a table with no model
+    # the server says which thing is missing, rather than complaining about the vector.
+    post(f"/tables/{table}/records", {"records": [{"id": "u1", "vector": [1.0, 0, 0, 0]}]})
+    r = call("PUT", f"/tables/{table}/records/u1", {"text": "new text"}, expect_ok=False)
+    assert r.status_code == 400, (r.status_code, r.text[:200])
+    assert "embedding model" in r.text, r.text[:200]
+
+    # And it is exclusive with `vector`, rather than one of them quietly winning.
+    r = call("PUT", f"/tables/{table}/records/u1",
+             {"text": "new text", "vector": [0, 1.0, 0, 0]}, expect_ok=False)
+    assert r.status_code == 400, (r.status_code, r.text[:200])
+    assert "not both" in r.text, r.text[:200]

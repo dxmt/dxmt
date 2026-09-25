@@ -506,6 +506,27 @@ struct InsertRequest {
     response_tx: oneshot::Sender<crate::Result<Vec<Record>>>,
 }
 
+/// What an edit to one record asks for, as a struct rather than eight positionals.
+///
+/// `apply_update` reached eight parameters, four of them `Option` or `bool` — which is the
+/// shape with no compiler protection against a swap at the call site, and there are two call
+/// sites in two protocols that must not disagree. `Default` is the "change nothing" update, so
+/// a caller names only the fields it means.
+#[derive(Debug, Default, Clone)]
+pub struct RecordUpdate {
+    /// `None` keeps the stored dense vector. The sparse and named vectors are kept either way.
+    pub vector: Option<DenseVector>,
+    /// `None` keeps the stored payload, in replace mode as much as in merge mode. To clear a
+    /// payload, send an empty object.
+    pub payload: Option<serde_json::Value>,
+    /// New text for the table's model to embed, replacing the vector. Exclusive with `vector`.
+    pub text: Option<String>,
+    /// Merge the payload into the stored one rather than replacing it.
+    pub merge: bool,
+    /// Create the record when it does not exist, rather than failing.
+    pub upsert: bool,
+}
+
 /// 智能索引存储引擎 - 自动选择最优索引算法
 pub struct IntelligentIndexedStorage {
     /// 表数据
@@ -1754,6 +1775,7 @@ impl IntelligentIndexedStorage {
                         hnsw: None,
                         quantization: None,
                         payload_index: None,
+                        embedding: None,
                     };
                     self.create_table(config).await.map(|_| {
                         tables += 1;
@@ -1771,6 +1793,7 @@ impl IntelligentIndexedStorage {
                         sparse_vector: None,
                         named_vectors: None,
                         payload,
+                        text: None,
                     };
                     self.insert_records(&table, vec![request]).await.map(|_| {
                         records += 1;
@@ -1866,6 +1889,7 @@ impl IntelligentIndexedStorage {
             sparse_vector: record.sparse_vector.clone(),
             named_vectors: record.named_vectors.clone(),
             payload: Some(record.payload.clone()),
+            text: None,
         };
         self.insert_records(table, vec![request]).await?;
 
@@ -2770,6 +2794,7 @@ impl IntelligentIndexedStorage {
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
+            embedding: None,
         };
         self.create_table(config).await?;
 
@@ -3759,6 +3784,7 @@ impl IntelligentIndexedStorage {
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
+            embedding: None,
         };
         // Not `create_table`: this container is being rebuilt from a snapshot that already
         // describes it, so re-logging the creation would grow the WAL on every restart.
@@ -4524,6 +4550,175 @@ impl IntelligentIndexedStorage {
     }
 
     /// 插入记录 - Channel-based 无锁架构
+    /// Give every record that arrived as text a vector, and file its text in the payload.
+    ///
+    /// Called before the insert goes to the channel, so the provider round trip is *not* taken
+    /// with the table lock held and does not sit in front of the single insert processor — the
+    /// one thing that would make one slow model everyone's problem.
+    ///
+    /// Not a method on the insert processor for the same reason, and not on the API handler
+    /// because then MCP, gRPC and DXQL would each have to remember it. This is the same
+    /// argument alias resolution settled: one place in the storage layer, and a protocol added
+    /// later cannot forget.
+    async fn fill_vectors_from_text(
+        &self,
+        table: &Table,
+        requests: &mut [CreateRecordRequest],
+    ) -> crate::Result<()> {
+        let has_text = requests.iter().any(|r| r.text.is_some());
+        let needs_vector = requests.iter().any(|r| r.vector.is_empty());
+        if !has_text && !needs_vector {
+            return Ok(());
+        }
+
+        let Some(config) = table.embedding.as_ref() else {
+            if has_text {
+                return Err(crate::Error::InvalidInput(format!(
+                    "table '{}' has no embedding model, so it cannot accept `text`. Create it \
+                     with an \"embedding\" config naming a model, or send a \"vector\".",
+                    table.name
+                )));
+            }
+            let id = requests
+                .iter()
+                .find(|r| r.vector.is_empty())
+                .map(|r| r.id.clone())
+                .unwrap_or_default();
+            return Err(crate::Error::InvalidInput(format!(
+                "record '{id}' has an empty vector and table '{}' has no embedding model to \
+                 fill it from",
+                table.name
+            )));
+        };
+
+        // The text goes into the payload whether or not it is what produced the vector: a
+        // caller who embedded client-side still wants the chunk back with the hit, and having
+        // the field mean two things depending on who computed the vector would be worse.
+        let field = config.field().to_string();
+        for record in requests.iter_mut() {
+            if let Some(text) = record.text.take() {
+                let payload = record
+                    .payload
+                    .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+                let object = payload.as_object_mut().ok_or_else(|| {
+                    crate::Error::InvalidInput(format!(
+                        "record '{}' sends `text`, which is filed under payload field \
+                         '{field}', but its payload is not an object",
+                        record.id
+                    ))
+                })?;
+                object.insert(field.clone(), serde_json::Value::String(text));
+            }
+        }
+
+        let mut pending: Vec<usize> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        for (i, record) in requests.iter().enumerate() {
+            if !record.vector.is_empty() {
+                continue;
+            }
+            let text = record
+                .payload
+                .as_ref()
+                .and_then(|p| p.get(&field))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if text.trim().is_empty() {
+                return Err(crate::Error::InvalidInput(format!(
+                    "record '{}' has no vector and nothing to embed: send \"text\", or a \
+                     payload field '{field}', or a \"vector\"",
+                    record.id
+                )));
+            }
+            pending.push(i);
+            texts.push(text.to_string());
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let vectors = Self::embed(config, &texts, Some(table.dimension)).await?;
+        for (i, vector) in pending.into_iter().zip(vectors) {
+            requests[i].vector = vector;
+        }
+        Ok(())
+    }
+
+    /// Call the table's model, or say which build cannot.
+    ///
+    /// The `cfg` is here and nowhere else so that the two paths cannot drift: every caller gets
+    /// the same message from a binary built without the feature, rather than the feature being
+    /// invisible at one entry point and an error at another.
+    async fn embed(
+        config: &crate::types::table::EmbeddingConfig,
+        texts: &[String],
+        dimension: Option<usize>,
+    ) -> crate::Result<Vec<Vec<f32>>> {
+        #[cfg(feature = "server-embedding")]
+        {
+            crate::embeddings::service::embed_texts(config, texts, dimension).await
+        }
+        #[cfg(not(feature = "server-embedding"))]
+        {
+            let _ = (config, texts, dimension);
+            Err(crate::Error::NotImplemented(
+                "this build has no embedding support: rebuild with --features server-embedding, \
+                 or send vectors instead of text"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Turn a query's `text` into its `vector`, using the table's model.
+    ///
+    /// The embedding has to be the table's, not the caller's choice, and not a server default:
+    /// a query vector from a different model than the corpus is not a worse answer, it is a
+    /// meaningless one, and it comes back looking like a normal ranked page.
+    async fn embed_query(
+        &self,
+        tablename: &str,
+        mut query: SearchQuery,
+    ) -> crate::Result<SearchQuery> {
+        let Some(text) = query.text.take() else {
+            return Ok(query);
+        };
+        if !query.vector.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "a search takes `vector` or `text`, not both".to_string(),
+            ));
+        }
+        if text.trim().is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "`text` is empty; there is nothing to embed".to_string(),
+            ));
+        }
+        if query.vector_name.is_some() {
+            return Err(crate::Error::InvalidInput(
+                "`text` embeds into the table's default vector space; a named space has its own \
+                 model and this server does not hold one. Send `vector` with `vector_name`."
+                    .to_string(),
+            ));
+        }
+        let table = self
+            .read_tables("embed_query")
+            .await
+            .get(tablename)
+            .map(|data| data.table.clone())
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let config = table.embedding.as_ref().ok_or_else(|| {
+            crate::Error::InvalidInput(format!(
+                "table '{tablename}' has no embedding model, so it cannot search by `text`. \
+                 Send a `vector`, or recreate the table with an \"embedding\" config."
+            ))
+        })?;
+        let vectors =
+            Self::embed(config, std::slice::from_ref(&text), Some(table.dimension)).await?;
+        query.vector = vectors.into_iter().next().ok_or_else(|| {
+            crate::Error::Internal("the embedding provider returned no vector".to_string())
+        })?;
+        Ok(query)
+    }
+
     pub async fn insert_records(
         &self,
         tablename: &str,
@@ -4535,6 +4730,23 @@ impl IntelligentIndexedStorage {
         // Writing to an evicted table has to bring it back first, or the insert lands in a
         // fresh empty table and the snapshot's records vanish on the next snapshot.
         self.ensure_resident(tablename).await?;
+
+        let mut requests = requests;
+        // Checked before the lock is taken, because this is the insert path: every batch on
+        // every table would otherwise pay a `tables` read lock and a `Table` clone to discover
+        // that it has nothing to embed.
+        if requests
+            .iter()
+            .any(|r| r.text.is_some() || r.vector.is_empty())
+        {
+            let table = self
+                .read_tables("insert_records")
+                .await
+                .get(tablename)
+                .map(|data| data.table.clone())
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            self.fill_vectors_from_text(&table, &mut requests).await?;
+        }
         // 创建响应 channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -4638,6 +4850,7 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
+        let query = self.embed_query(tablename, query).await?;
         if query.filter.is_some() {
             let tables = self.read_tables("search").await;
             if let Some(data) = tables.get(tablename) {
@@ -6556,6 +6769,27 @@ impl IntelligentIndexedStorage {
             let data = tables
                 .get_mut(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            if let Some(next) = req.embedding.as_ref() {
+                // Repointing the endpoint is fine; changing the model is not. The rows already
+                // in this table came from the old one, and mixing two embedding spaces in one
+                // index produces a ranked page that looks entirely normal and means nothing.
+                if let Some(current) = data.table.embedding.as_ref() {
+                    if current.model != next.model {
+                        return Err(crate::Error::InvalidInput(format!(
+                            "table '{name}' is embedded with '{}' and its vectors cannot be \
+                             re-embedded in place. Load a new table with model '{}' instead.",
+                            current.model, next.model
+                        )));
+                    }
+                } else if data.table.record_count > 0 {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "table '{name}' already holds {} records with vectors the caller \
+                         computed; giving it a model now would embed later rows in a different \
+                         space from the ones already here.",
+                        data.table.record_count
+                    )));
+                }
+            }
             let updated = data.table.apply_alter(&req);
             if req.payload_index.is_some() {
                 // The payload index cannot be narrowed in place -- a field's values are merged
@@ -7069,6 +7303,7 @@ impl IntelligentIndexedStorage {
                 payload_schema: src.table.payload_schema.clone(),
                 schema_version: src.table.schema_version,
                 named_vectors: None,
+                embedding: None,
             };
 
             let records: Vec<CreateRecordRequest> = src
@@ -7081,6 +7316,7 @@ impl IntelligentIndexedStorage {
                     sparse_vector: r.sparse_vector.clone(),
                     payload: Some(r.payload.clone()),
                     named_vectors: None,
+                    text: None,
                 })
                 .collect();
 
@@ -7759,19 +7995,32 @@ impl IntelligentIndexedStorage {
         &self,
         tablename: &str,
         record_id: &RecordId,
-        vector: Option<DenseVector>,
-        payload: Option<serde_json::Value>,
-        merge: bool,
-        upsert: bool,
+        update: RecordUpdate,
     ) -> crate::Result<Record> {
+        let RecordUpdate {
+            vector,
+            payload,
+            text,
+            merge,
+            upsert,
+        } = update;
         let existing = self.get_record(tablename, record_id).await.ok();
         if !upsert && existing.is_none() {
             return Err(crate::Error::RecordNotFound(record_id.to_string()));
         }
 
-        let final_vector = match vector {
-            Some(v) => v,
-            None => existing
+        // `text` replaces the vector, so it is not "no vector given, keep the old one": the
+        // vector is left empty here and `update_record` embeds the text into it. Sending both
+        // is refused rather than resolved, for the same reason a search carrying both is.
+        if text.is_some() && vector.is_some() {
+            return Err(crate::Error::InvalidInput(
+                "an update takes `vector` or `text`, not both".to_string(),
+            ));
+        }
+        let final_vector = match (vector, text.is_some()) {
+            (Some(v), _) => v,
+            (None, true) => Vec::new(),
+            (None, false) => existing
                 .as_ref()
                 .map(|r| r.vector.clone())
                 .unwrap_or_default(),
@@ -7809,6 +8058,7 @@ impl IntelligentIndexedStorage {
                 sparse_vector: existing.as_ref().and_then(|r| r.sparse_vector.clone()),
                 payload: final_payload,
                 named_vectors: existing.as_ref().and_then(|r| r.named_vectors.clone()),
+                text,
             },
         )
         .await
@@ -7824,6 +8074,25 @@ impl IntelligentIndexedStorage {
         self.ensure_writable()?;
         self.ensure_memory_headroom()?;
         self.ensure_resident(tablename).await?;
+
+        // An update is its own write path, so it needs the embedding step of its own. Without
+        // it a `PUT` carrying `text` would be accepted, the text dropped, and the record left
+        // with whatever vector it had -- the edit silently not happening.
+        //
+        // Note this is the one place where an empty vector is not an error: it means "keep the
+        // vector this record already has". So `fill_vectors_from_text` only runs when there is
+        // something to embed, rather than on every empty vector as it does on insert.
+        let mut request = request;
+        if request.text.is_some() {
+            let table = self
+                .read_tables("update_record")
+                .await
+                .get(tablename)
+                .map(|data| data.table.clone())
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            self.fill_vectors_from_text(&table, std::slice::from_mut(&mut request))
+                .await?;
+        }
 
         let artifacts = {
             let mut tables = self.write_tables("update_record").await;
@@ -9180,6 +9449,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
             payload_schema: snap.table.payload_schema.clone(),
             schema_version: snap.table.schema_version,
             named_vectors: None,
+            embedding: None,
         };
         // Drop existing table if present (best-effort)
         let _ = self.delete_table(table_name).await;
@@ -9194,6 +9464,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
                 sparse_vector: r.sparse_vector,
                 payload: Some(r.payload),
                 named_vectors: None,
+                text: None,
             })
             .collect();
         if !requests.is_empty() {
@@ -9294,6 +9565,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         config.name = "ladder".to_string();
         storage.create_table(config).await?;
@@ -9307,6 +9579,7 @@ mod tests {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             })
             .collect();
         storage.insert_records("ladder", records).await?;
@@ -9386,6 +9659,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
         // and would make this test vacuous. The size-based selector, explicitly: the
@@ -9402,6 +9676,7 @@ mod tests {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             })
             .collect();
         storage.insert_records("stale", records).await?;
@@ -9475,6 +9750,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = storage.create_table(table_config).await?;
@@ -9519,6 +9795,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             };
 
             let table = storage.create_table(table_config).await?;
@@ -9568,6 +9845,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         storage.create_table(table_config).await?;
 
@@ -9577,6 +9855,7 @@ mod tests {
             sparse_vector: None,
             payload: Some(serde_json::json!({"tag": "original"})),
             named_vectors: None,
+            text: None,
         };
         storage.insert_records("source", vec![req]).await?;
 
@@ -9596,6 +9875,7 @@ mod tests {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         };
         storage.insert_records("source", vec![req2]).await?;
         let branch_tables = storage.tables.read().await;
@@ -9698,6 +9978,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         storage.create_table(table_config).await?;
 
@@ -9712,6 +9993,7 @@ mod tests {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             })
             .collect();
         storage.insert_records("skip_rebuild", requests).await?;
@@ -9794,6 +10076,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         storage.create_table(table_config).await?;
 
@@ -9805,6 +10088,7 @@ mod tests {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             })
             .collect();
         storage.insert_records("rebuild_test", requests).await?;
@@ -9894,6 +10178,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await?;
         let record = |id: String, vector: Vec<f32>| CreateRecordRequest {
@@ -9902,6 +10187,7 @@ mod tests {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         };
         let mut requests = vec![record("exact".to_string(), vec![1.0, 0.0])];
         requests.extend(
@@ -9971,6 +10257,7 @@ mod tests {
                         sparse_vector: None,
                         named_vectors: None,
                         payload: None,
+                        text: None,
                     })
                     .collect(),
                 response_tx,
@@ -10081,6 +10368,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await?;
 
@@ -10156,6 +10444,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await?;
         let request = |id: &str, vector: Vec<f32>| CreateRecordRequest {
@@ -10164,6 +10453,7 @@ mod tests {
             sparse_vector: None,
             named_vectors: None,
             payload: None,
+            text: None,
         };
 
         for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
@@ -10235,6 +10525,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await?;
 

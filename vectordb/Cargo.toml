@@ -333,7 +333,7 @@ protoc-bin-vendored = { version = "3.0", optional = true }
 # harder to evaluate than one you can. `api-dashboard` compiles with no bundle present
 # (`allow_missing`), so a checkout without Node still builds; the server then says so and
 # serves everything else.
-default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard"]
+default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard", "server-embedding"]
 experimental = [
     "benchmarks",
     "adaptive-index",
@@ -357,6 +357,13 @@ api-dashboard = ["dep:rust-embed"]
 api-ws = []
 # gRPC, for the data path. Off by default like every other interface; see proto/dxmt.proto.
 api-grpc = ["dep:tonic", "dep:prost", "dep:tonic-build", "dep:protoc-bin-vendored"]
+# Server-side embedding: a table names a model, and records and queries may carry text
+# instead of a vector. Default, because "can I send text" is the first thing an evaluator
+# tries and a compile flag is a poor answer to it. It costs one HTTP client; nothing is
+# called unless a table declares `embedding`.
+server-embedding = ["reqwest"]
+# The unreachable provider clients in src/embeddings/legacy/. Not what serves text; see
+# src/embeddings/mod.rs for why the two names are this close.
 embeddings = ["reqwest", "backoff"]
 gpu = ["embeddings", "cudarc"]
 simd = ["embeddings"]

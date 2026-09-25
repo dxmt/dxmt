@@ -63,6 +63,7 @@ async fn test_basic_state_recreation() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
 
     let vectors = create_test_vectors(50, 32);
@@ -80,6 +81,7 @@ async fn test_basic_state_recreation() {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             });
         }
 
@@ -114,6 +116,7 @@ async fn test_basic_state_recreation() {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             });
         }
 
@@ -168,6 +171,7 @@ async fn test_fast_data_loading() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
 
     let vectors = create_test_vectors(1000, 128);
@@ -186,6 +190,7 @@ async fn test_fast_data_loading() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         });
     }
 
@@ -240,6 +245,7 @@ async fn test_index_consistency_after_rebuild() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
 
     let vectors = create_test_vectors(200, 64);
@@ -257,6 +263,7 @@ async fn test_index_consistency_after_rebuild() {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             });
         }
 
@@ -295,6 +302,7 @@ async fn test_index_consistency_after_rebuild() {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             });
         }
 

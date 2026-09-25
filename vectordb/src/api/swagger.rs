@@ -104,6 +104,7 @@ use crate::types::{
             crate::types::table::HnswParams,
             crate::types::table::QuantizationParams,
             crate::types::table::PayloadIndexPolicy,
+            crate::types::table::EmbeddingConfig,
             crate::types::table::TextFieldConfig,
             crate::api::response::ApiResponse,
             crate::api::response::ApiError,

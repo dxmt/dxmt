@@ -167,6 +167,7 @@ impl MutationRoot {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = state.storage.create_table(config).await?;
@@ -190,6 +191,7 @@ impl MutationRoot {
                 .payload
                 .map(|p| serde_json::from_str(&p).unwrap_or_default()),
             named_vectors: None,
+            text: None,
         };
 
         // Insert single record by wrapping in Vec
@@ -224,6 +226,7 @@ impl MutationRoot {
                     .payload
                     .map(|p| serde_json::from_str(&p).unwrap_or_default()),
                 named_vectors: None,
+                text: None,
             })
             .collect();
 
@@ -258,6 +261,7 @@ impl MutationRoot {
                 .payload
                 .map(|p| serde_json::from_str(&p).unwrap_or_default()),
             named_vectors: None,
+            text: None,
         };
 
         let record = state

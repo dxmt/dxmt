@@ -178,6 +178,7 @@ async fn handle_insert(
             sparse_vector: None,
             payload: r.payload,
             named_vectors: None,
+            text: None,
         })
         .collect();
 

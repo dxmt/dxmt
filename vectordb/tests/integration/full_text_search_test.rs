@@ -58,6 +58,7 @@ mod full_text_search_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = storage.create_table(table_config).await.expect("Failed to create table");
@@ -95,6 +96,7 @@ mod full_text_search_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -109,6 +111,7 @@ mod full_text_search_tests {
                     "description": "Machine learning is a subset of artificial intelligence"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "doc2".to_string(),
@@ -118,6 +121,7 @@ mod full_text_search_tests {
                     "description": "Deep learning uses neural networks for pattern recognition"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "doc3".to_string(),
@@ -127,6 +131,7 @@ mod full_text_search_tests {
                     "description": "Natural language processing enables computers to understand text"
                 })),
                 named_vectors: None,
+                text: None,
             },
         ];
 
@@ -186,6 +191,7 @@ mod full_text_search_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -200,6 +206,7 @@ mod full_text_search_tests {
                     "text": "apple fruit red delicious"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "item2".to_string(),
@@ -209,6 +216,7 @@ mod full_text_search_tests {
                     "text": "banana fruit yellow sweet"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "item3".to_string(),
@@ -218,6 +226,7 @@ mod full_text_search_tests {
                     "text": "orange fruit citrus vitamin"
                 })),
                 named_vectors: None,
+                text: None,
             },
         ];
 
@@ -279,6 +288,7 @@ mod full_text_search_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -294,6 +304,7 @@ mod full_text_search_tests {
                     "category": "technology"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "science1".to_string(),
@@ -304,6 +315,7 @@ mod full_text_search_tests {
                     "category": "science"
                 })),
                 named_vectors: None,
+                text: None,
             },
         ];
 

@@ -103,6 +103,14 @@ pub struct CreateTableRequest {
     /// this excludes is refused rather than answered empty.
     #[serde(default)]
     pub payload_index: Option<crate::types::table::PayloadIndexPolicy>,
+    /// The model this table embeds text with: `model`, and optionally `base_url`, `field`,
+    /// `api_key_env`, `batch_size`. With it, records and searches may carry `text` instead of
+    /// a `vector`. Without it, they may not, and the server takes vectors the caller computed.
+    ///
+    /// The API key is never in this body — `api_key_env` names an environment variable of the
+    /// server process.
+    #[serde(default)]
+    pub embedding: Option<crate::types::table::EmbeddingConfig>,
 }
 
 /// 批量插入记录的请求
@@ -191,12 +199,24 @@ fn validate_batch_insert(
             return Err(format!("Invalid record ID at position {}: {}", idx, e));
         }
 
-        // Dense vector validation
-        if let Err(e) = VectorValidator::validate(&record.vector, table.dimension) {
-            return Err(format!(
-                "Invalid vector at position {} (ID: '{}'): {}",
-                idx, record.id, e
-            ));
+        // Dense vector validation.
+        //
+        // An empty vector is left to the storage layer on a table with an embedding model:
+        // that is where the text becomes the vector, and where the record that has neither is
+        // named. Validating width here would reject every text record with "expected 1536,
+        // got 0" -- an error about a vector the caller never claimed to send.
+        // Also deferred when the record carries `text` on a table with *no* model: the storage
+        // layer's refusal names the missing model, where "Vector cannot be empty" describes a
+        // field the caller never claimed to send and does not say what to do about it.
+        let server_may_embed =
+            record.vector.is_empty() && (table.embedding.is_some() || record.text.is_some());
+        if !server_may_embed {
+            if let Err(e) = VectorValidator::validate(&record.vector, table.dimension) {
+                return Err(format!(
+                    "Invalid vector at position {} (ID: '{}'): {}",
+                    idx, record.id, e
+                ));
+            }
         }
 
         // Sparse vector validation (if present)
@@ -240,6 +260,12 @@ pub struct UpdateRecordRequest {
     /// Whether to create record if it doesn't exist (default: false)
     #[serde(default)]
     pub upsert: bool,
+    /// New text for the table's model to embed, replacing this record's vector.
+    ///
+    /// Exclusive with `vector`. Re-embedding a record after its text changed is otherwise a
+    /// delete and an insert, and the record loses its `created_at` and its version history.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// 批量删除记录的请求
@@ -394,6 +420,7 @@ pub async fn create_table(
         hnsw: request.hnsw,
         quantization: request.quantization,
         payload_index: request.payload_index,
+        embedding: request.embedding,
     };
 
     match state.storage.create_table(config).await {
@@ -1051,10 +1078,13 @@ pub async fn update_record(
         .apply_update(
             &table_name,
             &record_id,
-            request.vector,
-            request.payload,
-            merge,
-            request.upsert,
+            crate::storage::RecordUpdate {
+                vector: request.vector,
+                payload: request.payload,
+                text: request.text,
+                merge,
+                upsert: request.upsert,
+            },
         )
         .await
     {
@@ -1355,8 +1385,11 @@ pub async fn search_vectors(
     Path(table_name): Path<String>,
     ApiJson(query): ApiJson<SearchQuery>,
 ) -> impl IntoResponse {
-    if query.vector.is_empty() {
-        let error = ApiError::new("INVALID_VECTOR", "Query vector must not be empty");
+    if query.vector.is_empty() && query.text.is_none() {
+        let error = ApiError::new(
+            "INVALID_VECTOR",
+            "a search needs a `vector`, or a `text` on a table that declares an embedding model",
+        );
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
     }
     if query.top_k == 0 {

@@ -513,6 +513,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         }
     }
 
@@ -552,6 +553,7 @@ mod tests {
             sparse_vector: None,
             payload: Some(serde_json::json!({"category": "test"})),
             named_vectors: None,
+            text: None,
         };
 
         // 插入记录
@@ -584,6 +586,7 @@ mod tests {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"category": "A"})),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "record2".to_string(),
@@ -591,6 +594,7 @@ mod tests {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"category": "B"})),
                 named_vectors: None,
+                text: None,
             },
         ];
 

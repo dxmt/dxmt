@@ -33,6 +33,7 @@ fn create_test_table_config(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn create_test_vector(id: &str) -> CreateRecordRequest {
             "test": "data"
         })),
         named_vectors: None,
+        text: None,
     }
 }
 
@@ -408,6 +410,7 @@ async fn test_move_preserves_data() {
             "tags": ["important", "test"]
         })),
         named_vectors: None,
+        text: None,
     };
 
     cold_tier

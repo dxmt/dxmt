@@ -47,6 +47,10 @@ pub struct Table {
     /// Which payload fields this table indexes for filtering. Unset means every field.
     #[serde(default)]
     pub payload_index: Option<PayloadIndexPolicy>,
+    /// How this table turns text into a vector, if it does. Unset means the caller sends
+    /// vectors, which is what every table did before this existed.
+    #[serde(default)]
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 /// 索引类型
@@ -194,6 +198,16 @@ pub struct TableAlterRequest {
     /// on the next read that needs it, so a narrowed policy frees its memory then.
     #[serde(default)]
     pub payload_index: Option<PayloadIndexPolicy>,
+    /// Repoint this table's embedding: a new `base_url`, `api_key_env`, `field` or
+    /// `batch_size`.
+    ///
+    /// **`model` may not change.** Every vector in the table came from the named model, and a
+    /// query embedded by a different one is not a worse answer but an unrelated one — arriving
+    /// as a normal ranked page with no sign anything is wrong. Moving a corpus to a new model
+    /// means re-embedding it, which is a new table. What this is for is the endpoint moving,
+    /// which is a real thing that happens and which otherwise needs the table recreated.
+    #[serde(default)]
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 /// Named vector space configuration (multi-vector support)
@@ -248,6 +262,85 @@ pub struct QuantizationParams {
     /// is an exact HNSW graph, so this is also how to say "never quantize this table": set it
     /// higher than the table will ever grow.
     pub quantize_at_rows: Option<usize>,
+}
+
+/// How this table turns text into a vector, so a caller can write and search with text.
+///
+/// Without this, every client has to run an embedding model itself and keep it in step with
+/// whatever the table was loaded with — and the failure when it drifts is not an error but a
+/// worse answer. A table that names its model closes that: the text goes in, the server calls
+/// the model, and every client and every protocol gets the same vectors.
+///
+/// **One provider shape: the OpenAI `/embeddings` endpoint.** It is the de-facto interface, so
+/// one implementation reaches OpenAI, Jina, Voyage, text-embeddings-inference, Infinity,
+/// ollama, vLLM, LM Studio and llama.cpp — `base_url` is the whole difference between them.
+/// A second provider here would be a second thing to keep working for no new reach.
+///
+/// **The key is never in this struct**, so it is never in a request body, a snapshot, an
+/// export or a `GET /tables/{t}` response. `api_key_env` names an environment variable of the
+/// server process; the value is read at call time.
+///
+/// **A provider that will not answer is an error, not a zero vector.** The hashed bag of words
+/// that used to stand in for a model is gone for that reason: a wrong vector is stored, ranks
+/// badly forever, and looks exactly like a working system.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfig {
+    /// Model name, passed to the provider verbatim (`text-embedding-3-small`,
+    /// `BAAI/bge-m3`, `nomic-embed-text`, …).
+    pub model: String,
+    /// Base URL of an OpenAI-compatible API, without the trailing `/embeddings`.
+    /// Defaults to `https://api.openai.com/v1`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// The payload field holding the text to embed. Defaults to `text`.
+    ///
+    /// A record's top-level `text` is written here, so the text a hit came from is in the
+    /// payload that comes back — which is what a retrieval caller needs next, and what it
+    /// would otherwise have to store a second copy of.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// Environment variable holding the API key. Defaults to `OPENAI_API_KEY`; a provider that
+    /// needs no key (a local one, usually) is served by setting it to a variable that is unset.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Texts per request to the provider. Defaults to 64.
+    ///
+    /// Providers cap both the number of inputs and the total tokens per call, and the token cap
+    /// is the one that bites: 64 chunks of a document is a normal request, 2048 is not.
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+}
+
+impl EmbeddingConfig {
+    pub const DEFAULT_BASE_URL: &'static str = "https://api.openai.com/v1";
+    pub const DEFAULT_FIELD: &'static str = "text";
+    pub const DEFAULT_API_KEY_ENV: &'static str = "OPENAI_API_KEY";
+    pub const DEFAULT_BATCH_SIZE: usize = 64;
+
+    pub fn base_url(&self) -> &str {
+        self.base_url
+            .as_deref()
+            .map(|u| u.trim_end_matches('/'))
+            .unwrap_or(Self::DEFAULT_BASE_URL)
+    }
+
+    pub fn field(&self) -> &str {
+        self.field.as_deref().unwrap_or(Self::DEFAULT_FIELD)
+    }
+
+    pub fn api_key_env(&self) -> &str {
+        self.api_key_env
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_API_KEY_ENV)
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+            .unwrap_or(Self::DEFAULT_BATCH_SIZE)
+            .clamp(1, 2048)
+    }
 }
 
 /// Which payload fields this table keeps a filter index for.
@@ -389,6 +482,9 @@ pub struct TableConfig {
     /// When set, `dimension` serves as the default vector space named "default".
     #[serde(default)]
     pub named_vectors: Option<Vec<VectorSpaceConfig>>,
+    /// Model to embed text with, so records and queries may carry text instead of a vector.
+    #[serde(default)]
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 fn default_schema_version() -> u64 {
@@ -455,6 +551,7 @@ impl Table {
             hnsw: config.hnsw,
             quantization: config.quantization,
             payload_index: config.payload_index,
+            embedding: config.embedding,
         })
     }
 
@@ -475,6 +572,9 @@ impl Table {
         }
         if let Some(policy) = &req.payload_index {
             updated.payload_index = Some(policy.clone());
+        }
+        if let Some(embedding) = &req.embedding {
+            updated.embedding = Some(embedding.clone());
         }
 
         // Mutate payload_schema
@@ -620,6 +720,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = Table::new(config)?;
@@ -647,6 +748,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = Table::new(config)?;
@@ -678,6 +780,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table = Table::new(config_enabled)?;
@@ -699,6 +802,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table2 = Table::new(config_disabled)?;
@@ -720,6 +824,7 @@ mod tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         let table3 = Table::new(config_default)?;

@@ -64,6 +64,7 @@ impl From<TableV1> for Table {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         }
     }
 }

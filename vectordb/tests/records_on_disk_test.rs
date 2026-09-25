@@ -142,6 +142,7 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -154,6 +155,7 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(serde_json::json!({ "bucket": i % 5, "rare": i % 100 })),
+                text: None,
             })
             .collect();
         storage.insert_records("t", batch).await.unwrap();
@@ -313,6 +315,7 @@ async fn a_table_with_records_on_disk_searches_serves_and_restarts() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(serde_json::json!({ "bucket": 0 })),
+                text: None,
             },
         )
         .await

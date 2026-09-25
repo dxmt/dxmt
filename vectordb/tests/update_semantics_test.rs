@@ -7,7 +7,7 @@
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
-    storage::IntelligentIndexedStorage,
+    storage::{IntelligentIndexedStorage, RecordUpdate},
     types::{record::CreateRecordRequest, table::TableConfig, vector::DistanceMetric},
 };
 use serde_json::json;
@@ -42,6 +42,7 @@ async fn table_with_one_record(wal: Option<std::path::PathBuf>) -> IntelligentIn
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -54,6 +55,7 @@ async fn table_with_one_record(wal: Option<std::path::PathBuf>) -> IntelligentIn
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(json!({"keep": "me", "n": 1})),
+                text: None,
             }],
         )
         .await
@@ -66,7 +68,14 @@ async fn check(storage: &IntelligentIndexedStorage) {
 
     // Vector only: the payload stays.
     storage
-        .apply_update("t", &id, Some(vec![0.0, 1.0]), None, false, false)
+        .apply_update(
+            "t",
+            &id,
+            RecordUpdate {
+                vector: Some(vec![0.0, 1.0]),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let r = storage.get_record("t", &id).await.unwrap();
@@ -79,7 +88,7 @@ async fn check(storage: &IntelligentIndexedStorage) {
 
     // Nothing at all: nothing changes.
     storage
-        .apply_update("t", &id, None, None, false, false)
+        .apply_update("t", &id, RecordUpdate::default())
         .await
         .unwrap();
     let r = storage.get_record("t", &id).await.unwrap();
@@ -93,10 +102,11 @@ async fn check(storage: &IntelligentIndexedStorage) {
         .apply_update(
             "t",
             &id,
-            None,
-            Some(json!({"n": 2, "new": true})),
-            true,
-            false,
+            RecordUpdate {
+                payload: Some(json!({"n": 2, "new": true})),
+                merge: true,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -105,7 +115,14 @@ async fn check(storage: &IntelligentIndexedStorage) {
 
     // Replace with a payload: replaced, and the vector kept.
     storage
-        .apply_update("t", &id, None, Some(json!({"only": 1})), false, false)
+        .apply_update(
+            "t",
+            &id,
+            RecordUpdate {
+                payload: Some(json!({"only": 1})),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let r = storage.get_record("t", &id).await.unwrap();
@@ -113,7 +130,14 @@ async fn check(storage: &IntelligentIndexedStorage) {
 
     // An empty object is how to clear one.
     storage
-        .apply_update("t", &id, None, Some(json!({})), false, false)
+        .apply_update(
+            "t",
+            &id,
+            RecordUpdate {
+                payload: Some(json!({})),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(

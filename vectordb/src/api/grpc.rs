@@ -220,6 +220,7 @@ impl VectorDb for GrpcService {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             })
             .await
             .map_err(status)?;
@@ -272,6 +273,7 @@ impl VectorDb for GrpcService {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: parse_payload(&record.payload_json)?,
+                text: None,
             });
         }
         let inserted = self
@@ -309,12 +311,17 @@ impl VectorDb for GrpcService {
             .apply_update(
                 &request.table,
                 &request.id,
-                // An empty vector is the field's default, which is how a caller says "leave it
-                // alone"; proto3 gives no other way to omit a repeated field.
-                Some(request.vector).filter(|v| !v.is_empty()),
-                payload,
-                request.merge,
-                request.upsert,
+                crate::storage::RecordUpdate {
+                    // An empty vector is the field's default, which is how a caller says "leave
+                    // it alone"; proto3 gives no other way to omit a repeated field.
+                    vector: Some(request.vector).filter(|v| !v.is_empty()),
+                    payload,
+                    merge: request.merge,
+                    upsert: request.upsert,
+                    // gRPC has no text field on UpdateRequest: proto3 would need it added to
+                    // dxmt.proto, and the data path there is deliberately the small one.
+                    ..Default::default()
+                },
             )
             .await
             .map_err(status)?;

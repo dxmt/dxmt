@@ -47,6 +47,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -69,6 +70,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
                 "index": i,
             })),
             named_vectors: None,
+            text: None,
         });
     }
 
@@ -157,6 +159,7 @@ async fn test_post_filtering_with_low_selective_filter() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -179,6 +182,7 @@ async fn test_post_filtering_with_low_selective_filter() {
                 "index": i,
             })),
             named_vectors: None,
+            text: None,
         });
     }
 
@@ -250,6 +254,7 @@ async fn test_filter_with_in_operation() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -272,6 +277,7 @@ async fn test_filter_with_in_operation() {
                 "index": i,
             })),
             named_vectors: None,
+            text: None,
         });
     }
 

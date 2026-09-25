@@ -52,6 +52,7 @@ pub fn create_simple_table_config(name: &str, dimension: usize) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -78,6 +79,7 @@ pub fn create_fts_table_config(name: &str, dimension: usize) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -120,6 +122,7 @@ pub fn create_test_records(vectors: Vec<Vec<f32>>) -> Vec<CreateRecordRequest> {
                 "description": format!("Test record {}", i)
             })),
             named_vectors: None,
+            text: None,
         })
         .collect()
 }
@@ -139,6 +142,7 @@ pub fn create_test_records_with_metadata(
             sparse_vector: None,
             payload: Some(payload),
             named_vectors: None,
+            text: None,
         })
         .collect()
 }

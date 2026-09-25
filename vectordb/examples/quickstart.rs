@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await?;
     println!("   Table created\n");
@@ -85,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "source": "documentation"
             })),
             named_vectors: None,
+            text: None,
         })
         .collect();
 

@@ -26,6 +26,7 @@ fn test_wal_entry_creation() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         },
     };
 
@@ -42,6 +43,7 @@ fn test_wal_entry_serialization() {
         sparse_vector: None,
         payload: None,
         named_vectors: None,
+        text: None,
     };
 
     let operation = WalOperation::Insert {
@@ -160,6 +162,7 @@ fn test_batch_wal_operations() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         },
         CreateRecordRequest {
             id: "batch_2".to_string(),
@@ -167,6 +170,7 @@ fn test_batch_wal_operations() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         },
     ];
 

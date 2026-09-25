@@ -135,6 +135,7 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -151,6 +152,7 @@ async fn a_selective_filter_returns_a_full_result_set_on_either_path() {
                 payload: Some(serde_json::json!({
                     "bucket": if matching(i) { 0 } else { 1 + (i % 7) }
                 })),
+                text: None,
             })
             .collect();
         storage.insert_records("t", batch).await.unwrap();

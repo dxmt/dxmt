@@ -62,6 +62,7 @@ async fn test_create_table_basic() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
 
     let result = state.storage.create_table(table_config).await;
@@ -97,6 +98,7 @@ async fn test_create_table_duplicate() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
 
     state.storage.create_table(table_config.clone()).await.unwrap();
@@ -124,6 +126,7 @@ async fn test_insert_records_basic() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -135,6 +138,7 @@ async fn test_insert_records_basic() {
             sparse_vector: None,
             payload: Some(serde_json::json!({"label": "A"})),
             named_vectors: None,
+            text: None,
         },
         CreateRecordRequest {
             id: "vec2".to_string(),
@@ -142,6 +146,7 @@ async fn test_insert_records_basic() {
             sparse_vector: None,
             payload: Some(serde_json::json!({"label": "B"})),
             named_vectors: None,
+            text: None,
         },
     ];
 
@@ -174,6 +179,7 @@ async fn test_insert_records_wrong_dimension() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -185,6 +191,7 @@ async fn test_insert_records_wrong_dimension() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         },
     ];
 
@@ -212,6 +219,7 @@ async fn test_search_basic() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -223,6 +231,7 @@ async fn test_search_basic() {
             sparse_vector: None,
             payload: Some(serde_json::json!({"index": i})),
             named_vectors: None,
+            text: None,
         })
         .collect();
 
@@ -295,6 +304,7 @@ async fn test_delete_record() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -305,6 +315,7 @@ async fn test_delete_record() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         },
         CreateRecordRequest {
             id: "vec2".to_string(),
@@ -312,6 +323,7 @@ async fn test_delete_record() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         },
     ];
 
@@ -358,6 +370,7 @@ async fn test_update_record() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -369,6 +382,7 @@ async fn test_update_record() {
             sparse_vector: None,
             payload: Some(serde_json::json!({"version": 1})),
             named_vectors: None,
+            text: None,
         },
     ];
     state.storage.insert_records("update_test", records).await.unwrap();
@@ -380,6 +394,7 @@ async fn test_update_record() {
         sparse_vector: None,
         payload: Some(serde_json::json!({"version": 2})),
         named_vectors: None,
+        text: None,
     };
 
     let result = state.storage.update_record("update_test", &"vec1".to_string(), updated_record).await;
@@ -428,6 +443,7 @@ async fn test_list_tables() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
         state.storage.create_table(table_config).await.unwrap();
     }
@@ -465,6 +481,7 @@ async fn test_large_batch_insert() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -476,6 +493,7 @@ async fn test_large_batch_insert() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
 

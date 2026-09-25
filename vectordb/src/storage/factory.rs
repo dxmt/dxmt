@@ -678,6 +678,7 @@ impl StorageIntegration {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             };
 
             if let Err(e) = new_storage.create_table(table_config).await {
@@ -704,6 +705,7 @@ impl StorageIntegration {
                 score_threshold: None,
                 offset: 0,
                 mmr: None,
+                text: None,
             };
 
             match current_storage.search(&table.name, query).await {
@@ -719,6 +721,7 @@ impl StorageIntegration {
                                     sparse_vector: None,
                                     payload: hit.payload,
                                     named_vectors: None,
+                                    text: None,
                                 })
                         })
                         .collect();

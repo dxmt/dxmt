@@ -279,6 +279,7 @@ async fn loaded(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -294,6 +295,7 @@ async fn loaded(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: Some(payload(i)),
+                text: None,
             })
             .collect();
         storage.insert_records("t", rows).await.unwrap();

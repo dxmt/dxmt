@@ -625,6 +625,7 @@ impl<S: Storage + 'static> McpServer<S> {
             sparse_vector: None,
             payload: metadata,
             named_vectors: None,
+            text: None,
         };
         self.storage.insert(table_name, record).await?;
 
@@ -683,6 +684,7 @@ impl<S: Storage + 'static> McpServer<S> {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         self.storage.create_table(table_config).await?;

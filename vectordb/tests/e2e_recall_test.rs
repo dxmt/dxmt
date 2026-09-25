@@ -104,6 +104,7 @@ async fn test_e2e_recall_small_dataset() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -119,6 +120,7 @@ async fn test_e2e_recall_small_dataset() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage
@@ -249,6 +251,7 @@ async fn test_e2e_delete_removes_from_search() {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -264,6 +267,7 @@ async fn test_e2e_delete_removes_from_search() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage
@@ -322,6 +326,7 @@ async fn test_upsert_increments_version() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -339,6 +344,7 @@ async fn test_upsert_increments_version() {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"tag": "original"})),
                 named_vectors: None,
+                text: None,
             }],
         )
         .await
@@ -361,6 +367,7 @@ async fn test_upsert_increments_version() {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"tag": "updated"})),
                 named_vectors: None,
+                text: None,
             }],
         )
         .await
@@ -409,6 +416,7 @@ async fn test_update_record_preserves_vector_when_not_provided() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -426,6 +434,7 @@ async fn test_update_record_preserves_vector_when_not_provided() {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"tag": "v1"})),
                 named_vectors: None,
+                text: None,
             }],
         )
         .await
@@ -442,6 +451,7 @@ async fn test_update_record_preserves_vector_when_not_provided() {
                 sparse_vector: None,
                 payload: Some(serde_json::json!({"tag": "v2"})),
                 named_vectors: None,
+                text: None,
             },
         )
         .await
@@ -489,6 +499,7 @@ async fn test_search_with_payload_filter() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -504,6 +515,7 @@ async fn test_search_with_payload_filter() {
                 "index": i
             })),
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage
@@ -586,6 +598,7 @@ async fn test_filtered_search_recall_high_selectivity() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -602,6 +615,7 @@ async fn test_filtered_search_recall_high_selectivity() {
                 "category": if i < FILTER_COUNT { "target" } else { "other" }
             })),
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage

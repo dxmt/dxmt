@@ -108,6 +108,7 @@ impl TieredStorage {
             sparse_vector: record.sparse_vector.clone(),
             payload: Some(record.payload.clone()),
             named_vectors: None,
+            text: None,
         };
 
         // Step 3: Insert into target tier

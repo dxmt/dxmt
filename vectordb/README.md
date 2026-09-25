@@ -92,6 +92,51 @@ expects it — the same numbers as below, in text exposition format, in the defa
 `storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
 timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
 
+## Sending text instead of vectors
+
+A table can name an embedding model, and then records and queries carry text:
+
+```bash
+export OPENAI_API_KEY=...            # read by the server; never sent in a request body
+
+curl -X POST localhost:9999/api/v1/tables \
+  -d '{"name": "docs", "dimension": 1536,
+       "embedding": {"model": "text-embedding-3-small"}}'
+
+curl -X POST localhost:9999/api/v1/tables/docs/records \
+  -d '{"records": [{"id": "1", "text": "rust borrows memory instead of collecting it"},
+                   {"id": "2", "text": "go collects garbage instead of borrowing"}]}'
+
+curl -X POST localhost:9999/api/v1/tables/docs/search \
+  -d '{"text": "memory management", "top_k": 5}'
+```
+
+`base_url` points it anywhere that speaks the OpenAI `/embeddings` protocol, which is most
+things — a local GPU box, for instance, with no key and no egress:
+
+```json
+{"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1", "api_key_env": "TEI_KEY"}
+```
+
+Verified against text-embeddings-inference, Infinity, ollama (`/v1`), vLLM, LM Studio and
+llama.cpp by protocol rather than by testing each: the request is
+`POST {base_url}/embeddings` with `{"model": …, "input": [...]}` and a bearer token, and the
+reply is read by `data[].index`, not by array position.
+
+The details that decide whether this is usable:
+
+| | |
+| --- | --- |
+| Where the key lives | `api_key_env` names an environment variable **of the server**. No key is in a create-table body, a snapshot, an export, or any response. |
+| What is stored | The text is written into the payload (field `text` by default), so a hit carries the chunk it came from and you are not keeping a second copy of the corpus. |
+| Provider down | The request fails — 503, nothing written. There is no zero-vector or hashed fallback: a wrong vector stores cleanly and ranks wrongly forever. |
+| Wrong width | A model that answers at a width other than the table's is refused naming both, before anything is stored. |
+| Mixing | A table with a model still accepts vectors you computed. A record that brings its own is not sent to the provider. |
+| Changing it | `PATCH` can repoint `base_url`, `api_key_env`, `field`, `batch_size`. It cannot change `model` on a table that holds rows — those vectors came from the old one, and a query embedded by a different model is not a worse answer but an unrelated one. |
+
+Embedding client-side is still first-class and is what the LangChain and LlamaIndex packages
+do; `langchain-dxmt/examples/embedding.py` picks the best model available without a key.
+
 ### gRPC
 
 The data path also speaks gRPC, on its own port, when the server is built with the feature and
@@ -309,10 +354,14 @@ export DXMT_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 
 ### Feature Flags
 
-Default: `tokio-runtime`, `basic-storage`.
+Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,
+`server-embedding`.
 
-Opt-in: `text-bm25`, `api-swagger`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `gpu` (CUDA),
+Opt-in: `text-bm25`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `gpu` (CUDA),
 `cluster`, `multimodal`, `embeddings`, `python` (PyO3 bindings), `metrics`, `hf-datasets`.
+
+`embeddings` is **not** what lets you send text — that is `server-embedding`, which is on by
+default. `embeddings` compiles a directory of provider clients that no route reaches.
 
 ## Web console
 
@@ -537,8 +586,10 @@ experimental, and what a feature has to have before it moves between the two.
 - **gRPC carries the data path only.** Search, insert and the record routes, plus the table
   lifecycle; hybrid search, full-text search, DXQL, snapshots and backups stay on REST. It is
   off by default and off without `--grpc-port`.
-- **Stub modules**, present but not functional: `cluster`, `consensus`, and the Rust-side
-  `embeddings`.
+- **Stub modules**, present but not functional: `cluster`, `consensus`, and
+  `src/embeddings/legacy.rs` — four overlapping provider abstractions that nothing calls,
+  behind the non-default `embeddings` feature. The embedding path that does run is
+  `src/embeddings/service.rs`; see "Sending text instead of vectors".
 - **The graph is built inside the write request.** There is no compaction or optimizer stage
   behind it: a table finishes ingest already holding its index, which is why a load is not
   followed by a minutes-long build step. The other side of that is contention — with ingest

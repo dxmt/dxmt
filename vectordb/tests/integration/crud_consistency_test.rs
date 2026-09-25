@@ -59,6 +59,7 @@ mod crud_consistency_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -72,6 +73,7 @@ mod crud_consistency_tests {
                 "text": "artificial intelligence and machine learning"
             })),
             named_vectors: None,
+            text: None,
         };
 
         storage.insert_records("test_insert", vec![request]).await.expect("Failed to insert");
@@ -122,6 +124,7 @@ mod crud_consistency_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -135,6 +138,7 @@ mod crud_consistency_tests {
                 "text": "old content about cats"
             })),
             named_vectors: None,
+            text: None,
         };
 
         storage.insert_records("test_update", vec![initial]).await.expect("Failed to insert");
@@ -149,6 +153,7 @@ mod crud_consistency_tests {
                 "text": "new content about dogs"
             })),
             named_vectors: None,
+            text: None,
         };
 
         storage.update_record("test_update", &"doc1".to_string(), updated).await.expect("Failed to update");
@@ -211,6 +216,7 @@ mod crud_consistency_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -225,6 +231,7 @@ mod crud_consistency_tests {
                     "text": "content about machine learning"
                 })),
                 named_vectors: None,
+                text: None,
             },
             CreateRecordRequest {
                 id: "doc2".to_string(),
@@ -234,6 +241,7 @@ mod crud_consistency_tests {
                     "text": "content about deep learning"
                 })),
                 named_vectors: None,
+                text: None,
             },
         ];
 
@@ -301,6 +309,7 @@ mod crud_consistency_tests {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -314,6 +323,7 @@ mod crud_consistency_tests {
                 "text": "version 1: neural networks"
             })),
             named_vectors: None,
+            text: None,
         };
         storage.insert_records("test_crud", vec![create_req]).await.expect("INSERT failed");
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -340,6 +350,7 @@ mod crud_consistency_tests {
                 "text": "version 2: convolutional networks"
             })),
             named_vectors: None,
+            text: None,
         };
         storage.update_record("test_crud", &"doc1".to_string(), update_req).await.expect("UPDATE failed");
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

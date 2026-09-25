@@ -64,6 +64,7 @@ fn table_cfg(name: &str, dim: usize, metric: DistanceMetric) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -137,6 +138,7 @@ async fn insert_batch(
             sparse_vector: None,
             payload: payloads.map(|p| p[i].clone()),
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage.insert_records(table, requests).await.unwrap();
@@ -542,6 +544,7 @@ async fn test_distance_metric_ordering() {
                         sparse_vector: None,
                         payload: None,
                         named_vectors: None,
+                        text: None,
                     }],
                 )
                 .await
@@ -591,6 +594,7 @@ async fn test_distance_metric_ordering() {
                         sparse_vector: None,
                         payload: None,
                         named_vectors: None,
+                        text: None,
                     }],
                 )
                 .await
@@ -661,6 +665,7 @@ async fn test_concurrent_insert_and_query() {
                     sparse_vector: None,
                     payload: None,
                     named_vectors: None,
+                    text: None,
                 })
                 .collect();
             s.insert_records("concurrent", reqs).await.unwrap();
@@ -796,6 +801,7 @@ async fn test_crud_lifecycle() {
                 sparse_vector: None,
                 payload: None,
                 named_vectors: None,
+                text: None,
             }],
         )
         .await
@@ -924,6 +930,7 @@ async fn test_batch_insert_immediate_visibility() {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         })
         .collect();
     storage.insert_records("batch_vis", reqs).await.unwrap();

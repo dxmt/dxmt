@@ -825,8 +825,15 @@ export class DXMTClient {
       if (!record.id) {
         throw new DXMTValidationError('Record ID is required');
       }
-      if (!record.vector || !Array.isArray(record.vector) || record.vector.length === 0) {
-        throw new DXMTValidationError('Record vector must be an array');
+      // A record brings a vector, or text for the server's model to embed. Which one is
+      // valid depends on the table, which this client does not have, so the check here is
+      // only that it brought one of them; the server names the other case.
+      const hasVector = Array.isArray(record.vector) && record.vector.length > 0;
+      const hasText = typeof record.text === 'string' && record.text.length > 0;
+      if (!hasVector && !hasText) {
+        throw new DXMTValidationError(
+          `Record '${record.id}' has neither a vector nor text`
+        );
       }
     }
 
@@ -1021,8 +1028,12 @@ export class DXMTClient {
     if (!params.table_name) {
       throw new DXMTValidationError('Table name is required');
     }
-    if (!params.vector || !Array.isArray(params.vector) || params.vector.length === 0) {
-      throw new DXMTValidationError('Query vector must be an array');
+    const hasVector = Array.isArray(params.vector) && params.vector.length > 0;
+    const hasText = typeof params.text === 'string' && params.text.length > 0;
+    if (hasVector === hasText) {
+      throw new DXMTValidationError(
+        'Search takes either a query vector or text, not both and not neither'
+      );
     }
 
     try {
@@ -1030,7 +1041,7 @@ export class DXMTClient {
         'POST',
         `/tables/${encodeURIComponent(params.table_name)}/search`,
         {
-          vector: params.vector,
+          ...(hasText ? { text: params.text } : { vector: params.vector }),
           top_k: params.k || 10,
           filter: params.filter,
           with_payload: params.include_metadata !== false,

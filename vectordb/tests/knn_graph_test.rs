@@ -69,6 +69,7 @@ fn table(name: &str) -> TableConfig {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     }
 }
 
@@ -97,6 +98,7 @@ fn record(i: usize) -> CreateRecordRequest {
         payload: Some(
             serde_json::json!({ "cluster": i % 4, "half": if i < 200 { "a" } else { "b" } }),
         ),
+        text: None,
     }
 }
 

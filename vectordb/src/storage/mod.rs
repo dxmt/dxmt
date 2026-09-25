@@ -24,7 +24,7 @@ pub use factory::{
     OptimizedCostConstraints, OptimizedStorageConfig, PerformanceTargets, StorageBackend,
     StorageFactory, StorageIntegration,
 };
-pub use intelligent_indexed_storage::IntelligentIndexedStorage;
+pub use intelligent_indexed_storage::{IntelligentIndexedStorage, RecordUpdate};
 pub use memory::MemoryStorage;
 pub use tier_promotion::{
     AccessPattern, Tier, TierPromotionConfig, TierPromotionPolicy, TierStats,

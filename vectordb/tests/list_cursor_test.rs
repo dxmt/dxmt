@@ -6,7 +6,7 @@
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
-    storage::{payload_index::ListCursor, IntelligentIndexedStorage},
+    storage::{payload_index::ListCursor, IntelligentIndexedStorage, RecordUpdate},
     types::{
         record::{Condition, CreateRecordRequest, Filter, FilterOperation},
         table::TableConfig,
@@ -23,6 +23,7 @@ fn record(id: &str, keep: bool) -> CreateRecordRequest {
         sparse_vector: None,
         named_vectors: None,
         payload: Some(json!({ "keep": keep })),
+        text: None,
     }
 }
 
@@ -55,6 +56,7 @@ async fn storage(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
         hnsw: None,
         quantization: None,
         payload_index: None,
+        embedding: None,
     })
     .await
     .unwrap();
@@ -104,10 +106,10 @@ async fn scroll_while_writing(s: &IntelligentIndexedStorage, filter: Option<&Fil
             s.apply_update(
                 "t",
                 id,
-                None,
-                Some(json!({"keep": true, "touched": page_no})),
-                false,
-                false,
+                RecordUpdate {
+                    payload: Some(json!({"keep": true, "touched": page_no})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();

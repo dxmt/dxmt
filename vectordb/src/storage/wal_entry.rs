@@ -125,6 +125,7 @@ mod tests {
                 hnsw: None,
                 quantization: None,
                 payload_index: None,
+                embedding: None,
             },
         };
 
@@ -149,6 +150,7 @@ mod tests {
             sparse_vector: None,
             payload: None,
             named_vectors: None,
+            text: None,
         };
 
         let operation = WalOperation::Insert {

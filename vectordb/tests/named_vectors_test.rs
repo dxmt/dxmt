@@ -67,6 +67,7 @@ async fn test_named_vectors_independent_search() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -91,6 +92,7 @@ async fn test_named_vectors_independent_search() {
                 sparse_vector: None,
                 named_vectors: Some(named),
                 payload: Some(serde_json::json!({"idx": i})),
+                text: None,
             }
         })
         .collect();
@@ -179,6 +181,7 @@ async fn test_named_vectors_fallback_to_default() {
             hnsw: None,
             quantization: None,
             payload_index: None,
+            embedding: None,
         })
         .await
         .unwrap();
@@ -192,6 +195,7 @@ async fn test_named_vectors_fallback_to_default() {
                 sparse_vector: None,
                 named_vectors: None,
                 payload: None,
+                text: None,
             }],
         )
         .await
