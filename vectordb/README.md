@@ -383,6 +383,15 @@ parallel writers. Cohere for the 1M and 10M rows, LAION for 100M.
 | 768d × 10M | 1,396 s (~7,200 rows/s) | 4.68 GB | 0.9628 | 5,645 | 4.4 ms |
 | 768d × 100M, fp16 vectors | 3.75 h (~7,400 rows/s) | 44.7 GB | 0.9735 | 4,886 | 5.7 ms |
 
+Those are parallel writers on 32 vCPU. To see what your own machine does, over HTTP, with one
+writer: `python3 scripts/http_ingest_rate.py --port 9999 --dim 768 --rows 200000`. It reports
+the rate counting only the requests (a Python generator building 768 gaussians a row is itself
+good for about 1,700 rows/s, and timing it with the server hides most of the answer), checks
+recall against `search_mode: "exact"` on the table it just built, and waits for the PQ training
+that lands minutes *after* the last batch. On a 16 vCPU box: 2,875 rows/s at 768 dimensions,
+recall@10 1.000, search p50 1.6 ms, and the index falling from 848 MB to 132 MB when the
+quantizer installs.
+
 `SearchMode::Accurate` buys recall back without a rebuild: 0.9912 at 4,351 QPS on 1M, 0.9803 at
 3,720 on 10M, 0.9825 at 3,546 on 100M.
 

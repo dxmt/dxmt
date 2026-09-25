@@ -17,6 +17,7 @@ tells you quickly.
 | `make_compat_fixture.py` | writes a data directory for `tests/compat` to open with a later build | `CONTRIBUTING.md`, `tests/compat/test_compat.py` |
 | `soak.py` | end-to-end soak against a real `vectordb serve` | the 24-hour soak in the design notes |
 | `soak_long.py` | the same, over hours to a day | |
+| `http_ingest_rate.py` | ingest rate over HTTP, plus recall and the quantization that lands after the load | `README.md`'s measured-performance section |
 
 ## Benchmarks (need a running server unless stated)
 
