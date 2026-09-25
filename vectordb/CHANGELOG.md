@@ -24,6 +24,21 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **Recall of the parallel build is now in the gate.** Every storage-level recall assertion
+  here ran on at most 6,000 rows, and the batch planner that production tables are built with
+  only engages above 10,000 — so the build path the server actually uses had no end-to-end
+  accuracy guard. `tests/parallel_build_recall_test.rs` loads 15,000 rows in batches, with the
+  records and vectors on disk, and measures recall@10 against this server's own
+  `search_mode: "exact"`: no external dataset, no published ground truth, 3.4 seconds.
+
+  It uses a deliberately lean graph (`m: 4`, `ef_construction: 16`), because the shipped
+  defaults answer this corpus at recall 1.000 and a test whose answer is 1.000 cannot show a
+  build getting *worse* — only one going catastrophic. At m=4 it measures 0.984, with the floor
+  at 0.95. It also asserts that `fast` scores below `normal` (0.780 against 0.984): if the two
+  ever match, the corpus has stopped telling a weaker search from a stronger one and could not
+  tell a worse graph from a better one either, which is a failure of the test rather than a
+  pass of the code.
+
 - **Diversity reranking (`mmr`) on a search, done by the server.** A chunked corpus answers a
   query with several near-copies of one passage; they really are the nearest neighbours, and
   together they say one thing. `mmr: {"lambda_mult": 0.5, "fetch_k": 20}` picks each next hit by
