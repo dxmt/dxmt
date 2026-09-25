@@ -496,6 +496,11 @@ experimental, and what a feature has to have before it moves between the two.
   come up empty — but back up `data/wal/snapshot/` like the data it is.
 - **One fsync per write batch.** Durability is paid for synchronously; there is no group
   commit yet.
+- **A snapshot briefly delays writes**, on every table, while it compacts the log it covers.
+  Measured on 2026-09-25 with four tables of 40,000 rows and writers running throughout: the
+  snapshot took 0.32 s and the worst write waited 90 ms; at 80,000 rows a table, 1.00 s and
+  313 ms. Searches are not affected. The cost is proportional to the log since the last
+  snapshot, so `DXMT_SNAPSHOT_INTERVAL_SECS` trades this delay against how much the WAL holds.
 - **A large batch delays searches on the table it is written to**, and only that table.
   Measured on 2026-09-25 with 5,000 rows of 768 dimensions going into a 12,000-row table while
   searches ran against it: the worst search waited 1.86 s, the median 5.9 ms; `GET /tables` and

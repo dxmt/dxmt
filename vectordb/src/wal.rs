@@ -263,6 +263,63 @@ impl WalManager {
     }
 
     /// Replay WAL entries from a given sequence number (supports compression)
+    /// The bytes of every frame from `from_seq` on, or `None` if the file is not shaped the way
+    /// this expects.
+    ///
+    /// Headers only: sequence, compression flag and length, then a seek over the payload. No
+    /// frame is decoded, which is the whole point -- see the caller.
+    fn tail_bytes_from(&self, from_seq: u64) -> Result<Option<Vec<u8>>> {
+        use std::io::SeekFrom;
+
+        let wal_file_path = self.wal_path.join("wal.log");
+        let file = match File::open(&wal_file_path) {
+            Ok(file) => file,
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        let file_len = file.metadata().map_err(Error::Io)?.len();
+        // Buffered, and skipping with `seek_relative`, which stays inside the buffer instead of
+        // issuing a syscall per frame. Unbuffered this was a read and a seek for every entry in
+        // the log -- 320,000 syscalls for 160,000 entries -- and it cost 1.23 s under the WAL
+        // mutex, which is the same stall this whole change is about, just further down.
+        let mut file = std::io::BufReader::with_capacity(1 << 20, file);
+
+        let mut offset = 0u64;
+        loop {
+            if offset >= file_len {
+                // Every frame is below `from_seq`; nothing survives.
+                return Ok(Some(Vec::new()));
+            }
+            let mut header = [0u8; 13];
+            if file.read_exact(&mut header).is_err() {
+                // A torn tail, which replay drops anyway: everything from here is going.
+                return Ok(Some(Vec::new()));
+            }
+            let seq = u64::from_le_bytes(header[0..8].try_into().expect("8 bytes"));
+            let compressed = header[8];
+            let len = u32::from_le_bytes(header[9..13].try_into().expect("4 bytes")) as usize;
+            if compressed > 1 || len > MAX_WAL_FRAME_BYTES {
+                // Not a header this writer produced. Hand it to the decoding path, which
+                // reports the problem rather than guessing past it.
+                return Ok(None);
+            }
+            let payload_end = offset + 13 + len as u64;
+            if payload_end > file_len {
+                // The last frame is torn; it is below `from_seq` or it is the tail's first
+                // frame, and either way there is nothing complete from here on.
+                return Ok(Some(Vec::new()));
+            }
+            if seq >= from_seq {
+                let mut bytes = Vec::with_capacity((file_len - offset) as usize);
+                file.seek(SeekFrom::Start(offset)).map_err(Error::Io)?;
+                file.read_to_end(&mut bytes).map_err(Error::Io)?;
+                return Ok(Some(bytes));
+            }
+            file.seek_relative(len as i64).map_err(Error::Io)?;
+            offset = payload_end;
+        }
+    }
+
     pub fn replay_from(&self, from_seq: u64) -> Result<Vec<(u64, WalEntry)>> {
         let wal_file_path = self.wal_path.join("wal.log");
         if !wal_file_path.exists() {
@@ -406,10 +463,30 @@ impl WalManager {
         // `sequence_number` is the next sequence to be handed out, so the highest written is
         // one below it.
         let nothing_survives = keep_from >= self.sequence_number;
-        let kept = if nothing_survives {
-            Vec::new()
+
+        // The surviving tail, copied as bytes rather than decoded and re-encoded.
+        //
+        // This used to call `replay_from`, which deserialises *every* frame including the ones
+        // below `keep_from` -- on purpose, so that a corrupt frame in the middle of a log being
+        // recovered cannot be silently skipped. Compaction is the other case: the frames below
+        // `keep_from` are covered by a snapshot that has just been read back and verified, so
+        // nothing is lost by not looking at them, which is the same reasoning the
+        // `nothing_survives` shortcut above already rests on.
+        //
+        // What it cost: the decode runs under the WAL mutex, and every write waits on that
+        // mutex. Measured over HTTP with four tables of 40,000 rows and a writer running
+        // throughout, a snapshot blocked writes for 1.28 s of its 1.55 s -- all of it here,
+        // decoding 160,000 entries to keep the twenty that arrived while the snapshot ran.
+        // The comment above puts the same scan at 15 s and 3.97 GB on a 1M-row table.
+        //
+        // Scanning frame headers and copying the tail verbatim is the same operation without
+        // the decode: seek past each payload rather than parse it. A header that does not make
+        // sense means the file is not what this expects, and the old path -- decode, and let it
+        // report what it finds -- takes over.
+        let tail = if nothing_survives {
+            Some(Vec::new())
         } else {
-            self.replay_from(keep_from)?
+            self.tail_bytes_from(keep_from)?
         };
 
         let tmp_path = self.wal_path.join("wal.log.compacting");
@@ -421,7 +498,22 @@ impl WalManager {
                 .open(&tmp_path)
                 .map_err(Error::Io)?;
 
-            for (seq, entry) in kept {
+            if let Some(bytes) = tail {
+                tmp.write_all(&bytes).map_err(Error::Io)?;
+                tmp.sync_data().map_err(Error::Io)?;
+                drop(tmp);
+                self.current_file = None;
+                std::fs::rename(&tmp_path, &wal_file_path).map_err(Error::Io)?;
+                let next = self.sequence_number;
+                self.open_current_file()?;
+                self.sequence_number = self.sequence_number.max(next);
+                let after = std::fs::metadata(&wal_file_path).map_err(Error::Io)?.len();
+                return Ok(before.saturating_sub(after));
+            }
+
+            // The fallback: the header scan found something it did not understand, so every
+            // frame is decoded and re-encoded, which is what this always did.
+            for (seq, entry) in self.replay_from(keep_from)? {
                 let bytes =
                     rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
                 let payload = if self.compression_enabled {
@@ -595,6 +687,91 @@ mod tests {
         let kept = wal.replay_from(0).unwrap();
         assert_eq!(kept.len(), 3, "expected entries 7,8,9 to survive");
         assert_eq!(kept.first().unwrap().0, 7);
+    }
+
+    /// Compaction keeps the tail byte for byte, and falls back when the file says something
+    /// it does not understand.
+    ///
+    /// The tail is copied rather than decoded and re-encoded, so the property to hold is that
+    /// what survives is *identical*, not merely equivalent: an entry that round-tripped
+    /// through a different compression setting would still replay, and would still be a
+    /// rewrite this is supposed to avoid.
+    #[test]
+    fn compaction_copies_the_surviving_tail_verbatim() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(dir.path()).unwrap();
+        for i in 0..40 {
+            wal.write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: format!("r{}", i),
+            })
+            .unwrap();
+        }
+        wal.force_flush().unwrap();
+
+        let keep_from = 30u64;
+        let before: Vec<(u64, WalEntry)> = wal
+            .replay_from(0)
+            .unwrap()
+            .into_iter()
+            .filter(|(seq, _)| *seq >= keep_from)
+            .collect();
+        assert_eq!(before.len(), 10, "the fixture has to straddle the boundary");
+
+        // Compared as the sequence numbers plus the debug rendering of each entry: `WalEntry`
+        // has no `PartialEq`, and deriving one for a test would put a trait on the wire type
+        // for the sake of an assertion.
+        let render = |entries: &[(u64, WalEntry)]| -> Vec<String> {
+            entries.iter().map(|(s, e)| format!("{s}:{e:?}")).collect()
+        };
+        wal.truncate_before(keep_from).unwrap();
+        let after = wal.replay_from(0).unwrap();
+        assert_eq!(
+            render(&after),
+            render(&before),
+            "the surviving tail changed across a compaction"
+        );
+
+        // And the log is still writable, with sequence numbers that do not go backwards.
+        let next = wal
+            .write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: "after".to_string(),
+            })
+            .unwrap();
+        assert!(
+            next >= 40,
+            "compaction rewound the sequence to {next}, colliding with entries a snapshot names"
+        );
+    }
+
+    /// A header the scan cannot make sense of sends it to the decoding path rather than past it.
+    #[test]
+    fn a_frame_that_is_not_a_frame_falls_back_to_the_decoder() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(dir.path()).unwrap();
+        for i in 0..5 {
+            wal.write_entry(WalEntry::Delete {
+                table: "t".to_string(),
+                record_id: format!("r{}", i),
+            })
+            .unwrap();
+        }
+        wal.force_flush().unwrap();
+
+        // Byte 8 of the first frame is the compression flag, and 7 is neither 0 nor 1.
+        let path = dir.path().join("wal.log");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[8] = 7;
+        std::fs::write(&path, &bytes).unwrap();
+
+        // The decoding path is what reports it: an invalid flag is fatal there, and a
+        // compaction that quietly carried on would be writing a log it cannot read back.
+        let err = wal.truncate_before(2).unwrap_err();
+        assert!(
+            format!("{err}").contains("compression flag"),
+            "expected the decoder's complaint, got {err}"
+        );
     }
 
     #[test]

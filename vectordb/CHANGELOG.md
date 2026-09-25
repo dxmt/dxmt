@@ -24,6 +24,25 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **A snapshot no longer stops every write for most of its duration.** Measured over HTTP with
+  four tables of 40,000 rows and writers running throughout: a snapshot took 1.55 s and the
+  worst write waited 1.28 s of it — on every table, whichever one was being serialized, while
+  searches were never affected. The roadmap blamed the table map's read lock; it was the WAL
+  mutex, held by the compaction at the end.
+
+  Compaction drops the prefix a verified snapshot covers. It did that by decoding **every**
+  frame in the log — 160,000 entries — to re-encode the twenty that arrived while the snapshot
+  ran, because `replay_from` deliberately decodes frames below its start so a corrupt one
+  cannot be skipped silently. That reasoning is for recovery; the frames being dropped here are
+  covered by a snapshot that has just been read back and verified, which is the same argument
+  the existing "nothing survives" shortcut already rests on. The surviving tail is now found by
+  reading frame *headers* and copied verbatim, with the decoding path kept as the fallback for
+  a header that does not make sense.
+
+  The first version of that scan read 13 bytes and seeked per frame, which is 320,000 syscalls
+  on this log and cost 1.23 s of its own. Buffered, with `seek_relative`, the same measurement
+  is: snapshot **0.32 s**, worst write **90 ms**. At twice the data, 1.00 s and 313 ms.
+
 - **The index sweep climbs the size ladder and does not come back down.** A rebuild is O(n)
   whichever direction it goes, and a growing table sampled at a low point paid it twice: a soak
   watched one table go HNSW → brute force at 1,000 rows and brute force → HNSW at 38,400 ten
