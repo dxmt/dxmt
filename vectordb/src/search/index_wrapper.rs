@@ -61,6 +61,20 @@ impl IndexWrapper {
         self.quantize_if_wanted().await
     }
 
+    /// Rows per lock acquisition on the serial fallback. Small enough that a reader waits
+    /// milliseconds, large enough that the acquisitions are a rounding error: 5,000 rows is
+    /// eight of them, against 5,000 if each record took the lock.
+    const SERIAL_BATCH_CHUNK: usize = 128;
+
+    /// Whether the graph will plan this batch in parallel, asked under a read lock.
+    async fn plans_batch_in_parallel(&self, batch: usize) -> bool {
+        self.index
+            .read()
+            .await
+            .as_hnsw()
+            .is_some_and(|hnsw| hnsw.plans_batches_in_parallel(batch))
+    }
+
     /// Insert several vectors under one write lock.
     ///
     /// Calling `insert` in a loop took the lock once per record — a batch of two
@@ -90,24 +104,59 @@ impl IndexWrapper {
         // less is the fix; holding it more briefly is not.
         let _structural = self.structural.lock().await;
 
+        // A graph too young to plan a batch in parallel inserts it one row at a time, and does
+        // that under whatever lock it is holding. Handing it the whole batch under one write
+        // lock is what made a 5,000-row insert into a small table block every search on that
+        // table for the full 8.7 s it took -- measured over HTTP, with searches on other tables
+        // and `GET /tables` unaffected throughout, so this is that table's index lock and not
+        // the map's.
+        //
+        // Chunked, the same insert leaves a gap between chunks for a reader to take the lock,
+        // and the worst search drops to 302 ms. This is not the per-record locking this method
+        // replaced: that took the lock two thousand times for a two-thousand-row batch, where
+        // this takes it forty.
+        if !self.plans_batch_in_parallel(items.len()).await {
+            for chunk in items.chunks(Self::SERIAL_BATCH_CHUNK) {
+                self.insert_chunk(chunk.to_vec()).await?;
+                // Dropping the lock is not enough on its own. tokio's `RwLock` is
+                // write-preferring, so this task re-queues for the next chunk before a waiting
+                // reader is served, and starves it for the rest of the batch: chunking without
+                // this yield took the worst search from 8.0 s only to 3.8 s. Yielding lets a
+                // reader that is already waiting take the lock before the next chunk asks.
+                tokio::task::yield_now().await;
+            }
+        } else {
+            self.insert_chunk(items).await?;
+        }
+
+        // The phased path talks to the inner graph directly, so an index wrapping it never saw
+        // the batch; this is its chance. HNSW-PQ quantizes itself here at its row threshold --
+        // the 1M acceptance run streamed a million rows through this path as an exact graph and
+        // only quantized in the rebuild afterwards.
+        self.index.write().await.after_batch()?;
+        self.quantize_if_wanted().await
+    }
+
+    /// Prepare, plan, append and link one batch, releasing the index between the phases.
+    ///
+    /// Whether the graph plans in parallel is *its* decision, made inside `prepare_batch`, and
+    /// this handles both answers. An earlier version of the chunked loop above called
+    /// `prepare_batch` directly and assumed the answer was always "inserted serially, nothing
+    /// to apply" -- true only while the graph is below the planner's threshold. A chunk
+    /// arriving after it crossed came back with a plan instead, the plan was dropped, and those
+    /// rows were in the record store and absent from the graph with nothing said.
+    /// `streaming_quantize_test` caught it by passing 64x faster than it had any right to.
+    async fn insert_chunk(&self, items: Vec<(String, Vec<f32>)>) -> Result<()> {
         let prepared = {
             let mut index = self.index.write().await;
-            if index.as_hnsw().is_none() {
-                index.add_batch(items).await?;
-                drop(index);
-                return self.quantize_if_wanted().await;
-            }
-            index
-                .as_hnsw_mut()
-                .expect("checked on the line above, under the same lock")
-                .prepare_batch(items)?
+            let Some(hnsw) = index.as_hnsw_mut() else {
+                return index.add_batch(items).await;
+            };
+            hnsw.prepare_batch(items)?
         };
-        // `None` means the batch was small enough that the serial path took it already.
+        // `None`: the graph took the rows one at a time under the lock above.
         let Some(prepared) = prepared else {
-            // The graph took the batch one row at a time (too small, or the graph too
-            // young to plan in parallel); the wrapper index still gets its turn.
-            self.index.write().await.after_batch()?;
-            return self.quantize_if_wanted().await;
+            return Ok(());
         };
 
         // A. Planning: shared, and every core.
@@ -129,19 +178,12 @@ impl IndexWrapper {
         };
 
         // C. Reverse edges and pruning: shared, and the longest of the three.
-        {
-            let index = self.index.read().await;
-            index
-                .as_hnsw()
-                .expect("the structural lock holds the index type still")
-                .link_batch(&applied);
-        }
-        // The phased path above talks to the inner graph directly, so an index wrapping it
-        // never saw the batch; this is its chance. HNSW-PQ quantizes itself here at its
-        // row threshold -- the 1M acceptance run streamed a million rows through this path
-        // as an exact graph and only quantized in the rebuild afterwards.
-        self.index.write().await.after_batch()?;
-        self.quantize_if_wanted().await
+        let index = self.index.read().await;
+        index
+            .as_hnsw()
+            .expect("the structural lock holds the index type still")
+            .link_batch(&applied);
+        Ok(())
     }
 
     /// Start quantizing the index, in the background, if it has grown into wanting it.
@@ -544,6 +586,97 @@ impl Default for IndexCollection {
 
 #[cfg(test)]
 mod tests {
+
+    /// A batch into a young graph must not lock every reader out for its whole duration.
+    ///
+    /// Below `PARALLEL_PLAN_MIN_NODES` a batch is inserted one row at a time, and handing the
+    /// whole batch to that path under one write lock is what made a 5,000-row insert into a
+    /// small table block searches on it for the full 8.0 s the insert took -- measured over
+    /// HTTP on 2026-09-25, with `GET /tables` and searches on other tables unaffected, so it
+    /// was this lock and not the table map's.
+    ///
+    /// What is asserted is a *ratio*, not a latency: the longest gap between two completed
+    /// searches has to be a fraction of how long the insert took. A millisecond threshold would
+    /// measure the machine; a ratio measures the locking. The first version of this test
+    /// asserted only that some search completed, and passed with the whole batch under one
+    /// lock -- the reader gets its turn while the writer *waits* for the lock, which proves
+    /// nothing about what happens once the writer has it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reads_get_through_while_a_batch_goes_into_a_young_graph() {
+        use crate::search::hnsw::HnswIndex;
+        use crate::types::vector::DistanceMetric;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        const DIM: usize = 64;
+        // Small enough to stay on the serial path (the threshold is 10,000 nodes), large
+        // enough that the insert takes long enough for the gaps to mean something.
+        const SEED: usize = 500;
+        const BATCH: usize = 2_000;
+
+        let mut state = 0x5DEE_CE66_D123_4567_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let vector =
+            |n: &mut dyn FnMut() -> f32| -> DenseVector { (0..DIM).map(|_| n()).collect() };
+
+        let mut index = HnswIndex::new(DistanceMetric::Cosine, None);
+        for i in 0..SEED {
+            index.insert(i.to_string(), vector(&mut next)).unwrap();
+        }
+        let wrapper = Arc::new(IndexWrapper::new(Box::new(index)));
+        let batch: Vec<(RecordId, DenseVector)> = (SEED..SEED + BATCH)
+            .map(|i| (RecordId::from(i.to_string()), vector(&mut next)))
+            .collect();
+
+        let marks: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let wrapper = Arc::clone(&wrapper);
+            let marks = Arc::clone(&marks);
+            let stop = Arc::clone(&stop);
+            let probe: DenseVector = vec![0.1; DIM];
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    if wrapper.search(&probe, 5).await.is_ok() {
+                        marks.lock().expect("not poisoned").push(Instant::now());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+        };
+        // Let the reader establish itself, so the first gap is not the test's own start-up.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let started = Instant::now();
+        wrapper.insert_batch(batch).await.unwrap();
+        let insert_took = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        reader.await.unwrap();
+
+        let marks = marks.lock().expect("not poisoned").clone();
+        let during: Vec<Instant> = marks.into_iter().filter(|m| *m >= started).collect();
+        assert!(
+            !during.is_empty(),
+            "no search completed at all while {BATCH} rows went in"
+        );
+        let mut longest = during[0].duration_since(started);
+        for pair in during.windows(2) {
+            longest = longest.max(pair[1].duration_since(pair[0]));
+        }
+        assert!(
+            longest.as_secs_f64() < insert_took.as_secs_f64() * 0.5,
+            "searches stopped for {:.2?} of a {:.2?} insert -- the write lock is being held \
+             across the batch rather than per chunk",
+            longest,
+            insert_took
+        );
+    }
 
     /// A phased insert must build the same graph the one-shot path did.
     ///

@@ -496,6 +496,14 @@ experimental, and what a feature has to have before it moves between the two.
   come up empty — but back up `data/wal/snapshot/` like the data it is.
 - **One fsync per write batch.** Durability is paid for synchronously; there is no group
   commit yet.
+- **A large batch delays searches on the table it is written to**, and only that table.
+  Measured on 2026-09-25 with 5,000 rows of 768 dimensions going into a 12,000-row table while
+  searches ran against it: the worst search waited 1.86 s, the median 5.9 ms; `GET /tables` and
+  searches on other tables were unaffected throughout. Sending the same 5,000 rows as five
+  batches of 1,000 takes the worst wait to 478 ms and costs 8% of the ingest rate, which is the
+  trade to make if the table is serving reads while it loads. (A batch into a table too small
+  for the parallel planner -- under 10,000 rows -- used to hold the lock for the *whole* batch,
+  8.0 s of it; that path now takes the lock per 128 rows and the same measurement is 302 ms.)
 - **`POST /api/v1/tables/{name}/records` caps a request at 10,000 records** and returns
   `Validation failed` above that.
 - **`POST /api/v1/tables/{name}/records/list` omits vectors unless asked.** Pass

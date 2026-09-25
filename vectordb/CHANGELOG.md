@@ -24,6 +24,23 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **A batch into a small table no longer blocks every search on it.** Below 10,000 rows a
+  batch is inserted one row at a time, and the whole batch went in under a single write lock:
+  measured over HTTP, a 5,000-row insert into a small table blocked searches on that table for
+  the full 8.0 s it took. `GET /tables` and searches on other tables were unaffected, so the
+  "bulk writes make the database unreadable" note in the roadmap was half stale — it is one
+  table's index lock, not the map.
+
+  That path now takes the lock per 128 rows and yields between chunks. Chunking alone was not
+  enough (8.0 s to 3.8 s): tokio's `RwLock` is write-preferring, so the next chunk queues ahead
+  of the waiting reader and starves it. With the yield, the same measurement is **302 ms**, and
+  the insert takes the same time it did.
+
+  The parallel path, which a table over 10,000 rows uses, is unchanged and still has a shorter
+  version of the problem: 1.86 s for a 5,000-row batch, 478 ms if the same rows are sent as
+  five batches of 1,000 — an 8% ingest cost for a 4x better worst case. README's limitations
+  section now carries both numbers.
+
 - **The LangChain examples run without an API key**, the way the LlamaIndex ones already did.
   Fifteen of the seventeen opened with `OpenAIEmbeddings()`, so the first thing anyone
   evaluating DXMT through LangChain met was a missing key — for examples whose subject is a

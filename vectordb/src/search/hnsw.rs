@@ -1870,6 +1870,20 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Whether a batch handed to this graph will be planned in parallel or inserted one row at
+    /// a time.
+    ///
+    /// The caller needs to know *before* it takes a lock, because the two cases want different
+    /// locking: the parallel path releases the index between its phases, while the serial
+    /// fallback runs the whole batch under whatever lock it was given. A 5,000-row batch into a
+    /// young graph therefore held the write lock for 8.7 s, and a search on that table waited
+    /// all of it -- measured over HTTP on 2026-09-25.
+    pub fn plans_batches_in_parallel(&self, batch: usize) -> bool {
+        batch >= PARALLEL_PLAN_MIN_BATCH
+            && self.nodes.len() >= PARALLEL_PLAN_MIN_NODES
+            && self.entry_point.is_some()
+    }
+
     /// Draw the levels and reject duplicates. `&mut self` for the RNG; no distance work.
     ///
     /// `Ok(None)` means the batch was small enough, or the graph young enough, that the
