@@ -24,6 +24,14 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **The support matrix says what each client covers.** Six clients ship from this repository
+  and they are not equivalent: Python and JavaScript follow the whole HTTP surface, Rust and Go
+  wrap the table lifecycle, the record routes and `search`, and LangChain and LlamaIndex go
+  through the Python one. Nothing said so, and the contract test's own note still said the
+  answer to "who breaks if this route is renamed" was three callers when it was five. Picking
+  the Go client for something it does not wrap is one request of your own, not a missing server
+  feature — but that is only obvious once someone writes it down.
+
 - **Recall of the parallel build is now in the gate.** Every storage-level recall assertion
   here ran on at most 6,000 rows, and the batch planner that production tables are built with
   only engages above 10,000 — so the build path the server actually uses had no end-to-end

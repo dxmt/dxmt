@@ -21,11 +21,12 @@ struct Contract {
 /// Extracted from dxmt-python-sdk/dxmt/client.py and dxmt-js-sdk/src/client.ts.
 ///
 /// langchain-dxmt and llama-index-vector-stores-dxmt both go through the Python client, so they
-/// add no paths of their own. Neither does dxmt-rust-sdk: every route it issues -- the table
-/// lifecycle, the four record routes, `/search` and `/ready` -- is already listed below under
-/// another caller. It gets no rows of its own because duplicating a path would double what this
-/// test hits without protecting anything more; what the `caller` field is for is telling
-/// whoever renames a route which clients to go and fix, and the answer is now three, not two.
+/// add no paths of their own. Neither do dxmt-rust-sdk and dxmt-go-sdk: every route either
+/// issues -- the table lifecycle, the four record routes, `/search` and `/ready` -- is already
+/// listed below under another caller. They get no rows of their own because duplicating a path
+/// would double what this test hits without protecting anything more; what the `caller` field
+/// is for is telling whoever renames a route which clients to go and fix, and the answer is
+/// five (Python, JavaScript, Rust, Go and the dashboard), not two.
 const CONTRACTS: &[Contract] = &[
     // Python SDK — also the transitive surface of the LangChain and LlamaIndex packages.
     Contract {

@@ -37,6 +37,27 @@ The following features are part of the intended single-node Alpha contract:
 | Per-table export/import | `tables/{t}/export`, `tables/import` | One table to a file and back, on this server or another. Records keep their ids, payloads, versions and `created_at`; the graph is not in the file and the import rebuilds it. Both paths are bounded by `DXMT_BACKUP_ROOT` — the path comes off the wire and this server has no authentication, so an unbounded export is a write primitive and an unbounded import a read one. |
 | Diversity reranking | `mmr` on `search` | Server-side MMR over the candidates' own vectors, so no client-side re-embedding. Diversity is bounded by `fetch_k`. |
 | Search paging | `offset` on `search` | Pages tile the ranking. Costs `offset + top_k` at the index, so deep paging is not flat; `records/list` with a cursor is. |
+
+## What each client covers
+
+Six clients ship from this repository, and they are not equivalent. Python and JavaScript
+follow the whole HTTP surface; Rust and Go are deliberately small clients over the core, kept
+honest by live tests in CI rather than by feature parity. Picking one of the latter for a
+feature it does not wrap means one `rawRequest`-shaped call of your own, not a missing server
+feature -- every capability below is in the HTTP API.
+
+| | Python | JavaScript | Rust | Go | LangChain | LlamaIndex |
+| --- | --- | --- | --- | --- | --- | --- |
+| Tables: create, list, get, drop | yes | yes | yes | yes | via Python | via Python |
+| Records: insert, get, update, delete | yes | yes | yes | yes | yes | yes |
+| Search (filters, modes, `offset`, `mmr`) | yes | yes | search + filter | search + filter | search + MMR | search |
+| `count`, cursor `scroll`, bulk `upload` | yes | yes | — | — | — | — |
+| Sparse search, grouped search | yes | yes | — | — | — | — |
+| Payload index management | yes | yes | — | — | — | — |
+| Aliases, per-table export/import | yes | yes | — | — | — | — |
+| Full-text and hybrid search | yes | yes | — | — | — | — |
+| DXQL (`POST /query`) | yes | — | — | — | — | — |
+
 | Table aliases | `aliases` | Another name for a table, usable anywhere a table name is. Moving one is the zero-downtime half of a rebuild. Stored in `{DXMT_WAL_DIR}/aliases`, so a backup that copies the WAL directory carries them. |
 | Sparse search | `search/sparse` | Dot product over the WAND-pruned sparse index, with filters and a score floor. Default build, no `text-bm25` needed. The index is derived from the records and rebuilt on demand, so the first sparse query after a restart pays for the build. |
 | Grouped search | `search/groups` | Groups a window of nearest neighbours by a payload field, widening it until enough groups appear (cap 10,000 candidates). `candidates_fetched` and `ungrouped` are in the answer because grouping over a window cannot see a group whose every member is further away than the window reached. |
