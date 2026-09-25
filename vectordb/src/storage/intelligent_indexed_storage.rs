@@ -3347,7 +3347,20 @@ impl IntelligentIndexedStorage {
                 .await?
                 .selected_algorithm;
 
-            if !current.requires_rebuild_to_reach(&want) {
+            // A rebuild is O(n) whichever way it goes, so the sweep only ever climbs. A
+            // table that shrank keeps the index it has -- an oversized graph on a small table
+            // costs memory nobody notices, while flapping across a threshold costs a full
+            // rebuild each way, twice per crossing. `POST /tables/{t}/index/rebuild` still
+            // re-selects from scratch for an operator who wants the smaller index back.
+            let downgrade = current.is_downgrade_to(&want);
+            if downgrade {
+                debug!(
+                    "Table '{}' at {} records would select {:?}, which is below its current \
+                     {:?}; the periodic sweep does not demote",
+                    name, count, want, current
+                );
+            }
+            if downgrade || !current.requires_rebuild_to_reach(&want) {
                 // The algorithm still fits, but its per-query parameters may have moved.
                 // `ef_search` is read on every search and deliberately does not force a
                 // rebuild — and until this ran, nothing wrote a new one back either, so a
@@ -9241,6 +9254,98 @@ mod tests {
         assert_eq!(S::ef_for_rows(512, 1_000_000), 512);
         assert_eq!(S::ef_for_rows(512, 10_000_000), 1024);
         assert_eq!(S::ef_for_rows(512, 100_000_000), 2048);
+    }
+
+    /// The periodic sweep climbs the size ladder and does not come back down.
+    ///
+    /// A rebuild is O(n) in both directions, so a table sampled at a low point while it grows
+    /// pays it twice. A soak watched `hot` go HNSW -> brute force at 1,000 rows and back at
+    /// 38,400 ten seconds later: two full rebuilds for a table that only ever got bigger.
+    ///
+    /// Both halves are asserted. A test that only checked the refusal would pass if the sweep
+    /// stopped rebuilding altogether.
+    #[tokio::test]
+    async fn the_sweep_upgrades_an_index_but_never_demotes_one(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = StorageConfig {
+            r#type: "memory".to_string(),
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 1024,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new(&config).await?;
+        // The size-based selector, not the memory-optimized one, which answers HNSW-PQ at
+        // every size and has no ladder to climb.
+        let mut config = TableConfig {
+            name: "ladder".to_string(),
+            dimension: 8,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: None,
+            enable_full_text_search: false,
+            memory_optimization: Some(false),
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+            hnsw: None,
+            quantization: None,
+            payload_index: None,
+        };
+        config.name = "ladder".to_string();
+        storage.create_table(config).await?;
+
+        // Past the 5,000-row line where the selector leaves brute force for the graph.
+        const ROWS: usize = 6_000;
+        let records: Vec<CreateRecordRequest> = (0..ROWS)
+            .map(|i| CreateRecordRequest {
+                id: i.to_string(),
+                vector: (0..8).map(|j| ((i * 8 + j) % 11) as f32).collect(),
+                sparse_vector: None,
+                named_vectors: None,
+                payload: None,
+            })
+            .collect();
+        storage.insert_records("ladder", records).await?;
+
+        // Up: a table created at 10,000 estimated rows and filled past the threshold has to
+        // reach the graph, or the sweep is doing nothing at all.
+        storage.reevaluate_indexes().await?;
+        let climbed = storage
+            .describe_index("ladder")
+            .await
+            .expect("the table has an algorithm");
+        assert!(
+            matches!(climbed, IndexAlgorithm::HNSW { .. }),
+            "the sweep did not upgrade a 6,000-row table to the graph: {climbed:?}"
+        );
+
+        // Down: delete back under the threshold, where the selector answers brute force again.
+        let ids: Vec<String> = (0..ROWS - 100).map(|i| i.to_string()).collect();
+        storage.delete_records("ladder", ids).await?;
+        let wanted = storage
+            .decide_algorithm(100, 8, DistanceMetric::Cosine, false, None, None)
+            .await?
+            .selected_algorithm;
+        assert!(
+            matches!(wanted, IndexAlgorithm::BruteForce { .. }),
+            "this test needs a size where the selector demotes; it answered {wanted:?}"
+        );
+
+        storage.reevaluate_indexes().await?;
+        let after = storage
+            .describe_index("ladder")
+            .await
+            .expect("the table has an algorithm");
+        assert!(
+            matches!(after, IndexAlgorithm::HNSW { .. }),
+            "the sweep demoted a shrunken table to {after:?}; a rebuild each way is what the \
+             one-way rule exists to prevent"
+        );
+        Ok(())
     }
 
     /// A changed `ef_search` reaches an existing table without rebuilding its graph.

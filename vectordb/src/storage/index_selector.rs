@@ -110,6 +110,49 @@ impl IndexAlgorithm {
         true
     }
 
+    /// Where this algorithm sits on the size ladder the selector climbs.
+    ///
+    /// Only the order matters, and only for deciding which direction a re-evaluation is going.
+    /// It follows `select_optimal_index`: brute force for the smallest tables, then the graph,
+    /// then the quantized graph, then the disk-resident families.
+    fn size_rank(&self) -> u8 {
+        match self {
+            IndexAlgorithm::BruteForce { .. } => 0,
+            IndexAlgorithm::HNSW { .. } => 1,
+            IndexAlgorithm::HnswPQ { .. } | IndexAlgorithm::QuantizedIVF { .. } => 2,
+            IndexAlgorithm::ScaNN { .. } => 3,
+            IndexAlgorithm::DiskANN { .. }
+            | IndexAlgorithm::EnhancedDiskANN { .. }
+            | IndexAlgorithm::PartitionedIvf { .. } => 4,
+        }
+    }
+
+    /// Whether moving from `self` to `want` means going back down the size ladder.
+    ///
+    /// The periodic re-evaluation uses this to refuse a downgrade. A rebuild is O(n) in both
+    /// directions, and a growing table sampled at a low point pays it twice: a soak watched
+    /// `hot` go HNSW -> brute force at 1,000 rows and brute force -> HNSW at 38,400 ten
+    /// seconds later, two full rebuilds for a table that only ever got bigger. Keeping the
+    /// larger index on a table that shrank costs a graph nobody needed; going back and forth
+    /// costs the table.
+    ///
+    /// Demotion is still available deliberately, through `POST /tables/{t}/index/rebuild`,
+    /// which re-selects from scratch.
+    pub fn is_downgrade_to(&self, want: &IndexAlgorithm) -> bool {
+        // Leaving the partitioned index is not refused, and that is a debt rather than a
+        // design. `maintenance_after_a_snapshot_does_not_strand_that_snapshot` builds a
+        // partitioned table, snapshots it, lets maintenance split partitions past that
+        // snapshot, and then cannot find a record after recovery -- unless the sweep happens
+        // to rebuild the table onto another index first, which is what was repairing it and
+        // what made that test pass. Refusing this demotion exposed it. Until the partitioned
+        // index recovers from a snapshot whose partition ids maintenance has replaced, the
+        // rebuild stays as the way out.
+        if matches!(self, IndexAlgorithm::PartitionedIvf { .. }) {
+            return false;
+        }
+        want.size_rank() < self.size_rank()
+    }
+
     pub fn requires_rebuild_to_reach(&self, want: &IndexAlgorithm) -> bool {
         match (self, want) {
             (

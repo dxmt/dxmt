@@ -1450,23 +1450,29 @@ async fn an_index_is_rebuilt_once_the_table_outgrows_it() {
         .collect();
     storage.insert_records("t", small).await.unwrap();
 
-    // At 20 records the selector wants BruteForce, so re-evaluation has something to correct.
-    let rebuilt = storage.reevaluate_indexes().await.unwrap();
-    assert_eq!(
-        rebuilt,
-        vec!["t".to_string()],
-        "a 20-row table kept an index chosen for 10,000 rows"
+    // At 20 records the selector wants BruteForce -- and the sweep leaves the table alone
+    // anyway, because it only ever climbs. This used to assert the demotion, and the demotion
+    // is what a soak caught costing two full rebuilds on a table that was merely growing: it
+    // went HNSW -> BruteForce at 1,000 rows and back at 38,400 ten seconds later. An oversized
+    // graph on a 20-row table costs memory nobody can measure; a rebuild each way costs the
+    // table. The correction is still available on demand, below.
+    assert!(
+        storage.reevaluate_indexes().await.unwrap().is_empty(),
+        "the sweep demoted a small table instead of leaving its oversized index alone"
     );
     assert_eq!(
         storage.get_table("t").await.unwrap().index_type.to_string(),
-        "brute_force"
+        "hnsw",
+        "the index chosen from the create-time estimate should still be there"
     );
 
-    // Nothing changed since, so a second pass must be a no-op. Rebuilding on every sweep would
-    // cost O(n) forever for no benefit.
-    assert!(
-        storage.reevaluate_indexes().await.unwrap().is_empty(),
-        "re-evaluation rebuilt an index that was already the right one"
+    // On demand, an explicit rebuild re-selects from scratch and does demote it -- the escape
+    // hatch the sweep's one-way rule leaves open.
+    storage.rebuild_index("t").await.unwrap();
+    assert_eq!(
+        storage.get_table("t").await.unwrap().index_type.to_string(),
+        "brute_force",
+        "an explicit rebuild did not re-select for the size the table actually has"
     );
 
     // Grow past the BruteForce boundary and it should move again.
@@ -2366,8 +2372,11 @@ async fn a_table_with_no_index_file_is_restored_with_the_index_it_had() {
             .collect();
         storage.insert_records("t", rows).await.unwrap();
 
-        // 20 rows is squarely BruteForce territory; CREATE TABLE had guessed HNSW.
-        storage.reevaluate_indexes().await.unwrap();
+        // 20 rows is squarely BruteForce territory; CREATE TABLE had guessed HNSW. An explicit
+        // rebuild, not the periodic sweep: the sweep only climbs the size ladder and would
+        // leave the guess in place, which is a different test's subject. This one needs a
+        // table that really is on BruteForce.
+        storage.rebuild_index("t").await.unwrap();
         assert_eq!(
             storage.get_table("t").await.unwrap().index_type.to_string(),
             "brute_force"

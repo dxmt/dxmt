@@ -24,6 +24,16 @@ releases. Everything below is unreleased work on `main`.
 - **The JS SDK has an eslint configuration**, so `npm run lint` runs instead of failing with
   "looked for configuration files and found none". Seven source files, clean.
 
+- **The index sweep climbs the size ladder and does not come back down.** A rebuild is O(n)
+  whichever direction it goes, and a growing table sampled at a low point paid it twice: a soak
+  watched one table go HNSW → brute force at 1,000 rows and brute force → HNSW at 38,400 ten
+  seconds later, two full rebuilds for a table that only ever got bigger. The periodic
+  re-evaluation now refuses a demotion — an oversized graph on a table that shrank costs memory
+  nobody notices, while flapping across a threshold costs the table twice per crossing.
+  `POST /tables/{t}/index/rebuild` still re-selects from scratch for an operator who wants the
+  smaller index back. Both halves are tested: the sweep must still *upgrade*, or a test of the
+  refusal alone would pass with the sweep doing nothing at all.
+
 - **A batch into a small table no longer blocks every search on it.** Below 10,000 rows a
   batch is inserted one row at a time, and the whole batch went in under a single write lock:
   measured over HTTP, a 5,000-row insert into a small table blocked searches on that table for
