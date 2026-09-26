@@ -55,10 +55,13 @@ impl HnswPqConfig {
     /// `DXMT_RERANK_FACTOR` and `DXMT_RERANK_MIN` override how many candidates a search reranks.
     ///
     /// This is the one knob that trades recall against single-query latency, and it was a
-    /// constant, so measuring the trade meant recompiling. Milvus at a matched recall of
-    /// 0.982 answers a serial query in 2.4 ms against our 3.6 ms while refining a tenth as
-    /// many candidates, which makes the size of our rerank the first thing to measure rather
+    /// constant, so measuring the trade meant recompiling. At a matched recall it is possible
+    /// to refine an order of magnitude fewer candidates than the default does here, which
+    /// makes the size of this rerank the first thing to measure on a latency question rather
     /// than the last. Out of range or unparsable values are reported and ignored.
+    ///
+    /// (That comparison came from a head-to-head run against another engine. The numbers are
+    /// in the internal measurement notes, not here: see the note on `HnswIndex::bulk_build`.)
     fn env_usize(var: &str, default: usize, min: usize) -> usize {
         Self::parse_override(
             var,

@@ -2285,8 +2285,14 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
     /// Without this override HnswIndex took the trait's default, which inserts one record at a
     /// time. A 1M-vector `rebuild_index` was therefore a million serial single-threaded
     /// `insert` calls that never touched `insert_batch` -- the path made parallel in 2133ed6.
-    /// Measured against Qdrant on the same machine with the same graph parameters, that was
-    /// `optimize` 3,504 s against its 806 s, while DXMT's own insert had already caught up.
+    /// A rebuild was several times slower than the same graph built through the insert path,
+    /// which had already been made parallel: the bulk path was the one left behind.
+    ///
+    /// (A head-to-head measurement against another engine is what first showed the size of
+    /// the gap. The numbers are in the internal measurement notes and deliberately not here:
+    /// `docs/SUPPORT_MATRIX.md` says a competitive figure is worth stating only beside the
+    /// method and the tuning used on both sides, and this comment used to be the one place in
+    /// the tree that did not hold to that.)
     ///
     /// Chunked rather than handed over whole: see `BULK_BUILD_CHUNK` for why bigger is not
     /// better.
