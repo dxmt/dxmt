@@ -308,6 +308,36 @@ impl VectorValidator {
         Self::validate_with_config(vector, expected_dimension, &config)
     }
 
+    /// Validate against the metric the table actually uses.
+    ///
+    /// **Whether an all-zero vector is a mistake depends entirely on the metric.** Under
+    /// cosine it has no direction and every similarity to it is `0/0`; under dot it scores
+    /// zero against everything, which is a ranking but not a meaningful one. Under euclidean
+    /// or manhattan it is the origin: an ordinary point, at an ordinary distance from every
+    /// other point, and nothing about it is degenerate.
+    ///
+    /// The unconditional refusal that used to be here made a standard benchmark impossible to
+    /// load. GIST-960-euclidean — the dataset `ann-benchmarks` publishes ground truth for, and
+    /// the one Epsilla's own example script loads — contains **ten all-zero descriptors** among
+    /// its million training vectors, at indices 7030, 113718, 141476 and so on. The load
+    /// stopped at the first of them with "Zero vectors are not allowed", on a euclidean table,
+    /// where the vector is perfectly valid. `allow_zero_vectors` existed for this and no
+    /// caller ever set it.
+    pub fn validate_for_metric(
+        vector: &DenseVector,
+        expected_dimension: usize,
+        metric: DistanceMetric,
+    ) -> crate::Result<()> {
+        let config = ValidationConfig {
+            allow_zero_vectors: matches!(
+                metric,
+                DistanceMetric::Euclidean | DistanceMetric::Manhattan
+            ),
+            ..ValidationConfig::default()
+        };
+        Self::validate_with_config(vector, expected_dimension, &config)
+    }
+
     /// Validate vector with custom configuration
     pub fn validate_with_config(
         vector: &DenseVector,
@@ -377,7 +407,10 @@ impl VectorValidator {
         // 4. Zero vector check
         if is_zero_vector && !config.allow_zero_vectors {
             return Err(crate::Error::InvalidVector(
-                "Zero vectors are not allowed".to_string(),
+                "a zero vector has no direction, so this table's metric cannot rank it. \
+                 Euclidean and manhattan tables accept it -- it is the origin, an ordinary \
+                 point -- and cosine and dot tables do not."
+                    .to_string(),
             ));
         }
 

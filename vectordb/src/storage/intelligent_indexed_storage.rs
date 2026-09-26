@@ -5032,8 +5032,31 @@ impl IntelligentIndexedStorage {
                 };
             // An `IndexWrapper` is Arc-backed, so this clone costs a refcount and buys the
             // whole point of the phase split: the search below runs without the map lock.
+            let answered_by_named_space = named_index_opt.is_some();
             let index = named_index_opt.unwrap_or_else(|| table_data.index.clone());
-            let metric = table_data.table.distance_metric;
+            // The metric of whichever index is about to answer, which is not the table's when
+            // a named space answered. `similarity_from_distance` turns a distance into a
+            // score with a formula *per metric*, so using the table's here silently scored a
+            // named space with the wrong one: a `dot` space under a `cosine` table came back
+            // `1 - (-dot)`, above 1 for every hit and clamped flat to 1.0, and a `euclidean`
+            // space came back `1 - d` instead of `1 / (1 + d)`. The order survived, because
+            // the index sorts by distance before any of this, which is exactly why it went
+            // unnoticed -- the ranking looked right and every score was wrong.
+            let metric = query
+                .vector_name
+                .as_ref()
+                .filter(|_| answered_by_named_space)
+                .and_then(|name| {
+                    table_data
+                        .table
+                        .named_vectors
+                        .as_ref()?
+                        .iter()
+                        .find(|space| &space.name == name)
+                })
+                .map_or(table_data.table.distance_metric, |space| {
+                    space.distance_metric
+                });
             let total_records = table_data.records.len();
 
             // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
@@ -5227,6 +5250,7 @@ impl IntelligentIndexedStorage {
                                 &query.vector,
                                 result_limit,
                                 filtered_ef,
+                                query.search_mode,
                                 Some(filter_ids),
                                 None,
                             )
@@ -5259,6 +5283,7 @@ impl IntelligentIndexedStorage {
                             &query.vector,
                             fetch,
                             ef_hint,
+                            query.search_mode,
                             None,
                             precomputed_filter_ids.as_ref(),
                         )
@@ -5293,6 +5318,7 @@ impl IntelligentIndexedStorage {
                             &query.vector,
                             fetch,
                             ef_hint,
+                            query.search_mode,
                             None,
                             None,
                         )
@@ -5309,6 +5335,7 @@ impl IntelligentIndexedStorage {
                         &query.vector,
                         result_limit,
                         ef_hint,
+                        query.search_mode,
                         None,
                         None,
                     )
@@ -5404,6 +5431,7 @@ impl IntelligentIndexedStorage {
                     &query.vector,
                     fetched,
                     ef_hint.max(fetched),
+                    query.search_mode,
                     None,
                     precomputed_filter_ids.as_ref(),
                 )
@@ -5940,6 +5968,7 @@ impl IntelligentIndexedStorage {
         query: &DenseVector,
         k: usize,
         ef: usize,
+        mode: SearchMode,
         filter_ids: Option<&std::collections::HashSet<String>>,
         keep: Option<&std::collections::HashSet<String>>,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
@@ -5955,6 +5984,11 @@ impl IntelligentIndexedStorage {
                 None => index.search_with_ef_hint(query, k, ef).await,
             };
         };
+        // The mode widens the pool as well as the walk. On a quantized graph the pool is what
+        // decides the answer -- see `SearchMode::rerank_widening` for the measurement that
+        // says so -- and widening only `ef` left `accurate` paying for candidates it then
+        // threw away.
+        let candidates = candidates.saturating_mul(mode.rerank_widening());
         let fetch = if rows > 0 {
             candidates.max(k).min(rows)
         } else {
@@ -7461,6 +7495,7 @@ impl IntelligentIndexedStorage {
         // changes when it crosses: a table that answered exactly yesterday answers
         // approximately today, and nothing said so.
         let quantized = data.index.is_quantized().await;
+        let index_record_count = data.index.len().await;
         let dimension = data.table.dimension;
         let record_count = data.records.len();
 
@@ -7507,6 +7542,13 @@ impl IntelligentIndexedStorage {
             // stricter alternative.
             "resident": was_resident,
             "record_count": record_count,
+            // How many of those the *index* holds. It should equal `record_count`, and the
+            // day it does not is the day searches start missing records that `GET` returns
+            // and `search_mode: "exact"` finds -- a shortfall with no other symptom, because
+            // a record missing from the graph is simply never a result. The count existed on
+            // the storage type and was not served, so the one number that identifies this
+            // class of fault was the one an operator could not ask for.
+            "index_record_count": index_record_count,
             "dimension": dimension,
             "index_type": data.table.index_type.to_string(),
             "quantized": quantized,

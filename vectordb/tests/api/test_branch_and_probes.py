@@ -203,7 +203,10 @@ def test_a_branch_request_without_a_string_name_is_a_400(fresh_table, body):
     assert response.status_code == 400, response.text
 
 
-@pytest.mark.parametrize("name", ["bad name!", "", "9lives", "a" * 64, "a" * 300])
+# `9lives` and `_staging` used to be here and are legal now: a leading digit or
+# underscore is an ordinary file name, and the rule exists only to keep a name off the
+# filesystem as a path. What is still refused is a path, a flag and non-ASCII.
+@pytest.mark.parametrize("name", ["bad name!", "", "a/b", "-rf", "表名", "a" * 64, "a" * 300])
 def test_a_branch_name_follows_the_rules_for_a_table_name(fresh_table, name):
     """`POST /tables` has always checked names. The branch route did not: `"bad name!"` and `""`
     became tables that survived a restart, and a 300-character name was a 500 in disk mode

@@ -273,7 +273,9 @@ def test_malformed_dxql_is_a_400(sql):
         "CREATE TABLE {t}_new (id TEXT)",
         # Valid identifiers to the grammar, not valid table names to `POST /tables`.
         "CREATE TABLE `bad name` (embedding VECTOR(4))",
-        "CREATE TABLE _hidden (embedding VECTOR(4))",
+        # `_hidden` used to be here: a leading underscore is a legal file name and is
+        # accepted now. A path separator is what the rule is actually for.
+        "CREATE TABLE `a/b` (embedding VECTOR(4))",
     ],
 )
 def test_well_formed_dxql_that_cannot_be_carried_out_as_written_is_a_400(table, template):

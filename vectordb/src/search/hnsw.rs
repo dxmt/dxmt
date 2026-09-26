@@ -1276,6 +1276,37 @@ impl HnswIndex {
     /// to fix — and measuring on them alone said it bought nothing. Worth remembering before
     /// benchmarking an ANN change on uniform data again.
     ///
+    /// **This returns fewer than `m` when candidates crowd each other, and that is left as
+    /// it is.** The paper's `keepPrunedConnections` — filling the remainder from the rejects
+    /// — was implemented here, measured on three corpora, and removed again:
+    ///
+    /// | corpus | unreachable without | with | ingest |
+    /// | --- | --- | --- | --- |
+    /// | GIST-960, 100K rows | 2.0% | 0.1% | 1.8x slower |
+    /// | bge-m3, 60K real paragraphs | 0.50% | 0.50% | unchanged |
+    /// | clustered synthetic, 3K x 64 | — | — | self-retrieval 98+ to 82–91 |
+    ///
+    /// It helps only on GIST, which is a 2008 image descriptor with near-duplicates and
+    /// isolated points; it does nothing at all on what a modern embedding model produces,
+    /// which is what anyone actually stores; and it measurably degrades a clustered corpus,
+    /// because the edges it adds are precisely the ones this heuristic rejected for being
+    /// redundant. Trading a real regression on one workload for a fix on another, while the
+    /// representative workload is indifferent, is not a trade worth making.
+    ///
+    /// A narrower version — rescuing a node at insert time when every neighbour had just
+    /// pruned it away — was also tried: GIST went 2.0% to 1.6% only. Stranding does not happen
+    /// at insert, when the node still has in-edges. It happens a thousand inserts later as
+    /// others crowd it out one list at a time, and nothing revisits it.
+    ///
+    /// **So a small fraction of points is unreachable by the graph, by design of this
+    /// heuristic**: about 0.5% on modern embeddings and 2% on GIST. They are the points
+    /// nothing else is near, so they are nobody's nearest neighbour and recall is unaffected
+    /// (0.9955 on GIST while 5% was unreachable at a million rows). What does not work is
+    /// searching with a vector that is already stored and expecting it back.
+    /// `search_mode: "exact"` is the deterministic answer, and `index_record_count` on
+    /// `GET /tables/{t}/stats` is how to tell "the graph cannot reach it" from "the graph
+    /// never got it".
+    ///
     /// `candidates` must be sorted nearest-first, which is what `search_layer` returns.
     fn select_neighbors_heuristic(&self, candidates: &[(usize, f32)], m: usize) -> Vec<usize> {
         let mut selected: Vec<usize> = Vec::with_capacity(m);
@@ -2530,6 +2561,105 @@ impl crate::search::index_traits::SerializableIndex for HnswIndex {
             index_size_bytes: vectors_bytes + self.resident_bytes_without_vectors(),
             build_time_ms: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    /// Nodes nothing points at. A search walks edges from the entry point, so a node with no
+    /// in-edges is in the graph and cannot be returned by any query — not at a larger `ef`,
+    /// not at a larger `top_k`. Reachability is not a budget.
+    fn orphans(index: &HnswIndex) -> Vec<usize> {
+        let n = index.nodes.len();
+        let mut in_degree = vec![0usize; n];
+        let mut links = Vec::new();
+        for from in 0..n {
+            for layer in 0..index.nodes.layers(from) {
+                index.nodes.copy_links(from, layer, &mut links);
+                for &to in &links {
+                    in_degree[to as usize] += 1;
+                }
+            }
+        }
+        (0..n)
+            .filter(|&i| in_degree[i] == 0 && Some(i) != index.entry_point)
+            .collect()
+    }
+
+    /// A clustered corpus leaves no node stranded, which is the case that has to keep working.
+    ///
+    /// **This is characterisation, not a guarantee.** The graph *does* strand a small
+    /// fraction of points on some real corpora — about 2% of GIST-960 and 0.5% of a modern
+    /// embedding corpus, measured — and `select_neighbors_heuristic` carries the numbers and
+    /// the reason. What this pins is that the ordinary case stays at zero, so a change that
+    /// started stranding nodes in bulk would be caught here, with the node named.
+    ///
+    /// It will not catch the existing shortfall: no synthetic corpus written for this
+    /// reproduced it. The points that get stranded are mid-distance ones that lose every
+    /// pruning contest, and the obvious synthesis — a far outlier — is *protected* by the
+    /// heuristic, because its distance to the other candidates is about its distance to the
+    /// node being linked, so it never reads as crowded.
+    #[test]
+    fn a_clustered_corpus_strands_nobody() {
+        let mut index = HnswIndex::new(DistanceMetric::Euclidean, Some(HnswConfig::default()));
+        let mut rng = StdRng::seed_from_u64(99);
+        for i in 0..2_000 {
+            let centre = (i % 12) as f32;
+            let v: DenseVector = (0..16)
+                .map(|d| centre + rng.gen::<f32>() * 0.4 + (d as f32) * 0.01)
+                .collect();
+            index.insert(format!("v{i:06}"), v).unwrap();
+        }
+        let orphaned = orphans(&index);
+        assert!(
+            orphaned.is_empty(),
+            "{} of {} nodes have no in-edges, so no search can reach them: {:?}",
+            orphaned.len(),
+            index.nodes.len(),
+            &orphaned[..orphaned.len().min(10)]
+        );
+    }
+
+    /// Every stored vector comes back when used as its own query, on a corpus that strands
+    /// nobody.
+    ///
+    /// Compared by *distance*, not by id. Corpora have duplicate vectors — GIST has records
+    /// whose three nearest neighbours are all at distance zero — and demanding the id back
+    /// counts a correct tie as a failure, which is how the first measurement of the stranding
+    /// came out twice as bad as it was.
+    #[test]
+    fn every_stored_vector_finds_itself_or_an_equally_near_twin() {
+        let mut index = HnswIndex::new(DistanceMetric::Euclidean, Some(HnswConfig::default()));
+        let mut rng = StdRng::seed_from_u64(7);
+        let corpus: Vec<(RecordId, DenseVector)> = (0..2_000)
+            .map(|i| {
+                let centre = (i % 12) as f32;
+                let v: DenseVector = (0..16)
+                    .map(|d| centre + rng.gen::<f32>() * 0.4 + (d as f32) * 0.01)
+                    .collect();
+                (format!("v{i:06}"), v)
+            })
+            .collect();
+        for (id, v) in corpus.clone() {
+            index.insert(id, v).unwrap();
+        }
+        let mut missed = Vec::new();
+        for (id, v) in corpus.iter().take(400) {
+            let hits = index.search_with_ef(v, 1, 64).unwrap();
+            let found = hits.first().map(|(_, d)| *d).unwrap_or(f32::MAX);
+            if found > 1e-4 {
+                missed.push((id.clone(), found));
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} stored vectors did not come back when used as their own query, nearest \
+             distance {:?}",
+            missed.len(),
+            &missed[..missed.len().min(5)]
+        );
     }
 }
 

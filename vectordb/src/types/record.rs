@@ -204,6 +204,32 @@ impl SearchMode {
         }
     }
 
+    /// How much to widen the rerank pool on a quantized index.
+    ///
+    /// **`ef` alone does nothing on a quantized graph.** The walk happens on PQ codes and
+    /// only `rerank_candidates(k) = max(5k, 100)` of what it finds is scored against the
+    /// stored vectors; everything else the larger `ef` visited is discarded before the
+    /// ordering is decided. So `Accurate` — four times the traversal budget — bought latency
+    /// and not one point of recall, and the three modes returned *identical* results.
+    ///
+    /// Measured on glove-25-angular, 1.18M rows, quantized, recall@10 against the dataset's
+    /// published ground truth: 0.7270 / 0.7275 / 0.7275 for fast / normal / accurate, moving
+    /// not at all with `ef`, and 0.9955 with the pool raised to 2,000 at the same index size.
+    /// The shortfall is worst at low dimension, where a PQ code separates the neighbourhood
+    /// least: 0.9985 on SIFT-128 and 0.9955 on GIST-960 against 0.7275 here.
+    ///
+    /// `Normal` keeps today's pool, so today's latency is unchanged; `Accurate` pays for what
+    /// its name promises — on that corpus 2.6 ms and 0.7275 becomes 7.9 ms and 0.9955.
+    pub fn rerank_widening(&self) -> usize {
+        match self {
+            SearchMode::Fast => 1,
+            SearchMode::Normal => 1,
+            SearchMode::Accurate | SearchMode::Auto => 4,
+            // Diverted before any of this; it reads every row by definition.
+            SearchMode::Exact => 1,
+        }
+    }
+
     /// Dynamic ef calculation: scales proportionally to top_k / selectivity.
     ///
     /// A selective filter discards most of what the traversal visits, so the budget has to

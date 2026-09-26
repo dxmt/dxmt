@@ -218,7 +218,11 @@ fn validate_batch_insert(
         let server_may_embed =
             record.vector.is_empty() && (table.embedding.is_some() || record.text.is_some());
         if !server_may_embed {
-            if let Err(e) = VectorValidator::validate(&record.vector, table.dimension) {
+            if let Err(e) = VectorValidator::validate_for_metric(
+                &record.vector,
+                table.dimension,
+                table.distance_metric,
+            ) {
                 return Err(format!(
                     "Invalid vector at position {} (ID: '{}'): {}",
                     idx, record.id, e

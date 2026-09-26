@@ -214,3 +214,183 @@ async fn test_named_vectors_fallback_to_default() {
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].id, "r1");
 }
+
+/// A named space is scored with *its own* metric, not the table's.
+///
+/// `similarity_from_distance` turns the distance an index returns into the score the API
+/// returns, and the formula is per metric: `1 - d` for cosine, `1 / (1 + d)` for euclidean,
+/// `-d` for dot. The search path took the *table's* metric for that conversion even when a
+/// named space had answered, so every named space whose metric differed from the table's came
+/// back with scores computed by the wrong formula.
+///
+/// What made it survive: the index sorts by distance *before* any of this, so the **order was
+/// always right**. Only the numbers were wrong — a `dot` space under a `cosine` table scored
+/// `1 - (-dot)`, which is above 1 for every hit and clamps flat to 1.0, and a `euclidean`
+/// space scored `1 - d` instead of `1 / (1 + d)`. A caller reading the ranking saw nothing
+/// amiss; a caller thresholding on `score_threshold`, or fusing two lists, got nonsense.
+///
+/// This is checked against the same vectors in a table whose *default* metric is the one under
+/// test, because that path was always right and is therefore the only reference that does not
+/// assume the thing being tested.
+#[tokio::test]
+async fn a_named_space_is_scored_with_its_own_metric() {
+    use dxmt_vectordb::types::record::SearchMode;
+
+    const VECTORS: [(&str, [f32; 4]); 5] = [
+        ("berlin", [0.05, 0.61, 0.76, 0.74]),
+        ("london", [0.19, 0.81, 0.75, 0.11]),
+        ("moscow", [0.36, 0.55, 0.47, 0.94]),
+        ("sanfrancisco", [0.18, 0.01, 0.85, 0.80]),
+        ("shanghai", [0.24, 0.18, 0.22, 0.44]),
+    ];
+    let query = vec![0.35f32, 0.55, 0.47, 0.94];
+
+    for metric in [
+        DistanceMetric::Dot,
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+    ] {
+        let storage = IntelligentIndexedStorage::new(&make_config())
+            .await
+            .unwrap();
+
+        // The reference: a table whose own metric is the one under test.
+        storage
+            .create_table(TableConfig {
+                name: "reference".to_string(),
+                dimension: 4,
+                distance_metric: metric,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+                hnsw: None,
+                quantization: None,
+                payload_index: None,
+                embedding: None,
+            })
+            .await
+            .unwrap();
+
+        // The table under test: a *different* default metric, and a named space carrying the
+        // one being checked. Cosine is the odd one out for two of the three runs, and for the
+        // cosine run the default is euclidean, so no run can pass by the two agreeing.
+        let default_metric = if metric == DistanceMetric::Cosine {
+            DistanceMetric::Euclidean
+        } else {
+            DistanceMetric::Cosine
+        };
+        storage
+            .create_table(TableConfig {
+                name: "named".to_string(),
+                dimension: 4,
+                distance_metric: default_metric,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: Some(vec![VectorSpaceConfig {
+                    name: "space".to_string(),
+                    dimension: 4,
+                    distance_metric: metric,
+                }]),
+                hnsw: None,
+                quantization: None,
+                payload_index: None,
+                embedding: None,
+            })
+            .await
+            .unwrap();
+
+        for (id, vector) in VECTORS {
+            storage
+                .insert_records(
+                    "reference",
+                    vec![CreateRecordRequest {
+                        id: id.to_string(),
+                        vector: vector.to_vec(),
+                        text: None,
+                        sparse_vector: None,
+                        named_vectors: None,
+                        payload: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            let mut spaces = HashMap::new();
+            spaces.insert("space".to_string(), vector.to_vec());
+            storage
+                .insert_records(
+                    "named",
+                    vec![CreateRecordRequest {
+                        id: id.to_string(),
+                        vector: vector.to_vec(),
+                        text: None,
+                        sparse_vector: None,
+                        named_vectors: Some(spaces),
+                        payload: None,
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+
+        let ask = |table: &'static str, space: Option<&'static str>| {
+            let query = query.clone();
+            let storage = &storage;
+            async move {
+                storage
+                    .search(
+                        table,
+                        SearchQuery {
+                            vector: query,
+                            top_k: 5,
+                            limit: 5,
+                            vector_name: space.map(str::to_string),
+                            search_mode: SearchMode::Accurate,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .hits
+                    .into_iter()
+                    .map(|hit| (hit.id, hit.score))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let reference = ask("reference", None).await;
+        let named = ask("named", Some("space")).await;
+
+        assert_eq!(
+            reference.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            named.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            "{metric:?}: the two rankings differ"
+        );
+        for ((id, want), (_, got)) in reference.iter().zip(named.iter()) {
+            assert!(
+                (want - got).abs() < 1e-5,
+                "{metric:?}: '{id}' scored {got} in a named space and {want} in a table of the \
+                 same metric. The named space was scored with the table's formula."
+            );
+        }
+        // And the failure this replaces was not subtle once looked at: every dot score was
+        // exactly 1.0. A regression that produced constant scores would still pass the
+        // ordering check above, so say it outright.
+        let distinct: std::collections::HashSet<String> =
+            named.iter().map(|(_, s)| format!("{s:.4}")).collect();
+        assert!(
+            distinct.len() > 1,
+            "{metric:?}: every hit scored the same ({named:?}), which is what clamping a \
+             mis-converted distance looks like"
+        );
+    }
+}

@@ -141,6 +141,54 @@ DXMT_COMPRESSION
 `DXMT_STORAGE_TYPE` is currently parsed but does not select the server implementation. It must not
 be presented as a backend switch until it is connected to the actual construction path.
 
+## Recall on published ground truth
+
+Measured 2026-09-26 on one 16-core box, through HTTP, against the `neighbors` array each
+`ann-benchmarks` dataset ships — a ground truth this project did not compute. 200 queries per
+mode, `top_k` 10, shipped defaults otherwise. These are the first cross-dataset figures here
+that are not scored against our own exact scan.
+
+| dataset | rows × dim | metric | ingest | fast | normal | accurate | p50 accurate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| mnist-784 | 60K × 784 | euclidean | 1,766/s | 0.9645 | 1.0000 | 1.0000 | 6.0 ms |
+| fashion-mnist-784 | 60K × 784 | euclidean | 1,869/s | 0.9820 | 1.0000 | 1.0000 | 5.0 ms |
+| sift-128 | 1M × 128 | euclidean | 4,570/s | 0.9805 | 0.9965 | 0.9985 | 7.4 ms |
+| gist-960 | 1M × 960 | euclidean | 811/s | 0.8700 | 0.9830 | 0.9955 | 14.4 ms |
+| nytimes-256 | 290K × 256 | cosine | 1,685/s | 0.8400 | 0.9470 | 0.9770 | 12.3 ms |
+| lastfm-64 | 292K × 65 | dot | 5,816/s | 0.8935 | 0.9130 | 0.9910 | 3.9 ms |
+| glove-25 | 1.18M × 25 | cosine | 10,125/s | 0.7475 | 0.7450 | 0.9325 | 5.9 ms |
+| glove-50 | 1.18M × 50 | cosine | 6,052/s | 0.7995 | 0.8445 | 0.9715 | 8.2 ms |
+| glove-200 | 1.18M × 200 | cosine | 1,995/s | 0.7425 | 0.8620 | 0.9495 | 11.4 ms |
+
+**Ingest rate tracks dimension, not rows.** 10,125/s at 25 dimensions down to 811/s at 960,
+over HTTP with JSON on the wire.
+
+**On a low-dimension corpus, use `accurate`.** `normal` is 0.745 on glove-25 and 0.9965 on
+sift-128, and the difference is product quantization: a PQ code separates a 25-dimension
+neighbourhood far less than a 128- or 960-dimension one, so more of the answer has to come
+from the exact rerank that `accurate` widens. The alternative, if the memory is available, is
+to turn quantization off for that table — `quantization.quantize_at_rows` above the table's
+eventual size — which measured 1.0000 at `normal` on glove-25 for 466 MB against 263 MB.
+
+**A small fraction of records cannot be found by the graph, whatever the effort.** Searching
+with a vector that is already stored returns it for about 99.5% of a modern-embedding corpus
+and 98% of GIST-960 — the remainder are points nothing else is near, which the graph's
+neighbour selection leaves with no incoming edges. `ef` and `top_k` do not help; they are a
+budget and this is not. Ordinary retrieval is unaffected, because those points are nobody's
+nearest neighbour (recall@10 was 0.9955 on GIST while 5% was unreachable at a million rows).
+Deduplication and near-duplicate detection are the workloads that hit it, and
+`search_mode: "exact"` is the deterministic answer for them.
+`index_record_count` on `GET /tables/{t}/stats` distinguishes this from records the index
+never received. The standard mitigation (`keepPrunedConnections`) was implemented, measured
+on three corpora and removed — see `select_neighbors_heuristic` for the table.
+
+**A standard dataset may not load as it ships.** GIST-960 contains ten all-zero descriptors
+and nytimes-256 contains 239. They are legitimate under euclidean (the origin is a point) and
+meaningless under cosine (no direction), and are accepted and refused accordingly. What is
+worth knowing before a bulk load is that **a batch is all-or-nothing**: one refused record
+fails the whole request, so a million-row load stops at the first bad row and the caller has
+to find it. Filter them out, or load in small batches.
+
 ## Promotion Rules
 
 A feature can move into the supported table only when it has:
