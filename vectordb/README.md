@@ -92,6 +92,32 @@ expects it — the same numbers as below, in text exposition format, in the defa
 `storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
 timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
 
+## Filtering by place
+
+Any payload field holding `{"lat": …, "lon": …}` can be filtered on:
+
+```json
+{"vector": [...], "top_k": 10, "filter": {"must": [
+  {"key": "shop", "operation": {"type": "GeoRadius",
+   "value": {"center": {"lat": 52.5163, "lon": 13.3777}, "radius_m": 1500}}}]}}
+```
+
+`GeoBox` takes `top_left` and `bottom_right` instead, and is the right shape for a map
+viewport; a box whose west edge is east of its east edge crosses the antimeridian rather than
+being empty. Both combine with every other condition, including under `must_not`.
+
+Three things are deliberate:
+
+* **A radius is a circle, not its bounding box.** The index stores the two coordinates together
+  and runs the real great-circle test, because the search path takes the index's answer rather
+  than re-checking it — a superset there is wrong records returned as right ones.
+* **A two-element array is not a point.** GeoJSON writes `[lon, lat]` and every map UI writes
+  `[lat, lon]`; anywhere both numbers are a plausible latitude the two cannot be told apart, so
+  a record whose field is an array simply does not match. Write the object.
+* **Geometry that is not on the earth is a 400.** A latitude of 452 is a swapped pair or a
+  degrees/radians slip, and an empty page is a plausible answer to a real question — which
+  makes it the worst possible answer to that one.
+
 ## Sending text instead of vectors
 
 A table can name an embedding model, and then records and queries carry text:

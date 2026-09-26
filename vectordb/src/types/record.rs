@@ -586,6 +586,14 @@ impl Filter {
     pub fn validate(&self) -> Result<(), String> {
         let all = [&self.must, &self.must_not, &self.should];
         for condition in all.into_iter().flatten().flatten() {
+            // A coordinate off the earth, or a negative radius, is a mistake in the request
+            // and not a query that matches nothing: a `lat` of 452 is a swapped pair or a
+            // degrees/radians slip, and answering it with an empty page hides that. This is
+            // the one place a *filter's* geometry is judged; a record whose payload holds
+            // nonsense simply does not match, because a payload has no declared shape.
+            if let Err(why) = validate_geometry(&condition.operation) {
+                return Err(format!("filter on \"{}\": {why}", condition.key));
+            }
             let composite = |v: &serde_json::Value| v.is_array() || v.is_object();
             let (operation, bad) = match &condition.operation {
                 FilterOperation::Equal(v) => ("Equal", composite(v)),
@@ -604,6 +612,179 @@ impl Filter {
             }
         }
         Ok(())
+    }
+}
+
+/// A point on the earth, as `{"lat": 52.52, "lon": 13.40}`.
+///
+/// **Only the object form.** A two-element array is the most common way to write a coordinate
+/// and there is no agreement on which end is which: GeoJSON says `[lon, lat]`, almost every
+/// map UI says `[lat, lon]`, and the two are indistinguishable anywhere both values are a
+/// plausible latitude. Silently picking one puts a record in Somalia instead of Berlin and
+/// nothing about the result looks wrong. So an array is refused, naming the keys to use.
+///
+/// `lng` and `longitude` are accepted for `lon`, and `latitude` for `lat`: those are the
+/// spellings the other half of the ecosystem uses, they cannot be confused with each other,
+/// and rejecting them buys nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GeoPoint {
+    #[serde(alias = "latitude")]
+    pub lat: f64,
+    #[serde(alias = "lng", alias = "longitude")]
+    pub lon: f64,
+}
+
+// `FilterOperation` is `Hash + Eq` (it keys a plan cache), and `f64` is neither. Comparing by
+// bits makes two identical filters identical here, which is all that is asked of it; that it
+// also makes NaN equal to NaN does not matter, because `validate` refuses a non-finite
+// coordinate before one can reach a map.
+impl PartialEq for GeoPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.lat.to_bits() == other.lat.to_bits() && self.lon.to_bits() == other.lon.to_bits()
+    }
+}
+impl Eq for GeoPoint {}
+impl std::hash::Hash for GeoPoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.lat.to_bits().hash(state);
+        self.lon.to_bits().hash(state);
+    }
+}
+
+impl GeoPoint {
+    /// Mean earth radius, in metres. The figure WGS-84 distance calculations quote.
+    pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
+
+    /// Read a point out of a payload value, or `None` if it is not one.
+    ///
+    /// Returns `None` rather than an error: a payload has no declared shape, so a field that
+    /// holds something else on some records is normal, and those records simply do not match.
+    /// A *filter* naming a bad point is a different thing and is refused by `validate`.
+    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let get = |names: &[&str]| {
+            names
+                .iter()
+                .find_map(|n| object.get(*n))
+                .and_then(serde_json::Value::as_f64)
+        };
+        let lat = get(&["lat", "latitude"])?;
+        let lon = get(&["lon", "lng", "longitude"])?;
+        let point = GeoPoint { lat, lon };
+        point.is_on_the_earth().then_some(point)
+    }
+
+    pub(crate) fn is_on_the_earth(&self) -> bool {
+        self.lat.is_finite()
+            && self.lon.is_finite()
+            && (-90.0..=90.0).contains(&self.lat)
+            && (-180.0..=180.0).contains(&self.lon)
+    }
+
+    /// Great-circle distance in metres, by the haversine formula.
+    ///
+    /// Haversine and not a spheroidal formula: it is within about 0.5% of the WGS-84 ellipsoid,
+    /// which is smaller than the error in most coordinates a payload carries, and the answer is
+    /// used to include or exclude a point rather than to navigate to it. What matters far more
+    /// is that **one** implementation answers this, because the index prefilters and then
+    /// refines with the same function the matcher uses; two implementations that disagree by a
+    /// metre would put records on one side of a radius in one path and the other side in the
+    /// other, for a query the caller cannot tell is inconsistent.
+    pub fn distance_m(&self, other: &GeoPoint) -> f64 {
+        let (lat1, lat2) = (self.lat.to_radians(), other.lat.to_radians());
+        let d_lat = lat2 - lat1;
+        let d_lon = (other.lon - self.lon).to_radians();
+        let a = (d_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (d_lon / 2.0).sin().powi(2);
+        2.0 * Self::EARTH_RADIUS_M * a.sqrt().clamp(-1.0, 1.0).asin()
+    }
+}
+
+/// A rectangle in latitude and longitude.
+///
+/// `top_left` is the north-west corner and `bottom_right` the south-east one, which is the
+/// naming every other vector database uses for this. A box whose left edge is east of its right
+/// edge is read as crossing the antimeridian rather than as empty -- the Pacific is where a
+/// wrong answer here would be, and an empty box is a thing a caller can already express with a
+/// filter that matches nothing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GeoBox {
+    pub top_left: GeoPoint,
+    pub bottom_right: GeoPoint,
+}
+
+impl GeoBox {
+    pub fn contains(&self, point: &GeoPoint) -> bool {
+        let within_latitude = point.lat <= self.top_left.lat && point.lat >= self.bottom_right.lat;
+        let (west, east) = (self.top_left.lon, self.bottom_right.lon);
+        let within_longitude = if west <= east {
+            point.lon >= west && point.lon <= east
+        } else {
+            // Crossing the antimeridian: the box is the two pieces either side of it.
+            point.lon >= west || point.lon <= east
+        };
+        within_latitude && within_longitude
+    }
+}
+
+/// A circle on the earth.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GeoRadius {
+    pub center: GeoPoint,
+    /// Metres. Named for its unit because "radius: 1000" is otherwise read as kilometres by
+    /// about half of everyone, and the failure is a result set a thousand times too small.
+    pub radius_m: f64,
+}
+
+// By bits, for the same reason as `GeoPoint`.
+impl PartialEq for GeoRadius {
+    fn eq(&self, other: &Self) -> bool {
+        self.center == other.center && self.radius_m.to_bits() == other.radius_m.to_bits()
+    }
+}
+impl Eq for GeoRadius {}
+impl std::hash::Hash for GeoRadius {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.center.hash(state);
+        self.radius_m.to_bits().hash(state);
+    }
+}
+
+impl GeoRadius {
+    pub fn contains(&self, point: &GeoPoint) -> bool {
+        self.center.distance_m(point) <= self.radius_m
+    }
+
+    /// How far north and south the circle reaches, and how far east and west at its widest.
+    ///
+    /// This is what lets the index walk a band of latitudes instead of every point: the circle
+    /// is inside this box, so a walk of the box cannot miss a member of the circle. The
+    /// longitude half widens as `1 / cos(lat)` and is meaningless near the poles or for a
+    /// radius large enough to wrap, both of which are reported as "the whole range" rather than
+    /// as a narrow box that would silently lose the far side of the world.
+    pub fn bounding_box(&self) -> (f64, f64, Option<(f64, f64)>) {
+        let d_lat = (self.radius_m / GeoPoint::EARTH_RADIUS_M).to_degrees();
+        let south = (self.center.lat - d_lat).max(-90.0);
+        let north = (self.center.lat + d_lat).min(90.0);
+        let cos = self.center.lat.to_radians().cos();
+        // Within a degree of a pole, or a circle that reaches one: every longitude is inside.
+        if cos.abs() < 1e-6 || south <= -90.0 || north >= 90.0 {
+            return (south, north, None);
+        }
+        let d_lon = (self.radius_m / (GeoPoint::EARTH_RADIUS_M * cos)).to_degrees();
+        if d_lon >= 180.0 {
+            return (south, north, None);
+        }
+        (
+            south,
+            north,
+            Some((self.center.lon - d_lon, self.center.lon + d_lon)),
+        )
     }
 }
 
@@ -664,6 +845,27 @@ pub enum FilterOperation {
     /// Sent as `{"type": "IsNull"}`. Distinct from `IsEmpty`: a payload that writes `null` to
     /// mean "we looked and there was nothing" is saying something a missing field is not.
     IsNull,
+    /// The field holds a point within `radius_m` metres of `center`.
+    ///
+    /// ```json
+    /// {"key": "shop", "operation": {"type": "GeoRadius",
+    ///  "value": {"center": {"lat": 52.52, "lon": 13.40}, "radius_m": 1500}}}
+    /// ```
+    ///
+    /// The field's value is `{"lat": …, "lon": …}`; a record whose value there is not a point
+    /// does not match, as with any other type mismatch here. Distance is the great-circle
+    /// distance, so the boundary is a circle on the sphere and not a square.
+    GeoRadius(GeoRadius),
+    /// The field holds a point inside a latitude/longitude rectangle.
+    ///
+    /// ```json
+    /// {"key": "shop", "operation": {"type": "GeoBox", "value": {
+    ///   "top_left": {"lat": 52.6, "lon": 13.2}, "bottom_right": {"lat": 52.4, "lon": 13.6}}}}
+    /// ```
+    ///
+    /// Cheaper than `GeoRadius` and the right shape for a map viewport, which is what usually
+    /// asks. A box whose western edge is east of its eastern one crosses the antimeridian.
+    GeoBox(GeoBox),
 }
 
 impl Record {
@@ -953,6 +1155,45 @@ fn any_element(value: &serde_json::Value, test: impl Fn(&serde_json::Value) -> b
     }
 }
 
+/// Refuse a geographic condition whose geometry is not on the earth.
+fn validate_geometry(operation: &FilterOperation) -> Result<(), String> {
+    let point = |p: &GeoPoint, name: &str| -> Result<(), String> {
+        if p.is_on_the_earth() {
+            return Ok(());
+        }
+        Err(format!(
+            "{name} is ({}, {}), which is not a place. Latitude runs -90 to 90 and longitude \
+             -180 to 180; a latitude above 90 is usually a swapped pair.",
+            p.lat, p.lon
+        ))
+    };
+    match operation {
+        FilterOperation::GeoRadius(circle) => {
+            point(&circle.center, "center")?;
+            if !(circle.radius_m.is_finite() && circle.radius_m >= 0.0) {
+                return Err(format!(
+                    "radius_m is {}, which is not a distance. It is in metres.",
+                    circle.radius_m
+                ));
+            }
+            Ok(())
+        }
+        FilterOperation::GeoBox(rectangle) => {
+            point(&rectangle.top_left, "top_left")?;
+            point(&rectangle.bottom_right, "bottom_right")?;
+            if rectangle.top_left.lat < rectangle.bottom_right.lat {
+                return Err(format!(
+                    "top_left is at latitude {} and bottom_right at {}, so the box has no \
+                     height. top_left is the north-west corner.",
+                    rectangle.top_left.lat, rectangle.bottom_right.lat
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A positive operation against one value.
 fn scalar_matches(value: &serde_json::Value, operation: &FilterOperation) -> bool {
     let number = || value.as_f64();
@@ -980,6 +1221,15 @@ fn scalar_matches(value: &serde_json::Value, operation: &FilterOperation) -> boo
             text().is_some_and(|s| s.starts_with(prefix.as_str()))
         }
         FilterOperation::EndsWith(suffix) => text().is_some_and(|s| s.ends_with(suffix.as_str())),
+        // The one place a *value* that is an object is matched rather than skipped. Everything
+        // else here reads a scalar, and `index_field` records an object as present only — which
+        // is why the geo half of the index is a structure of its own rather than a posting.
+        FilterOperation::GeoRadius(circle) => {
+            GeoPoint::from_value(value).is_some_and(|p| circle.contains(&p))
+        }
+        FilterOperation::GeoBox(rectangle) => {
+            GeoPoint::from_value(value).is_some_and(|p| rectangle.contains(&p))
+        }
         // Answered as complements in `matches_condition`, never per element.
         FilterOperation::NotEqual(_) | FilterOperation::NotIn(_) => {
             unreachable!("negations are complements of the positive forms")

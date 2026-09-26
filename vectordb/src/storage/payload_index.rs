@@ -6,7 +6,7 @@
 //! - 智能PRE-FILTERING决策
 
 use crate::types::{
-    record::{Condition, Filter, FilterOperation},
+    record::{Condition, Filter, FilterOperation, GeoPoint},
     vector::RecordId,
 };
 use serde::{Deserialize, Serialize};
@@ -186,6 +186,7 @@ impl PayloadIndex {
         self.bulk = false;
         for field in self.field_indices.values_mut() {
             field.numeric.merge();
+            field.geo.merge();
             field.distinct_count = field.value_to_ids.len() + field.numeric.distinct_count();
         }
     }
@@ -372,6 +373,8 @@ struct FieldIndex {
     value_to_ids: FastMap<ValueKey, Postings>,
     /// Numeric values, sorted. A field can hold both: the value decides, not the field.
     numeric: NumericIndex,
+    /// Coordinate pairs, sorted by latitude. Empty for all but a handful of fields.
+    geo: GeoIndex,
     /// 字段类型（推断）
     #[allow(dead_code)]
     field_type: FieldType,
@@ -464,6 +467,125 @@ impl Postings {
         match self {
             Postings::One(ordinal) => visit(*ordinal),
             Postings::Many(many) => many.iter().for_each(visit),
+        }
+    }
+}
+
+/// The coordinate pairs a field holds, sorted by latitude.
+///
+/// **Why a structure of its own, and not the numeric index on `key.lat` and `key.lon`.** Those
+/// exist already — `index_field` recurses into the object, so a `{"lat": …, "lon": …}` value is
+/// filed as two numbers — and intersecting two range walks would give the bounding box. But a
+/// bounding box is not a circle, and this index's answers are *taken*, not re-checked: the
+/// search path turns post-filtering off when the index answered, so a superset here is wrong
+/// answers delivered as right ones. Refining a box down to a circle needs each candidate's two
+/// coordinates *together*, and an inverted (value → records) index cannot give you that.
+///
+/// So: latitude sorted, to bound the walk, with the longitude carried alongside so the exact
+/// test can run in place. Both are `f64` and the test is
+/// [`GeoPoint::distance_m`] — the same function [`Record::matches_filter`] calls, on the same
+/// bits the payload held. Anything narrower would put a point inside the circle here and
+/// outside it there, for records within a metre of the boundary, which is exactly where a
+/// caller checking a result by hand will look.
+///
+/// **What it costs**: 24 bytes per point, on top of the two numeric entries the same value
+/// already makes. A field nobody filters geographically pays nothing, because nothing that is
+/// not a coordinate pair lands here; a field that is one pays about 400 MB at 10M rows across
+/// all three structures, and `payload_index`'s `except` is how to decline that.
+#[derive(Debug, Clone, Default)]
+struct GeoIndex {
+    /// Sorted by latitude. `(latitude, longitude, record)`.
+    sorted: Vec<(OrderedFloat, f64, Ordinal)>,
+    /// Appended since the last merge, unsorted.
+    pending: Vec<(OrderedFloat, f64, Ordinal)>,
+}
+
+impl GeoIndex {
+    /// The same policy as [`NumericIndex`], for the same reason: a merge is a sort of the whole
+    /// array, so what matters is how many merges happen, not how fast one is.
+    const MERGE_AT: usize = 4_096;
+
+    fn len(&self) -> usize {
+        self.sorted.len() + self.pending.len()
+    }
+
+    fn insert(&mut self, point: GeoPoint, id: Ordinal) {
+        self.pending
+            .push((OrderedFloat::from(point.lat), point.lon, id));
+        if self.pending.len() >= Self::MERGE_AT
+            || self.pending.len().saturating_mul(64) > self.sorted.len()
+        {
+            self.merge();
+        }
+    }
+
+    /// Append without considering a merge. See [`PayloadIndex::begin_bulk`].
+    fn push(&mut self, point: GeoPoint, id: Ordinal) {
+        self.pending
+            .push((OrderedFloat::from(point.lat), point.lon, id));
+    }
+
+    fn remove(&mut self, point: GeoPoint, id: Ordinal) {
+        let lat = OrderedFloat::from(point.lat);
+        if let Some(at) = self
+            .pending
+            .iter()
+            .position(|(v, _, i)| *v == lat && *i == id)
+        {
+            self.pending.swap_remove(at);
+            return;
+        }
+        let lo = self.sorted.partition_point(|(v, _, _)| *v < lat);
+        let mut at = lo;
+        while at < self.sorted.len() && self.sorted[at].0 == lat {
+            if self.sorted[at].2 == id {
+                self.sorted.remove(at);
+                return;
+            }
+            at += 1;
+        }
+    }
+
+    fn merge(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.sorted.append(&mut self.pending);
+        self.sorted.sort_unstable_by_key(|(lat, _, _)| *lat);
+    }
+
+    /// Visit every record whose point lies in the latitude band and satisfies `accept`.
+    ///
+    /// The band is what the sort buys; `accept` is the exact test, run on the point itself, so
+    /// what comes out is the answer and not a candidate set.
+    fn select(
+        &self,
+        south: f64,
+        north: f64,
+        accept: impl Fn(&GeoPoint) -> bool,
+        mut visit: impl FnMut(Ordinal),
+    ) {
+        let (lo, hi) = (OrderedFloat::from(south), OrderedFloat::from(north));
+        let start = self.sorted.partition_point(|(v, _, _)| *v < lo);
+        let end = self.sorted.partition_point(|(v, _, _)| *v <= hi);
+        let mut test = |(lat, lon, id): &(OrderedFloat, f64, Ordinal)| {
+            let point = GeoPoint {
+                lat: f64::from(*lat),
+                lon: *lon,
+            };
+            if accept(&point) {
+                visit(*id);
+            }
+        };
+        for entry in &self.sorted[start..end.max(start)] {
+            test(entry);
+        }
+        // The unsorted tail has no band to narrow it, so every entry is tested. It is bounded
+        // by MERGE_AT, which is what keeps that from mattering.
+        for entry in &self.pending {
+            if (south..=north).contains(&f64::from(entry.0)) {
+                test(entry);
+            }
         }
     }
 }
@@ -902,14 +1024,16 @@ impl PayloadIndex {
                     .map(|(value, postings)| value.heap_size() + postings.heap_size())
                     .sum();
                 let numeric_entries = field.numeric.entry_count();
+                let geo_points = field.geo.len();
                 FieldIndexReport {
                     field: name.clone(),
                     distinct_values: field.distinct_count,
                     keyword_values: field.value_to_ids.len(),
                     keyword_rows,
                     numeric_entries,
+                    geo_points,
                     unkeyed_rows: self.unindexed.get(name).map_or(0, |b| b.len() as usize),
-                    estimated_bytes: keyword_bytes + numeric_entries * 16,
+                    estimated_bytes: keyword_bytes + numeric_entries * 16 + geo_points * 24,
                     numeric_min: field.stats.numeric_min,
                     numeric_max: field.stats.numeric_max,
                 }
@@ -1197,6 +1321,12 @@ impl PayloadIndex {
             // "every record it accepts is in the index" reasoning does not apply: a record it
             // accepts is typically one with no entry here at all.
             FilterOperation::IsEmpty | FilterOperation::IsNull => false,
+            // A coordinate pair is not a `ValueKey`, and the proof this gates walks value
+            // keys. Every value would fail `value_key_matches`, so a geo condition left in
+            // would prove *every* geographic filter unsatisfiable and the search would answer
+            // an empty page — a wrong answer with a 200 on it. Left out, the query runs and
+            // the geo index answers it.
+            FilterOperation::GeoRadius(_) | FilterOperation::GeoBox(_) => false,
         }
     }
 
@@ -1212,6 +1342,10 @@ impl PayloadIndex {
             FilterOperation::NotEqual(value) => {
                 Self::to_value_key(value).is_some_and(|k| !Self::same_value(&k, value_key))
             }
+            // A coordinate pair is an object, and an object is never a `ValueKey`. Geo is
+            // answered from `FieldIndex::geo`, not from the keyword or numeric halves, so
+            // nothing this function is asked about can satisfy one.
+            FilterOperation::GeoRadius(_) | FilterOperation::GeoBox(_) => false,
             FilterOperation::In(values) => values
                 .iter()
                 .filter_map(Self::to_value_key)
@@ -1514,6 +1648,22 @@ impl PayloadIndex {
         };
 
         match &condition.operation {
+            // Counted, not estimated. The walk a geo condition costs is the walk this would
+            // have to do to guess at it, so guessing buys nothing — and the number matters:
+            // it decides whether the search scores the candidate set exactly or walks the
+            // graph with a filter, and a wrong guess here is the 16.6-second query described
+            // above. The latitude band is the bound, so a tight radius is cheap to count and
+            // a radius spanning a continent costs what answering it costs anyway.
+            FilterOperation::GeoRadius(_) | FilterOperation::GeoBox(_) => {
+                let count = Self::geo_ordinals(&field_index.geo, &condition.operation).len();
+                let total = self.total_records.max(1);
+                CardinalityEstimate {
+                    min: count,
+                    max: count,
+                    exp: count,
+                    selectivity: count as f64 / total as f64,
+                }
+            }
             FilterOperation::Equal(value) => {
                 if let Some(value_key) = Self::to_value_key(value) {
                     // Both halves: a number is in the sorted index and everything else in the
@@ -1718,6 +1868,9 @@ impl PayloadIndex {
             FilterOperation::Contains(s) => scan(&|id| id.contains(s.as_str())),
             FilterOperation::StartsWith(s) => scan(&|id| id.starts_with(s.as_str())),
             FilterOperation::EndsWith(s) => scan(&|id| id.ends_with(s.as_str())),
+            // A record id is a string; it is not a place, and asking where it is matches
+            // nothing, the same way the numeric comparisons below match nothing.
+            FilterOperation::GeoRadius(_) | FilterOperation::GeoBox(_) => FastSet::default(),
             FilterOperation::GreaterThan(_)
             | FilterOperation::GreaterThanOrEqual(_)
             | FilterOperation::LessThan(_)
@@ -1730,6 +1883,45 @@ impl PayloadIndex {
                 unreachable!("negations are taken as complements in get_condition_ids")
             }
         }
+    }
+
+    /// The records whose point satisfies a geographic condition.
+    ///
+    /// Two steps, and the second is what makes this an answer rather than a candidate set: the
+    /// latitude band narrows the walk, and then the exact test runs on the point. `GeoRadius`'s
+    /// band is its bounding box, which contains the circle, so nothing inside the circle is
+    /// skipped; the circle test then drops the corners. `GeoBox` is its own band.
+    ///
+    /// The longitude half of a radius is checked by `GeoRadius::contains`, not by the band, so
+    /// the antimeridian needs no special case here — the distance function does not know the
+    /// date line exists.
+    fn geo_ordinals(geo: &GeoIndex, operation: &FilterOperation) -> FastSet<Ordinal> {
+        let mut result = FastSet::default();
+        match operation {
+            FilterOperation::GeoRadius(circle) => {
+                let (south, north, _) = circle.bounding_box();
+                geo.select(
+                    south,
+                    north,
+                    |p| circle.contains(p),
+                    |id| {
+                        result.insert(id);
+                    },
+                );
+            }
+            FilterOperation::GeoBox(rectangle) => {
+                geo.select(
+                    rectangle.bottom_right.lat,
+                    rectangle.top_left.lat,
+                    |p| rectangle.contains(p),
+                    |id| {
+                        result.insert(id);
+                    },
+                );
+            }
+            _ => unreachable!("geo_ordinals is only reached for a geographic operation"),
+        }
+        result
     }
 
     /// The records satisfying a condition that is not a negation.
@@ -1751,6 +1943,13 @@ impl PayloadIndex {
             Some(idx) => idx,
             None => return FastSet::default(),
         };
+
+        // The geo half answers on its own and returns: a point is not in the keyword map and
+        // its two coordinates in the numeric half say nothing together, so neither of the
+        // loops below can contribute anything to a geographic question.
+        if let FilterOperation::GeoRadius(_) | FilterOperation::GeoBox(_) = operation {
+            return Self::geo_ordinals(&field_index.geo, operation);
+        }
 
         let mut result = FastSet::default();
 
@@ -1890,6 +2089,14 @@ impl PayloadIndex {
             // object and matches nothing scalar.
             serde_json::Value::Object(fields) => {
                 self.mark_unindexed(key, ordinal);
+                // An object that reads as a coordinate pair is *also* filed as a point, under
+                // the object's own key. Its `lat` and `lon` still go to the numeric index
+                // below, so a range filter on `shop.lat` keeps working — that was the only way
+                // to ask a geographic question here before, and taking it away to save the
+                // duplication would break every caller who found that workaround.
+                if let Some(point) = GeoPoint::from_value(value) {
+                    self.index_geo(key, point, ordinal);
+                }
                 // All the way down, with no depth limit. A limit was the first version of
                 // this, and it would have been a silent hole exactly where the excluded-field
                 // refusal closed one: a filter on a path below the cut-off is not indexed, and
@@ -1944,6 +2151,11 @@ impl PayloadIndex {
             // again, which is the one way this index can return a wrong record.
             serde_json::Value::Object(fields) => {
                 self.unmark_unindexed(key, ordinal);
+                if let Some(point) = GeoPoint::from_value(value) {
+                    if let Some(field) = self.field_indices.get_mut(key) {
+                        field.geo.remove(point, ordinal);
+                    }
+                }
                 for (name, nested) in fields {
                     let path = format!("{key}.{name}");
                     if literals.is_some_and(|l| l.contains(path.as_str())) {
@@ -2064,6 +2276,32 @@ impl PayloadIndex {
     }
 
     /// Index one scalar value under `key`.
+    /// File one coordinate pair under `key`.
+    ///
+    /// Separate from `index_scalar` because a point is not a scalar and has no `ValueKey`: the
+    /// two coordinates only mean anything together, which is the whole reason the geo half
+    /// exists.
+    fn index_geo(&mut self, key: &str, point: GeoPoint, ordinal: Ordinal) {
+        let field = self
+            .field_indices
+            .entry(key.to_string())
+            .or_insert_with(|| FieldIndex {
+                value_to_ids: FastMap::default(),
+                numeric: NumericIndex::default(),
+                geo: GeoIndex::default(),
+                // A point is neither a string nor a number; `Mixed` is the honest label and
+                // `field_type` is only used for the estimate anyway.
+                field_type: FieldType::Mixed,
+                distinct_count: 0,
+                stats: FieldStats::new(),
+            });
+        if self.bulk {
+            field.geo.push(point, ordinal);
+        } else {
+            field.geo.insert(point, ordinal);
+        }
+    }
+
     fn index_scalar(&mut self, key: &str, value: &serde_json::Value, ordinal: Ordinal) {
         let Some(value_key) = Self::to_value_key(value) else {
             return;
@@ -2078,6 +2316,7 @@ impl PayloadIndex {
                 FieldIndex {
                     value_to_ids: FastMap::default(),
                     numeric: NumericIndex::default(),
+                    geo: GeoIndex::default(),
                     field_type: Self::infer_field_type(value),
                     distinct_count: 0,
                     stats: FieldStats::new(),
@@ -2175,6 +2414,13 @@ pub struct FieldIndexReport {
     pub keyword_rows: usize,
     /// (value, record) pairs on the numeric side; an array counts once per element.
     pub numeric_entries: usize,
+    /// Coordinate pairs filed for this field, at 24 bytes each.
+    ///
+    /// A geographic field pays three times: here, and once for each of `lat` and `lon` in the
+    /// numeric half, which stay so that a range filter on `field.lat` keeps working. This is
+    /// the line that says so, and `payload_index`'s `except` is how to decline it.
+    #[serde(default)]
+    pub geo_points: usize,
     /// Records whose value here is an array or an object, which is recorded as presence only.
     pub unkeyed_rows: usize,
     /// Computed from the postings, not measured: bitmaps at their serialized size, keys at
