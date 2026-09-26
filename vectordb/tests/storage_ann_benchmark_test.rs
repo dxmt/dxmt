@@ -195,7 +195,7 @@ async fn test_storage_ann_10k_recall_and_latency() {
                     limit: top_k,
                     with_payload: false,
                     with_vector: false,
-                    search_mode: search_mode.clone(),
+                    search_mode,
                     ..Default::default()
                 },
             )
@@ -328,7 +328,7 @@ async fn test_search_effort_is_live() {
                         limit: top_k,
                         with_payload: false,
                         with_vector: false,
-                        search_mode: mode.clone(),
+                        search_mode: mode,
                         ..Default::default()
                     },
                 )
