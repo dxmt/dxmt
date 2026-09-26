@@ -91,7 +91,15 @@ impl<S: Storage + 'static> McpServer<S> {
                     "vector": {
                         "type": "array",
                         "items": {"type": "number"},
-                        "description": "Query vector"
+                        "description": "Query vector. Omit it and pass `text` instead when the \
+                                        table declares an embedding model."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Query text, embedded by the table's own model. Use this \
+                                        unless you have a vector; an MCP client has no embedding \
+                                        model of its own. `get_table_info` says whether a table \
+                                        has one."
                     },
                     "limit": {
                         "type": "integer",
@@ -103,7 +111,7 @@ impl<S: Storage + 'static> McpServer<S> {
                         "description": "Optional metadata filters"
                     }
                 },
-                "required": ["table", "vector"]
+                "required": ["table"]
             }),
         });
 
@@ -125,14 +133,21 @@ impl<S: Storage + 'static> McpServer<S> {
                     "vector": {
                         "type": "array",
                         "items": {"type": "number"},
-                        "description": "Vector data"
+                        "description": "Vector data. Omit it and pass `text` instead when the \
+                                        table declares an embedding model."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text for the table's model to embed. It is also stored \
+                                        in the payload, so a later search returns the text this \
+                                        record came from."
                     },
                     "metadata": {
                         "type": "object",
                         "description": "Associated metadata"
                     }
                 },
-                "required": ["table", "id", "vector"]
+                "required": ["table", "id"]
             }),
         });
 
@@ -149,7 +164,27 @@ impl<S: Storage + 'static> McpServer<S> {
                     },
                     "dimension": {
                         "type": "integer",
-                        "description": "Vector dimension"
+                        "description": "Vector dimension. Omit it when `embedding` is given and \
+                                        the server will ask the model how wide its vectors are, \
+                                        which is one fewer number to be wrong about."
+                    },
+                    "embedding": {
+                        "type": "object",
+                        "description": "Let the server embed text for this table, so records \
+                                        and searches can carry `text` instead of a vector. \
+                                        `model` is required. `base_url` points at anything \
+                                        speaking the OpenAI /embeddings protocol and defaults \
+                                        to OpenAI; `api_key_env` names an environment variable \
+                                        of the server (default OPENAI_API_KEY) and never \
+                                        carries the key itself.",
+                        "properties": {
+                            "model": {"type": "string"},
+                            "base_url": {"type": "string"},
+                            "field": {"type": "string"},
+                            "api_key_env": {"type": "string"},
+                            "batch_size": {"type": "integer"}
+                        },
+                        "required": ["model"]
                     },
                     "metric": {
                         "type": "string",
@@ -164,7 +199,7 @@ impl<S: Storage + 'static> McpServer<S> {
                         "default": "hnsw"
                     }
                 },
-                "required": ["name", "dimension"]
+                "required": ["name"]
             }),
         });
 
@@ -574,7 +609,18 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<CallToolResult, McpServerError> {
         let args = args.ok_or("Missing arguments")?;
         let table_name = args["table"].as_str().ok_or("Missing table name")?;
-        let vector: Vec<f32> = serde_json::from_value(args["vector"].clone())?;
+        // Either a vector or text, never both: the storage layer refuses a query carrying two,
+        // and quietly preferring one of them is how an agent measures the wrong thing.
+        let text = args["text"].as_str().map(str::to_string);
+        let vector: Vec<f32> = match args.get("vector") {
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(value) => serde_json::from_value(value.clone())?,
+        };
+        if vector.is_empty() && text.is_none() {
+            return Err(
+                "give `vector`, or `text` on a table that declares an embedding model".into(),
+            );
+        }
         let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
         // Parse filter if provided
@@ -590,7 +636,9 @@ impl<S: Storage + 'static> McpServer<S> {
         // Perform vector search
         let query = SearchQuery {
             vector: DenseVector::from(vector),
+            text,
             top_k: limit,
+            limit,
             filter,
             ..Default::default()
         };
@@ -615,7 +663,16 @@ impl<S: Storage + 'static> McpServer<S> {
         let args = args.ok_or("Missing arguments")?;
         let table_name = args["table"].as_str().ok_or("Missing table name")?;
         let id = args["id"].as_str().ok_or("Missing vector ID")?;
-        let vector: Vec<f32> = serde_json::from_value(args["vector"].clone())?;
+        let text = args["text"].as_str().map(str::to_string);
+        let vector: Vec<f32> = match args.get("vector") {
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(value) => serde_json::from_value(value.clone())?,
+        };
+        if vector.is_empty() && text.is_none() {
+            return Err(
+                "give `vector`, or `text` on a table that declares an embedding model".into(),
+            );
+        }
         let metadata = args.get("metadata").cloned();
 
         // Insert vector
@@ -625,7 +682,7 @@ impl<S: Storage + 'static> McpServer<S> {
             sparse_vector: None,
             payload: metadata,
             named_vectors: None,
-            text: None,
+            text,
         };
         self.storage.insert(table_name, record).await?;
 
@@ -647,7 +704,19 @@ impl<S: Storage + 'static> McpServer<S> {
     ) -> Result<CallToolResult, McpServerError> {
         let args = args.ok_or("Missing arguments")?;
         let name = args["name"].as_str().ok_or("Missing table name")?;
-        let dimension = args["dimension"].as_u64().ok_or("Missing dimension")? as usize;
+        let embedding: Option<crate::types::table::EmbeddingConfig> = match args.get("embedding") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|e| format!("Invalid embedding config: {e}"))?,
+            ),
+        };
+        // Zero asks the model for its width, which `create_table` only accepts with a model.
+        let dimension = match args["dimension"].as_u64() {
+            Some(d) => d as usize,
+            None if embedding.is_some() => 0,
+            None => return Err("Missing dimension, and no `embedding` to take one from".into()),
+        };
         let metric = args
             .get("metric")
             .and_then(|m| m.as_str())
@@ -684,16 +753,18 @@ impl<S: Storage + 'static> McpServer<S> {
             hnsw: None,
             quantization: None,
             payload_index: None,
-            embedding: None,
+            embedding,
         };
 
-        self.storage.create_table(table_config).await?;
+        let created = self.storage.create_table(table_config).await?;
 
         Ok(CallToolResult {
             content: vec![ToolContent::Text {
+                // `created.dimension`, not the argument: when the model was asked, the number
+                // worth telling the caller is the one the table actually has.
                 text: format!(
                     "Successfully created table '{}' with dimension {} and {} metric",
-                    name, dimension, metric
+                    name, created.dimension, metric
                 ),
             }],
             is_error: Some(false),

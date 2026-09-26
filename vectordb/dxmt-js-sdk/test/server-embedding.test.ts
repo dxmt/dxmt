@@ -72,3 +72,20 @@ describe('server-side embedding', () => {
     expect(sentBody().records[0]).toMatchObject({ id: '1', text: 'rust borrows memory' });
   });
 });
+
+describe('dimension from the model', () => {
+  afterEach(() => fetchMock.mockReset());
+
+  it('omits dimension when a model will supply it', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ name: 'docs', dimension: 1536 }));
+    await new DXMTClient().createTable({ name: 'docs', embedding: EMBEDDING });
+    expect(sentBody().dimension).toBeUndefined();
+  });
+
+  it('still refuses no dimension and no model', async () => {
+    await expect(new DXMTClient().createTable({ name: 'docs' })).rejects.toThrow(
+      DXMTValidationError
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

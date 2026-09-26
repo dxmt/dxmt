@@ -4373,7 +4373,47 @@ impl IntelligentIndexedStorage {
                 config.name
             )));
         }
+        let config = self.dimension_from_the_model(config).await?;
         self.create_table_inner(config, true).await
+    }
+
+    /// Fill in a dimension of zero by asking the table's model how wide its vectors are.
+    ///
+    /// Zero is the sentinel for "not given", set by the API layer, which has already refused
+    /// it without an `embedding`. It is only read here and not in `create_table_inner`,
+    /// because that is also the recovery and rehydration path: a replayed table already knows
+    /// its width, and a restart must not depend on a provider being reachable.
+    ///
+    /// The cost is one call to the provider during a create, and a create that fails when the
+    /// provider is down. That is the right failure: the alternative is a table whose declared
+    /// width and whose model's width disagree, which is discovered at the first insert, by
+    /// someone else, as a dimension mismatch naming neither the model nor the table's origin.
+    async fn dimension_from_the_model(&self, config: TableConfig) -> crate::Result<TableConfig> {
+        if config.dimension != 0 {
+            return Ok(config);
+        }
+        let Some(embedding) = config.embedding.as_ref() else {
+            return Err(crate::Error::InvalidInput(format!(
+                "table '{}' has no dimension and no embedding model to take one from",
+                config.name
+            )));
+        };
+        let probe = Self::embed(embedding, &["dimension probe".to_string()], None).await?;
+        let dimension = probe.first().map(|v| v.len()).unwrap_or(0);
+        if dimension == 0 {
+            return Err(crate::Error::InvalidConfig(format!(
+                "model '{}' returned an empty vector, so this table has no width to take",
+                embedding.model
+            )));
+        }
+        info!(
+            "Table '{}' takes dimension {} from model '{}'",
+            config.name, dimension, embedding.model
+        );
+        Ok(TableConfig {
+            dimension,
+            ..config
+        })
     }
 
     /// Build the in-memory table container, optionally logging the creation.

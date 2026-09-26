@@ -99,9 +99,11 @@ A table can name an embedding model, and then records and queries carry text:
 ```bash
 export OPENAI_API_KEY=...            # read by the server; never sent in a request body
 
+# No dimension: the server asks the model how wide its vectors are. 1536 for
+# text-embedding-3-small, 1024 for bge-m3, 384 for all-MiniLM-L6-v2 -- the number
+# whose cost, when you get it wrong, is a table that accepts no writes.
 curl -X POST localhost:9999/api/v1/tables \
-  -d '{"name": "docs", "dimension": 1536,
-       "embedding": {"model": "text-embedding-3-small"}}'
+  -d '{"name": "docs", "embedding": {"model": "text-embedding-3-small"}}'
 
 curl -X POST localhost:9999/api/v1/tables/docs/records \
   -d '{"records": [{"id": "1", "text": "rust borrows memory instead of collecting it"},
@@ -133,6 +135,17 @@ The details that decide whether this is usable:
 | Wrong width | A model that answers at a width other than the table's is refused naming both, before anything is stored. |
 | Mixing | A table with a model still accepts vectors you computed. A record that brings its own is not sent to the provider. |
 | Changing it | `PATCH` can repoint `base_url`, `api_key_env`, `field`, `batch_size`. It cannot change `model` on a table that holds rows — those vectors came from the old one, and a query embedded by a different model is not a worse answer but an unrelated one. |
+
+The MCP tools take text too, which is the protocol where it matters most: the caller is a
+language model driving tools and has no way to turn a sentence into 1,536 floats, so
+`insert_vector` and `vector_search` requiring a vector made them unusable by the only sort of
+client that speaks MCP. `create_table` there takes `embedding` and infers the width.
+
+```
+create_table  {"name": "notes", "embedding": {"model": "text-embedding-3-small"}}
+insert_vector {"table": "notes", "id": "1", "text": "..."}
+vector_search {"table": "notes", "text": "...", "limit": 5}
+```
 
 Embedding client-side is still first-class and is what the LangChain and LlamaIndex packages
 do; `langchain-dxmt/examples/embedding.py` picks the best model available without a key.

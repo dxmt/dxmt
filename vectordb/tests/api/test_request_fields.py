@@ -158,6 +158,17 @@ def _(table):
     assert get(f"/tables/{table}").json()["data"]["table"]["name"] == table
 
 
+def test_no_dimension_and_no_model_names_both_ways_out():
+    """The field is optional now, so its absence has to be refused where it cannot be filled.
+
+    Not a `@probe` -- `CreateTableRequest.dimension` already has one, and this is about the
+    field being *absent*, which that probe cannot express.
+    """
+    r = post("/tables", {"name": f"probe_nodim_{uuid.uuid4().hex[:8]}"}, expect_ok=False)
+    assert r.status_code == 400, (r.status_code, r.text[:200])
+    assert "embedding" in r.text, r.text[:200]
+
+
 @probe("CreateTableRequest", "dimension")
 def _(table):
     assert get(f"/tables/{table}").json()["data"]["table"]["dimension"] == 4
@@ -1321,6 +1332,16 @@ def _(table):
         assert get(f"/tables/{name}").json()["data"]["record_count"] == 0
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+    # A create with no dimension asks the model how wide it is. There is no provider here, so
+    # what that proves is that it *tried*: 503 from the unreachable endpoint rather than a 400
+    # about the missing field, and no table left behind.
+    inferred = f"probe_infer_{uuid.uuid4().hex[:8]}"
+    r = post("/tables", {"name": inferred,
+                         "embedding": {"model": "m", "base_url": "http://127.0.0.1:1/v1"}},
+             expect_ok=False)
+    assert r.status_code == 503, (r.status_code, r.text[:200])
+    assert get(f"/tables/{inferred}", expect_ok=False).status_code == 404
 
 
 @probe("SearchQuery", "text")

@@ -224,10 +224,17 @@ export class DXMTClient {
     if (!config.name) {
       throw new DXMTValidationError('Table name is required');
     }
-    if (!config.dimension || config.dimension <= 0) {
-      throw new DXMTValidationError(
-        'Valid dimension (> 0) is required'
-      );
+    // A dimension is required unless a model is named, in which case the server asks the
+    // model how wide its vectors are — the number most often got wrong, and whose cost is a
+    // table that accepts no writes.
+    if (config.dimension === undefined) {
+      if (!config.embedding) {
+        throw new DXMTValidationError(
+          'dimension is required, unless `embedding` names a model to take it from'
+        );
+      }
+    } else if (config.dimension <= 0) {
+      throw new DXMTValidationError('Valid dimension (> 0) is required');
     }
 
     try {

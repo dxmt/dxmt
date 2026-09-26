@@ -342,7 +342,7 @@ class DXMTClient:
     def create_table(
         self,
         name: str,
-        dimension: int,
+        dimension: Optional[int] = None,
         distance_metric: str = "cosine",
         index_type: str = "hnsw",
         description: Optional[str] = None,
@@ -358,7 +358,11 @@ class DXMTClient:
 
         Args:
             name: Table name.
-            dimension: Vector dimension.
+            dimension: Vector dimension, fixed for the life of the table. Optional only
+                when `embedding` is given: the server then asks the model how wide its vectors
+                are, which is the number most often got wrong (1536 for text-embedding-3-small,
+                1024 for bge-m3, 384 for all-MiniLM-L6-v2) and whose cost is a table that
+                accepts no writes.
             distance_metric: Distance metric (cosine, euclidean, manhattan, dot).
             index_type: Index type (hnsw, ivf, ivf_pq, lsh, brute_force).
             description: Optional table description.
@@ -394,7 +398,6 @@ class DXMTClient:
         """
         payload = {
             "name": name,
-            "dimension": dimension,
             "distance_metric": distance_metric,
             "index_type": index_type,
             "description": description,
@@ -408,6 +411,10 @@ class DXMTClient:
             payload["hnsw"] = hnsw
         if quantization is not None:
             payload["quantization"] = quantization
+        # Omitted rather than null when the model is to supply it: the server reads its
+        # absence as "ask the model how wide its vectors are", and a null would be a value.
+        if dimension is not None:
+            payload["dimension"] = dimension
         if payload_index is not None:
             payload["payload_index"] = payload_index
         # The model the server embeds text with: `{"model": "text-embedding-3-small"}`, plus
@@ -430,7 +437,7 @@ class DXMTClient:
     async def acreate_table(
         self,
         name: str,
-        dimension: int,
+        dimension: Optional[int] = None,
         distance_metric: str = "cosine",
         index_type: str = "hnsw",
         description: Optional[str] = None,
@@ -445,7 +452,6 @@ class DXMTClient:
         """Async create a new table. See `create_table` for what each argument does."""
         payload = {
             "name": name,
-            "dimension": dimension,
             "distance_metric": distance_metric,
             "index_type": index_type,
             "description": description,
@@ -457,6 +463,10 @@ class DXMTClient:
             payload["hnsw"] = hnsw
         if quantization is not None:
             payload["quantization"] = quantization
+        # Omitted rather than null when the model is to supply it: the server reads its
+        # absence as "ask the model how wide its vectors are", and a null would be a value.
+        if dimension is not None:
+            payload["dimension"] = dimension
         if payload_index is not None:
             payload["payload_index"] = payload_index
         # The model the server embeds text with: `{"model": "text-embedding-3-small"}`, plus

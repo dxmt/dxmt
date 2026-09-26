@@ -9,6 +9,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+mod fake_provider;
+
 /// Send `requests` to a fresh MCP server, return one parsed reply per request.
 fn exchange(wal_dir: &std::path::Path, requests: &[&str]) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
@@ -198,4 +200,80 @@ fn a_table_name_cannot_put_files_outside_the_data_directory() {
         "files written beside the WAL directory: {:?}",
         stray
     );
+}
+
+#[test]
+fn an_agent_with_no_embedding_model_can_load_a_corpus_and_search_it() {
+    // This is the case MCP exists for and the one it could not serve: the caller is a language
+    // model driving tools, and it has no way to turn a sentence into 1,536 floats. Every tool
+    // here required a vector, so `insert_vector` and `vector_search` were unusable by the only
+    // sort of client that speaks this protocol.
+    //
+    // The provider runs in this process; the server runs as a child and reaches it over
+    // loopback, exactly as it would reach a text-embeddings-inference container.
+    let (base_url, provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+
+    // No `dimension`: the agent names a model and the server asks it how wide it is.
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"create_table","arguments":{{"name":"notes","embedding":{{"model":"bag-of-words","base_url":"{base_url}","api_key_env":"DXMT_TEST_KEY_UNSET"}}}}}}}}"#
+    );
+    let replies = exchange(
+        &wal,
+        &[
+            initialize(),
+            &create,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"rust","text":"rust borrows memory instead of collecting it"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"go","text":"go collects garbage instead of borrowing"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"vector_search","arguments":{"table":"notes","text":"borrows memory","limit":2}}}"#,
+        ],
+    );
+    for r in &replies[1..] {
+        assert_eq!(
+            r["result"]["isError"],
+            serde_json::json!(false),
+            "tool call failed: {}",
+            r
+        );
+    }
+
+    // The create reports the width it took from the model, not the one it was given.
+    let created = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(created.contains("dimension 32"), "{created}");
+
+    let hits = replies[4]["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(hits).unwrap();
+    assert_eq!(parsed["hits"][0]["id"], "rust", "ranked: {hits}");
+    // The text came back with the hit, which is what makes the result usable as context --
+    // otherwise an agent has the ids of passages it cannot read.
+    assert_eq!(
+        parsed["hits"][0]["payload"]["text"], "rust borrows memory instead of collecting it",
+        "{hits}"
+    );
+    // One width probe, two inserts, one query: the corpus is not re-embedded per search.
+    assert_eq!(provider.call_count(), 4);
+}
+
+#[test]
+fn a_tool_call_with_neither_a_vector_nor_text_says_which_to_send() {
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let replies = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_table","arguments":{"name":"t","dimension":4}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"t","id":"a"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"vector_search","arguments":{"table":"t"}}}"#,
+        ],
+    );
+    for r in &replies[2..] {
+        let message = serde_json::to_string(&r["error"]).unwrap();
+        assert!(
+            message.contains("`text`"),
+            "the error does not name the alternative: {r}"
+        );
+    }
 }

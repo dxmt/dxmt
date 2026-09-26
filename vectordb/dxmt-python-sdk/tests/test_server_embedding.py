@@ -97,3 +97,19 @@ async def test_the_async_half_behaves_the_same() -> None:
             await client.asearch("docs", [0.1], text="memory")
     finally:
         await client.aclose()
+
+
+def test_dimension_is_omitted_when_a_model_will_supply_it(client_and_post) -> None:
+    # Sent as null it would be a value the server has to interpret; absent, it means "ask the
+    # model", which is the one reading that matches what the caller meant.
+    client, post = client_and_post
+    client.create_table("docs", embedding=EMBEDDING)
+    body = _body(post)
+    assert "dimension" not in body, body
+    assert body["embedding"] == EMBEDDING
+
+
+def test_an_explicit_dimension_still_goes_through(client_and_post) -> None:
+    client, post = client_and_post
+    client.create_table("docs", dimension=1536, embedding=EMBEDDING)
+    assert _body(post)["dimension"] == 1536

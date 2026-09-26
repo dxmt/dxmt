@@ -60,7 +60,14 @@ pub struct PaginationQuery {
 #[serde(deny_unknown_fields)]
 pub struct CreateTableRequest {
     pub name: String,
-    pub dimension: usize,
+    /// Vector width, fixed for the life of the table.
+    ///
+    /// Optional only when `embedding` names a model: the server then asks the model for one
+    /// vector and takes its width. A caller who has to look up that `text-embedding-3-small`
+    /// is 1,536 and `bge-m3` is 1,024, and gets it wrong, finds out at the first insert —
+    /// which is why the model is asked instead of guessed.
+    #[serde(default)]
+    pub dimension: Option<usize>,
     pub distance_metric: Option<String>,
     pub description: Option<String>,
     pub index_type: Option<String>,
@@ -354,15 +361,25 @@ pub async fn create_table(
         return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
     }
 
-    if request.dimension > MAX_DIMENSION || request.dimension < MIN_DIMENSION {
-        let error = ApiError::new(
-            "INVALID_INPUT",
-            &format!(
-                "Dimension must be between {} and {}",
-                MIN_DIMENSION, MAX_DIMENSION
-            ),
-        );
-        return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
+    match request.dimension {
+        Some(dimension) if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&dimension) => {
+            let error = ApiError::new(
+                "INVALID_INPUT",
+                &format!(
+                    "Dimension must be between {} and {}",
+                    MIN_DIMENSION, MAX_DIMENSION
+                ),
+            );
+            return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
+        }
+        None if request.embedding.is_none() => {
+            let error = ApiError::new(
+                "INVALID_INPUT",
+                "dimension is required, unless `embedding` names a model to take it from",
+            );
+            return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
+        }
+        _ => {}
     }
 
     // 验证表名
@@ -404,7 +421,11 @@ pub async fn create_table(
 
     let config = TableConfig {
         name: request.name,
-        dimension: request.dimension,
+        // Zero is the sentinel `create_table` reads as "ask the model", checked above to be
+        // reachable only with an `embedding`. `TableConfig::dimension` stays a `usize` because
+        // making it an `Option` would touch every one of its sixty construction sites to say
+        // something only this one path can mean.
+        dimension: request.dimension.unwrap_or(0),
         distance_metric,
         description: request.description,
         index_type,

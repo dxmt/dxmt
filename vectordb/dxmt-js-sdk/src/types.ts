@@ -214,7 +214,9 @@ export interface EmbeddingConfig {
  */
 export interface TableConfig {
   name: string;
-  dimension: number;
+  /** Vector width, fixed for the life of the table. Optional only with {@link
+   * TableConfig.embedding}, where the server takes it from the model. */
+  dimension?: number;
   /** Which payload fields to index for filtering. Unset indexes every field. */
   payload_index?: PayloadIndexPolicy;
   distance_metric?: DistanceMetric;

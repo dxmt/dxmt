@@ -1,23 +1,14 @@
 //! Text in, vectors out: the table's model runs on the server.
 //!
-//! The provider here is a real HTTP server speaking the OpenAI `/embeddings` protocol, not a
-//! stub swapped in behind the client. That is the whole point of the test: the thing being
-//! checked is that pointing `base_url` at *something that speaks that protocol* works, because
-//! that is the only claim `EmbeddingConfig` makes — the same one that has to hold for
-//! text-embeddings-inference, ollama and Infinity, none of which can be in a test suite.
-//!
-//! It also means the failure paths are real failures: a 429 is a 429 on the wire, an
-//! unreachable provider is a refused connection.
-//!
-//! The model is a hashed bag of words. It is not an embedding model and nothing here pretends
-//! it is — it only has to be deterministic and to put similar text nearer together, which is
-//! enough to tell "the server embedded the query with the same thing it embedded the corpus
-//! with" from "it did not".
+//! The provider is a real HTTP server speaking the OpenAI `/embeddings` protocol
+//! (`tests/fake_provider/`), not a stub swapped in behind the client. That is the whole point:
+//! the only claim `EmbeddingConfig` makes is that `base_url` may point at something speaking
+//! that protocol, and the only way to check it is to point it at something that does. It also
+//! makes the failure paths real — a 429 is a 429 on the wire, an unreachable provider is a
+//! refused connection.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use axum::{extract::State, routing::post, Json, Router};
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
     storage::IntelligentIndexedStorage,
@@ -27,124 +18,15 @@ use dxmt_vectordb::{
         vector::DistanceMetric,
     },
 };
-use serde_json::{json, Value};
+
+mod fake_provider;
+use fake_provider::{bag_of_words, Behaviour};
 
 const DIM: usize = 32;
 
-/// How the fake provider should behave, so the failure paths can be exercised.
-#[derive(Clone, Copy, PartialEq)]
-enum Behaviour {
-    Normal,
-    /// 429 on the first call, then normal. Proves the retry is a retry and not a give-up.
-    RateLimitOnce,
-    /// A 401 that no number of attempts would fix.
-    Unauthorized,
-    /// Vectors of the wrong width, which must be caught before anything is stored.
-    WrongDimension,
-    /// Answers in reverse order with `index` set, which is legal and which a client that
-    /// trusts array position gets silently wrong.
-    Reversed,
-}
-
-#[derive(Clone)]
-struct Provider {
-    behaviour: Behaviour,
-    calls: Arc<AtomicUsize>,
-    /// Every text the provider was asked to embed, in order, so a test can assert what the
-    /// server sent rather than inferring it from the result.
-    seen: Arc<std::sync::Mutex<Vec<String>>>,
-}
-
-fn bag_of_words(text: &str, dimension: usize) -> Vec<f32> {
-    let mut v = vec![0f32; dimension];
-    for word in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
-        if word.is_empty() {
-            continue;
-        }
-        let mut h: u64 = 1469598103934665603;
-        for b in word.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(1099511628211);
-        }
-        v[(h % dimension as u64) as usize] += 1.0;
-    }
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm == 0.0 {
-        v[0] = 1.0;
-        return v;
-    }
-    v.iter_mut().for_each(|x| *x /= norm);
-    v
-}
-
-async fn embeddings(
-    State(provider): State<Provider>,
-    Json(body): Json<Value>,
-) -> (axum::http::StatusCode, Json<Value>) {
-    let n = provider.calls.fetch_add(1, Ordering::SeqCst);
-    let inputs: Vec<String> = body["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
-    provider.seen.lock().unwrap().extend(inputs.iter().cloned());
-
-    match provider.behaviour {
-        Behaviour::RateLimitOnce if n == 0 => {
-            return (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": {"message": "slow down"}})),
-            );
-        }
-        Behaviour::Unauthorized => {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": "invalid api key"}})),
-            );
-        }
-        _ => {}
-    }
-
-    let width = if provider.behaviour == Behaviour::WrongDimension {
-        DIM + 1
-    } else {
-        DIM
-    };
-    let mut data: Vec<Value> = inputs
-        .iter()
-        .enumerate()
-        .map(|(i, text)| json!({"index": i, "embedding": bag_of_words(text, width)}))
-        .collect();
-    if provider.behaviour == Behaviour::Reversed {
-        data.reverse();
-    }
-    (
-        axum::http::StatusCode::OK,
-        Json(json!({"object": "list", "data": data, "model": body["model"]})),
-    )
-}
-
-/// A provider listening on a loopback port, and its base URL.
-async fn serve(behaviour: Behaviour) -> (String, Provider) {
-    let provider = Provider {
-        behaviour,
-        calls: Arc::new(AtomicUsize::new(0)),
-        seen: Arc::new(std::sync::Mutex::new(Vec::new())),
-    };
-    let app = Router::new()
-        .route("/embeddings", post(embeddings))
-        .with_state(provider.clone());
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::Server::from_tcp(listener)
-            .unwrap()
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
-    });
-    (format!("http://{addr}"), provider)
+/// A provider on loopback, at this test's dimension.
+async fn serve(behaviour: Behaviour) -> (String, fake_provider::Provider) {
+    fake_provider::serve(behaviour, DIM).await
 }
 
 fn storage_config() -> StorageConfig {
@@ -759,4 +641,53 @@ async fn a_loaded_table_cannot_be_given_a_model_after_the_fact() {
         .insert_records("fresh", vec![text_record("a", "alpha")])
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_table_can_take_its_width_from_the_model() {
+    // The number nobody remembers: text-embedding-3-small is 1,536, bge-m3 is 1,024,
+    // all-MiniLM-L6-v2 is 384. Getting it wrong creates a table that accepts no writes, and
+    // the error arrives at the first insert rather than at the create. Asking costs one call.
+    let (base, provider) = serve(Behaviour::Normal).await;
+    let storage = open().await;
+    let mut config = table("inferred", Some(config(&base)));
+    config.dimension = 0;
+    storage.create_table(config).await.unwrap();
+
+    assert_eq!(storage.get_table("inferred").await.unwrap().dimension, DIM);
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "the width is asked for once, at create"
+    );
+
+    storage
+        .insert_records("inferred", vec![text_record("a", "alpha bravo")])
+        .await
+        .unwrap();
+    assert_eq!(storage.get_table("inferred").await.unwrap().record_count, 1);
+}
+
+#[tokio::test]
+async fn no_width_and_no_model_is_refused_rather_than_defaulted() {
+    let storage = open().await;
+    let mut config = table("nowidth", None);
+    config.dimension = 0;
+    let err = storage.create_table(config).await.unwrap_err();
+    assert!(err.to_string().contains("no embedding model"), "{err}");
+}
+
+#[tokio::test]
+async fn a_width_probe_that_cannot_reach_the_provider_fails_the_create() {
+    // Rather than creating a table with some default width, which would be a table that
+    // accepts nothing and says nothing about why.
+    let storage = open().await;
+    let mut config = table("unreachable", Some(config("http://127.0.0.1:1/v1")));
+    config.dimension = 0;
+    let err = storage.create_table(config).await.unwrap_err();
+    assert_eq!(err.status_code(), 503, "{err}");
+    assert!(
+        storage.get_table("unreachable").await.is_err(),
+        "the table was created anyway"
+    );
 }
