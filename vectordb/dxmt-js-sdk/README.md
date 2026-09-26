@@ -473,7 +473,7 @@ Apache License 2.0 - See [LICENSE](./LICENSE) for details.
 
 - **Issues**: [GitHub Issues](https://github.com/dxmt/dxmt/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/dxmt/dxmt/discussions)
-- **Documentation**: [DXMT Docs](https://docs.dxmt.io)
+- **Documentation**: [DXMT Docs](https://docs.dxmt.online)
 
 ## Related Projects
 

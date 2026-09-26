@@ -356,4 +356,4 @@ See `tests/test_filters.py` for comprehensive unit tests demonstrating all filte
 
 - [Recommendation System Example](examples/recommendation_system.py) - Demonstrates filtered search in practice
 - [Filtered Search Example](examples/filtered_search.py) - Advanced filtering techniques
-- [API Documentation](https://dxmt.dev/api/search) - Complete search API reference
+- [API Documentation](https://dxmt.online/api/search) - Complete search API reference

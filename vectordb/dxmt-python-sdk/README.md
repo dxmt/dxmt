@@ -654,7 +654,7 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 ## Links
 
 - **Homepage**: https://github.com/dxmt/dxmt
-- **Documentation**: https://docs.dxmt.io
+- **Documentation**: https://docs.dxmt.online
 - **Issues**: https://github.com/dxmt/dxmt/issues
 - **PyPI**: https://pypi.org/project/dxmt-python-sdk/
 

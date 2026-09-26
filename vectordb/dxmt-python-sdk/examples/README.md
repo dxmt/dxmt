@@ -694,9 +694,9 @@ except DXMTConnectionError as e:
 ## 📖 Additional Resources
 
 - **Main Documentation:** [../README.md](../README.md)
-- **API Reference:** [DXMT Python SDK Docs](https://docs.dxmt.com/python-sdk)
+- **API Reference:** [DXMT Python SDK Docs](https://docs.dxmt.online/python-sdk)
 - **LangChain Integration:** [../langchain-dxmt/examples/](../../langchain-dxmt/examples/)
-- **Server Configuration:** [Server Docs](https://docs.dxmt.com/server)
+- **Server Configuration:** [Server Docs](https://docs.dxmt.online/server)
 
 ## 🤝 Contributing
 
@@ -715,7 +715,7 @@ These examples are part of the DXMT VectorDB project and are released under the 
 ---
 
 **Need Help?**
-- 📧 Email: support@dxmt.com
+- 📧 Email: support@dxmt.online
 - 💬 Discord: [DXMT Community](https://discord.gg/dxmt)
-- 📚 Docs: [docs.dxmt.com](https://docs.dxmt.com)
+- 📚 Docs: [docs.dxmt.online](https://docs.dxmt.online)
 - 🐛 Issues: [GitHub Issues](https://github.com/dxmt/dxmt/issues)

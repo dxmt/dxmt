@@ -306,4 +306,4 @@ def get_embedding_with_retry(text):
 
 **成本计算器**: https://openai.com/api/pricing/
 **API文档**: https://platform.openai.com/docs/guides/embeddings
-**DXMT文档**: https://docs.dxmt.com
+**DXMT文档**: https://docs.dxmt.online

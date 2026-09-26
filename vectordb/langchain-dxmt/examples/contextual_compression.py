@@ -126,7 +126,7 @@ DXMT offers both cloud and on-premise deployments.
 The pricing starts at $99/month for the starter plan.
 For index selection, HNSW is recommended for datasets over 10K vectors
 due to its superior query performance. IVF is better for very large datasets.
-Contact us at support@dxmt.io for more information.
+Contact us at support@dxmt.online for more information.
             """.strip(),
             metadata={"doc_id": "1", "type": "product_info"}
         ),

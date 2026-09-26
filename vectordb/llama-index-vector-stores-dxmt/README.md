@@ -382,4 +382,4 @@ Apache License 2.0 - see [LICENSE](./LICENSE) file for details.
 ## Support
 
 - GitHub Issues: https://github.com/dxmt/dxmt/issues
-- Email: support@dxmt.io
+- Email: support@dxmt.online

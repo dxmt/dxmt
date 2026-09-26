@@ -681,7 +681,7 @@ result = qa_chain.invoke({"query": "Your question"})
 
 1. 📖 **Read the main README**: `../README.md`
 2. 🧪 **Run the tests**: `pytest tests/`
-3. 📚 **Check the API docs**: https://docs.dxmt.io
+3. 📚 **Check the API docs**: https://docs.dxmt.online
 4. 💬 **Join the community**: https://github.com/dxmt/dxmt/discussions
 5. 🐛 **Report issues**: https://github.com/dxmt/dxmt/issues
 
@@ -691,7 +691,7 @@ result = qa_chain.invoke({"query": "Your question"})
 
 ### Documentation
 - [LangChain Documentation](https://python.langchain.com/docs/)
-- [DXMT VectorDB Docs](https://docs.dxmt.io)
+- [DXMT VectorDB Docs](https://docs.dxmt.online)
 - [OpenAI API Reference](https://platform.openai.com/docs/)
 
 ### Tutorials
