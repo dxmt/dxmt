@@ -54,6 +54,13 @@ CLAUDE.md
 # Per-checkout agent settings. Local to whoever is working here, never shared.
 .claude/settings.local.json
 
+# Snapshot archives of the tree, taken by hand before something risky. They are a copy of
+# the repository sitting inside the repository: harmless until one `git add` sweeps a few
+# megabytes of duplicated source into the history, where it cannot be taken back out.
+*.tar.gz
+*.tgz
+*.zip
+
 # Stray run output. `vectordb/.gitignore` has had this since the start; the repository root
 # did not, which is how an empty `logs/vectordb_bench.log` came to be committed here.
 logs/

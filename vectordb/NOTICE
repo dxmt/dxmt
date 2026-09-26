@@ -15,10 +15,6 @@ License, Version 1.1. The full licence text ships beside the font file, at
 vectordb/dashboard/public/fonts/OFL.txt, and is served at
 /dashboard/fonts/OFL.txt.
 
-The console's visual language -- palette, radii, shadow, type scale -- follows
-the UBold admin theme by Coderthemes. No files, styles or assets from that theme
-are included or derived from here; the stylesheet is written from scratch.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at

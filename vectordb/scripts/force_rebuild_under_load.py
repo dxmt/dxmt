@@ -8,13 +8,23 @@ load is safe. So force one: automatic re-evaluation off, load a big table, then 
 """
 import json, os, subprocess, sys, threading, time, urllib.error, urllib.request
 
-PORT = 9978
+import random
+import tempfile
+
+PORT = int(os.environ.get("DXMT_PORT", "9978"))
 BASE = f"http://127.0.0.1:{PORT}/api/v1"
 DIM = 128
-SD = "/tmp/claude-1001/-home-eric-code-dxmt/75260ee8-5e2e-4261-9dff-72b8158f0ad1/scratchpad"
+# A scratch directory of its own, removed by the OS rather than by this script: a WAL path
+# that outlives the run is a few gigabytes nobody goes looking for. `DXMT_SCRATCH` overrides
+# it when the run should be inspected afterwards.
+SD = os.environ.get("DXMT_SCRATCH") or tempfile.mkdtemp(prefix="dxmt-force-rebuild-")
 WAL = f"{SD}/force-wal"
-BIN = "/home/eric/code/dxmt/vectordb/target/release/vectordb"
-import random
+# Relative to this file, so the script works from any checkout. These three used to be
+# absolute paths from the machine they were written on -- one of them a temporary directory
+# belonging to a tool, complete with its session id.
+BIN = os.environ.get("DXMT_BIN") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target/release/vectordb"
+)
 
 def req(method, path, body=None, timeout=30):
     data = json.dumps(body).encode() if body is not None else None

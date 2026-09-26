@@ -1,10 +1,9 @@
 /* Design tokens.
  *
- * The palette, the radius, the shadow and the type scale follow UBold, a commercial admin
- * theme the team likes — the shape, not the code. None of its files are here and none can be:
- * it is a ThemeForest item with no redistributable licence, and this repository is Apache-2.0.
- * What is reproduced is the visual language, which is why these are plain custom properties
- * over hand-written CSS rather than an imported stylesheet.
+ * Plain custom properties over hand-written CSS, rather than an imported stylesheet or a
+ * component library: the console has twelve primitives and one typeface, and every one of
+ * the values below is set here where it can be read and changed. A dependency would decide
+ * them somewhere else, and bring several hundred kilobytes to do it.
  *
  * Nunito is the one asset actually shipped, and it is shipped because it can be: SIL OFL 1.1,
  * licence text beside it in public/fonts/OFL.txt. Self-hosted rather than pulled from Google's
