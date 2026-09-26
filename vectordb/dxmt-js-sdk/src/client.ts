@@ -29,6 +29,7 @@ import {
   PayloadIndexReport,
   SearchGroupsResult,
   SparseVector,
+  FacetResult,
 } from './types';
 import {
   DXMTError,
@@ -664,6 +665,46 @@ export class DXMTClient {
       filter === undefined ? {} : { filter }
     );
     return answer.count;
+  }
+
+  /**
+   * How many records hold each value of a payload field.
+   *
+   * Computed from the payload index, which is already a value-to-records map, so it does not
+   * page the table to count.
+   *
+   * **Check `covered` against `matched` before drawing anything.** A facet built from an index
+   * describes what the index holds; a record with no value for the field, or one whose value
+   * is an object, is missing from every bucket rather than having a bucket of its own. Their
+   * difference is how many records the answer cannot describe, and `hits` alone will show a
+   * corpus that is not the corpus.
+   *
+   * @example
+   * ```typescript
+   * const { hits, covered, matched } = await client.facets('documents', 'topic');
+   * if (covered < matched) console.warn(`${matched - covered} records have no topic`);
+   * ```
+   */
+  async facets(
+    tableName: string,
+    key: string,
+    options: { filter?: Filter; limit?: number } = {}
+  ): Promise<FacetResult> {
+    if (!tableName) {
+      throw new DXMTValidationError('Table name is required');
+    }
+    if (!key) {
+      throw new DXMTValidationError('A payload field to count values of is required');
+    }
+    return this.request<FacetResult>(
+      'POST',
+      `/tables/${encodeURIComponent(tableName)}/facets`,
+      {
+        key,
+        limit: options.limit ?? 20,
+        ...(options.filter === undefined ? {} : { filter: options.filter }),
+      }
+    );
   }
 
   /**

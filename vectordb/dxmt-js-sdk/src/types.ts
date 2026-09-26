@@ -472,3 +472,26 @@ export interface UploadResult {
   retries: number;
   failed: UploadFailure[];
 }
+
+/** One bucket of a facet: a value and how many records hold it. */
+export interface Facet {
+  value: string | number | boolean | null;
+  count: number;
+}
+
+/** What `POST /tables/{t}/facets` answers. */
+export interface FacetResult {
+  /** The most common values, count descending then value ascending. */
+  hits: Facet[];
+  /** How many distinct values there were, of which `hits` is the top `limit`. */
+  distinct_values: number;
+  /**
+   * How many of the `matched` records contributed a value here.
+   *
+   * `matched - covered` is what the facet cannot describe: records with no value for the
+   * field, or with an object, which the index records as presence only.
+   */
+  covered: number;
+  /** How many records the filter selected; the whole table when there is no filter. */
+  matched: number;
+}

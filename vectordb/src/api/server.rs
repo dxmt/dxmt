@@ -11,7 +11,7 @@ use crate::{
     api::handlers::{
         alter_table, branch_table, count_records, create_backup, create_snapshot, create_table,
         delete_alias, delete_records, delete_table, drop_index, drop_payload_index_field,
-        execute_dxql, export_table, full_text_search, get_record, get_status, get_table,
+        execute_dxql, export_table, facets, full_text_search, get_record, get_status, get_table,
         get_table_stats, health_check, health_metrics, hybrid_search, hybrid_search_combined,
         import_table, index_payload_field, insert_records, insert_records_optimized, knn_graph,
         list_aliases, list_records, list_tables, liveness, payload_index_report,
@@ -442,6 +442,7 @@ pub async fn create_app_with_storage(
         .route("/tables/:table_name/records", delete(delete_records))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))
+        .route("/tables/:table_name/facets", post(facets))
         // The nearest-neighbour structure of a sample, without its vectors — so a client can
         // lay a table out without the wire deciding how many points it may draw.
         .route("/tables/:table_name/graph", post(knn_graph))

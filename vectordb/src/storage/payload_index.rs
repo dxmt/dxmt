@@ -202,6 +202,144 @@ impl PayloadIndex {
     }
 
     /// Turn a set of ordinals into the ids the caller asked for.
+    /// How many records hold each value of one field — a facet, optionally under a filter.
+    ///
+    /// This index is already the answer: `value_to_ids` is value → records, so counting is a
+    /// walk of postings rather than of rows. The filtered form intersects each posting with the
+    /// filter's record set, which is why the filter is evaluated once here and not per value.
+    ///
+    /// **Two numbers in the result are the honest part and should not be dropped.** A facet
+    /// built from an index can only describe what the index holds, and what it does not hold
+    /// disappears as a *count of zero* rather than as an absence — the same failure mode the
+    /// excluded-field refusal exists for. So:
+    ///
+    /// * `matched` is how many records the filter selected (or the table, unfiltered);
+    /// * `covered` is how many of those contributed at least one value here.
+    ///
+    /// Their difference is the records this facet cannot describe: no value for the field, or a
+    /// value that is an object or an array of objects, which the index records as presence
+    /// only. A caller that renders a facet without checking it is showing a chart that silently
+    /// omits part of the corpus.
+    ///
+    /// `covered` costs a set of ordinals, because a record whose value is an array contributes
+    /// to several buckets and summing the counts would double it. That is the memory this call
+    /// has that a plain count does not, and it is the price of the number being true.
+    ///
+    /// The page is the `limit` most common values, by count descending and then by value, so
+    /// two identical calls answer identically. `distinct_values` says how many there were.
+    pub fn facet(&self, key: &str, filter: Option<&Filter>, limit: usize) -> FacetResult {
+        let allowed = filter.map(|f| self.matching_ordinals(f));
+        let matched = match &allowed {
+            Some(set) => set.len(),
+            None => self.total_records,
+        };
+        let permitted =
+            |ordinal: Ordinal| allowed.as_ref().is_none_or(|set| set.contains(&ordinal));
+
+        let Some(field) = self.field_indices.get(key) else {
+            return FacetResult {
+                hits: Vec::new(),
+                distinct_values: 0,
+                covered: 0,
+                matched,
+            };
+        };
+
+        let mut covered: FastSet<Ordinal> = FastSet::default();
+        let mut distinct_values = 0usize;
+        // A bounded heap rather than a sorted vector of every distinct value: a field with a
+        // value per row has as many buckets as the table has rows, and collecting them all to
+        // return twenty of them is the allocation this call would be remembered for.
+        let mut top: std::collections::BinaryHeap<std::cmp::Reverse<FacetEntry>> =
+            std::collections::BinaryHeap::new();
+        let mut offer = |value: ValueKey, count: usize| {
+            if count == 0 {
+                return;
+            }
+            distinct_values += 1;
+            let entry = FacetEntry { count, value };
+            if top.len() < limit.max(1) {
+                top.push(std::cmp::Reverse(entry));
+            } else if top.peek().is_some_and(|smallest| smallest.0 < entry) {
+                top.pop();
+                top.push(std::cmp::Reverse(entry));
+            }
+        };
+
+        for (value, postings) in &field.value_to_ids {
+            let mut count = 0usize;
+            postings.for_each(|ordinal| {
+                if permitted(ordinal) {
+                    count += 1;
+                    covered.insert(ordinal);
+                }
+            });
+            offer(value.clone(), count);
+        }
+
+        // The numeric half is sorted, so equal values are adjacent and the runs can be counted
+        // without a map. `pending` is not sorted and is walked separately; it is bounded by the
+        // merge policy, so the extra pass costs nothing worth avoiding.
+        let mut numeric: Vec<(OrderedFloat, Ordinal)> = field.numeric.entries().collect();
+        numeric.sort_unstable_by_key(|(value, _)| *value);
+        let mut run = 0usize;
+        for i in 0..numeric.len() {
+            let (value, ordinal) = numeric[i];
+            if permitted(ordinal) {
+                run += 1;
+                covered.insert(ordinal);
+            }
+            let last_of_run = i + 1 == numeric.len() || numeric[i + 1].0 != value;
+            if last_of_run {
+                offer(Self::from_ordered(value), run);
+                run = 0;
+            }
+        }
+
+        let mut hits: Vec<FacetEntry> = top.into_iter().map(|entry| entry.0).collect();
+        hits.sort_unstable_by(|a, b| b.cmp(a));
+        FacetResult {
+            hits: hits
+                .into_iter()
+                .map(|entry| Facet {
+                    value: Self::value_key_to_json(&entry.value),
+                    count: entry.count,
+                })
+                .collect(),
+            distinct_values,
+            covered: covered.len(),
+            matched,
+        }
+    }
+
+    /// The JSON a `ValueKey` came from, for a facet to hand back.
+    fn value_key_to_json(value: &ValueKey) -> serde_json::Value {
+        match value {
+            ValueKey::String(s) => serde_json::Value::String(s.clone()),
+            ValueKey::Number(n) => serde_json::Value::from(*n),
+            ValueKey::Float(f) => {
+                let number = f64::from(*f);
+                // Every number lives in the numeric half as an `f64`, so the integer a payload
+                // wrote comes back out as one too and a facet on a year field would answer
+                // `2024.0`. In JSON those are the same number, but they do not read the same
+                // in a chart legend and they do not round-trip through a client that formats
+                // floats, so an integral value is handed back as an integer -- which is what
+                // the payload said.
+                if number.fract() == 0.0 && number.abs() < 9.007_199_254_740_992e15 {
+                    serde_json::Value::from(number as i64)
+                } else {
+                    serde_json::Number::from_f64(number)
+                        .map(serde_json::Value::Number)
+                        // A non-finite float cannot be JSON, and cannot be in a payload
+                        // either, since the payload was parsed from JSON.
+                        .unwrap_or(serde_json::Value::Null)
+                }
+            }
+            ValueKey::Bool(b) => serde_json::Value::Bool(*b),
+            ValueKey::Null => serde_json::Value::Null,
+        }
+    }
+
     fn ids_of(&self, ordinals: impl IntoIterator<Item = Ordinal>) -> HashSet<RecordId> {
         ordinals
             .into_iter()
@@ -764,6 +902,58 @@ struct FieldStats {
     sample_count: usize,
 }
 
+/// One bucket of a facet: a value and how many records hold it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct Facet {
+    pub value: serde_json::Value,
+    pub count: usize,
+}
+
+/// What `POST /tables/{t}/facets` answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct FacetResult {
+    /// The most common values, count descending then value ascending.
+    pub hits: Vec<Facet>,
+    /// How many distinct values there were, of which `hits` is the top `limit`.
+    pub distinct_values: usize,
+    /// How many of the `matched` records contributed at least one value here.
+    ///
+    /// **`matched - covered` is what this facet cannot describe**: records with no value for
+    /// the field, or with an object or an array of objects, which the index records as
+    /// presence only. It is reported because the alternative is a chart that silently omits
+    /// part of the corpus — an index-backed facet loses what it does not hold as a count of
+    /// zero rather than as an absence.
+    pub covered: usize,
+    /// How many records the filter selected; the whole table when there is no filter.
+    pub matched: usize,
+}
+
+/// A facet bucket while it is being ranked. Ordered by count, then by value so that two
+/// identical calls return the same page when counts tie.
+#[derive(Debug, PartialEq, Eq)]
+struct FacetEntry {
+    count: usize,
+    value: ValueKey,
+}
+
+impl Ord for FacetEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.count
+            .cmp(&other.count)
+            // Reversed, so that under the max-heap's `Reverse` wrapper the value that loses a
+            // tie is the one that sorts later -- which is what "count descending, then value
+            // ascending" means once the page is turned the right way up.
+            .then_with(|| other.value.sort_key().cmp(&self.value.sort_key()))
+    }
+}
+impl PartialOrd for FacetEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// 值的键（用于HashMap）
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ValueKey {
@@ -775,6 +965,21 @@ enum ValueKey {
 }
 
 impl ValueKey {
+    /// A total order across the variants, for a deterministic facet page.
+    ///
+    /// Numbers before strings before booleans before null, and within the numbers by value:
+    /// the ordering itself is arbitrary and only has to be stable, since it decides nothing
+    /// but which of two equally common values is listed first.
+    fn sort_key(&self) -> (u8, Option<OrderedFloat>, Option<&str>, bool) {
+        match self {
+            ValueKey::Number(n) => (0, Some(OrderedFloat::from(*n as f64)), None, false),
+            ValueKey::Float(f) => (0, Some(*f), None, false),
+            ValueKey::String(s) => (1, None, Some(s.as_str()), false),
+            ValueKey::Bool(b) => (2, None, None, *b),
+            ValueKey::Null => (3, None, None, false),
+        }
+    }
+
     /// What the key itself costs beyond the map slot. Only a string owns anything.
     fn heap_size(&self) -> usize {
         match self {

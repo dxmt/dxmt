@@ -4886,6 +4886,49 @@ impl IntelligentIndexedStorage {
         }
     }
 
+    /// How many records hold each value of one payload field, optionally under a filter.
+    ///
+    /// The payload index already is this answer — it maps value to records — so a facet is a
+    /// walk of postings rather than of rows. What it is not, and what the result says so, is a
+    /// description of the whole table: an index-backed facet loses whatever the index does not
+    /// hold as a *count of zero* rather than as an absence, which is the same failure the
+    /// excluded-field refusal exists to prevent. `covered` against `matched` is the number that
+    /// makes that visible, and the field being excluded is refused outright.
+    pub async fn facet(
+        &self,
+        tablename: &str,
+        key: &str,
+        filter: Option<&crate::types::Filter>,
+        limit: usize,
+    ) -> crate::Result<crate::storage::payload_index::FacetResult> {
+        let tablename = &*self.resolve(tablename);
+        Self::check_filter(filter)?;
+        self.ensure_resident(tablename).await?;
+        let tables = self.read_tables("facet").await;
+        let data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        Self::check_filter_policy(&data.table, filter)?;
+        // The faceted field itself, not only the filter's fields. Counting from an index that
+        // was told not to hold this field would answer every value with zero, which reads as
+        // "the corpus has none of these" rather than as "this server cannot tell you".
+        if let Some(policy) = &data.table.payload_index {
+            if !policy.indexes(key) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "table '{}' does not index payload field '{key}', so it cannot be faceted. \
+                     Index it with PUT /tables/{}/payload_index/{key} -- the index is rebuilt \
+                     from the records -- or facet a field GET /tables/{}/payload_index lists.",
+                    data.table.name, data.table.name, data.table.name
+                )));
+            }
+        }
+        // Computed while the guard is held and returned by value: `derived()` borrows from
+        // the table map, and a facet is a snapshot rather than a view of it.
+        let result = data.derived().payload.facet(key, filter, limit);
+        drop(tables);
+        Ok(result)
+    }
+
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(query.filter.as_ref())?;

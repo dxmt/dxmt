@@ -1302,6 +1302,55 @@ class DXMTClient:
             msg = f"Connection error while counting: {e}"
             raise DXMTConnectionError(msg) from e
 
+    def facets(
+        self,
+        table_name: str,
+        key: str,
+        *,
+        filter: Optional[Filter] = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """How many records hold each value of a payload field.
+
+        Computed from the payload index, which is already a value-to-records map, so this
+        does not page the table to count it.
+
+        **Read `covered` against `matched` before drawing anything.** A facet built from an
+        index describes what the index holds, and what it does not hold — a record with no
+        value for the field, or one whose value is an object — is missing from every bucket
+        rather than having a bucket of its own. Their difference is how many records this
+        answer cannot describe, and `hits` alone will happily show a corpus that is not the
+        corpus.
+
+        Args:
+            table_name: Name of the table.
+            key: The payload field to count values of. A dotted path works, as in a filter.
+            filter: Count only within what this matches. Omitted, it counts the table.
+            limit: How many of the most common values to return; `distinct_values` in the
+                result says how many there were.
+
+        Returns:
+            `{"hits": [{"value": ..., "count": n}, ...], "distinct_values": n,
+              "covered": n, "matched": n}`.
+
+        Raises:
+            DXMTError: If the field is not indexed, or the request fails.
+        """
+        body: dict[str, Any] = {"key": key, "limit": limit}
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
+        try:
+            response = self._client.post(f"/tables/{_seg(table_name)}/facets", json=body)
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to facet '{key}': {e.response.text}"
+            raise DXMTError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error while faceting: {e}"
+            raise DXMTConnectionError(msg) from e
+
     def delete_records(
         self,
         table_name: str,

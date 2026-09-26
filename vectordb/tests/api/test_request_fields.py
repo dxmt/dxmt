@@ -1407,3 +1407,55 @@ def _(table):
              {"text": "new text", "vector": [0, 1.0, 0, 0]}, expect_ok=False)
     assert r.status_code == 400, (r.status_code, r.text[:200])
     assert "not both" in r.text, r.text[:200]
+
+
+def _faceted(table):
+    """A table with two countable fields, for the facet probes."""
+    name = f"{table}_facet_{uuid.uuid4().hex[:4]}"
+    post("/tables", {"name": name, "dimension": 4})
+    post(f"/tables/{name}/records", {"records": [
+        {"id": "a", "vector": [1, 0, 0, 0], "payload": {"topic": "rust", "year": 2024}},
+        {"id": "b", "vector": [1, 0, 0, 0], "payload": {"topic": "rust", "year": 2025}},
+        {"id": "c", "vector": [1, 0, 0, 0], "payload": {"topic": "go", "year": 2025}},
+    ]})
+    return name
+
+
+@probe("FacetRequest", "key")
+def _(table):
+    name = _faceted(table)
+    try:
+        by_topic = post(f"/tables/{name}/facets", {"key": "topic"}).json()["data"]
+        by_year = post(f"/tables/{name}/facets", {"key": "year"}).json()["data"]
+        assert [h["value"] for h in by_topic["hits"]] == ["rust", "go"], by_topic
+        assert [h["value"] for h in by_year["hits"]] == [2025, 2024], by_year
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("FacetRequest", "filter")
+def _(table):
+    name = _faceted(table)
+    try:
+        whole = post(f"/tables/{name}/facets", {"key": "topic"}).json()["data"]
+        narrowed = post(f"/tables/{name}/facets", {
+            "key": "topic",
+            "filter": {"must": [{"key": "year", "operation": {"type": "Equal", "value": 2025}}]},
+        }).json()["data"]
+        assert whole["matched"] == 3 and narrowed["matched"] == 2, (whole, narrowed)
+        assert [(h["value"], h["count"]) for h in narrowed["hits"]] == [("go", 1), ("rust", 1)]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("FacetRequest", "limit")
+def _(table):
+    name = _faceted(table)
+    try:
+        page = post(f"/tables/{name}/facets", {"key": "topic", "limit": 1}).json()["data"]
+        assert len(page["hits"]) == 1, page
+        # And the caller can still tell the page is a page, which is what makes a small limit
+        # safe to use rather than a silent truncation.
+        assert page["distinct_values"] == 2, page
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)

@@ -146,6 +146,11 @@ const CONTRACTS: &[Contract] = &[
     },
     Contract {
         method: "POST",
+        path: "/tables/{t}/facets",
+        caller: "python",
+    },
+    Contract {
+        method: "POST",
         path: "/tables/{t}/search/groups",
         caller: "python",
     },

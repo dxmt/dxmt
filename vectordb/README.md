@@ -92,6 +92,28 @@ expects it — the same numbers as below, in text exposition format, in the defa
 `storage.snapshot_failures`/`last_snapshot_error`, plus resident and total table counts. These
 timestamps and counters reset on restart; the WAL and snapshot manifest remain authoritative.
 
+## Counting the values of a field
+
+```bash
+curl -X POST localhost:9999/api/v1/tables/docs/facets \
+  -d '{"key": "topic", "limit": 20}'
+```
+
+```json
+{"hits": [{"value": "rust", "count": 412}, {"value": "go", "count": 87}],
+ "distinct_values": 14, "covered": 499, "matched": 512}
+```
+
+Counted from the payload index, which is already a value-to-records map, so it does not page
+the table. A `filter` narrows it, and `matched` then reports what the filter selected.
+
+**`covered` against `matched` is not decoration.** A facet built from an index describes what
+the index holds; a record with no value for the field, or one whose value is an object, is
+missing from every bucket rather than having a bucket of its own. Here that is 13 records the
+answer cannot describe — and a chart drawn from `hits` alone would show a corpus of 499 where
+there are 512, with nothing to say so. A field the table's `payload_index` excludes is refused
+outright, for the same reason a filter on one is.
+
 ## Filtering by place
 
 Any payload field holding `{"lat": …, "lon": …}` can be filtered on:

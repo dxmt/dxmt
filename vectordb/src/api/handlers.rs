@@ -1246,6 +1246,74 @@ pub async fn count_records(
     }
 }
 
+/// The body of `POST /tables/{t}/facets`.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FacetRequest {
+    /// The payload field to count values of. A dotted path works, as in a filter.
+    pub key: String,
+    /// Count only within what this matches. Omitted, it counts the table.
+    #[serde(default)]
+    pub filter: Option<crate::types::Filter>,
+    /// How many of the most common values to return. Default 20.
+    ///
+    /// Capped, because a field holding a distinct value per row has as many buckets as the
+    /// table has rows and nobody wants them: a facet is for the shape of a field, and a field
+    /// with no shape is one the caller should have discovered from `distinct_values` instead.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+const MAX_FACET_LIMIT: usize = 1_000;
+const DEFAULT_FACET_LIMIT: usize = 20;
+
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/facets",
+    params(("table_name" = String, Path, description = "表名", example = "demo")),
+    request_body(content = FacetRequest, example = json!({"key": "topic", "limit": 20})),
+    responses(
+        (status = 200, description = "Value counts, most common first", body = ApiResponse),
+        (status = 400, description = "The field is not indexed, or the filter is not valid", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse),
+    ),
+    tag = "records"
+))]
+/// How many records hold each value of a payload field.
+///
+/// The answer carries `covered` and `matched` as well as the counts: a facet built from the
+/// payload index describes what the index holds, and a record it does not hold — one whose
+/// value there is an object, say — is missing from every bucket rather than being in a bucket
+/// of its own. `matched - covered` is that number, and a caller drawing a chart from `hits`
+/// without it is drawing one that omits part of the corpus without saying so.
+pub async fn facets(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+    ApiJson(request): ApiJson<FacetRequest>,
+) -> impl IntoResponse {
+    if request.key.is_empty() {
+        return error_response(crate::Error::InvalidInput(
+            "`key` names the payload field to count values of, and is empty".to_string(),
+        ));
+    }
+    let limit = request
+        .limit
+        .unwrap_or(DEFAULT_FACET_LIMIT)
+        .clamp(1, MAX_FACET_LIMIT);
+    match state
+        .storage
+        .facet(&table_name, &request.key, request.filter.as_ref(), limit)
+        .await
+    {
+        Ok(result) => {
+            let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+            ApiResponse::success(value).into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
 /// Search by sparse vector alone.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     post,
