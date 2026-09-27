@@ -48,6 +48,12 @@ def succeeded(response):
 
 def call(method, path, body=None, expect_ok=True):
     response = _HTTP.request(method, BASE + path, json=body)
+    # Every exchange is checked against the OpenAPI document. See `helpers/openapi.py` for
+    # what is a failure and what is only reported; a build without `api-swagger` serves no
+    # document and this is a no-op.
+    from . import openapi
+
+    openapi.check(method, path, body, response, expect_ok=expect_ok)
     if expect_ok and not succeeded(response):
         raise ApiError(method, path, response)
     return response

@@ -46,9 +46,30 @@ def pytest_report_header(config):
     return f"dxmt: {client.BASE}  storage_mode={STORAGE_MODE}"
 
 
+def pytest_sessionfinish(session, exitstatus):
+    """Print the operations whose responses the document does not describe."""
+    from .helpers import openapi
+
+    report = openapi.report()
+    if report:
+        print("\n" + report)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def server():
     client.wait_for_server()
+    # The OpenAPI document, fetched once. A build without `api-swagger` serves none and the
+    # validation is skipped -- but if the caller named the feature, a missing document means
+    # the suite would go green with the check silently off, which is the failure mode the
+    # rest of this file exists to avoid.
+    from .helpers import openapi
+
+    served = openapi.load(client.BASE)
+    if not served and "api-swagger" in os.environ.get("DXMT_FEATURES", ""):
+        raise AssertionError(
+            "DXMT_FEATURES names api-swagger and /api/docs/openapi.json did not answer, so "
+            "every request and response would go unvalidated."
+        )
 
 
 @pytest.fixture(scope="module")

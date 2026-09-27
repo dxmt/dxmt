@@ -1167,8 +1167,25 @@ def spec():
         pytest.skip(message)
 
 
+#: Request types that carry another type's fields through `#[serde(flatten)]`.
+#:
+#: The inherited fields are real -- the endpoint accepts them -- and they are probed once,
+#: under the base type. Demanding a second probe per field per flattening type would be
+#: thirteen copies of the `SearchQuery` probes asserting the same behaviour through a
+#: different path, which is work that finds nothing. What must stay covered is each
+#: *flattening type's own* fields, and those are not exempted here.
+#:
+#: This appeared when `SearchGroupsRequest` got an honest schema: utoipa 4.2 emits nothing at
+#: all for a flattened struct, so the document used to say the type had no fields, and this
+#: test had nothing to ask for.
+FLATTENED_INTO = {"SearchGroupsRequest": "SearchQuery"}
+
+
 def documented_fields(spec):
-    """Every (schema, property) a request body in the document exposes."""
+    """Every (schema, property) a request body in the document exposes.
+
+    Less the fields a type inherits by flattening; see `FLATTENED_INTO`.
+    """
     schemas = spec.get("components", {}).get("schemas", {})
     out = set()
     for path, operations in spec["paths"].items():
@@ -1184,6 +1201,11 @@ def documented_fields(spec):
             if not name:
                 continue
             found = fields_of(schemas, name)
+            if found is not None and name in FLATTENED_INTO:
+                # By field *name*: the pairs carry the schema they were found under, and
+                # these were found under the flattening type.
+                inherited = {f for _, f in fields_of(schemas, FLATTENED_INTO[name]) or set()}
+                found = {(s, f) for s, f in found if f not in inherited}
             assert found is not None, (
                 f"{path} takes a {name} body, and {name} is not in components/schemas — utoipa "
                 f"emitted a $ref to a schema it never defined, so the documentation shows this "
@@ -1197,12 +1219,13 @@ def documented_fields(spec):
 def fields_of(schemas, name, seen=None):
     """The (schema, property) pairs a body schema exposes, or None if it is not defined.
 
-    A `#[serde(flatten)]` field is an `allOf` in the document -- `SearchGroupsRequest` is
-    `SearchQuery` plus three properties of its own -- so a schema can carry no `properties` key
-    at all and still take a body full of fields. Resolving it here means the flattened half is
-    covered by the probes already written against the schema it came from, and only the new
-    fields need new ones. Without this the test fails on any flattened body with a message
-    about registering the schema, which is not what is wrong.
+    A flattened body can arrive in two shapes and both are handled. `allOf` is the natural
+    one and the `$ref` member's fields are attributed to the schema they came from, so the
+    probes written against that schema cover them. `SearchGroupsRequest` is the other: it is a
+    *flat* object carrying `SearchQuery`'s properties as its own, because `allOf` cannot
+    express it -- `SearchQuery` is `deny_unknown_fields`, so its schema says
+    `additionalProperties: false`, and every branch of an `allOf` must accept the whole body.
+    `FLATTENED_INTO` is what subtracts the inherited half in that case.
     """
     seen = seen or set()
     if name in seen:

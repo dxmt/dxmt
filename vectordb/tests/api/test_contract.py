@@ -91,26 +91,30 @@ def test_a_duplicate_table_is_409_table_already_exists(table):
     assert response.json()["error"]["code"] == "TABLE_ALREADY_EXISTS"
 
 
-def test_a_wrong_dimension_is_400_but_skips_the_envelope(fresh_table):
-    """Pinned as found. This is the one REST route that answers a failure without the envelope.
+def test_a_wrong_dimension_is_400_in_the_envelope_like_everything_else(fresh_table):
+    """`POST /tables/{t}/records` used to be the one route that refused without the envelope.
 
-    `POST /tables/{t}/records` validates the batch in the handler and returns a bare
-    `{"error": "...", "details": ...}` — no `success`, no `data`, and `error` is a string rather
-    than the `{code, message}` object every other route returns. A client switching on
-    `error.code`, which is what the rest of this matrix teaches it to do, gets a `TypeError`
-    here instead of a code. The 429 overload reply on the same route has the same shape.
+    It validated the batch in the handler and returned a bare `{"error": "...", "details": ...}`
+    — no `success`, no `data`, and `error` a string rather than the `{code, message}` object
+    every other route returns, so a client switching on `error.code` got a `TypeError` here
+    instead of a code. The 429 overload reply on the same route had the same shape.
 
-    Left alone rather than fixed: changing it is a breaking change for anyone reading `error`
-    as a string or reading `details`, so it is a decision to take deliberately, not a drive-by.
+    This test used to pin that as found, and said: "Left alone rather than fixed: changing it
+    is a breaking change for anyone reading `error` as a string, so it is a decision to take
+    deliberately, not a drive-by." It is taken deliberately here, on 2026-09-27, for two
+    reasons. There is no released version of this server, so the clients the warning protects
+    do not exist; and the OpenAPI document promised `ApiResponse` for this status all along,
+    so the bare object was already a lie to anyone generating a client from it — which is how
+    the runtime validation in `helpers/openapi.py` found it.
     """
     body = {"records": [{"id": "wrong", "vector": [1.0, 2.0]}]}
     response = post(f"/tables/{fresh_table}/records", body, expect_ok=False)
 
     assert response.status_code == 400
     payload = response.json()
-    assert isinstance(payload["error"], str), "if this became an object, the contract improved"
-    assert "details" in payload
-    assert "success" not in payload, "this route does not use the envelope"
+    assert payload["success"] is False
+    assert payload["error"]["code"] == "VALIDATION_FAILED"
+    assert "Dimension mismatch" in payload["error"]["message"]
 
 
 def test_an_illegal_table_name_is_400_invalid_table_name():

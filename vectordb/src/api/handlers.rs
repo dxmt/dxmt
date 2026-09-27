@@ -344,7 +344,11 @@ pub struct ListRecordsRequest {
     responses(
         (status = 200, description = "创建表成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 409, description = "表已存在", body = ApiResponse)
+        (status = 409, description = "表已存在", body = ApiResponse),
+        // Creating a table is a write, so it is refused while durability is degraded.
+        // Undocumented until the OpenAPI validation saw the server answer it.
+        (status = 503, description = "Durability degraded; the server is read-only",
+         body = ApiResponse)
     ),
     tag = "tables"
 ))]
@@ -857,8 +861,11 @@ pub async fn get_table_stats(
     params(("table_name" = String, Path, description = "Table name", example = "demo")),
     responses(
         (status = 200, description = "Branch created", body = ApiResponse),
-        (status = 400, description = "branch_name missing or already taken", body = ApiResponse),
-        (status = 404, description = "No such table", body = ApiResponse)
+        (status = 400, description = "branch_name missing", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse),
+        // The taken-name case is a 409, not the 400 the description above claimed.
+        (status = 409, description = "branch_name is already a table or an alias",
+         body = ApiResponse)
     ),
     tag = "tables"
 ))]
@@ -924,7 +931,15 @@ pub async fn branch_table(
     responses(
         (status = 200, description = "插入记录成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 404, description = "表不存在", body = ApiResponse)
+        (status = 404, description = "表不存在", body = ApiResponse),
+        // Both of these were reachable and undocumented, which the OpenAPI validation in
+        // `tests/api/helpers/openapi.py` found by seeing the server answer a status the
+        // document did not list. An insert is the one call that gets refused for reasons
+        // that are about the server rather than the request.
+        (status = 429, description = "Overloaded; see Retry-After", body = ApiResponse),
+        (status = 503, description = "Durability degraded, or below the free-memory floor; \
+                                      the server refuses writes until it recovers",
+         body = ApiResponse)
     ),
     tag = "records"
 ))]
@@ -945,14 +960,21 @@ pub async fn insert_records(
             headers.insert("Retry-After", value);
         }
 
-        let error_response = serde_json::json!({
-            "error": "Server is currently overloaded",
-            "details": health_state.description(),
-            "retry_after_seconds": retry_after,
-            "suggestion": format!("Please retry your request after {} seconds. The server is under heavy load due to index building or resource constraints.", retry_after)
+        // The envelope, like every other refusal. This was a hand-built JSON object with
+        // `error` as a *string*, so a client reading `body.error.code` -- which is what the
+        // document promises and what every other endpoint returns -- got a string where it
+        // expected an object, on the one response it is most important to handle. The
+        // OpenAPI validation in `tests/api/helpers/openapi.py` is what found it.
+        let body = ApiResponse::error(ApiError {
+            code: "SERVER_OVERLOADED".to_string(),
+            message: "Server is currently overloaded".to_string(),
+            details: Some(serde_json::json!({
+                "state": health_state.description(),
+                "retry_after_seconds": retry_after,
+            })),
         });
 
-        return (StatusCode::TOO_MANY_REQUESTS, headers, Json(error_response)).into_response();
+        return (StatusCode::TOO_MANY_REQUESTS, headers, Json(body)).into_response();
     }
 
     // Get table for validation
@@ -963,11 +985,12 @@ pub async fn insert_records(
 
     // Comprehensive batch validation
     if let Err(e) = validate_batch_insert(&request, &table) {
-        let error_response = serde_json::json!({
-            "error": "Validation failed",
-            "details": e
+        let body = ApiResponse::error(ApiError {
+            code: "VALIDATION_FAILED".to_string(),
+            message: e,
+            details: None,
         });
-        return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
     // Start tracking this operation
@@ -1356,8 +1379,14 @@ pub async fn sparse_search(
 }
 
 /// `POST /tables/{t}/search/groups` — a search whose answer is groups, not hits.
+///
+/// The schema is written out rather than derived. utoipa 4.2 does not understand
+/// `#[serde(flatten)]`: the derive produced an object with **no properties** and, because of
+/// `deny_unknown_fields`, `additionalProperties: false` — a document saying this endpoint
+/// accepts nothing at all, which is what a generated client would then refuse to send. The
+/// OpenAPI validation in `tests/api/helpers/openapi.py` is what found it. `allOf` is the
+/// shape a flattened struct has: everything `SearchQuery` takes, plus the three below.
 #[derive(Debug, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SearchGroupsRequest {
     /// Everything a plain search takes. `top_k` and `limit` are ignored here -- how many hits
@@ -1374,6 +1403,59 @@ pub struct SearchGroupsRequest {
     /// How many hits to keep in each group, best first.
     #[serde(default = "default_group_size")]
     pub group_size: usize,
+}
+
+#[cfg(feature = "api-swagger")]
+impl<'s> utoipa::ToSchema<'s> for SearchGroupsRequest {
+    /// `SearchQuery`'s own schema with three properties added, not an `allOf` over it.
+    ///
+    /// `allOf` is the obvious spelling for a flattened struct and it cannot work here:
+    /// `SearchQuery` is `deny_unknown_fields`, so its schema carries
+    /// `additionalProperties: false`, and every branch of an `allOf` must accept the *whole*
+    /// object. A body with `group_by` fails the `SearchQuery` branch. That was the second
+    /// wrong document for this endpoint in one sitting -- the derived one accepted nothing at
+    /// all, and the `allOf` one rejected the three fields the endpoint is named for.
+    ///
+    /// Taking `SearchQuery::schema()` and extending it keeps the thirteen inherited fields
+    /// from being copied here, where they would drift the first time one changed.
+    fn schema() -> (
+        &'s str,
+        utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+    ) {
+        use utoipa::openapi::schema::{ObjectBuilder, Schema, SchemaType};
+        use utoipa::openapi::RefOr;
+
+        let (_, base) = <SearchQuery as utoipa::ToSchema>::schema();
+        let mut object = match base {
+            RefOr::T(Schema::Object(o)) => o,
+            // `SearchQuery` is a plain struct, so this is unreachable; an empty object is the
+            // safe answer rather than a panic in a documentation path.
+            _ => ObjectBuilder::new().build(),
+        };
+        object.properties.insert(
+            "group_by".to_string(),
+            ObjectBuilder::new()
+                .schema_type(SchemaType::String)
+                .description(Some("The payload field whose value defines a group."))
+                .into(),
+        );
+        object.required.push("group_by".to_string());
+        object.properties.insert(
+            "groups".to_string(),
+            ObjectBuilder::new()
+                .schema_type(SchemaType::Integer)
+                .description(Some("How many groups to return. Default 10."))
+                .into(),
+        );
+        object.properties.insert(
+            "group_size".to_string(),
+            ObjectBuilder::new()
+                .schema_type(SchemaType::Integer)
+                .description(Some("How many hits to keep in each group. Default 3."))
+                .into(),
+        );
+        ("SearchGroupsRequest", RefOr::T(Schema::Object(object)))
+    }
 }
 
 fn default_groups() -> usize {
@@ -1608,7 +1690,12 @@ pub async fn list_records(
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 404, description = "表不存在", body = ApiResponse)
+        (status = 404, description = "表不存在", body = ApiResponse),
+        // This endpoint serves a lone `dense_vector` and refuses anything with a sparse or
+        // text component, naming the endpoints that do work. That refusal is its most common
+        // answer and was not in the document at all.
+        (status = 501, description = "A sparse or text component; use /search/hybrid",
+         body = ApiResponse)
     ),
     tag = "search"
 ))]
