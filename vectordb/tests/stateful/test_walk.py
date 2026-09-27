@@ -257,6 +257,43 @@ def check(server, model, rng, where):
         missed = [rid for rid in truth if rid not in {h["id"] for h in hits} and truth[rid] > floor + TOL]
         assert not missed, f"{where}: exact search left out {missed}, which score above {floor}"
 
+    # The approximate path agrees with the exact one, and every stored vector finds itself.
+    #
+    # Everything above this point reads the *record store*: `records/list` and `search_mode:
+    # exact` both answer from the rows, so a record that was written but never reached the
+    # graph passes all of it. The graph is what `search` without a mode walks, and these two
+    # assertions are the only ones here that go through it.
+    #
+    # Chroma's `ann_accuracy` invariant is the model, with its recall floor replaced by
+    # equality: 40 records against `DEFAULT_EF_SEARCH` = 512 means the walk's candidate budget
+    # exceeds the graph, so there is nothing approximate left about it and a floor below 1.0
+    # would only hide a defect. At a size where the budget binds this has to become a floor.
+    #
+    # Compared by score and not by id, deliberately. `IDS` is 40 ids and `gen_vector` rounds to
+    # three decimals, so two records holding one vector is a thing that happens over a long
+    # walk -- and then "the id I queried with came back" is false for a correct answer. The
+    # measured version of this mistake reported 2.5% of GIST-960 unreachable where the truth
+    # was 2.0%.
+    if model.records:
+        q = gen_vector(rng)
+        k = min(8, len(model.records))
+        status, body = server.call("POST", "/tables/t/search", {"vector": q, "top_k": k})
+        assert status == 200, f"{where}: approximate search {status} {body}"
+        approximate = [h["score"] for h in body["data"]["hits"]]
+        exact = sorted((cosine(q, r["vector"]) for r in model.records.values()), reverse=True)[:k]
+        assert len(approximate) == k, f"{where}: approximate search returned {len(approximate)} of {k}"
+        assert all(abs(a - b) < TOL for a, b in zip(approximate, exact)), (
+            f"{where}: the graph and the rows disagree\n  graph {approximate}\n  rows  {exact}")
+
+        rid = rng.choice(sorted(model.records))
+        want = model.records[rid]["vector"]
+        status, body = server.call("POST", "/tables/t/search", {"vector": want, "top_k": 1})
+        assert status == 200, f"{where}: self-retrieval {status} {body}"
+        top = body["data"]["hits"][0]
+        assert abs(top["score"] - cosine(want, want)) < TOL, (
+            f"{where}: searching with {rid}'s own vector returned {top['id']} at {top['score']}, "
+            f"not a record at distance zero -- {rid} is in the store and not reachable in the graph")
+
     # Filters, through every route that answers one.
     for _ in range(4):
         f = gen_filter(rng)
