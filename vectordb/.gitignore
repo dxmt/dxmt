@@ -49,6 +49,9 @@ logs/
 # `clients/` as the one file in the tree still naming the old layout.
 .coverage
 .coverage.*
+# The queries `examples/generative_benchmark.py` generates. Cached so a rerun is free, and
+# local because they are about whatever corpus that machine pointed it at.
+examples/.generative_benchmark.json
 
 # Documentation builds
 /book/

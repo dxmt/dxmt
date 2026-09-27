@@ -128,6 +128,11 @@ CATALOGUE = [
     Example("mem0_integration.py", imports=("mem0",), key=True),
     Example("dxmt_mem0_simple.py", imports=("mem0", "dotenv"), key=True),
     Example("metagpt_integration.py", imports=("llama_index",), key=True),
+    # Needs the key in the *server's* environment as well as here: the table names a model
+    # and the server does the embedding. The runner's server inherits this process's
+    # environment, so one export covers both.
+    Example("generative_benchmark.py", imports=("openai",), key=True, timeout=1800,
+            args=("--limit", "40")),
 ]
 
 

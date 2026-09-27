@@ -47,6 +47,7 @@ Six read `DXMT_URL` or `DXMT_HOST`/`DXMT_PORT` and will follow a server elsewher
 | `mem0_integration.py` | `mem0ai` | yes | mem0 configures an OpenAI embedder and LLM |
 | `dxmt_mem0_simple.py` | `mem0ai python-dotenv` | yes | |
 | `metagpt_integration.py` | `llama-index` | yes | |
+| `generative_benchmark.py` | `openai` | yes | the key must also be in the **server's** environment |
 
 `OPENAI_API_KEY` comes from the environment. Never put a key in a file here -- keys have had to
 be scrubbed from this tree once already.
@@ -147,3 +148,29 @@ Examples that did not run were removed rather than left to rot: four AutoGen exa
 a module that exists in no package, and a multimodal example calling routes the server does not
 serve. They were not abandoned by accident -- each one needs work this repository has not done,
 and an example that cannot run is a promise the code does not keep.
+
+## Two ways to score retrieval, and what each one answers
+
+`rag_eval.py` and `generative_benchmark.py` look like the same example and are not.
+
+`rag_eval.py` scores the two RAG metrics a database is responsible for -- context precision
+and context recall -- against **hand-written questions with a known gold passage**, over this
+repository's own documentation. No LLM, no key, no judge model, so the number is the same on
+every run. It is the regression test of the two.
+
+`generative_benchmark.py` works on **any corpus**, including yours, because it does not need
+labels: an LLM writes the query each passage answers, and the pair is the label. That buys
+generality and costs reproducibility -- the queries are generated, so read them before
+trusting the score. `--show` prints them next to their passages.
+
+The reason to have the second one is a question the first cannot ask. A perfect index still
+retrieves badly if the embedding model puts the wrong passage first, and those are different
+problems. Every query runs through the graph and through `search_mode: "exact"`, and each
+miss is attributed to one or the other. On this repository's documentation, 165 generated
+queries, `text-embedding-3-small`: recall@1 0.5333, recall@10 0.8848, and **all 77 misses
+were the embedding -- the index placed none of them wrong**. That is the shape of answer this
+example exists to produce, and no amount of index tuning would have moved it.
+
+The method is Chroma's `sample_apps/generative_benchmarking` (Apache 2.0 -- the method, not
+the code). The attribution half is ours, and is only possible because of `search_mode:
+"exact"`.
