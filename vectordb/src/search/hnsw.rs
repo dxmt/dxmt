@@ -1283,14 +1283,22 @@ impl HnswIndex {
     /// | corpus | unreachable without | with | ingest |
     /// | --- | --- | --- | --- |
     /// | GIST-960, 100K rows | 2.0% | 0.1% | 1.8x slower |
-    /// | bge-m3, 60K real paragraphs | 0.50% | 0.50% | unchanged |
+    /// | bge-m3 1024d, 60K real paragraphs | 0.00% | 0.00% | unchanged |
+    /// | OpenAI 3-large 3072d, 60K paragraphs | 0.00% | — | — |
     /// | clustered synthetic, 3K x 64 | — | — | self-retrieval 98+ to 82–91 |
     ///
     /// It helps only on GIST, which is a 2008 image descriptor with near-duplicates and
-    /// isolated points; it does nothing at all on what a modern embedding model produces,
-    /// which is what anyone actually stores; and it measurably degrades a clustered corpus,
-    /// because the edges it adds are precisely the ones this heuristic rejected for being
-    /// redundant. Trading a real regression on one workload for a fix on another, while the
+    /// isolated points. **On what a modern embedding model produces — which is what anyone
+    /// actually stores — nothing is stranded at all**, so there is nothing for it to fix; and
+    /// it measurably degrades a clustered corpus, because the edges it adds are precisely the
+    /// ones this heuristic rejected for being redundant.
+    ///
+    /// Those zeroes were 0.50% until the measurement was checked. Comparing the graph's score
+    /// against the exact scan's with a tolerance of `1e-6` is tighter than the floating-point
+    /// noise of summing 1024 products, let alone 3072: at 3072 dimensions the median gap is
+    /// 2e-6 and the criterion reported **87.9% unreachable on a corpus with recall@10 of
+    /// 1.0000**. Two numbers that cannot both be true is what exposed it. Compare the returned
+    /// *id*, or use a tolerance above the metric's own noise. Trading a real regression on one workload for a fix on another, while the
     /// representative workload is indifferent, is not a trade worth making.
     ///
     /// A narrower version — rescuing a node at insert time when every neighbour had just

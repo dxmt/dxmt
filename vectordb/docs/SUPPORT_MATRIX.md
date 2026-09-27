@@ -170,10 +170,13 @@ from the exact rerank that `accurate` widens. The alternative, if the memory is 
 to turn quantization off for that table — `quantization.quantize_at_rows` above the table's
 eventual size — which measured 1.0000 at `normal` on glove-25 for 466 MB against 263 MB.
 
-**A small fraction of records cannot be found by the graph, whatever the effort.** Searching
-with a vector that is already stored returns it for about 99.5% of a modern-embedding corpus
-and 98% of GIST-960 — the remainder are points nothing else is near, which the graph's
-neighbour selection leaves with no incoming edges. `ef` and `top_k` do not help; they are a
+**A small fraction of records cannot be found by the graph on some corpora.** Searching with
+a vector that is already stored returns it for **100% of a modern-embedding corpus** — 60,000
+paragraphs through bge-m3 (1024d) and through OpenAI `text-embedding-3-large` (3072d), zero
+missed in both — and for 98% of GIST-960. The 2% are points nothing else is near, which the
+graph's neighbour selection leaves with no incoming edges; GIST is a 2008 image descriptor
+full of near-duplicates and isolated points, and the shortfall has not been reproduced on
+anything a retrieval application would store. `ef` and `top_k` do not help; they are a
 budget and this is not. Ordinary retrieval is unaffected, because those points are nobody's
 nearest neighbour (recall@10 was 0.9955 on GIST while 5% was unreachable at a million rows).
 Deduplication and near-duplicate detection are the workloads that hit it, and
