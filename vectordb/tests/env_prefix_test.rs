@@ -221,8 +221,8 @@ fn nothing_that_sets_variables_uses_the_old_names() {
     }
     for file in [
         "../CONTRIBUTING.md",
-        "Dockerfile",
-        "docker-compose.yml",
+        "docker/Dockerfile",
+        "docker/docker-compose.yml",
         ".env.example",
         "Makefile",
     ] {

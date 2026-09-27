@@ -20,13 +20,12 @@ datasets/
 ehthumbs.db
 Thumbs.db
 
-# Environment files. Only the templates are shared. `.env` alone is an exact-name
+# Environment files. Only .env.example is shared. `.env` alone is an exact-name
 # match, so `.env.production` was never actually ignored — a placeholder file that
 # someone later fills in would have been committed without a word.
 .env
 .env.*
 !.env.example
-!.env.template
 
 # Logs
 *.log
@@ -44,6 +43,12 @@ logs/
 /test-results/
 /coverage/
 *.profraw
+# `coverage.py`'s database. `/coverage/` above is a directory and does not match it, so
+# `clients/langchain-dxmt/.coverage` was tracked -- 52 KB of binary holding absolute paths
+# from whichever machine last ran the suite, which then travelled through the move to
+# `clients/` as the one file in the tree still naming the old layout.
+.coverage
+.coverage.*
 
 # Documentation builds
 /book/

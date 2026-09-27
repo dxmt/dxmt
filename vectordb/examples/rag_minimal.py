@@ -10,7 +10,7 @@ store, retrieve, ground the answer -- runs with nothing but pip installs and a s
     python3 examples/rag_minimal.py
     python3 examples/rag_minimal.py "how does the graph get built"
 
-**On the fallback.** `dxmt-python-sdk/examples/common_utils.embed` falls back to a deterministic
+**On the fallback.** `clients/dxmt-python-sdk/examples/common_utils.embed` falls back to a deterministic
 md5-derived vector when sentence-transformers is absent, which keeps code running offline. It
 does not keep *retrieval* working: an md5 of the whole string carries no meaning, so similar
 questions land nowhere near their answers. This example says so loudly and keeps going, because

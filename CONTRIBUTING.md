@@ -1,13 +1,14 @@
 # Contributing
 
 Thanks for taking the time. This file covers the things that are specific to this repository;
-it assumes you already know how to open a pull request.
+it assumes you already know how to open a pull request. Participation is covered by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Layout, and the one thing that surprises everyone
 
-Everything lives under `vectordb/`: the Rust crate `dxmt-vectordb` and its four client
-packages. **There is no `Cargo.toml` at the repository root.** Every `cargo` and `make` command
-runs from `vectordb/`:
+Everything lives under `vectordb/`: the Rust crate `dxmt-vectordb`, its six client packages
+under `vectordb/clients/`, and its Docker files under `vectordb/docker/`. **There is no
+`Cargo.toml` at the repository root.** Every `cargo` and `make` command runs from `vectordb/`:
 
 ```bash
 cd vectordb && cargo build
@@ -16,10 +17,12 @@ cd vectordb && cargo build
 | Path | Contents |
 | --- | --- |
 | `vectordb/src/` | The `dxmt-vectordb` crate (bins: `vectordb`, `benchmark`) |
-| `vectordb/dxmt-python-sdk/` | Python client and the framework integrations built on it |
-| `vectordb/dxmt-js-sdk/` | TypeScript client |
-| `vectordb/langchain-dxmt/` | LangChain vector store |
-| `vectordb/llama-index-vector-stores-dxmt/` | LlamaIndex vector store |
+| `vectordb/clients/dxmt-python-sdk/` | Python client and the framework integrations built on it |
+| `vectordb/clients/dxmt-js-sdk/` | TypeScript client |
+| `vectordb/clients/dxmt-rust-sdk/` | Rust client — the core routes only; `tests/live.rs` runs in CI |
+| `vectordb/clients/dxmt-go-sdk/` | Go client — the same core surface; `live_test.go` runs in CI |
+| `vectordb/clients/langchain-dxmt/` | LangChain vector store |
+| `vectordb/clients/llama-index-vector-stores-dxmt/` | LlamaIndex vector store |
 
 Each client package is independently packaged, with its own tests and dependency manifest, so a
 change to the Rust HTTP API means updating them separately. `vectordb/tests/api_contract_test.rs`
@@ -75,10 +78,12 @@ with relative imports, so it has to be that and not `cd tests/api`.
 The client packages:
 
 ```bash
-cd vectordb/dxmt-python-sdk              && pytest -m "not integration"
-cd vectordb/dxmt-js-sdk                  && npm test
-cd vectordb/langchain-dxmt               && pytest
-cd vectordb/llama-index-vector-stores-dxmt && pytest
+cd vectordb/clients/dxmt-python-sdk              && pytest -m "not integration"
+cd vectordb/clients/dxmt-js-sdk                  && npm test
+cd vectordb/clients/dxmt-rust-sdk && DXMT_URL=http://127.0.0.1:9999 cargo test --test live
+cd vectordb/clients/dxmt-go-sdk   && DXMT_URL=http://127.0.0.1:9999 go test ./...
+cd vectordb/clients/langchain-dxmt               && pytest
+cd vectordb/clients/llama-index-vector-stores-dxmt && pytest
 ```
 
 Tests that need a live server skip themselves when there is none, and take `DXMT_HOST` /

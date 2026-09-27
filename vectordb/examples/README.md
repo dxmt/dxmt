@@ -89,7 +89,7 @@ network.
 ## Embeddings
 
 None of these get embeddings from the database; the server stores vectors the caller supplies.
-`dxmt-python-sdk/examples/common_utils.py` has an `embed()` that uses `all-MiniLM-L6-v2` when
+`clients/dxmt-python-sdk/examples/common_utils.py` has an `embed()` that uses `all-MiniLM-L6-v2` when
 `sentence-transformers` is installed and falls back to a deterministic md5-derived vector when
 it is not, which is what makes an example runnable offline. The fallback vectors are not
 semantically meaningful -- they exercise the plumbing, not the retrieval quality.

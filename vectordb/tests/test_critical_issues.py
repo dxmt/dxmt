@@ -2,7 +2,7 @@
 """测试关键问题：删除后重新插入的bug"""
 
 import sys
-sys.path.insert(0, 'dxmt-python-sdk')
+sys.path.insert(0, 'clients/dxmt-python-sdk')
 
 from dxmt.client import DXMTClient
 import time

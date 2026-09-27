@@ -17,7 +17,7 @@ import time
 import os
 
 # Add local SDK to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'dxmt-python-sdk'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "clients", "dxmt-python-sdk"))
 
 # Configure logging
 logging.basicConfig(
@@ -31,7 +31,7 @@ try:
 except ImportError as e:
     logger.error(f"Import error: {e}")
     logger.error("请安装 DXMT Python SDK: pip install dxmt-python-sdk")
-    logger.error("或确保 dxmt-python-sdk 目录存在于当前目录")
+    logger.error("或确保 clients/dxmt-python-sdk 目录存在于当前目录")
     sys.exit(1)
 
 

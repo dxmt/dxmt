@@ -231,7 +231,7 @@ docs-open:
 # bringing it up there are the same image rather than two.
 docker-build:
 	@echo "Building Docker image..."
-	@docker build -t dxmt/vectordb:alpha .
+	@docker build -f docker/Dockerfile -t dxmt/vectordb:alpha .
 
 # The server listens on 9999 (Dockerfile: EXPOSE 9999, CMD --port 9999). This published 8000,
 # so the container came up healthy and nothing could reach it. The volume is the other half:
@@ -242,7 +242,7 @@ docker-run:
 
 docker-compose:
 	@echo "Starting with docker-compose..."
-	@docker-compose up -d
+	@docker-compose -f docker/docker-compose.yml up -d
 
 # Clean build artifacts
 clean:

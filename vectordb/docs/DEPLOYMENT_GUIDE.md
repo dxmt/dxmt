@@ -5,7 +5,7 @@
 ### 1. Build the Improved Server
 
 ```bash
-cd /localdisk/code/dxmt/vectordb
+cd vectordb   # from the repository root
 
 # Check compilation
 cargo check --lib
@@ -33,7 +33,7 @@ cargo run -- serve
 cargo run -- serve
 
 # Terminal 2: Test improvements
-cd dxmt-python-sdk/examples
+cd clients/dxmt-python-sdk/examples
 python3 test_server_improvements.py
 
 # Terminal 3: Run original problem scenario
@@ -288,8 +288,8 @@ curl -v http://localhost:9999/api/v1/tables/test/records -X POST -d '...'
 
 | Document | Purpose | Location |
 |----------|---------|----------|
-| Issue Report | Problem details | `dxmt-python-sdk/examples/ISSUE_REPORT.md` |
-| Diagnosis Summary | Quick summary | `dxmt-python-sdk/examples/DIAGNOSIS_SUMMARY.md` |
+| Issue Report | Problem details | `clients/dxmt-python-sdk/examples/ISSUE_REPORT.md` |
+| Diagnosis Summary | Quick summary | `clients/dxmt-python-sdk/examples/DIAGNOSIS_SUMMARY.md` |
 | Server Improvements | Technical details | `SERVER_IMPROVEMENTS.md` |
 | Improvements Summary | Implementation summary | `IMPROVEMENTS_SUMMARY.md` |
 | **This Guide** | **Deployment guide** | **`DEPLOYMENT_GUIDE.md`** |

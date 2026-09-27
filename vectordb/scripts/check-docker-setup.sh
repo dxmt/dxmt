@@ -61,13 +61,13 @@ else
     check_warn "docker-nightly.yml 不存在 (可选)"
 fi
 
-if [ -f "Dockerfile" ]; then
+if [ -f "docker/Dockerfile" ]; then
     check_pass "Dockerfile 存在"
 else
     check_fail "Dockerfile 不存在"
 fi
 
-if [ -f "Dockerfile.multiarch" ]; then
+if [ -f "docker/Dockerfile.multiarch" ]; then
     check_pass "Dockerfile.multiarch 存在"
 else
     check_warn "Dockerfile.multiarch 不存在 (可选)"
@@ -188,23 +188,23 @@ fi
 # =============================================================================
 echo -e "\n${BLUE}[6] 检查Dockerfile...${NC}"
 
-if [ -f "Dockerfile" ]; then
+if [ -f "docker/Dockerfile" ]; then
     # 检查多阶段构建
-    if grep -q "FROM.*AS builder" Dockerfile; then
+    if grep -q "FROM.*AS builder" docker/Dockerfile; then
         check_pass "使用多阶段构建"
     else
         check_warn "未使用多阶段构建 (镜像可能较大)"
     fi
 
     # 检查健康检查
-    if grep -q "HEALTHCHECK" Dockerfile; then
+    if grep -q "HEALTHCHECK" docker/Dockerfile; then
         check_pass "配置了健康检查"
     else
         check_warn "未配置健康检查"
     fi
 
     # 检查非root用户
-    if grep -q "USER" Dockerfile; then
+    if grep -q "USER" docker/Dockerfile; then
         check_pass "使用非root用户运行"
     else
         check_warn "以root用户运行 (安全风险)"
@@ -216,14 +216,14 @@ fi
 # =============================================================================
 echo -e "\n${BLUE}[7] 测试本地构建 (可选)...${NC}"
 
-if [ -f "Dockerfile" ] && command -v docker &> /dev/null && docker info &> /dev/null; then
+if [ -f "docker/Dockerfile" ] && command -v docker &> /dev/null && docker info &> /dev/null; then
     echo -e "${YELLOW}是否要测试本地Docker构建? (y/n)${NC}"
     read -r -p "> " response
 
     if [[ "$response" =~ ^[Yy]$ ]]; then
         echo -e "${BLUE}开始构建测试镜像...${NC}"
 
-        if docker build -t dxmt-vectordb:test .; then
+        if docker build -f docker/Dockerfile -t dxmt-vectordb:test .; then
             check_pass "本地构建成功"
 
             echo -e "${YELLOW}是否要运行测试容器? (y/n)${NC}"

@@ -6,8 +6,16 @@ collection mode. Full-text search (Tantivy), GraphQL, WebSocket, Swagger and S3 
 build features — see [Feature flags](#feature-flags) — so a default build is the minimal
 supported single-node server and nothing more.
 
-> **Status: Alpha development, not production-ready.** Records are held in memory and made durable by a write-ahead log,
-> replayed on startup — `kill -9` and restart preserves your tables. The log defaults to
+> **Status: Alpha development, not production-ready.** Durability is a write-ahead log,
+> replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
+> Records and full vectors are **not** held in memory: with a WAL directory, which is the
+> default, they live in row files beside it (`wal/records/<table>.rec`,
+> `wal/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident —
+> about 0.45 KB per 768-dimension row, measured at 100 million, against 8.3 KB when
+> everything was in the map. `docs/architecture/disk-index.md` is how that was done and what
+> it cost. (This paragraph said "records are held in memory" from 2026-08-14, when the WAL
+> went on the write path, until 2026-09-27: true when written, and left behind by the two
+> phases that moved the rows to disk.) The log defaults to
 > `~/.dxmt/store` — everything the server writes lives under one root, `DXMT_ROOT_DIR`, which
 > defaults to `~/.dxmt`. Under the home directory rather than the working directory, so
 > starting the server from somewhere else does not open a different, empty database. **Set
@@ -196,7 +204,7 @@ vector_search {"table": "notes", "text": "...", "limit": 5}
 ```
 
 Embedding client-side is still first-class and is what the LangChain and LlamaIndex packages
-do; `langchain-dxmt/examples/embedding.py` picks the best model available without a key.
+do; `clients/langchain-dxmt/examples/embedding.py` picks the best model available without a key.
 
 ### gRPC
 
@@ -454,15 +462,19 @@ it on every request; its static files stay reachable without one, because they c
 
 ## Client SDKs
 
-| Directory                          | Package                                  |
-| ---------------------------------- | ---------------------------------------- |
-| `dxmt-python-sdk/`                 | Python client + framework integrations   |
-| `dxmt-js-sdk/`                     | TypeScript/JavaScript client             |
-| `langchain-dxmt/`                  | LangChain vector store                   |
-| `llama-index-vector-stores-dxmt/`  | LlamaIndex vector store                  |
+All six live under `clients/`.
+
+| Directory                                   | Package                                  |
+| -------------------------------------------- | ---------------------------------------- |
+| `clients/dxmt-python-sdk/`                   | Python client + framework integrations   |
+| `clients/dxmt-js-sdk/`                        | TypeScript/JavaScript client             |
+| `clients/dxmt-rust-sdk/`                      | Rust client — core routes only           |
+| `clients/dxmt-go-sdk/`                        | Go client — the same core surface        |
+| `clients/langchain-dxmt/`                     | LangChain vector store                   |
+| `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
 The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI, MetaGPT,
-and AutoGen. See `dxmt-python-sdk/README.md`.
+and AutoGen. See `clients/dxmt-python-sdk/README.md`.
 
 ## Development
 

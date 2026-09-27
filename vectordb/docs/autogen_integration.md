@@ -98,7 +98,7 @@ AutoGen is Microsoft's multi-agent conversation framework that enables building 
   - Metadata filtering
 
 #### Layer 2: DXMT Python SDK
-- **Location:** `dxmt-python-sdk`
+- **Location:** `clients/dxmt-python-sdk`
 - **Language:** Python
 - **Responsibilities:**
   - HTTP client for DXMT server
@@ -168,7 +168,7 @@ cargo build --release
 pip install autogen-ext autogen-agentchat
 
 # Install DXMT Python SDK
-cd dxmt-python-sdk
+cd clients/dxmt-python-sdk
 pip install -e .
 
 # Or install from PyPI (when published)
@@ -1075,7 +1075,7 @@ print(f"Results: {len(results.results)}")
 
 **Solution:**
 ```bash
-cd dxmt-python-sdk
+cd clients/dxmt-python-sdk
 pip install -e .
 ```
 

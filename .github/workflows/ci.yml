@@ -244,7 +244,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
           DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q tests/test_integration.py
-        working-directory: vectordb/dxmt-python-sdk
+        working-directory: vectordb/clients/dxmt-python-sdk
 
       # The LangGraph store implements BaseStore over DXMT, and nothing ran it: `langgraph` is
       # not a dependency of this SDK, so `importorskip` skipped the whole file everywhere --
@@ -255,7 +255,7 @@ jobs:
           python -m pip install langgraph
           DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q \
             tests/test_langgraph_store.py tests/test_langgraph_store_integration.py
-        working-directory: vectordb/dxmt-python-sdk
+        working-directory: vectordb/clients/dxmt-python-sdk
 
       # The two adapter packages had no CI at all, and both had gone red without anyone
       # noticing: a test importing a class name this package never exported, and one asserting
@@ -271,7 +271,7 @@ jobs:
       # in lib.rs is `no_run`, so building it adds a link step that proves nothing here.
       - name: Rust client live tests
         run: DXMT_URL=http://127.0.0.1:19999 cargo test --test live
-        working-directory: vectordb/dxmt-rust-sdk
+        working-directory: vectordb/clients/dxmt-rust-sdk
 
       - uses: actions/setup-go@v5
         with:
@@ -279,13 +279,13 @@ jobs:
 
       - name: Go client live tests
         run: DXMT_URL=http://127.0.0.1:19999 go test ./...
-        working-directory: vectordb/dxmt-go-sdk
+        working-directory: vectordb/clients/dxmt-go-sdk
 
       - name: LangChain adapter tests
         run: |
           python -m pip install -e .
           DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
-        working-directory: vectordb/langchain-dxmt
+        working-directory: vectordb/clients/langchain-dxmt
 
       # `tests/test_integration.py` here asked for `OpenAIEmbedding`, so it skipped itself on
       # every machine without a key -- this one included -- and the package's live path was
@@ -294,7 +294,7 @@ jobs:
         run: |
           python -m pip install -e .
           DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
-        working-directory: vectordb/llama-index-vector-stores-dxmt
+        working-directory: vectordb/clients/llama-index-vector-stores-dxmt
 
       - uses: actions/setup-node@v4
         with:
@@ -306,7 +306,7 @@ jobs:
           npm test
           npm run build
           DXMT_LIVE_URL=http://127.0.0.1:19999 npm test -- --run test/live.test.ts
-        working-directory: vectordb/dxmt-js-sdk
+        working-directory: vectordb/clients/dxmt-js-sdk
 
       # Every client again, against a server that requires a key. On the test side
       # `DXMT_API_KEY` is read only by each suite's harness -- the SDKs read no environment
@@ -331,10 +331,10 @@ jobs:
         env:
           DXMT_API_KEY: ci-live-key
         run: |
-          (cd dxmt-python-sdk && DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19998 pytest -q tests/test_integration.py)
-          (cd dxmt-rust-sdk && DXMT_URL=http://127.0.0.1:19998 cargo test --test live)
-          (cd dxmt-go-sdk && DXMT_URL=http://127.0.0.1:19998 go test ./...)
-          (cd langchain-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
-          (cd llama-index-vector-stores-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
-          (cd dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts)
+          (cd clients/dxmt-python-sdk && DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19998 pytest -q tests/test_integration.py)
+          (cd clients/dxmt-rust-sdk && DXMT_URL=http://127.0.0.1:19998 cargo test --test live)
+          (cd clients/dxmt-go-sdk && DXMT_URL=http://127.0.0.1:19998 go test ./...)
+          (cd clients/langchain-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
+          (cd clients/llama-index-vector-stores-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
+          (cd clients/dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts)
         working-directory: vectordb

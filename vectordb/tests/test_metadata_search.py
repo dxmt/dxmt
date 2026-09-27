@@ -2,7 +2,7 @@
 """测试纯元数据搜索功能"""
 
 import sys
-sys.path.insert(0, 'dxmt-python-sdk')
+sys.path.insert(0, 'clients/dxmt-python-sdk')
 
 from dxmt.client import DXMTClient
 import json

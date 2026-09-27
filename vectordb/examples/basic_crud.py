@@ -3,11 +3,11 @@
     cd vectordb && cargo run -- serve                  # standard mode, port 9999
     cd vectordb && python3 examples/basic_crud.py
 
-Needs `dxmt-python-sdk` importable (`pip install -e dxmt-python-sdk`). `DXMT_HOST` / `DXMT_PORT`
+Needs `dxmt-python-sdk` importable (`pip install -e clients/dxmt-python-sdk`). `DXMT_HOST` / `DXMT_PORT`
 point it elsewhere. The table is created at the start and dropped at the end, so this can be
 run repeatedly.
 
-The Rust equivalent is `dxmt-rust-sdk/examples/basic_crud.rs`; the two do the same things in
+The Rust equivalent is `clients/dxmt-rust-sdk/examples/basic_crud.rs`; the two do the same things in
 the same order, on purpose, so the clients can be compared side by side.
 """
 

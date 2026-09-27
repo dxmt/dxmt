@@ -1,5 +1,0 @@
-#
-# This empty file ensures the `configs/` directory exists so that
-# the Dockerfile's `COPY configs/ /config/` instruction always
-# has a valid source directory during image builds.
-#

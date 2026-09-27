@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Add SDK to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "dxmt-python-sdk"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 from haystack import Pipeline, Document
 from haystack.components.builders import PromptBuilder, AnswerBuilder

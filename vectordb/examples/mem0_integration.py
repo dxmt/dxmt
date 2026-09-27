@@ -24,7 +24,7 @@ import time
 from typing import List
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dxmt-python-sdk"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "clients", "dxmt-python-sdk"))
 
 from dxmt import Client as DXMTClient
 from dxmt.mem0 import DXMTMemoryStore

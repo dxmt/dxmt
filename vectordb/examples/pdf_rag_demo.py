@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "dxmt-python-sdk"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 from dxmt import Client
 from sentence_transformers import SentenceTransformer
