@@ -30,7 +30,6 @@ fn record(id: &str, keep: bool) -> CreateRecordRequest {
 async fn storage(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
     let s = IntelligentIndexedStorage::new_with_wal(
         &StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 128,
                 eviction_policy: "lru".to_string(),

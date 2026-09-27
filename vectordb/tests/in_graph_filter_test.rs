@@ -38,7 +38,6 @@ const K: usize = 20;
 
 fn config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 4096,
             eviction_policy: "lru".to_string(),

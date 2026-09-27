@@ -15,7 +15,6 @@ use serde_json::json;
 async fn table_with_one_record(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
     let storage = IntelligentIndexedStorage::new_with_wal(
         &StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 128,
                 eviction_policy: "lru".to_string(),

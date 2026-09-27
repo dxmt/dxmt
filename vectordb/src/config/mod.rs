@@ -1,14 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-pub mod dynamic_config;
 pub mod env;
 pub mod layout;
 // pub mod eight_core_optimization; // Removed - redundant
-pub mod large_memory_optimization;
 pub mod memory_detector;
-pub mod optimization;
 pub mod performance_optimization;
-pub mod storage_optimization;
 
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +27,6 @@ pub struct ServerConfig {
 /// 存储配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
-    pub r#type: String,
     pub memory: Option<MemoryConfig>,
     pub ssd: Option<SsdConfig>,
     pub object_storage: Option<ObjectStorageConfig>,
@@ -224,8 +219,6 @@ impl Default for AppConfig {
             .and_then(|w| w.parse::<usize>().ok());
 
         // 存储配置
-        let storage_type =
-            crate::config::env::var("DXMT_STORAGE_TYPE").unwrap_or_else(|_| "tiered".to_string());
 
         let memory_cache_size = crate::config::env::var("DXMT_MEMORY_CACHE_SIZE")
             .ok()
@@ -400,7 +393,6 @@ impl Default for AppConfig {
                 workers,
             },
             storage: StorageConfig {
-                r#type: storage_type,
                 memory: Some(MemoryConfig {
                     max_size_mb: memory_cache_size,
                     eviction_policy: "lru".to_string(),
@@ -444,7 +436,6 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.server.port, 9999);
         assert_eq!(config.server.bind_address, "0.0.0.0:9999");
-        assert_eq!(config.storage.r#type, "tiered");
         assert_eq!(config.tables.default_dimension, 1536)
     }
 
@@ -550,14 +541,12 @@ mod tests {
         clear_all_env_vars();
 
         // 设置存储相关环境变量
-        std::env::set_var("DXMT_STORAGE_TYPE", "memory");
         std::env::set_var("DXMT_MEMORY_CACHE_SIZE", "1024");
         std::env::set_var("DXMT_SSD_CACHE_DIR", "/tmp/cache");
         std::env::set_var("DXMT_SSD_CACHE_SIZE", "20");
         std::env::set_var("DXMT_COMPRESSION", "lz4");
 
         let config = AppConfig::default();
-        assert_eq!(config.storage.r#type, "memory");
         assert_eq!(config.storage.memory.as_ref().unwrap().max_size_mb, 1024);
         assert_eq!(config.storage.ssd.as_ref().unwrap().cache_dir, "/tmp/cache");
         assert_eq!(config.storage.ssd.as_ref().unwrap().max_size_gb, 20);
@@ -672,7 +661,6 @@ mod tests {
             "DXMT_HOST",
             "DXMT_PORT",
             "DXMT_WORKER_THREADS",
-            "DXMT_STORAGE_TYPE",
             "DXMT_MEMORY_CACHE_SIZE",
             "DXMT_SSD_CACHE_DIR",
             "DXMT_SSD_CACHE_SIZE",

@@ -22,7 +22,6 @@ pub async fn create_test_storage() -> IntelligentIndexedStorage {
 /// Create a test storage instance with specified memory size
 pub async fn create_test_storage_with_size(max_size_mb: usize) -> IntelligentIndexedStorage {
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb,
             eviction_policy: "lru".to_string(),

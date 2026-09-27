@@ -137,8 +137,9 @@ DXMT_PARTITION_THRESHOLD_MB
 DXMT_COMPRESSION
 ```
 
-`DXMT_STORAGE_TYPE` is currently parsed but does not select the server implementation. It must not
-be presented as a backend switch until it is connected to the actual construction path.
+`DXMT_STORAGE_TYPE` was removed on 2026-09-27. It was parsed but selected no implementation,
+and this paragraph used to say it "must not be presented as a backend switch until it is
+connected" -- removing it is how that was settled.
 
 ## Recall on published ground truth
 

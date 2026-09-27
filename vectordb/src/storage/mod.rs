@@ -2,7 +2,6 @@
 
 pub mod compression;
 pub mod consistency_check; // New: Index consistency verification
-pub mod factory;
 pub mod index_selector;
 pub mod intelligent_indexed_storage;
 pub mod memory;
@@ -20,10 +19,6 @@ pub mod wal_entry; // New: WAL entry definitions
                    // Removed
 
 // Re-export main types
-pub use factory::{
-    OptimizedCostConstraints, OptimizedStorageConfig, PerformanceTargets, StorageBackend,
-    StorageFactory, StorageIntegration,
-};
 pub use intelligent_indexed_storage::{IntelligentIndexedStorage, RecordUpdate};
 pub use memory::MemoryStorage;
 pub use tier_promotion::{

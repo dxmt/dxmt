@@ -21,7 +21,6 @@ mod full_text_search_tests {
     /// Helper function to create a test storage instance
     async fn create_test_storage() -> IntelligentIndexedStorage {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 1024,
                 eviction_policy: "lru".to_string(),

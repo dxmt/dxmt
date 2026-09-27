@@ -344,8 +344,10 @@ DXMT_MEMORY_CACHE_SIZE=512    # MB
 DXMT_COMPRESSION=zstd         # zstd | lz4 | none
 ```
 
-`DXMT_STORAGE_TYPE` is parsed but currently has no effect — the server constructs
-`IntelligentIndexedStorage` unconditionally.
+`DXMT_STORAGE_TYPE` is gone as of 2026-09-27. It was parsed into config and selected nothing —
+the server constructs `IntelligentIndexedStorage` unconditionally — and a documented variable
+that reads as a backend switch is worse than no variable. The 832-line `StorageFactory` it
+would have driven had no caller either; it is in `planning/`.
 
 ### Where the data goes
 

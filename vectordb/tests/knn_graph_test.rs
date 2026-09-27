@@ -37,7 +37,6 @@ const DIM: usize = 12;
 
 fn storage_config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 1024,
             eviction_policy: "lru".to_string(),

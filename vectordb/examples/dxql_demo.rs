@@ -1,17 +1,20 @@
 //! What DXQL parses, compiles and executes -- and what it refuses.
 //!
 //! Every statement below runs against a real in-memory table, through the same three stages the
-//! server's `POST /query` uses: parse, compile, execute. That matters, because `DxqlEngine::new`
-//! wires the *storage-free* executor, which returns an empty result for every plan; a demo built
-//! on it printed "Results: 0 records found" for a SELECT and looked like an empty table rather
-//! than like nothing having happened.
+//! server's `POST /query` uses: parse, compile, execute. That used to be worth stating: a
+//! `DxqlEngine` wired the parser and compiler to a *storage-free* executor that returned an
+//! empty result for every plan, and a demo built on it printed "Results: 0 records found" for a
+//! SELECT -- indistinguishable from an empty table. Both are gone as of 2026-09-27, so
+//! `StorageAwareExecutor` is now the only thing there is to reach for.
 //!
 //! The refusals are the point as much as the successes. DXQL says no to vector search, text
 //! search and graph traversal in a WHERE clause, and names the route to use instead, rather than
 //! accepting the syntax and quietly doing something else.
 
 use dxmt_vectordb::config::{MemoryConfig, StorageConfig};
-use dxmt_vectordb::dxql::{compiler::Compiler, executor::StorageAwareExecutor, parser::Parser};
+use dxmt_vectordb::dxql::{
+    compiler::Compiler, executor_impl::StorageAwareExecutor, parser::Parser,
+};
 use dxmt_vectordb::dxql::{DxqlError, QueryResult};
 use dxmt_vectordb::storage::IntelligentIndexedStorage;
 use std::sync::Arc;
@@ -30,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let storage = Arc::new(
         IntelligentIndexedStorage::new(&StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 512,
                 eviction_policy: "lru".to_string(),

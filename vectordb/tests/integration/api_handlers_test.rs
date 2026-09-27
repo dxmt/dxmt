@@ -21,7 +21,6 @@ use std::sync::Arc;
 /// Helper function to create test AppState
 async fn create_test_app_state() -> AppState {
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),

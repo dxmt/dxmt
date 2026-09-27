@@ -72,7 +72,6 @@ const HIGH: usize = 1_000;
 
 fn config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),

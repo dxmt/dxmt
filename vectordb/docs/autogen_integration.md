@@ -387,7 +387,6 @@ DXMT_HOST=0.0.0.0
 DXMT_PORT=9999
 
 # Storage settings
-DXMT_STORAGE_TYPE=tiered          # memory, indexed, object, tiered
 DXMT_MEMORY_CACHE_SIZE=512        # Memory cache size in MB
 
 # Object storage (S3)
@@ -877,7 +876,6 @@ DXMT_MEMORY_CACHE_SIZE=2048   # Larger cache
 
 ```python
 # Use tiered storage
-DXMT_STORAGE_TYPE=tiered
 DXMT_MEMORY_CACHE_SIZE=512
 DXMT_S3_BUCKET=my-bucket
 ```
@@ -899,7 +897,6 @@ DXMT_MEMORY_CACHE_SIZE=1024  # MB
 #### Storage Type
 
 ```bash
-DXMT_STORAGE_TYPE=tiered
 ```
 
 **Options:**
@@ -1043,7 +1040,6 @@ print(f"Results: {len(results.results)}")
 3. **Enable tiered storage:**
    ```bash
    # .env
-   DXMT_STORAGE_TYPE=tiered
    DXMT_MEMORY_CACHE_SIZE=1024
    ```
 

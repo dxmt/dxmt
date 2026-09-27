@@ -35,7 +35,6 @@ use tempfile::TempDir;
 
 fn storage_config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 1024,
             eviction_policy: "lru".to_string(),
@@ -835,7 +834,6 @@ async fn a_snapshot_that_cannot_be_read_back_does_not_compact_the_log() {
 /// Storage config with a filesystem-backed object store, standing in for S3.
 fn storage_config_with_object_store(base: &Path) -> StorageConfig {
     StorageConfig {
-        r#type: "tiered".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 64,
             eviction_policy: "lru".to_string(),

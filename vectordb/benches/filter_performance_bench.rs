@@ -87,7 +87,6 @@ fn benchmark_filter_selectivity(c: &mut Criterion) {
 
     // Setup storage
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),
@@ -158,7 +157,6 @@ fn benchmark_search_no_filter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),

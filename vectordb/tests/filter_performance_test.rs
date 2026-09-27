@@ -14,7 +14,6 @@ fn random_vector(dim: usize) -> DenseVector {
 /// Helper function to create test storage
 async fn create_test_storage() -> IntelligentIndexedStorage {
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 1024,
             eviction_policy: "lru".to_string(),

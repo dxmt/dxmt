@@ -116,7 +116,6 @@ async fn test_storage_ann_10k_recall_and_latency() {
     let query_count = env_usize("DXMT_ANN_NUM_QUERIES", DEFAULT_NUM_QUERIES).min(n);
 
     let storage = IntelligentIndexedStorage::new(&StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),
@@ -256,7 +255,6 @@ async fn test_search_effort_is_live() {
     let query_count = 50;
 
     let storage = IntelligentIndexedStorage::new(&StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 512,
             eviction_policy: "lru".to_string(),

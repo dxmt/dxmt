@@ -121,7 +121,6 @@ impl Rng {
 
 fn storage_config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 8_192,
             eviction_policy: "lru".to_string(),

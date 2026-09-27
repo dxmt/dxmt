@@ -19,7 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create in-memory storage
     println!("1. Creating storage...");
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 256,
             eviction_policy: "lru".to_string(),

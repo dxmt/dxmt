@@ -20,7 +20,6 @@ use std::time::Instant;
 /// Helper to create test storage
 async fn create_test_storage(max_size_mb: usize) -> IntelligentIndexedStorage {
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb,
             eviction_policy: "lru".to_string(),

@@ -252,7 +252,6 @@ fn filters() -> Vec<(&'static str, Filter)> {
 async fn loaded(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
     let storage = IntelligentIndexedStorage::new_with_wal(
         &StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),

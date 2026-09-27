@@ -30,7 +30,6 @@ fn vector(i: usize) -> Vec<f32> {
 async fn serve() -> VectorDbClient<tonic::transport::Channel> {
     let storage = Arc::new(
         IntelligentIndexedStorage::new(&StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(MemoryConfig {
                 max_size_mb: 512,
                 eviction_policy: "lru".to_string(),

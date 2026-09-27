@@ -1,5 +1,14 @@
+//! There is one executor: [`executor_impl::StorageAwareExecutor`], which is what
+//! `POST /query` uses.
+//!
+//! There used to be two. `dxql::executor::Executor` was a storage-free shell that returned an
+//! empty result for every plan type by design, and `DxqlEngine` wired the parser, compiler and
+//! optimizer to *it* rather than to the real one. Nothing constructed `DxqlEngine`, which is
+//! the only reason it never shipped an empty answer to anybody -- but it was the obvious name
+//! to reach for, and reaching for it would have produced a 200 with no records and no error.
+//! Both were removed on 2026-09-27.
+
 pub mod compiler;
-pub mod executor;
 pub mod executor_impl;
 pub mod optimizer;
 pub mod parser;
@@ -8,43 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::types::RecordId;
-
-#[derive(Debug, Clone)]
-pub struct DxqlEngine {
-    parser: parser::Parser,
-    compiler: compiler::Compiler,
-    optimizer: optimizer::Optimizer,
-    executor: executor::Executor,
-}
-
-impl Default for DxqlEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DxqlEngine {
-    pub fn new() -> Self {
-        Self {
-            parser: parser::Parser::new(),
-            compiler: compiler::Compiler::new(),
-            optimizer: optimizer::Optimizer::new(),
-            executor: executor::Executor::new(),
-        }
-    }
-
-    pub async fn execute(&self, query: &str) -> Result<QueryResult, DxqlError> {
-        let ast = self.parser.parse(query)?;
-
-        let plan = self.compiler.compile(ast)?;
-
-        let optimized_plan = self.optimizer.optimize(plan)?;
-
-        let result = self.executor.execute(optimized_plan).await?;
-
-        Ok(result)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {

@@ -18,7 +18,6 @@ use std::time::Instant;
 /// 创建测试用的存储配置
 async fn create_storage(max_size_mb: usize) -> IntelligentIndexedStorage {
     let config = StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb,
             eviction_policy: "lru".to_string(),

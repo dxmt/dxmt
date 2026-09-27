@@ -20,7 +20,6 @@ use dxmt_vectordb::{
 
 fn make_config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(dxmt_vectordb::config::MemoryConfig {
             max_size_mb: 256,
             eviction_policy: "lru".to_string(),

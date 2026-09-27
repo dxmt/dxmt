@@ -31,9 +31,6 @@ pub struct RaBitQConfig {
 
     /// Whether to use residual quantization
     pub use_residual: bool,
-
-    /// Enable SIMD optimization for distance computation
-    pub enable_simd: bool,
 }
 
 impl Default for RaBitQConfig {
@@ -43,7 +40,6 @@ impl Default for RaBitQConfig {
             codebook_size: 256,      // 8-bit codes
             training_iterations: 20, // k-means iterations
             use_residual: true,      // Enable residual quantization
-            enable_simd: true,       // Use SIMD when available
         }
     }
 }
@@ -304,13 +300,15 @@ impl RaBitQQuantizer {
         Ok(reconstructed)
     }
 
-    /// Compute distance between query and quantized vector
+    /// Compute distance between query and quantized vector.
+    ///
+    /// A `RaBitQConfig::enable_simd` flag used to pick between `hamming_distance_simd` and
+    /// `hamming_distance_scalar` here. Both were the same function: the "SIMD" one was a
+    /// comment saying AVX2/AVX-512 was not implemented and a call to the scalar one. It
+    /// defaulted to true, so it read as an acceleration that was on. Flag and function are
+    /// gone; this is the only implementation there has ever been.
     pub fn compute_distance(&self, query_codes: &[u8], vector_codes: &[u8]) -> f32 {
-        if self.config.enable_simd {
-            hamming_distance_simd(query_codes, vector_codes)
-        } else {
-            hamming_distance_scalar(query_codes, vector_codes)
-        }
+        hamming_distance_scalar(query_codes, vector_codes)
     }
 
     /// Get compression ratio
@@ -440,15 +438,6 @@ fn hamming_distance_scalar(a: &[u8], b: &[u8]) -> f32 {
         .sum::<u32>() as f32
 }
 
-/// Hamming distance (SIMD implementation)
-///
-/// Uses SIMD instructions when available (AVX2/AVX-512)
-#[inline]
-fn hamming_distance_simd(a: &[u8], b: &[u8]) -> f32 {
-    // SIMD path (AVX2/AVX-512) not yet implemented; using scalar fallback
-    hamming_distance_scalar(a, b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,7 +473,6 @@ mod tests {
             codebook_size: 256,
             training_iterations: 5,
             use_residual: true,
-            enable_simd: false,
         };
 
         let dimension = 128;
@@ -521,7 +509,6 @@ mod tests {
             codebook_size: 256,
             training_iterations: 10,
             use_residual: true,
-            enable_simd: false,
         };
 
         let dimension = 128;
@@ -549,7 +536,6 @@ mod tests {
             codebook_size: 128,
             training_iterations: 5,
             use_residual: true,
-            enable_simd: false,
         };
 
         let dimension = 64;
@@ -586,7 +572,6 @@ mod tests {
             codebook_size: 256,
             training_iterations: 5,
             use_residual: true,
-            enable_simd: false,
         };
 
         let dimension = 768; // OpenAI embedding size

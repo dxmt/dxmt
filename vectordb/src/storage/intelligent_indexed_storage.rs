@@ -9628,7 +9628,6 @@ mod tests {
     async fn the_sweep_upgrades_an_index_but_never_demotes_one(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 1024,
                 eviction_policy: "lru".to_string(),
@@ -9723,7 +9722,6 @@ mod tests {
     #[tokio::test]
     async fn a_reevaluation_adopts_a_new_ef_search() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 1024,
                 eviction_policy: "lru".to_string(),
@@ -9814,7 +9812,6 @@ mod tests {
     #[tokio::test]
     async fn test_intelligent_storage_creation() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 1024,
                 eviction_policy: "lru".to_string(),
@@ -9851,7 +9848,6 @@ mod tests {
     #[tokio::test]
     async fn test_intelligent_index_selection() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 1024,
                 eviction_policy: "lru".to_string(),
@@ -9908,7 +9904,6 @@ mod tests {
     #[tokio::test]
     async fn test_branch_table() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -9992,7 +9987,6 @@ mod tests {
     async fn the_sweep_leaves_a_default_table_on_hnsw_pq_however_large_it_grows(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10039,7 +10033,6 @@ mod tests {
         // when something has. Both halves are asserted here; only asserting the skip would
         // pass just as well if `rebuild_index` had become a no-op outright.
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10140,7 +10133,6 @@ mod tests {
     #[tokio::test]
     async fn test_rebuild_index() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10242,7 +10234,6 @@ mod tests {
         // r1's fifth neighbour change after a rebuild in memory mode.
         const TIED: usize = 20;
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10432,7 +10423,6 @@ mod tests {
     #[tokio::test]
     async fn a_bad_request_fails_alone_inside_a_group() -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10508,7 +10498,6 @@ mod tests {
     async fn a_non_finite_vector_is_refused_and_leaves_the_table_searchable(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),
@@ -10589,7 +10578,6 @@ mod tests {
     async fn a_group_answers_each_request_with_its_own_rows(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = StorageConfig {
-            r#type: "memory".to_string(),
             memory: Some(crate::config::MemoryConfig {
                 max_size_mb: 256,
                 eviction_policy: "lru".to_string(),

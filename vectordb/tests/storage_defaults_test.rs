@@ -22,7 +22,6 @@ const ROWS: usize = 300;
 
 fn config() -> StorageConfig {
     StorageConfig {
-        r#type: "memory".to_string(),
         memory: Some(MemoryConfig {
             max_size_mb: 1024,
             eviction_policy: "lru".to_string(),
