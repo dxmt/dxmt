@@ -155,6 +155,33 @@ struct SnapshotManifest {
     names: Vec<String>,
 }
 
+/// How many filtered searches each planner branch has answered since process start.
+///
+/// A filtered search takes one of five paths, chosen from the estimated selectivity, and they
+/// differ by orders of magnitude in cost -- an unfiltered search is ~2 ms at a million rows
+/// while a filter matching an eighth to a half of the table is 160-800 ms. Which one a
+/// workload lands on is therefore the first thing to know when it is slow, and it was visible
+/// only as an `info!` line in the log.
+///
+/// It is also what makes a test honest. Comparing a filtered search against `search_mode:
+/// "exact"` proves nothing if the planner quietly sent both down the same exhaustive path;
+/// the comparison passes and the branch under test never ran. Qdrant's filtered-HNSW test
+/// asserts on a telemetry counter for exactly this reason. These are those counters.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct FilterPathCounts {
+    /// The match set was small enough to score exactly, without touching the graph.
+    pub exact_scan: u64,
+    /// `scan_ids`: score the match set by code, then rerank. Low selectivity, larger set.
+    pub code_scan: u64,
+    /// The graph walked with the filter applied inside it (Acorn-style).
+    pub in_graph: u64,
+    /// Selectivity 5-30%: an amplified unfiltered fetch, then the filter.
+    pub pre_filter: u64,
+    /// Selectivity at or above 30%: the same shape, a different amplification.
+    pub post_filter: u64,
+}
+
 /// Runtime persistence state exposed to health/readiness endpoints.
 ///
 /// This is deliberately a small, read-only snapshot rather than a promise that every backing
@@ -183,6 +210,8 @@ pub struct StorageHealthSnapshot {
     /// Most recent snapshot failure, if any. A failed snapshot does not make the WAL unreadable;
     /// it is nevertheless useful to surface the reason to operators and metrics consumers.
     pub last_snapshot_error: Option<String>,
+    /// Which branch answered each filtered search. See [`FilterPathCounts`].
+    pub filter_paths: FilterPathCounts,
 }
 
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
@@ -619,6 +648,13 @@ pub struct IntelligentIndexedStorage {
     /// Emptied of the names a snapshot has just written without.
     dropped_since_snapshot: Arc<StdMutex<std::collections::HashSet<String>>>,
     snapshot_failures: AtomicU64,
+
+    /// One counter per filtered-search branch; see [`FilterPathCounts`].
+    filter_path_exact_scan: AtomicU64,
+    filter_path_code_scan: AtomicU64,
+    filter_path_in_graph: AtomicU64,
+    filter_path_pre_filter: AtomicU64,
+    filter_path_post_filter: AtomicU64,
     last_snapshot_error: Arc<StdMutex<Option<String>>>,
 
     /// Alternative names for tables: `alias -> table`.
@@ -1656,6 +1692,11 @@ impl IntelligentIndexedStorage {
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
             dropped_since_snapshot: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             snapshot_failures: AtomicU64::new(0),
+            filter_path_exact_scan: AtomicU64::new(0),
+            filter_path_code_scan: AtomicU64::new(0),
+            filter_path_in_graph: AtomicU64::new(0),
+            filter_path_pre_filter: AtomicU64::new(0),
+            filter_path_post_filter: AtomicU64::new(0),
             memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
@@ -5106,6 +5147,12 @@ impl IntelligentIndexedStorage {
                                 .then_with(|| a.0.cmp(&b.0))
                         });
                         scored.truncate(result_limit);
+                        self.filter_path_exact_scan.fetch_add(1, Ordering::Relaxed);
+                        info!(
+                            "FILTER-EXACT-SCAN: selectivity={:.2}%, candidates={}",
+                            selectivity * 100.0,
+                            filter_ids.len()
+                        );
                         exact_scored = Some(scored);
                     }
                     precomputed_filter_ids = Some(filter_ids);
@@ -5177,6 +5224,7 @@ impl IntelligentIndexedStorage {
                         .unwrap_or(result_limit)
                         .max(result_limit);
                     if let Some(scanned) = active_index.scan_ids(&query.vector, &ids, want).await {
+                        self.filter_path_code_scan.fetch_add(1, Ordering::Relaxed);
                         info!(
                             "FILTER-CODE-SCAN: selectivity={:.2}%, candidates={}, kept={}",
                             selectivity * 100.0,
@@ -5197,6 +5245,7 @@ impl IntelligentIndexedStorage {
                     // the map lock was held.
                     let empty = std::collections::HashSet::new();
                     let filter_ids = precomputed_filter_ids.as_ref().unwrap_or(&empty);
+                    self.filter_path_in_graph.fetch_add(1, Ordering::Relaxed);
                     info!(
                         "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
                         selectivity * 100.0,
@@ -5248,6 +5297,7 @@ impl IntelligentIndexedStorage {
                     let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
                         .min(total_records)
                         .max(result_limit * 2);
+                    self.filter_path_pre_filter.fetch_add(1, Ordering::Relaxed);
                     info!(
                         "PRE-FILTERING: selectivity={:.2}%, fetch={}",
                         selectivity * 100.0,
@@ -5283,6 +5333,7 @@ impl IntelligentIndexedStorage {
                     let fetch = ((result_limit as f64 / selectivity * safety).ceil() as usize)
                         .min(total_records)
                         .max(result_limit * 3);
+                    self.filter_path_post_filter.fetch_add(1, Ordering::Relaxed);
                     info!(
                         "POST-FILTERING: selectivity={:.2}%, fetch={}",
                         selectivity * 100.0,
@@ -8600,6 +8651,13 @@ impl IntelligentIndexedStorage {
             last_snapshot_at,
             snapshot_failures: self.snapshot_failures.load(Ordering::Relaxed),
             last_snapshot_error,
+            filter_paths: FilterPathCounts {
+                exact_scan: self.filter_path_exact_scan.load(Ordering::Relaxed),
+                code_scan: self.filter_path_code_scan.load(Ordering::Relaxed),
+                in_graph: self.filter_path_in_graph.load(Ordering::Relaxed),
+                pre_filter: self.filter_path_pre_filter.load(Ordering::Relaxed),
+                post_filter: self.filter_path_post_filter.load(Ordering::Relaxed),
+            },
         }
     }
 

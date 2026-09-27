@@ -2515,6 +2515,25 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         let _ = writeln!(out, "dxmt_ongoing_operations{{kind=\"{kind}\"}} {value}");
     }
 
+    // Which planner branch answered each filtered search. The four differ by orders of
+    // magnitude -- a filter matching an eighth to a half of a million-row table costs
+    // 160-800 ms where an unfiltered search is ~2 ms -- so a workload sitting on
+    // `post_filter` is the explanation for a latency complaint, not a detail.
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_filter_path_total Filtered searches answered, by planner branch."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_filter_path_total counter");
+    for (branch, value) in [
+        ("exact_scan", storage.filter_paths.exact_scan),
+        ("code_scan", storage.filter_paths.code_scan),
+        ("in_graph", storage.filter_paths.in_graph),
+        ("pre_filter", storage.filter_paths.pre_filter),
+        ("post_filter", storage.filter_paths.post_filter),
+    ] {
+        let _ = writeln!(out, "dxmt_filter_path_total{{branch=\"{branch}\"}} {value}");
+    }
+
     let _ = writeln!(
         out,
         "# HELP dxmt_operations_total Operations completed since process start."

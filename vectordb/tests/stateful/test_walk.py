@@ -392,6 +392,16 @@ def test_walk(mode, seed):
             return "snapshot"
 
         def step_restart():
+            # Check *before* killing as well as after, which is the whole difference between
+            # "something is wrong" and "the reload path is wrong".
+            #
+            # The walk checked only after a restart, so a failure there had two explanations
+            # and no way to choose: the write path stored it wrong and the restart merely
+            # revealed it, or the write path was fine and replay lost it. Qdrant's
+            # model-based soak has a `--pre-restart-check` switch for exactly this
+            # distinction. Here it is unconditional -- the check is a few hundred
+            # milliseconds against a forty-record table, and a restart is 6% of steps.
+            check(server, model, rng, f"seed {seed} {mode} before restart at step {n}")
             sig = rng.choice([signal.SIGTERM, signal.SIGKILL])
             server.stop(sig)
             server.start()
@@ -428,7 +438,11 @@ def test_walk(mode, seed):
             op = rng.choices(population, weights)[0]
             trail.append(f"{n}: {op()}")
             if op is step_restart or n % 15 == 14:
-                check(server, model, rng, f"seed {seed} {mode} step {n}")
+                # Named so a failure says which side of the restart it is on. Paired with the
+                # pre-restart check inside `step_restart`, a failure here and not there means
+                # the reload path, and a failure in both means the write path.
+                when = "after restart at step" if op is step_restart else "step"
+                check(server, model, rng, f"seed {seed} {mode} {when} {n}")
         check(server, model, rng, f"seed {seed} {mode} end")
     except AssertionError as e:
         raise AssertionError(f"{e}\n\nlast steps:\n  " + "\n  ".join(trail[-20:]) +
