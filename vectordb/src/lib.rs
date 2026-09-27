@@ -11,16 +11,12 @@ pub mod storage;
 pub mod types;
 pub mod utils;
 
-// Experimental modules are opt-in. Keeping them out of the default dependency graph is part of
-// the supported single-node Alpha contract.
-#[cfg(any(feature = "embeddings", feature = "server-embedding"))]
+// Turning text into a vector, server-side. The rest of what used to be here -- four
+// overlapping provider abstractions, an ONNX multimodal path returning placeholder vectors,
+// and a GPU distance calculator whose feature did not compile -- moved to `planning/src/` on
+// 2026-09-27. None of it was reachable and none of it was built by CI.
+#[cfg(feature = "server-embedding")]
 pub mod embeddings;
-#[cfg(feature = "multimodal")]
-pub mod multimodal;
-
-// Hardware acceleration (GPU, SIMD, parallel)
-#[cfg(feature = "embeddings")]
-pub mod acceleration;
 
 // MCP Protocol Support (P0 Priority)
 pub mod mcp;
@@ -31,8 +27,6 @@ pub mod mcp;
 pub mod dxql;
 
 // Python bindings
-#[cfg(feature = "python")]
-pub mod python;
 
 // Schema version management
 

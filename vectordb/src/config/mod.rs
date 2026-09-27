@@ -6,7 +6,6 @@ pub mod layout;
 // pub mod eight_core_optimization; // Removed - redundant
 pub mod large_memory_optimization;
 pub mod memory_detector;
-pub mod multimodal;
 pub mod optimization;
 pub mod performance_optimization;
 pub mod storage_optimization;

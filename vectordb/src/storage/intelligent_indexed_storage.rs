@@ -621,10 +621,6 @@ pub struct IntelligentIndexedStorage {
     snapshot_failures: AtomicU64,
     last_snapshot_error: Arc<StdMutex<Option<String>>>,
 
-    /// GPU distance calculator (None if no GPU available or feature not enabled)
-    #[cfg(feature = "gpu")]
-    gpu_calculator: Option<Arc<crate::acceleration::GpuDistanceCalculator>>,
-
     /// Alternative names for tables: `alias -> table`.
     ///
     /// What they are for is a swap. Rebuilding a table with different index parameters means
@@ -1635,22 +1631,6 @@ impl IntelligentIndexedStorage {
 
         info!("Channel-based insertion processor started (lock-free architecture)");
 
-        // Initialize GPU distance calculator if available
-        #[cfg(feature = "gpu")]
-        let gpu_calculator = {
-            let gpu_config = crate::acceleration::GpuDistanceConfig::from_env();
-            match crate::acceleration::GpuDistanceCalculator::try_new(gpu_config) {
-                Some(calc) => {
-                    info!("GPU acceleration initialized: {}", calc.device_name());
-                    Some(Arc::new(calc))
-                }
-                None => {
-                    info!("No GPU detected, using CPU+SIMD for vector operations");
-                    None
-                }
-            }
-        };
-
         Ok(Self {
             tables: tables_arc,
             storage: Arc::new(storage),
@@ -1678,8 +1658,6 @@ impl IntelligentIndexedStorage {
             snapshot_failures: AtomicU64::new(0),
             memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
-            #[cfg(feature = "gpu")]
-            gpu_calculator,
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         })
     }
@@ -7801,17 +7779,8 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<Box<dyn VectorIndex + Send + Sync>> {
         match algorithm {
             IndexAlgorithm::BruteForce { .. } => {
-                // BruteForce索引, with optional GPU acceleration
-                #[allow(unused_mut)]
-                let mut index = BruteForceIndex::new(distance_metric);
-                #[cfg(feature = "gpu")]
-                {
-                    if let Some(ref gpu) = self.gpu_calculator {
-                        index.set_gpu_calculator(gpu.clone());
-                        debug!("GPU acceleration injected into BruteForce index");
-                    }
-                }
-                Ok(Box::new(index))
+                // BruteForce 索引
+                Ok(Box::new(BruteForceIndex::new(distance_metric)))
             }
 
             IndexAlgorithm::HNSW {
@@ -8007,11 +7976,6 @@ impl IntelligentIndexedStorage {
     /// 检测硬件能力
     fn detect_hardware_capabilities() -> HardwareCapabilities {
         let has_gpu_available = {
-            #[cfg(feature = "gpu")]
-            {
-                crate::acceleration::gpu::is_cuda_available()
-            }
-            #[cfg(not(feature = "gpu"))]
             {
                 false
             }

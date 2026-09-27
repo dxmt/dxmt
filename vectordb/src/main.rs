@@ -31,9 +31,6 @@ use dxmt_vectordb::{
     Result,
 };
 
-#[cfg(feature = "cluster")]
-use dxmt_vectordb::api::create_app_with_cluster;
-
 /// Unified VectorDB CLI
 #[derive(Parser)]
 #[command(name = "vectordb")]
@@ -185,15 +182,11 @@ async fn main() -> Result<()> {
                 let config = AppConfig::load()?;
                 let cluster_enabled = config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false);
                 let (app, storage) = if cluster_enabled {
-                    #[cfg(feature = "cluster")]
-                    {
-                        (create_app_with_cluster(&config).await?, None)
-                    }
-                    #[cfg(not(feature = "cluster"))]
                     {
                         return Err(dxmt_vectordb::Error::InvalidConfig(
-                            "Cluster mode is configured, but this binary was built without the \
-                             `cluster` feature"
+                            "Cluster mode is configured, but this build has no cluster mode: \
+                             the coordination code is in `planning/src/cluster/` and nothing \
+                             mounts it"
                                 .to_string(),
                         ));
                     }

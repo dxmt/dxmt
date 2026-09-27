@@ -418,8 +418,13 @@ export DXMT_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,
 `server-embedding`.
 
-Opt-in: `text-bm25`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `gpu` (CUDA),
-`cluster`, `multimodal`, `embeddings`, `python` (PyO3 bindings), `metrics`, `hf-datasets`.
+Opt-in: `text-bm25`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `benchmarks`,
+`experimental-indexes`, `adaptive-index`, `test-failpoints`.
+
+That is the whole list. Until 2026-09-27 it also advertised `gpu`, `cluster`, `multimodal`,
+`embeddings`, `python`, `metrics` and `hf-datasets`: of those, two did not compile, three
+gated no code at all, and `metrics` was never a feature of this crate. They are removed, and
+the code behind them is in `planning/src/`.
 
 `embeddings` is **not** what lets you send text — that is `server-embedding`, which is on by
 default. `embeddings` compiles a directory of provider clients that no route reaches.
@@ -637,20 +642,17 @@ experimental, and what a feature has to have before it moves between the two.
 - **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It rejects sparse/text fusion
   with `NOT_IMPLEMENTED` instead of silently discarding query components. For BM25 use
   `/search/text`; for real vector+text fusion use `/search/hybrid`.
-- **Two implementations behind one name.** `search/quantization/product_quantizer.rs` is a
-  52-line stand-in whose `encode_batch` returns zeroed codes; the working one is
-  `product_quantization.rs`. Only the latter is reachable from the live path.
 - **`DiskANN`, `ScaNN` and `QuantizedIVF`** fall back to brute force in
   `create_index_instance`.
-- **Multimodal** (`src/multimodal/`) — returns placeholder embeddings, pending a stable
-  `ort` 2.0 release.
 - **gRPC carries the data path only.** Search, insert and the record routes, plus the table
   lifecycle; hybrid search, full-text search, DXQL, snapshots and backups stay on REST. It is
   off by default and off without `--grpc-port`.
-- **Stub modules**, present but not functional: `cluster`, `consensus`, and
-  `src/embeddings/legacy.rs` — four overlapping provider abstractions that nothing calls,
-  behind the non-default `embeddings` feature. The embedding path that does run is
-  `src/embeddings/service.rs`; see "Sending text instead of vectors".
+- **Nothing in `src/` is a stub you can reach by accident any more.** Multimodal (placeholder
+  embeddings pending `ort` 2.0), the GPU/SIMD acceleration modules, the PyO3 bindings, the
+  cluster and consensus scaffolding, and `embeddings/legacy.rs` — four overlapping provider
+  abstractions nothing called — moved to `planning/src/` on 2026-09-27, 11,668 lines, with
+  their cargo features. The embedding path that does run is `src/embeddings/service.rs`; see
+  "Sending text instead of vectors".
 - **The graph is built inside the write request.** There is no compaction or optimizer stage
   behind it: a table finishes ingest already holding its index, which is why a load is not
   followed by a minutes-long build step. The other side of that is contention — with ingest

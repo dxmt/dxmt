@@ -7,8 +7,6 @@ pub mod graphql;
 #[cfg(feature = "api-grpc")]
 pub mod grpc;
 pub mod handlers;
-#[cfg(feature = "multimodal")]
-pub mod multimodal;
 pub mod response;
 pub mod server;
 pub mod server_health; // Server health monitoring and backpressure
@@ -18,5 +16,3 @@ pub mod swagger;
 pub mod websocket;
 
 pub use server::{create_app, create_app_with_features, create_app_with_storage, Interfaces};
-#[cfg(feature = "cluster")]
-pub use server_with_cluster::create_app_with_cluster;

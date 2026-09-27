@@ -481,14 +481,9 @@ impl HardwareDetector {
 
     pub(crate) async fn detect(&self) -> HardwareCapabilities {
         let has_gpu = {
-            #[cfg(feature = "gpu")]
-            {
-                crate::acceleration::gpu::is_cuda_available()
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                false
-            }
+            // No GPU path in the shipped crate: `acceleration/` moved to `planning/src/` on
+            // 2026-09-27, its `gpu` feature having never compiled and never been built by CI.
+            false
         };
         HardwareCapabilities {
             cpu_cores: num_cpus::get(),
@@ -817,14 +812,9 @@ pub(crate) struct HardwareCapabilities {
 impl Default for HardwareCapabilities {
     fn default() -> Self {
         let has_gpu = {
-            #[cfg(feature = "gpu")]
-            {
-                crate::acceleration::gpu::is_cuda_available()
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                false
-            }
+            // No GPU path in the shipped crate: `acceleration/` moved to `planning/src/` on
+            // 2026-09-27, its `gpu` feature having never compiled and never been built by CI.
+            false
         };
         Self {
             cpu_cores: num_cpus::get(),

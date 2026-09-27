@@ -31,14 +31,6 @@ use crate::api::graphql;
 use crate::api::swagger;
 #[cfg(feature = "api-ws")]
 use crate::api::websocket;
-#[cfg(feature = "multimodal")]
-use crate::{
-    api::multimodal::{
-        create_multimodal_record, cross_modal_search, generate_embedding,
-        validate_multimodal_content, MultimodalAppState,
-    },
-    embeddings::EmbeddingManager,
-};
 
 /// WAL 目录：`DXMT_WAL_DIR` 覆盖，默认 `$DXMT_ROOT_DIR/store`（`DXMT_ROOT_DIR` 默认 `~/.dxmt`），
 /// 显式设为空串关闭持久化。
@@ -419,12 +411,6 @@ pub async fn create_app_with_storage(
         server_health,
     };
 
-    #[cfg(feature = "multimodal")]
-    let multimodal_state = MultimodalAppState {
-        basestate: base_state.clone(),
-        embeddingmanager: Arc::new(EmbeddingManager::new()),
-    };
-
     // 创建API v1路由
     let api_v1_routes = Router::new()
         // 表管理API
@@ -520,32 +506,11 @@ pub async fn create_app_with_storage(
         .route("/metrics", get(prometheus_metrics))
         .with_state(base_state.clone());
 
-    #[cfg(feature = "multimodal")]
-    let multimodal_routes = Router::new()
-        // .route("/embeddings/functions", get(list_embedding_functions))
-        // .route("/embeddings/functions/:name", post(load_embedding_function))
-        .route("/embeddings/embed", post(generate_embedding))
-        .route(
-            "/tables/:table_name/records/multimodal",
-            post(create_multimodal_record),
-        )
-        .route(
-            "/tables/:table_name/search/cross-modal",
-            post(cross_modal_search),
-        )
-        .route("/multimodal/validate", post(validate_multimodal_content))
-        .with_state(multimodal_state);
-
     // 合并路由
     #[allow(unused_mut)]
     let mut app = Router::new()
         .merge(system_routes)
         .nest("/api/v1", api_v1_routes);
-
-    #[cfg(feature = "multimodal")]
-    {
-        app = app.nest("/api/v1", multimodal_routes);
-    }
 
     // 条件性添加 GraphQL 路由
     #[cfg(feature = "api-graphql")]

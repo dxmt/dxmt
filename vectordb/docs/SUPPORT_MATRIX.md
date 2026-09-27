@@ -6,8 +6,8 @@ safe to use: this tree contains modules that compile, carry unit tests, and are 
 binary.
 
 This is a single-node database. Distributed mode was designed, was never implemented, and is
-not being worked on — `cluster/` and `consensus/` are scaffolding. Everything below describes
-one process.
+not being worked on; the scaffolding for it is in `planning/`, not in the shipped crate.
+Everything below describes one process.
 
 Numbers quoted here were measured on one machine with the harness in this repository; the
 README carries the method beside each headline figure.
@@ -83,10 +83,9 @@ These modules may compile or have unit tests, but they are not part of the stabl
 | Partitioned IVF | Implemented behind the adaptive path | Long-running maintenance and remote-segment recovery tests. |
 | DiskANN / ScaNN / QuantizedIVF | Not selectable as stable indexes | Complete index implementations and round-trip tests. |
 | EnhancedDiskANN | Reachable only with `DXMT_MEMORY_OPTIMIZATION=false`: the size-based selector picks it above a million rows once a notional in-memory HNSW would exceed half the machine's RAM (~18M rows at 768d on a 121 GB box, ~2M on a 16 GB one). 748 lines, a real search, **no delete** (`NOT_IMPLEMENTED`) and **no test of its own**. Until 2026-09-07 the periodic sweep routed *every* table here at that size, whatever it was created with. | Delete support and a round-trip test before anything is routed here by default. |
-| LMDB / RocksDB | Alternate modules; not the standard server path | A documented factory path and complete search semantics. |
-| Cluster / consensus | Experimental scaffolding | Replication, split-brain and recovery semantics. |
-| Multimodal / Rust embeddings | Experimental or placeholder implementations: these modules are reachable from the server but return placeholder vectors | Real model backends and reproducible integration tests. Until then they should not be in `src/`; `planning/` is where this repo keeps code a binary cannot usefully reach. |
-| GPU acceleration | Optional build and benchmark path | Hardware matrix and correctness comparison against CPU. |
+| LMDB / RocksDB | **Not in the crate.** In `planning/src/storage/` since 2026-09-11 | A documented factory path and complete search semantics. |
+| Cluster / consensus | **Not in the crate.** Scaffolding, in `planning/src/` | Replication, split-brain and recovery semantics. |
+| Multimodal / GPU / PyO3 / the legacy embedding clients | **Not in the crate.** Moved to `planning/src/` on 2026-09-27 — this row previously read "reachable from the server but return placeholder vectors", and that is what was fixed. `gpu` and `python` did not compile; `multimodal` compiled and would have answered with made-up vectors | Real model backends and reproducible integration tests. |
 | GraphQL / WebSocket / MCP | Optional interfaces | Contract tests and versioned compatibility guarantees. |
 
 Unsupported operations must return an explicit `NOT_IMPLEMENTED` error. They must not silently

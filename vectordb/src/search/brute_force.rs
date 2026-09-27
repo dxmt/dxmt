@@ -10,14 +10,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-#[cfg(feature = "gpu")]
-use crate::acceleration::GpuDistanceCalculator;
-
 /// BruteForce 索引 - 使用 Vec 而非 HashMap，提升缓存局部性
 /// 适用于小数据集 (<10K vectors)，线性扫描比哈希查找更快
-///
-/// When a GPU is available and the dataset exceeds the batch threshold,
-/// distance computations are offloaded to the GPU automatically.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BruteForceIndex {
     /// Vec 存储：更好的缓存局部性，无哈希开销
@@ -27,12 +21,6 @@ pub struct BruteForceIndex {
     /// Deferred indexing: mark if index needs rebuilding (thread-safe for parallel search)
     #[serde(skip)]
     dirty: AtomicBool,
-
-    /// Optional GPU distance calculator -- injected at index creation time.
-    /// When present and the dataset is large enough, search uses GPU.
-    #[serde(skip)]
-    #[cfg(feature = "gpu")]
-    gpu_calculator: Option<Arc<GpuDistanceCalculator>>,
 }
 
 impl Clone for BruteForceIndex {
@@ -41,8 +29,6 @@ impl Clone for BruteForceIndex {
             vectors: self.vectors.clone(),
             distance_metric: self.distance_metric,
             dirty: AtomicBool::new(self.dirty.load(AtomicOrdering::Relaxed)),
-            #[cfg(feature = "gpu")]
-            gpu_calculator: self.gpu_calculator.clone(),
         }
     }
 }
@@ -128,18 +114,7 @@ impl BruteForceIndex {
             vectors: Vec::new(),
             distance_metric,
             dirty: AtomicBool::new(false),
-            #[cfg(feature = "gpu")]
-            gpu_calculator: None,
         }
-    }
-
-    /// Inject a GPU distance calculator for accelerated search.
-    ///
-    /// When set, `search()` will automatically use GPU for datasets
-    /// exceeding the calculator's batch threshold.
-    #[cfg(feature = "gpu")]
-    pub fn set_gpu_calculator(&mut self, calc: Arc<GpuDistanceCalculator>) {
-        self.gpu_calculator = Some(calc);
     }
 
     /// 插入向量 - 延迟索引构建，只标记为 dirty
@@ -227,30 +202,6 @@ impl BruteForceIndex {
             .vectors
             .par_iter()
             .map(|(id, vector)| (id.clone(), self.distance(query, vector, use_simd)))
-            .collect();
-        Ok(top_k_sorted(results, k))
-    }
-
-    /// GPU-accelerated search: compute all distances on GPU in one batch,
-    /// then select top-k on CPU.
-    #[cfg(feature = "gpu")]
-    fn search_gpu(
-        &self,
-        query: &DenseVector,
-        k: usize,
-        gpu: &GpuDistanceCalculator,
-    ) -> crate::Result<Vec<(RecordId, f32)>> {
-        // Extract just the vectors for GPU batch computation
-        let db_vectors: Vec<DenseVector> = self.vectors.iter().map(|(_, v)| v.clone()).collect();
-
-        // Compute all distances on GPU in one batch
-        let distances = gpu.single_query_distances(&self.distance_metric, query, &db_vectors)?;
-
-        let results: Vec<(RecordId, f32)> = self
-            .vectors
-            .iter()
-            .zip(distances.iter())
-            .map(|((id, _), &dist)| (id.clone(), dist))
             .collect();
         Ok(top_k_sorted(results, k))
     }
@@ -345,18 +296,7 @@ impl VectorIndex for BruteForceIndex {
     }
 
     async fn search(&self, query: &[f32], k: usize) -> crate::Result<Vec<(String, f32)>> {
-        // GPU-accelerated path: if GPU calculator is present and workload is large enough
-        #[cfg(feature = "gpu")]
-        {
-            if let Some(ref gpu) = self.gpu_calculator {
-                let dim = query.len();
-                if gpu.should_use_gpu(self.vectors.len(), dim) {
-                    return self.search_gpu(&query.to_vec(), k, gpu);
-                }
-            }
-        }
-
-        // Fallback: CPU + SIMD + Rayon
+        // CPU + SIMD + Rayon
         self.search_sync(&query.to_vec(), k)
     }
 

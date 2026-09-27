@@ -185,8 +185,8 @@ impl<S: Storage> ResourceManager<S> {
                 "features": {
                     "mcp_protocol": true,
                     "hybrid_search": true,
-                    "gpu_acceleration": cfg!(feature = "gpu"),
-                    "simd_optimization": cfg!(feature = "simd"),
+                    "gpu_acceleration": false,
+                    "simd_optimization": false,
                     "distributed": true,
                     "multi_tenancy": true
                 },

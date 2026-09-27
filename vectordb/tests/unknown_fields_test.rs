@@ -299,8 +299,17 @@ fn a_malformed_body_is_an_error_object_not_plain_text() {
 fn no_handler_takes_a_typed_body_through_plain_json() {
     let mut offenders = Vec::new();
     let mut wanted = Vec::new();
-    for file in ["handlers.rs", "multimodal.rs"] {
-        let path = format!("{}/src/api/{file}", env!("CARGO_MANIFEST_DIR"));
+    // Every file under `src/api/`, not a named list. The list was `["handlers.rs",
+    // "multimodal.rs"]`, which is the same shape of mistake this test exists to catch: a guard
+    // that names a subset stops guarding the moment the subset stops being the whole set. It
+    // also broke outright when `multimodal.rs` moved to `planning/` — a source-scanning test
+    // should not carry a path that a `git mv` can invalidate.
+    for path in walk(&format!("{}/src/api", env!("CARGO_MANIFEST_DIR"))) {
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
         let source = std::fs::read_to_string(&path).expect("api source");
         for line in source.lines() {
             let line = line.trim();
@@ -342,8 +351,7 @@ fn no_handler_takes_a_typed_body_through_plain_json() {
     }
     let mut missing = Vec::new();
     for name in wanted {
-        // `MultimodalContent` and friends come from types this test cannot see the end of;
-        // look for the definition and the attribute above it.
+        // Look for the definition and the attribute above it.
         // `FullTextSearchRequest` names two types: the body this API takes, and the engine's
         // own request inside `search::full_text`. It is enough that one definition carries the
         // attribute; a type with none carrying it is the case worth failing on.
