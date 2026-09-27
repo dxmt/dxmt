@@ -1,6 +1,6 @@
 //! Where a table's records live: the in-memory map, or a row file on disk.
 //!
-//! Phase 3 of the disk index (design/DISK_INDEX.md section 4). With the graph on codes and
+//! Phase 3 of the disk index (docs/architecture/disk-index.md §3-4). With the graph on codes and
 //! the vectors in a row file, the record map was what remained resident: about 800 bytes a
 //! record at 1M for a `Record` with an empty vector -- the struct itself rounded up by the
 //! allocator, its `Arc`, the map entry, and the id string kept once more per structure that

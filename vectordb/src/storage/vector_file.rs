@@ -1,6 +1,6 @@
 //! Full vectors on disk, addressed by row.
 //!
-//! Phase 2 of the disk index (design/DISK_INDEX.md section 4): once a table's graph walks on
+//! Phase 2 of the disk index (docs/architecture/disk-index.md §3-4): once a table's graph walks on
 //! PQ codes, the only readers of a full vector are the exact rerank of a search's candidates,
 //! `with_vector` and `get_record`. Those can read from a file. This is that file: fixed-size
 //! rows of `dim` little-endian `f32`s, appended in insertion order, read through a memory map.
@@ -190,7 +190,7 @@ pub fn f32_to_f16_bits(x: f32) -> u16 {
 /// Half-precision rows to `f32`, eight values per instruction where the CPU has `f16c`.
 ///
 /// A rerank decodes 500 rows of 768 values per query and this was 16.2% of the server's CPU
-/// at 1M under load (perf, `design/route_probe_logs/phase3/1m_profile/`), all of it in the
+/// at 1M under load (measured with `perf`; the profiles are not distributed), all of it in the
 /// scalar bit-twiddling below -- which also carries a loop for subnormals that a real
 /// embedding never contains. `vcvtph2ps` does the same conversion, correctly for every
 /// input including subnormals and NaN, eight at a time.

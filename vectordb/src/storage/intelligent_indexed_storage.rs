@@ -680,11 +680,11 @@ struct IntelligentTableData {
     /// 被内核杀掉(design doc §34.3)。记录从不原地修改、只整体替换,所以引用计数就够,
     /// 一次快照的拷贝从每条 9.5 KB 降到 8 字节。
     /// Where the records live: the map, or a row file on disk (`DXMT_RECORD_STORE=disk`,
-    /// phase 3 of design/DISK_INDEX.md). Same interface either way; `get` decodes from
+    /// phase 3 of docs/architecture/disk-index.md). Same interface either way; `get` decodes from
     /// disk when that is where the record is.
     records: crate::storage::record_store::RecordStore,
 
-    /// Full vectors on disk (`DXMT_VECTOR_STORE=disk`, design/DISK_INDEX.md section 4, phase 2).
+    /// Full vectors on disk (`DXMT_VECTOR_STORE=disk`, docs/architecture/disk-index.md §4, phase 2).
     /// When set, the `Record`s in `records` carry an empty `vector` and `vector_rows` says
     /// which row of the file holds each id's; the vector index still gets the vector on
     /// insert (it plans and encodes from it), and everything that reads a full vector
@@ -3141,7 +3141,7 @@ impl IntelligentIndexedStorage {
     }
 
     /// Records live in a row file under the WAL directory (`DXMT_RECORD_STORE=disk`, the
-    /// default since design/DISK_INDEX.md phase 3 was accepted) or in memory
+    /// default since docs/architecture/disk-index.md §4, phase 3 was accepted) or in memory
     /// (`DXMT_RECORD_STORE=memory`, and always when there is no WAL directory to put a file
     /// in). Like the vector file: keyed by table name, wiped by a fresh `CREATE TABLE`,
     /// reused by a restore or replay. A reopened table keeps the store it already has: a
@@ -3196,7 +3196,7 @@ impl IntelligentIndexedStorage {
     }
 
     /// Full vectors live in a row file under the WAL directory (`DXMT_VECTOR_STORE=disk`, the
-    /// default since design/DISK_INDEX.md phase 2 was accepted) or inside the records
+    /// default since docs/architecture/disk-index.md §4, phase 2 was accepted) or inside the records
     /// (`DXMT_VECTOR_STORE=memory`, and always without a WAL directory). As with the record
     /// store, a reopened table keeps the file it already has.
     fn open_vector_file(&self, table: &Table, fresh: bool) -> crate::Result<OpenedVectorFile> {
@@ -4789,7 +4789,7 @@ impl IntelligentIndexedStorage {
         // on this path, freed as soon as the entry is serialised. It cannot simply be moved:
         // `inserted` is this function's return value and has 157 call sites. Removing it
         // means serialising the WAL entry from a borrow (a `WalEntryRef` with the same serde
-        // shape, so replay keeps decoding) -- see design/INSERT_PERFORMANCE.md §23.17 for
+        // shape, so replay keeps decoding) -- see the insert-path notes (not distributed) for
         // what that clone costs and what it would take.
         self.wal_append(
             inserted
@@ -5369,7 +5369,7 @@ impl IntelligentIndexedStorage {
                 // `search_reranked`, which multiplies whatever `k` it is handed by the rerank
                 // factor: a 5M-row table was asked for 25M results at ef 25M, and every
                 // candidate that came back was reranked against its stored vector. That is
-                // where the 16.6 s empty answer in `design/DISK_INDEX.md` 5.5.1 came from,
+                // where the 16.6 s empty answer in `docs/architecture/disk-index.md` §5 came from,
                 // 4.6 s of it holding the table read lock, against 3.6 ms for the same query
                 // unfiltered. At `ef = n` the graph has stopped being an index -- the walk
                 // reaches every node and carries an n-sized heap -- so it is strictly more
@@ -7575,17 +7575,16 @@ impl IntelligentIndexedStorage {
 
     /// Rows per decade of `ef_search` growth, and the ceiling on that growth.
     ///
-    /// A fixed `ef` does not hold recall as the graph grows: measured on Cohere 768d
-    /// (`design/DISK_INDEX.md` 5.5, `probe_10m_streambuild.log`), one graph reaches
-    /// recall@100 0.9800 at 1M with ef 500, but only 0.9638 at 10M with the same budget --
-    /// it needs 1024 there for 0.9800 and 2048 for 0.9887.
+    /// A fixed `ef` does not hold recall as the graph grows: measured on 768-dimension
+    /// embeddings (`docs/architecture/disk-index.md` §5), one graph reaches recall@100 0.9800
+    /// at 1M with ef 500, but only 0.9638 at 10M with the same budget -- it needs 1024 there
+    /// for 0.9800 and 2048 for 0.9887.
     ///
-    /// Segmented engines get this growth without naming it. Qdrant splits 10M into 8 segments
-    /// and walks each at ef 256, a 2,048-candidate budget in total, which is why its recall
-    /// held at 10M (0.9828) where a single graph at 500 fell to 0.9626 -- and why it paid 594
-    /// QPS for it against our 4,698. At a matched total budget the single graph is the better
-    /// of the two (0.9887 at ef 2048 against its 0.9828), so the fix is to spend the budget,
-    /// not to shard.
+    /// A segmented engine gets this growth without naming it: splitting 10M into 8 segments
+    /// and walking each at ef 256 is a 2,048-candidate budget in total, which is why that
+    /// shape holds its recall at 10M where a single graph at 500 does not. At a *matched*
+    /// total budget the single graph is the better of the two, so the fix is to spend the
+    /// budget, not to shard.
     ///
     /// One doubling per decade of rows: 1M keeps 512, 10M gets 1024, 100M gets 2048.
     const EF_SCALE_BASE_ROWS: usize = 1_000_000;
@@ -7714,7 +7713,7 @@ impl IntelligentIndexedStorage {
     /// next re-evaluation sweep -- O(n), on a table that by then held a million rows. The
     /// index does not need the selector to know the size. An `HnswPqIndex` is an exact HNSW
     /// graph until it holds `quantize_at_rows` (65,536) vectors and quantizes itself in
-    /// place from there (design/DISK_INDEX.md section 4), so choosing it up front gives a
+    /// place from there (docs/architecture/disk-index.md §3), so choosing it up front gives a
     /// small table exactly what HNSW gave it and a large one the graph-on-codes layout
     /// without a rebuild in between.
     async fn select_memory_optimized_index(
@@ -7731,7 +7730,7 @@ impl IntelligentIndexedStorage {
             ef_construction: Self::default_ef_construction(),
             ef_search: Self::DEFAULT_EF_SEARCH,
             // 4 dimensions per subspace (192 bytes at 768): the code size that kept
-            // recall@100 at 1M and 10M (design/DISK_INDEX.md section 2.7). `HnswPqIndex::new`
+            // recall@100 at 1M and 10M (docs/architecture/disk-index.md §2). `HnswPqIndex::new`
             // rounds it to a divisor of the dimension.
             num_subvectors: config.dimension / 4,
             num_centroids: 256,
@@ -7739,7 +7738,7 @@ impl IntelligentIndexedStorage {
             quantize_at_rows: None,
         };
         // Measured, not estimated: 1M x 768 Cohere, records and vectors on disk, HNSW-PQ192
-        // with a 500-candidate rerank (design/DISK_INDEX.md section 4, phase 3 / fp16).
+        // with a 500-candidate rerank (docs/architecture/disk-index.md §3–4).
         let quantized =
             config.dataset_size >= crate::search::hnsw_pq::HnswPqConfig::DEFAULT_QUANTIZE_AT_ROWS;
         let bytes_per_row = if quantized {
@@ -9587,7 +9586,7 @@ mod tests {
     /// The numbers on the right are the measured operating points, not a formula's output:
     /// on Cohere 768d one graph reaches recall@100 0.9800 at 1M with a 500-candidate walk
     /// and 0.9638 at 10M with the same walk, needing 1024 there to get back to 0.9800
-    /// (`design/DISK_INDEX.md` 5.5). A table below the base row count keeps what it was
+    /// (`docs/architecture/disk-index.md` §4). A table below the base row count keeps what it was
     /// configured with -- growing `ef` on a short graph buys nothing and costs latency.
     #[test]
     fn the_traversal_budget_doubles_per_decade_of_rows() {

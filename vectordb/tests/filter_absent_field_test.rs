@@ -4,7 +4,7 @@
 //! calling that a conservative estimate. It is the opposite: the payload index holds every
 //! field any record has written, so a missing key is the answer, not missing information.
 //!
-//! What the wrong answer cost, measured on a 5M x 1536 table (design/DISK_INDEX.md 5.5.1):
+//! What the wrong answer cost, measured on a 5M x 1536 table (docs/architecture/disk-index.md §5):
 //! the search read 50% selectivity as a broad filter, chose post-filtering, fetched 600
 //! candidates, matched none of them, and took **16.6 s** to return an empty result while
 //! holding the table read lock for 4.6 s. The same query with no filter takes 3.6 ms. The

@@ -1,6 +1,6 @@
 //! HNSW over PQ codes: the graph holds no vectors, only codes.
 //!
-//! This is the resident half of the disk index (design/DISK_INDEX.md, route C): the graph and
+//! This is the resident half of the disk index (docs/architecture/disk-index.md §1): the graph and
 //! a 192-byte code per vector stay in memory, the full vectors live in the record store, and a
 //! search returns the walk's best candidates ranked by ADC for the storage layer to rerank
 //! against the originals. Measured on 1M and 10M Cohere 768-d, a walk on 192-byte codes with

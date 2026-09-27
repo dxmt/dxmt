@@ -8,7 +8,7 @@ with somebody else's**.
 
 Defaults to Cohere 100k x 768 -- large enough to be a real distribution, small enough to load in
 a couple of minutes. The dataset is the one VectorDBBench uses, so the recall printed here is
-directly comparable with the numbers in `design/DISK_INDEX.md`.
+directly comparable with the numbers in `docs/architecture/disk-index.md`.
 
     python3 examples/standard_dataset_recall.py
     DXMT_DATASET_DIR=/data/vectordb_bench/dataset python3 examples/standard_dataset_recall.py

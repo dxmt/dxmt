@@ -6,7 +6,7 @@
 //! `search_reranked` multiplies whatever `k` it is handed by the rerank factor, so asking for
 //! `total_records` asks the graph for `max(5 * total_records, 100)` results at an `ef` to
 //! match, and reranks every one of them against the stored vectors. On the 5M x 1536 table in
-//! `design/DISK_INDEX.md` 5.5.1 that was 25M candidates: **16.6 s to return an empty page**,
+//! `docs/architecture/disk-index.md` §5 that was 25M candidates: **16.6 s to return an empty page**,
 //! 4.6 s of it holding the table read lock, against 3.6 ms for the same query unfiltered.
 //!
 //! At `ef = n` the graph is not an index any more -- the walk reaches every node and carries

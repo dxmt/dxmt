@@ -3,7 +3,7 @@
 //! The benchmark harness and the server share one machine, and a client that serialises 768
 //! floats per request in Python is not free: sweeping the client size against the 1M table
 //! showed throughput plateau at 6,690 QPS with the box 100% busy, the server pinned at 24.8
-//! of 32 cores and **the load generator holding 6.7** (design/DISK_INDEX.md). Every
+//! of 32 cores and **the load generator holding 6.7**. Every
 //! server-side improvement then arrives damped -- 6% off the server was 4.7% off the total
 //! and showed up as a 3% throughput gain, small enough to be mistaken for noise.
 //!

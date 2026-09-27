@@ -72,7 +72,7 @@ pub trait VectorIndex: Send + Sync {
     /// than a walk to score an arbitrary set -- an exact HNSW would have to read every
     /// vector, which the caller can do itself. A quantized graph scores a code in a few
     /// hundred nanoseconds from memory, so a 1%-selectivity filter over 1M rows is 10,000
-    /// scores and one rerank instead of a 30,000-wide walk (design/DISK_INDEX.md, phase 3).
+    /// scores and one rerank instead of a 30,000-wide walk (docs/architecture/disk-index.md §4, phase 3).
     fn scan_ids(&self, _query: &[f32], _ids: &[&str], _k: usize) -> Option<Vec<(String, f32)>> {
         None
     }

@@ -735,7 +735,7 @@ pub struct HnswIndex {
 /// per-subspace centroid-to-centroid table. That is what lets the full vectors leave the index
 /// (and, later, memory): measured on 1M and 10M Cohere 768-d, a graph walked on 192-byte codes
 /// with the best 500 reranked on the originals matched an exact walk at the same `ef` to within
-/// 0.1 points of recall@100 (design/DISK_INDEX.md sections 2.7 and 2.10).
+/// 0.1 points of recall@100 (docs/architecture/disk-index.md §2).
 ///
 /// `codes` is indexed by node position: node `i` owns bytes `[i*m, (i+1)*m)`. Tombstoned nodes
 /// keep their slot, as they keep their `Node`.

@@ -1842,7 +1842,7 @@ impl PayloadIndex {
                 // filtering over 600 fetched candidates, and one such query on a 5M x 1536
                 // table took 16.6 s to return nothing while holding the table read lock for
                 // 4.6 s. The same query without a filter takes 3.6 ms
-                // (design/DISK_INDEX.md 5.5.1).
+                // (docs/architecture/disk-index.md §5).
                 return CardinalityEstimate {
                     min: 0,
                     max: 0,
