@@ -123,6 +123,10 @@ def main():
     print("输入 'quit' 或 'exit' 退出")
     print()
 
+    if not sys.stdin.isatty():
+        print("非交互运行，跳过问答循环。")
+        return
+
     while True:
         try:
             user_input = input("您的问题 >>> ").strip()

@@ -58,6 +58,34 @@ from .filters import convert_simple_filter_to_dxmt
 logger = logging.getLogger(__name__)
 
 
+class OutputData:
+    """What mem0 reads off a result: `.id`, `.score`, `.payload`.
+
+    mem0 indexes results by attribute (`memory.id`, `memory.score`) and every backend in its
+    tree returns a small model with these three fields. This adapter returned dicts, which
+    worked while mem0 went through `provider: "custom"` and stopped when it did not:
+    `'dict' object has no attribute 'id'`. A plain class rather than a pydantic model, so
+    the SDK does not gain a dependency for three attributes.
+    """
+
+    __slots__ = ("id", "score", "payload")
+
+    def __init__(self, id, score, payload):
+        self.id = id
+        self.score = score
+        self.payload = payload
+
+    # Subscripting kept working for anything that still reads these as dicts.
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def __repr__(self):
+        return f"OutputData(id={self.id!r}, score={self.score!r}, payload={self.payload!r})"
+
+
 class DXMTMemoryStore(VectorStoreBase):
     """mem0-compatible VectorStore implementation using DXMT VectorDB.
 
@@ -204,8 +232,9 @@ class DXMTMemoryStore(VectorStoreBase):
         self,
         query: str,  # Not used, kept for mem0 interface compatibility
         vectors: List[List[float]],
-        limit: int = 5,
+        top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Search for similar vectors.
 
@@ -225,8 +254,19 @@ class DXMTMemoryStore(VectorStoreBase):
         if not vectors or len(vectors) == 0:
             raise ValueError("At least one query vector is required")
 
-        # mem0 passes vectors as list of lists, but DXMT expects single vector
-        query_vector = vectors[0]
+        # `VectorStoreBase.search` spells this `top_k`; this adapter called it `limit` and so
+        # raised `unexpected keyword argument 'top_k'` the moment mem0 called it. Both are
+        # accepted, `limit` winning when given, so a caller written against either signature
+        # keeps working.
+        if limit is not None:
+            top_k = limit
+
+        # `vectors` is one query embedding, flat, in current mem0 -- `search(vectors=
+        # query_embedding, ...)` in `Memory._add_to_vector_store`. It used to be a list of
+        # them, and this adapter took `vectors[0]`, which on a flat list is a float and
+        # produced `object of type 'float' has no len()` two lines later. Both shapes are
+        # read here rather than one being chosen, because the caller is not ours to pin.
+        query_vector = vectors if vectors and isinstance(vectors[0], (int, float)) else vectors[0]
 
         # Validate dimension
         if len(query_vector) != self.embedding_model_dims:
@@ -240,23 +280,23 @@ class DXMTMemoryStore(VectorStoreBase):
 
         # Perform search
         logger.debug(
-            f"Searching {self.collection_name} with limit={limit}, filters={filters}"
+            f"Searching {self.collection_name} with top_k={top_k}, filters={filters}"
         )
         results = self.client.search(
             table_name=self.collection_name,
             vector=query_vector,
-            k=limit,
+            k=top_k,
             filter=dxmt_filter,
         )
 
         # Normalize scores and format output
         output = []
         for hit in results:
-            output.append({
-                "id": hit["id"],
-                "score": self._normalize_score(hit["score"]),
-                "payload": hit.get("metadata", hit.get("payload", {})),
-            })
+            output.append(OutputData(
+                id=hit["id"],
+                score=self._normalize_score(hit["score"]),
+                payload=hit.get("metadata", hit.get("payload", {})),
+            ))
 
         return output
 
@@ -328,11 +368,11 @@ class DXMTMemoryStore(VectorStoreBase):
                 return None
 
             record = records[0]
-            return {
-                "id": record["id"],
-                "score": None,  # No score for direct retrieval
-                "payload": record.get("metadata", record.get("payload", {})),
-            }
+            return OutputData(
+                id=record["id"],
+                score=None,  # No score for direct retrieval
+                payload=record.get("metadata", record.get("payload", {})),
+            )
         except DXMTError as e:
             logger.error(f"Error getting vector {vector_id}: {e}")
             return None
@@ -370,8 +410,11 @@ class DXMTMemoryStore(VectorStoreBase):
         return self.client.get_table(self.collection_name)
 
     def list(
-        self, filters: Optional[Dict[str, Any]] = None, limit: int = 100
-    ) -> List[Dict[str, Any]]:
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        top_k: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[List["OutputData"]]:
         """List all vectors in the collection.
 
         Args:
@@ -395,24 +438,32 @@ class DXMTMemoryStore(VectorStoreBase):
         dxmt_filter = self._convert_filters(filters) if filters else None
 
         # Search with dummy vector to get records
-        logger.debug(f"Listing records from {self.collection_name} with limit={limit}")
+        # `VectorStoreBase.list` spells it `top_k`, as `search` does. Both accepted, and
+        # neither given means the old default of 100 rather than everything.
+        top_k = limit if limit is not None else (top_k if top_k is not None else 100)
+        logger.debug(f"Listing records from {self.collection_name} with top_k={top_k}")
         results = self.client.search(
             table_name=self.collection_name,
             vector=dummy_vector,
-            k=limit,
+            k=top_k,
             filter=dxmt_filter,
         )
 
         # Format output
         output = []
         for hit in results:
-            output.append({
-                "id": hit["id"],
-                "score": None,  # Not relevant for listing
-                "payload": hit.get("metadata", hit.get("payload", {})),
-            })
+            output.append(OutputData(
+                id=hit["id"],
+                score=None,  # Not relevant for listing
+                payload=hit.get("metadata", hit.get("payload", {})),
+            ))
 
-        return output
+        # Wrapped in a list, which looks wrong and is the contract. mem0 reads this as
+        # `self.vector_store.list(...)[0]` -- see `Memory.delete_all` -- and every backend in
+        # its own tree ends with `return [self._parse_output(results)]`. Returning the flat
+        # list made `delete_all` raise `IndexError: list index out of range` on an empty
+        # result and iterate a single `OutputData` on a non-empty one.
+        return [output]
 
     def reset(self) -> None:
         """Reset the collection by deleting and recreating it.
@@ -539,4 +590,64 @@ class DXMTMemoryStore(VectorStoreBase):
             return score
 
 
-__all__ = ["DXMTMemoryStore"]
+def register_with_mem0(provider: str = "dxmt") -> str:
+    """Make `{"vector_store": {"provider": "dxmt", ...}}` a thing mem0 accepts.
+
+    mem0 used to take any `VectorStoreBase` through `provider: "custom"` and a
+    `custom_vector_store` in the config. That door is closed: current mem0 validates the
+    provider against a fixed table of twenty-five named backends, and a config for an
+    unlisted one fails in pydantic before any of this code runs --
+
+        ValidationError: Unsupported vector store provider: custom
+
+    -- which is what every DXMT + mem0 example in this repository hit. The adapter below was
+    never the problem; the way it was plugged in stopped existing.
+
+    There are two tables to join, because mem0 validates the config and builds the store in
+    different places, and the validator reaches the config class by importing
+    `mem0.configs.vector_stores.<provider>`. So this registers a module under that name as
+    well as the two dictionary entries. Idempotent, and it touches nothing but the entries it
+    adds.
+
+    Returns the provider name, so a caller can write
+
+        config = {"vector_store": {"provider": register_with_mem0(), "config": {...}}}
+
+    and not repeat the string. `config` then takes this class's own arguments --
+    `collection_name`, `client`, `embedding_model_dims`, `distance_metric` -- rather than a
+    prebuilt instance, because mem0 constructs the store itself.
+    """
+    import sys
+    import types
+
+    from pydantic import BaseModel, Field
+
+    from mem0.utils.factory import VectorStoreFactory
+    from mem0.vector_stores.configs import VectorStoreConfig
+
+    VectorStoreFactory.provider_to_class[provider] = "dxmt.mem0.DXMTMemoryStore"
+
+    module_name = f"mem0.configs.vector_stores.{provider}"
+    if module_name not in sys.modules:
+        class DXMTVectorStoreConfig(BaseModel):
+            collection_name: str = Field("mem0", description="table name")
+            client: Any = Field(None, description="a dxmt.Client")
+            embedding_model_dims: int = Field(1536, description="vector width")
+            distance_metric: str = Field("cosine", description="cosine|euclidean|manhattan|dot")
+
+            model_config = {"arbitrary_types_allowed": True}
+
+        module = types.ModuleType(module_name)
+        module.DXMTVectorStoreConfig = DXMTVectorStoreConfig
+        sys.modules[module_name] = module
+
+    # `_provider_configs` is a pydantic private attribute, so reading it off the class gives
+    # the descriptor rather than the dict. The dict is its default, and is the object the
+    # validator actually consults.
+    VectorStoreConfig.__private_attributes__["_provider_configs"].default[provider] = (
+        "DXMTVectorStoreConfig"
+    )
+    return provider
+
+
+__all__ = ["DXMTMemoryStore", "OutputData", "register_with_mem0"]

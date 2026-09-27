@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "clients", "dxmt-python-sdk"))
 
 from dxmt import Client as DXMTClient
-from dxmt.mem0 import DXMTMemoryStore
+from dxmt.mem0 import DXMTMemoryStore, register_with_mem0
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +41,30 @@ except ImportError:
     sys.exit(1)
 
 
+def rows(result):
+    """The list inside what mem0 returns.
+
+    `add`, `search` and `get_all` return `{"results": [...]}` now; they used to return the
+    list. The examples iterated the return value directly, so the first one printed
+    `TypeError: string indices must be integers` -- it was iterating the dict's keys. Both
+    shapes are read here so this runs on either.
+    """
+    return result.get("results", result) if isinstance(result, dict) else result
+
+def first(result, what):
+    """The first memory mem0 extracted, or a clear exit if it extracted none.
+
+    `add` runs the text through an LLM that decides what is worth remembering, so it can
+    return nothing for a sentence a human would call memorable, and does so occasionally for
+    the same input. The examples indexed `[0]` and died with `IndexError: list index out of
+    range`, which reads like a bug in this database and is not one.
+    """
+    if not result:
+        print(f"   mem0 extracted no memory from {what!r}; nothing to demonstrate here.")
+        return None
+    return result[0]
+
+
 def create_dxmt_memory_config():
     """Create mem0 configuration with DXMT backend."""
     # Initialize DXMT client
@@ -53,24 +77,28 @@ def create_dxmt_memory_config():
     vector_store = DXMTMemoryStore(
         collection_name="simple_demo",
         client=client,
-        embedding_model_dims=1536,  # OpenAI text-embedding-ada-002
+        embedding_model_dims=1536,  # OpenAI text-embedding-3-small
         distance_metric="cosine",
     )
 
     # Configure mem0
     config = {
+        # `provider: "custom"` is gone from mem0 -- it validates against a fixed table of
+        # named backends now, and an unlisted one fails in pydantic before any adapter code
+        # runs. `register_with_mem0` puts DXMT in that table; mem0 then builds the store
+        # itself from the config below, so it takes arguments rather than an instance.
         "vector_store": {
-            "provider": "custom",
+            "provider": register_with_mem0(),
             "config": {
-                "custom_vector_store": vector_store,
                 "collection_name": "simple_demo",
+                "client": client,
                 "embedding_model_dims": 1536,
             }
         },
         "embedder": {
             "provider": "openai",
             "config": {
-                "model": "text-embedding-ada-002",
+                "model": "text-embedding-3-small",
                 "embedding_dims": 1536,
             }
         },
@@ -107,7 +135,7 @@ def example_basic_operations():
         {"role": "user", "content": "I'm learning machine learning"},
     ]
 
-    result = m.add(conversations, user_id=user_id)
+    result = rows(m.add(conversations, user_id=user_id))
     print(f"   Added {len(result)} memories")
     for mem in result:
         print(f"   - {mem['memory']}")
@@ -115,7 +143,7 @@ def example_basic_operations():
     # 2. Search memories
     print("\n2. Searching for programming preferences...")
     query = "What are my programming preferences?"
-    memories = m.search(query, user_id=user_id, limit=5)
+    memories = rows(m.search(query, top_k=5, filters={"user_id": user_id}))
 
     print(f"   Found {len(memories)} relevant memories:")
     for i, mem in enumerate(memories, 1):
@@ -123,7 +151,7 @@ def example_basic_operations():
 
     # 3. Get all memories
     print("\n3. Getting all memories...")
-    all_memories = m.get_all(user_id=user_id)
+    all_memories = rows(m.get_all(filters={"user_id": user_id}))
     print(f"   Total memories for {user_id}: {len(all_memories)}")
 
     return m
@@ -151,12 +179,12 @@ def example_multi_user():
     # Search for each user
     print("\n3. Searching memories by user...")
 
-    alice_memories = m.search("work", user_id="alice", limit=5)
+    alice_memories = rows(m.search("work", top_k=5, filters={"user_id": "alice"}))
     print(f"\n   Alice's work-related memories ({len(alice_memories)}):")
     for mem in alice_memories:
         print(f"   - {mem['memory']}")
 
-    bob_memories = m.search("work", user_id="bob", limit=5)
+    bob_memories = rows(m.search("work", top_k=5, filters={"user_id": "bob"}))
     print(f"\n   Bob's work-related memories ({len(bob_memories)}):")
     for mem in bob_memories:
         print(f"   - {mem['memory']}")
@@ -177,10 +205,13 @@ def example_memory_updates():
 
     # Add initial memory
     print("\n1. Adding initial preference...")
-    result = m.add("I prefer email notifications", user_id=user_id)
-    memory_id = result[0]["id"]
+    result = rows(m.add("I prefer email notifications", user_id=user_id))
+    _m = first(result, "I prefer email notifications")
+    if _m is None:
+        return
+    memory_id = _m["id"]
     print(f"   Created memory: {memory_id}")
-    print(f"   Content: {result[0]['memory']}")
+    print(f"   Content: {_m['memory']}")
 
     # Update memory
     print("\n2. Updating preference...")
@@ -212,14 +243,14 @@ def example_cleanup():
     m.add("Test memory 2", user_id=user_id)
     m.add("Test memory 3", user_id=user_id)
 
-    all_memories = m.get_all(user_id=user_id)
+    all_memories = rows(m.get_all(filters={"user_id": user_id}))
     print(f"   Created {len(all_memories)} test memories")
 
     # Delete all memories for user
     print("\n2. Deleting all memories for user...")
     m.delete_all(user_id=user_id)
 
-    remaining = m.get_all(user_id=user_id)
+    remaining = rows(m.get_all(filters={"user_id": user_id}))
     print(f"   Remaining memories: {len(remaining)}")
 
     return m

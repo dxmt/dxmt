@@ -461,6 +461,10 @@ def main():
     print("输入问题编号 (1-4) 可以快速提问预定义问题")
     print()
 
+    if not sys.stdin.isatty():
+        print("非交互运行，跳过问答循环。加 -t 或直接运行本文件即可进入。")
+        return
+
     while True:
         try:
             user_input = input("您的问题 >>> ").strip()
@@ -496,7 +500,14 @@ def main():
     print("清理")
     print(f"{'='*80}\n")
 
-    cleanup = input("是否删除表？(y/N) ").strip().lower()
+    # Piped or run by a script, there is nobody to ask. Prompting anyway raised
+    # `EOFError: EOF when reading a line` and took the example's exit code with it, which is
+    # how an example that works by hand fails every time something tries to run it for you.
+    if not sys.stdin.isatty():
+        print("非交互运行，保留表 '%s'" % table_name)
+        cleanup = "n"
+    else:
+        cleanup = input("是否删除表？(y/N) ").strip().lower()
     if cleanup == 'y':
         try:
             client.delete_table(table_name)

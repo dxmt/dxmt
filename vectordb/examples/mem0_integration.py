@@ -27,7 +27,7 @@ from typing import List
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "clients", "dxmt-python-sdk"))
 
 from dxmt import Client as DXMTClient
-from dxmt.mem0 import DXMTMemoryStore
+from dxmt.mem0 import DXMTMemoryStore, register_with_mem0
 
 # Check if mem0 is installed
 try:
@@ -40,6 +40,30 @@ except ImportError:
 
 
 # ---------- Configuration ----------
+
+def rows(result):
+    """The list inside what mem0 returns.
+
+    `add`, `search` and `get_all` return `{"results": [...]}` now; they used to return the
+    list. The examples iterated the return value directly, so the first one printed
+    `TypeError: string indices must be integers` -- it was iterating the dict's keys. Both
+    shapes are read here so this runs on either.
+    """
+    return result.get("results", result) if isinstance(result, dict) else result
+
+def first(result, what):
+    """The first memory mem0 extracted, or a clear exit if it extracted none.
+
+    `add` runs the text through an LLM that decides what is worth remembering, so it can
+    return nothing for a sentence a human would call memorable, and does so occasionally for
+    the same input. The examples indexed `[0]` and died with `IndexError: list index out of
+    range`, which reads like a bug in this database and is not one.
+    """
+    if not result:
+        print(f"   mem0 extracted no memory from {what!r}; nothing to demonstrate here.")
+        return None
+    return result[0]
+
 
 def create_dxmt_mem0_config(collection_name: str = "mem0"):
     """Create mem0 configuration using DXMT as vector store.
@@ -60,24 +84,28 @@ def create_dxmt_mem0_config(collection_name: str = "mem0"):
     vector_store = DXMTMemoryStore(
         collection_name=collection_name,
         client=dxmt_client,
-        embedding_model_dims=1536,  # OpenAI text-embedding-ada-002
+        embedding_model_dims=1536,  # OpenAI text-embedding-3-small
         distance_metric="cosine",
     )
 
     # mem0 configuration
     config = {
+        # `provider: "custom"` is gone from mem0 -- it validates against a fixed table of
+        # named backends now, and an unlisted one fails in pydantic before any adapter code
+        # runs. `register_with_mem0` puts DXMT in that table; mem0 then builds the store
+        # itself from the config below, so it takes arguments rather than an instance.
         "vector_store": {
-            "provider": "custom",
+            "provider": register_with_mem0(),
             "config": {
-                "custom_vector_store": vector_store,
                 "collection_name": collection_name,
+                "client": dxmt_client,
                 "embedding_model_dims": 1536,
             }
         },
         "embedder": {
             "provider": "openai",
             "config": {
-                "model": "text-embedding-ada-002",
+                "model": "text-embedding-3-small",
                 "embedding_dims": 1536,
             }
         },
@@ -120,7 +148,7 @@ def example_user_memory():
         {"role": "user", "content": "I use VS Code as my primary editor"},
     ]
 
-    result = m.add(messages, user_id="user_123")
+    result = rows(m.add(messages, user_id="user_123"))
     print(f"   Added {len(result)} memories for user_123")
     for mem in result:
         print(f"   - {mem['memory']}")
@@ -128,7 +156,7 @@ def example_user_memory():
     # Search memories
     print("\n2. Searching for programming preferences...")
     query = "What are my programming preferences?"
-    memories = m.search(query, user_id="user_123", limit=5)
+    memories = rows(m.search(query, top_k=5, filters={"user_id": "user_123"}))
 
     print(f"   Found {len(memories)} relevant memories:")
     for i, mem in enumerate(memories, 1):
@@ -136,7 +164,7 @@ def example_user_memory():
 
     # Get all memories for user
     print("\n3. Getting all memories for user_123...")
-    all_memories = m.get_all(user_id="user_123")
+    all_memories = rows(m.get_all(filters={"user_id": "user_123"}))
     print(f"   Total memories: {len(all_memories)}")
 
     return m
@@ -168,21 +196,16 @@ def example_agent_memory():
         {"role": "assistant", "content": "No need, no rain expected today."},
     ]
 
-    result = m.add(
+    result = rows(m.add(
         messages,
         agent_id="weather_agent",
         run_id="session_456"
-    )
+    ))
     print(f"   Stored {len(result)} memories for weather_agent")
 
     # Retrieve agent context
     print("\n2. Retrieving weather conversation context...")
-    memories = m.search(
-        "weather information",
-        agent_id="weather_agent",
-        run_id="session_456",
-        limit=5
-    )
+    memories = rows(m.search("weather information", top_k=5, filters={"agent_id": "weather_agent", "run_id": "session_456"}))
 
     print(f"   Agent conversation context ({len(memories)} memories):")
     for mem in memories:
@@ -215,37 +238,32 @@ def example_multi_scope_memory():
         {"role": "assistant", "content": "I'll help you book a flight to Paris."},
     ]
 
-    result = m.add(
+    result = rows(m.add(
         messages,
         user_id="user_123",
         agent_id="travel_agent",
         run_id="booking_session_789",
         metadata={"intent": "flight_booking", "destination": "Paris", "priority": "high"}
-    )
+    ))
     print(f"   Added {len(result)} memories with multi-scope")
 
     # Query across different scopes
     print("\n2. Querying across different scopes...")
 
     # All user memories
-    user_mems = m.get_all(user_id="user_123")
+    user_mems = rows(m.get_all(filters={"user_id": "user_123"}))
     print(f"   - User memories (user_123): {len(user_mems)}")
 
     # Agent-specific memories
-    agent_mems = m.get_all(agent_id="travel_agent")
+    agent_mems = rows(m.get_all(filters={"agent_id": "travel_agent"}))
     print(f"   - Agent memories (travel_agent): {len(agent_mems)}")
 
     # Session-specific memories
-    session_mems = m.get_all(run_id="booking_session_789")
+    session_mems = rows(m.get_all(filters={"run_id": "booking_session_789"}))
     print(f"   - Session memories (booking_session_789): {len(session_mems)}")
 
     # Multi-scope query (user + agent)
-    specific_mems = m.search(
-        "travel plans",
-        user_id="user_123",
-        agent_id="travel_agent",
-        limit=5
-    )
+    specific_mems = rows(m.search("travel plans", top_k=5, filters={"user_id": "user_123", "agent_id": "travel_agent"}))
     print(f"   - User + Agent memories: {len(specific_mems)}")
     for mem in specific_mems:
         print(f"     * {mem['memory']}")
@@ -272,14 +290,17 @@ def example_memory_update():
 
     # Add initial memory
     print("\n1. Adding initial notification preference...")
-    result = m.add(
+    result = rows(m.add(
         "I prefer email notifications",
         user_id="user_123",
         metadata={"preference_type": "notification", "channel": "email"}
-    )
-    memory_id = result[0]["id"]
+    ))
+    _m = first(result, "the update example")
+    if _m is None:
+        return
+    memory_id = _m["id"]
     print(f"   Created memory: {memory_id}")
-    print(f"   Content: {result[0]['memory']}")
+    print(f"   Content: {_m['memory']}")
 
     # Update memory
     print("\n2. Updating notification preference...")
@@ -317,9 +338,12 @@ def example_memory_deletion():
 
     # Add temporary memories
     print("\n1. Adding temporary memories...")
-    result1 = m.add("Temporary note 1", user_id="user_temp")
-    result2 = m.add("Temporary note 2", user_id="user_temp")
-    memory_id = result1[0]["id"]
+    result1 = rows(m.add("Temporary note 1", user_id="user_temp"))
+    result2 = rows(m.add("Temporary note 2", user_id="user_temp"))
+    _m = first(result1, "the cleanup example")
+    if _m is None:
+        return
+    memory_id = _m["id"]
     print(f"   Added 2 temporary memories")
 
     # Delete specific memory
@@ -334,7 +358,7 @@ def example_memory_deletion():
     # Delete all memories for user
     print("\n3. Deleting all memories for user_temp...")
     m.delete_all(user_id="user_temp")
-    remaining = m.get_all(user_id="user_temp")
+    remaining = rows(m.get_all(filters={"user_id": "user_temp"}))
     print(f"   Remaining memories: {len(remaining)}")
 
     return m
@@ -364,8 +388,14 @@ def example_memory_history():
     m.add("Version 3 of memory", user_id="user_123")
 
     print("\n2. Getting memory history...")
-    history = m.history(user_id="user_123")
-    print(f"   Total operations: {len(history)}")
+    # `history` takes one memory id now; it used to accept a scope like `user_id`. Ask for
+    # the user's memories first and follow one of them.
+    mems = rows(m.get_all(filters={"user_id": "user_123"}))
+    if not mems:
+        print("   no memories to follow; skipping")
+        return m
+    history = m.history(mems[0]["id"])
+    print(f"   Total operations on {mems[0]['id']}: {len(history)}")
 
     # Show recent operations
     print("\n   Recent memory operations:")
@@ -410,7 +440,7 @@ def example_performance_benchmark():
     num_searches = 100
     start = time.time()
     for i in range(num_searches):
-        m.search("benchmark query", user_id="bench_user", limit=10)
+        m.search("benchmark query", top_k=10, filters={"user_id": "bench_user"})
     search_time = time.time() - start
 
     print(f"   Performed {num_searches} searches in {search_time:.2f}s")
@@ -457,12 +487,10 @@ def example_advanced_filtering():
 
     # Search with category filter
     print("\n2. Searching tech memories...")
-    tech_mems = m.search(
-        "programming",
-        user_id="user_123",
-        filters={"category": "tech"},
-        limit=10
-    )
+    tech_mems = rows(m.search(
+        "programming", top_k=10,
+        filters={"user_id": "user_123", "category": "tech"},
+    ))
     print(f"   Found {len(tech_mems)} tech memories")
     for mem in tech_mems:
         print(f"   - {mem['memory']}")
@@ -471,7 +499,7 @@ def example_advanced_filtering():
     print("\n3. Searching high-rated memories (rating >= 8)...")
     # Note: Complex filters may require direct vector store access
     # This is a simplified example
-    all_mems = m.get_all(user_id="user_123")
+    all_mems = rows(m.get_all(filters={"user_id": "user_123"}))
     high_rated = [mem for mem in all_mems if mem.get('metadata', {}).get('rating', 0) >= 8]
     print(f"   Found {len(high_rated)} high-rated memories")
     for mem in high_rated:

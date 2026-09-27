@@ -440,11 +440,18 @@ class TestDXMTMemoryStoreList:
         ]
         memory_store.client.search.return_value = mock_results
 
-        results = memory_store.list(filters=None, limit=100)
+        results = memory_store.list(filters=None, top_k=100)
 
-        assert len(results) == 2
-        assert results[0]["id"] == "mem1"
-        assert results[0]["score"] is None  # No score for listing
+        # One batch containing the rows, not the rows. `Memory.delete_all` reads
+        # `self.vector_store.list(...)[0]` and every backend in mem0's own tree ends with
+        # `return [self._parse_output(results)]`; returning the flat list raised
+        # `IndexError: list index out of range` there on an empty result.
+        assert len(results) == 1
+        batch = results[0]
+        assert len(batch) == 2
+        assert batch[0].id == "mem1"
+        assert batch[0].score is None  # No score for listing
+        assert batch[0]["id"] == "mem1"  # still subscriptable, for older callers
 
     def test_list_with_filters(self, memory_store):
         """Test listing with filters."""
@@ -480,6 +487,11 @@ class TestDXMTMemoryStoreList:
             "distance_metric": "cosine",
             "record_count": 100
         }
+        # The fixture gives `get_table` a `side_effect` so construction takes the
+        # create-the-table branch. A `side_effect` wins over a `return_value`, so setting one
+        # here changed nothing and this test raised `DXMTError: Table not found` from inside
+        # `col_info` -- red before this change and unrelated to it.
+        memory_store.client.get_table.side_effect = None
         memory_store.client.get_table.return_value = mock_info
 
         info = memory_store.col_info()

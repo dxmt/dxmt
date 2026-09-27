@@ -8,7 +8,7 @@ CARGO_INCREMENTAL ?= 0
 CARGO_PROFILE_DEV_DEBUG ?= 0
 export CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG
 
-.PHONY: help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live dashboard-install dashboard-build dashboard-dev run-dashboard verify-dashboard dashboard-clean
+.PHONY: examples examples-list help build test test-unit test-integ test-recovery test-contract clean run docker setup lint lint-strict bench docs release verify verify-core ci bench-recall test-api test-api-quick verify-live dashboard-install dashboard-build dashboard-dev run-dashboard verify-dashboard dashboard-clean
 
 # Default target - show help
 # Every target below is listed here, and `make check-help` fails if one is not: this listed
@@ -32,6 +32,8 @@ help:
 	@echo "  test-contract  - The SDK/router contract test"
 	@echo "  test-api     - The HTTP functional suite in both storage modes (needs python3+pytest+httpx)"
 	@echo "  test-api-quick - Same, skipping the property suite"
+	@echo "  examples     - Run examples/, naming every one it could not run and why"
+	@echo "  examples-list - What would run and what would not, without running it"
 	@echo "  quick-test   - fmt + lint + unit tests"
 	@echo "  bench        - Run the criterion benchmarks"
 	@echo "  bench-recall - Measure ANN recall against exact ground truth"
@@ -141,6 +143,14 @@ test-api:
 test-api-quick:
 	@echo "Running functional API tests (skipping the property suite)..."
 	@scripts/api_tests.sh -m "not slow"
+
+# The examples, against a server this starts. Not part of `verify`: it needs frameworks and
+# keys that a checkout does not have, and reports what it could not run rather than pretending.
+examples:
+	@scripts/run_examples.py
+
+examples-list:
+	@scripts/run_examples.py --list
 
 # Dashboard (the read-only web console). Node 20+; nothing else in this Makefile needs it.
 dashboard-install:

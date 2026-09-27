@@ -13,6 +13,12 @@ the same order, on purpose, so the clients can be compared side by side.
 
 import os
 import sys
+from pathlib import Path
+
+# The SDK from this checkout, like every other example here. Without it `import dxmt` picks up
+# whatever is on the path -- on one machine that was an older clone with no
+# `Client.health_check`, and this example reported it as "no server".
+sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 from dxmt import Client
 

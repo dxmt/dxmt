@@ -54,7 +54,7 @@ def example_1_basic_rag():
     vector_store = DXMTVectorStore(
         client=client,
         table_name="metagpt_basic_docs",
-        dimension=1536,  # OpenAI text-embedding-ada-002 dimension
+        dimension=1536,  # OpenAI text-embedding-3-small dimension
         distance_metric="cosine",
         create_if_not_exists=True,
     )

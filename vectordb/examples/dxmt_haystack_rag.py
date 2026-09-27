@@ -26,12 +26,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 from haystack import Pipeline, Document
-from haystack.components.builders import PromptBuilder, AnswerBuilder
-from haystack.components.embedders import (
-    SentenceTransformersDocumentEmbedder,
-    SentenceTransformersTextEmbedder,
-)
-from haystack.components.generators import OpenAIGenerator
+# Haystack 3.0 dropped the non-chat `OpenAIGenerator` and the plain-string `PromptBuilder`
+# path that fed it; a prompt is a list of `ChatMessage` now and the generator returns them.
+# Both spellings below, because an example that only builds against the version its author
+# had is a demo of that afternoon rather than of this database.
+try:
+    from haystack.components.builders import AnswerBuilder, ChatPromptBuilder
+    from haystack.components.generators.chat import OpenAIChatGenerator
+    from haystack.dataclasses import ChatMessage
+
+    HAYSTACK_CHAT = True
+except ImportError:  # Haystack 2.x
+    from haystack.components.builders import AnswerBuilder, PromptBuilder
+    
+    HAYSTACK_CHAT = False
+# Haystack 3.0 moved the sentence-transformers embedders out of the core package and into
+# `sentence-transformers-haystack`, so that installing Haystack no longer pulls in torch. Both
+# spellings are accepted here: an example that breaks when a dependency rearranges its
+# namespace teaches the reader nothing about this database.
+try:
+    from haystack_integrations.components.embedders.sentence_transformers import (
+        SentenceTransformersDocumentEmbedder,
+        SentenceTransformersTextEmbedder,
+    )
+except ImportError:  # Haystack 2.x
+    from haystack.components.embedders import (
+        SentenceTransformersDocumentEmbedder,
+        SentenceTransformersTextEmbedder,
+    )
 from haystack.components.writers import DocumentWriter
 
 from dxmt import Client as DXMTClient
@@ -78,11 +100,13 @@ def example_bm25_rag():
     )
     rag_pipeline.add_component(
         name="prompt_builder",
-        instance=PromptBuilder(template=prompt_template),
+        instance=(ChatPromptBuilder(template=[ChatMessage.from_user(prompt_template)],
+                                    required_variables="*")
+                  if HAYSTACK_CHAT else PromptBuilder(template=prompt_template)),
     )
     rag_pipeline.add_component(
         name="llm",
-        instance=OpenAIGenerator(),
+        instance=OpenAIChatGenerator() if HAYSTACK_CHAT else OpenAIGenerator(),
     )
     rag_pipeline.add_component(
         name="answer_builder",
@@ -91,9 +115,10 @@ def example_bm25_rag():
 
     # Connect components
     rag_pipeline.connect("retriever.documents", "prompt_builder.documents")
-    rag_pipeline.connect("prompt_builder.prompt", "llm.prompt")
+    rag_pipeline.connect("prompt_builder.prompt", "llm.messages" if HAYSTACK_CHAT else "llm.prompt")
     rag_pipeline.connect("llm.replies", "answer_builder.replies")
-    rag_pipeline.connect("llm.meta", "answer_builder.meta")
+    if not HAYSTACK_CHAT:
+        rag_pipeline.connect("llm.meta", "answer_builder.meta")
     rag_pipeline.connect("retriever.documents", "answer_builder.documents")
 
     # Populate the document store
@@ -227,11 +252,13 @@ def example_embedding_rag():
     )
     rag_pipeline.add_component(
         name="prompt_builder",
-        instance=PromptBuilder(template=prompt_template),
+        instance=(ChatPromptBuilder(template=[ChatMessage.from_user(prompt_template)],
+                                    required_variables="*")
+                  if HAYSTACK_CHAT else PromptBuilder(template=prompt_template)),
     )
     rag_pipeline.add_component(
         name="llm",
-        instance=OpenAIGenerator(),
+        instance=OpenAIChatGenerator() if HAYSTACK_CHAT else OpenAIGenerator(),
     )
     rag_pipeline.add_component(
         name="answer_builder",
@@ -241,9 +268,10 @@ def example_embedding_rag():
     # Connect components
     rag_pipeline.connect("text_embedder.embedding", "retriever.query_embedding")
     rag_pipeline.connect("retriever.documents", "prompt_builder.documents")
-    rag_pipeline.connect("prompt_builder.prompt", "llm.prompt")
+    rag_pipeline.connect("prompt_builder.prompt", "llm.messages" if HAYSTACK_CHAT else "llm.prompt")
     rag_pipeline.connect("llm.replies", "answer_builder.replies")
-    rag_pipeline.connect("llm.meta", "answer_builder.meta")
+    if not HAYSTACK_CHAT:
+        rag_pipeline.connect("llm.meta", "answer_builder.meta")
     rag_pipeline.connect("retriever.documents", "answer_builder.documents")
 
     # Run queries

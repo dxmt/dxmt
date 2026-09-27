@@ -1,14 +1,33 @@
 # Examples
 
-Every file here uses the library and states what it needs. Nothing runs them automatically --
-they need frameworks, keys and PDFs that a CI job should not -- so this table is the contract:
-if one stops working, it is a bug, not an expected casualty.
+Every file here uses the library and states what it needs. `scripts/run_examples.py` runs
+them, starting a server itself, and **names every one it could not run and why**:
 
-All of them need a running server:
+    cd vectordb && scripts/run_examples.py
+    scripts/run_examples.py --list                 the plan, without running anything
+    scripts/run_examples.py --only rag_minimal     one of them
+    scripts/run_examples.py --strict               a skip is a failure
+
+This paragraph used to say "nothing runs them automatically ... so this table is the contract:
+if one stops working, it is a bug, not an expected casualty". The table was the contract and
+nothing enforced it, which is a promise with no mechanism behind it. When the runner was
+written, five of the seventeen were broken -- four framework integrations against APIs that
+had moved on, and one that could not run unattended at all because it stopped to ask a
+question. `import dxmt` was resolving to a different checkout entirely, so anything that
+touched the SDK had been validated against code that is not in this repository.
+
+The skips are the point as much as the runs. An example that needs `crewai`, a PDF or a key
+this machine does not have is reported by name with the reason, and counted separately; a
+runner that skips quietly is worse than none, because the line at the end says "ok" either
+way. `--strict` makes a skip a failure, for a machine that was supposed to have everything.
+
+All of them need a running server, and **they assume port 9999** -- eleven write it into a
+constructor -- which is why the runner refuses to start when that port is busy rather than
+picking a free one and letting half of them fail for a reason that is not theirs:
 
     cd vectordb && cargo run --release -- serve       # port 9999
 
-`DXMT_HOST` / `DXMT_PORT` are not read by these; they connect to localhost:9999.
+Six read `DXMT_URL` or `DXMT_HOST`/`DXMT_PORT` and will follow a server elsewhere.
 
 ## What each one needs
 
