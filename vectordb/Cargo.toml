@@ -569,6 +569,10 @@ path = "tests/recall/storage_ann_benchmark_test.rs"
 
 # search/
 [[test]]
+name = "analytic_order_test"
+path = "tests/search/analytic_order_test.rs"
+
+[[test]]
 name = "exact_search_test"
 path = "tests/search/exact_search_test.rs"
 
