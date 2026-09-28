@@ -89,8 +89,10 @@ core.*
 flamegraph.svg
 perf.data*
 
-# Docker build context
-.dockerignore
+# `.dockerignore` used to be ignored here, under the heading "Docker build context", as though
+# it were something a build produces. It is source: it decides what leaves the machine when
+# anyone runs `docker build`, so it has to ship with the repository the way `.gitignore` does.
+# Ignoring it meant the protection existed only on the machine that wrote it.
 
 # Node.js (for documentation tools)
 node_modules/

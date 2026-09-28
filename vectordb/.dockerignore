@@ -1,0 +1,63 @@
+# What must not reach the Docker daemon, and must never reach an image layer.
+#
+# The build context is this directory: `docker/docker-compose.yml` says `context: ..`, and the
+# Dockerfiles copy `Cargo.toml`, `src`, `tests`, `examples`, `benches` and `config`, all of
+# which are here. Without this file the context was 64 GB of `target/` plus 139 MB of
+# `node_modules` -- and `docker/Dockerfile.build` did `COPY . .`, so building it baked `.env`
+# into a layer. A key in a layer is not removed by deleting the file afterwards; it stays in
+# `docker history` and in anything the image was pushed to.
+#
+# `Dockerfile.build` now copies explicit paths, so the credentials are excluded twice over.
+# That is deliberate: this file protects a `COPY . .` someone adds later, and the explicit
+# copies protect a context built without this file.
+
+# ── credentials ───────────────────────────────────────────────────────────────
+# `.env` holds live provider keys on a developer machine. It is in `.gitignore`, which keeps
+# it out of the repository and does nothing at all for a Docker build.
+.env
+.env.*
+!.env.example
+
+# ── build output and dependencies, rebuilt inside the image anyway ────────────
+# `**/target/`, not `target/`: the first probe of this file still shipped
+# `clients/dxmt-rust-sdk/target`, because a leading-component pattern only matches the root.
+**/target/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+clients/dxmt-js-sdk/dist/
+clients/*/build/
+
+# `dashboard/dist/` is deliberately NOT here: `api-dashboard` embeds it at compile time, so a
+# build with that feature needs it in the context. `dashboard/node_modules/` is covered above.
+
+# ── runtime state, which is data and not source ───────────────────────────────
+data/
+wal/
+snapshots/
+# Both: `*.log` is the files, `logs/` is the directory the server writes into -- the first
+# probe shipped `logs/` because a glob on the name does not match a directory.
+*.log
+logs/
+pdf/
+
+# ── not part of the product ───────────────────────────────────────────────────
+# `planning/` is code kept out of `src/` precisely because nothing reaches it; shipping it in
+# an image would undo that. Both CLAUDE.md files are gitignored working notes.
+planning/
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+
+# ── noise ─────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.github/
+**/.DS_Store
+*.swp

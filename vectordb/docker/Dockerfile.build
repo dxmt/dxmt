@@ -1,20 +1,37 @@
+# A throwaway image for building and testing the crate in a clean toolchain.
+#
+# Unlike `Dockerfile` and `Dockerfile.multiarch`, which produce a runtime image, this one
+# exists to run `cargo build` / `cargo test` somewhere reproducible.
 FROM rust:latest
 
-# Install build dependencies
+# Build dependencies. `librocksdb-dev` used to be here and is gone: the RocksDB backend moved
+# to `planning/` in 2026-09-11 and no code has linked against it since.
 RUN apt-get update && apt-get install -y \
     build-essential \
     clang \
     libclang-dev \
     libzstd-dev \
-    librocksdb-dev \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-# Copy source code
-COPY . .
+# Explicit paths, not `COPY . .`.
+#
+# `COPY . .` copied whatever happened to be in the working directory, which on a developer
+# machine is `.env` with live provider keys, 64 GB of `target/`, and `planning/`. A key copied
+# into a layer cannot be removed by deleting the file in a later layer -- it stays in
+# `docker history` and in every registry the image reached. `.dockerignore` now excludes those
+# as well; naming what goes in is the half that still holds when someone builds this without
+# the context this repository provides.
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+COPY examples ./examples
+COPY proto ./proto
+COPY config ./config
 
-# Build the project
 RUN cargo build --release
 
 CMD ["cargo", "test"]
