@@ -68,6 +68,11 @@ struct EmbeddingDatum {
     /// **Not assumed to be the array position.** The OpenAI specification says to sort by it,
     /// and a provider that batches internally can and does return them out of order; ignoring
     /// it attaches every vector to the wrong record, and nothing downstream can tell.
+    ///
+    /// `default` plus a *stable* sort is what makes a provider that omits the field work:
+    /// Gemini's OpenAI-compatible endpoint does omit it, every element then keys on 0, and
+    /// `sort_by_key` leaves equal keys in the order they arrived -- which for such a provider
+    /// is the input order. Swapping in an unstable sort here would scramble those silently.
     #[serde(default)]
     index: usize,
     embedding: Vec<f32>,

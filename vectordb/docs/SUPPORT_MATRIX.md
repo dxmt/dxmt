@@ -192,6 +192,48 @@ worth knowing before a bulk load is that **a batch is all-or-nothing**: one refu
 fails the whole request, so a million-row load stops at the first bad row and the caller has
 to find it. Filter them out, or load in small batches.
 
+## Choosing an embedding model, which is a different question
+
+The table above measures **the index**: how close the graph's answer is to the exact one, on
+datasets whose right answers were published by somebody else. It says nothing about whether a
+model is right for your documents, and that is the question that decides whether retrieval
+works.
+
+`examples/generative_benchmark.py` answers it without needing labels: an LLM writes, for each
+passage, the query a reader would type that this passage answers, and the pair is the label.
+Every query then runs through the graph **and** through `search_mode: "exact"`, so a miss is
+attributed to the model or to the index rather than merely counted.
+
+Five models, this repository's own documentation, 165 passages, the same 165 generated queries
+every time -- only the embedding changes. Measured 2026-09-28:
+
+| provider | model | dim | recall@1 | recall@10 | NDCG@10 | misses the index caused |
+| --- | --- | --- | --- | --- | --- | --- |
+| OpenAI | text-embedding-3-large | 3072 | **0.6391** | 0.9231 | 0.7706 | 0 of 61 |
+| Gemini | gemini-embedding-001 | 3072 | 0.6331 | **0.9349** | **0.7790** | 0 of 62 |
+| OpenAI | text-embedding-ada-002 | 1536 | 0.5976 | 0.8698 | 0.7316 | 0 of 68 |
+| Gemini | gemini-embedding-2 | 3072 | 0.5385 | 0.8876 | 0.7125 | 0 of 78 |
+| OpenAI | text-embedding-3-small | 1536 | 0.5325 | 0.8698 | 0.7000 | 0 of 79 |
+
+**Across five models and 348 misses, the index caused none of them.** `accurate` and `exact`
+returned identical scores in all five runs. On this corpus the retrieval quality is decided
+entirely by the embedding, and no amount of `ef_search` tuning would move it — which is worth
+knowing before spending a week on the index.
+
+**Two of the five are newer models that scored worse than the ones they replace.**
+`text-embedding-3-small` loses to `ada-002` by 6.5 points of recall@1 at the same width, and
+`gemini-embedding-2` loses to `gemini-embedding-001` by 9.5. Picking the newest model is a
+reasonable default and is wrong here, twice, in different families. That is the argument for
+measuring on your own corpus rather than reading a leaderboard.
+
+These numbers are about *this* corpus — 165 chunks of one project's documentation, and
+generated queries, which are only as good as the model that wrote them. Read them with
+`--show` before trusting the ranking. What transfers is the method, not the order.
+
+**Any OpenAI-compatible endpoint works.** The Gemini rows went through
+`base_url: https://generativelanguage.googleapis.com/v1beta/openai` with no code change; the
+key is named by `api_key_env` and never appears in a create body, a snapshot or an export.
+
 ## Promotion Rules
 
 A feature can move into the supported table only when it has:
