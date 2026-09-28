@@ -9,6 +9,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+// Shared module, one directory up now that this test lives in a scenario
+// folder. Cargo resolves `mod` relative to the file, so without the path it
+// would look for tests/api/fake_provider.rs and fail to compile.
+#[path = "../fake_provider/mod.rs"]
 mod fake_provider;
 
 /// Send `requests` to a fresh MCP server, return one parsed reply per request.

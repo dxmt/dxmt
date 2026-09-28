@@ -19,6 +19,10 @@ use dxmt_vectordb::{
     },
 };
 
+// Shared module, one directory up now that this test lives in a scenario
+// folder. Cargo resolves `mod` relative to the file, so without the path it
+// would look for tests/api/fake_provider.rs and fail to compile.
+#[path = "../fake_provider/mod.rs"]
 mod fake_provider;
 use fake_provider::{bag_of_words, Behaviour};
 

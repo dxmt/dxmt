@@ -369,6 +369,299 @@ jemalloc = ["tikv-jemallocator"]
 
 
 
+# ── Integration tests, declared rather than discovered ─────────────────────────────────────
+#
+# Cargo auto-discovers `tests/*.rs` and nothing else. These files live in scenario folders, so
+# each one needs a `[[test]]` entry -- which is the reason this layout was chosen over
+# aggregating them into a handful of binaries behind `include!`. A file that moves and is not
+# declared **fails to build**; a `mod` line forgotten in an aggregator is silently never run,
+# and this repository has already paid for that class of mistake more than once (CI naming four
+# targets and skipping twenty-four; a feature-gated test file reporting `0 passed`).
+#
+# `name` is the file stem and must stay that way: `cargo test --test wal_recovery_test`, the
+# Makefile and `.github/workflows/ci.yml` all address them by it.
+#
+# Generated, and kept in step by `tests/layout_test.rs`, which fails if a file under `tests/`
+# has no entry or an entry points nowhere.
+
+
+# interfaces/
+[[test]]
+name = "api_contract_test"
+path = "tests/interfaces/api_contract_test.rs"
+
+[[test]]
+name = "api_key_test"
+path = "tests/interfaces/api_key_test.rs"
+
+[[test]]
+name = "dashboard_test"
+path = "tests/interfaces/dashboard_test.rs"
+
+[[test]]
+name = "grpc_test"
+path = "tests/interfaces/grpc_test.rs"
+
+[[test]]
+name = "input_the_engine_should_accept_test"
+path = "tests/interfaces/input_the_engine_should_accept_test.rs"
+
+[[test]]
+name = "mcp_stdio_test"
+path = "tests/interfaces/mcp_stdio_test.rs"
+
+[[test]]
+name = "prometheus_metrics_test"
+path = "tests/interfaces/prometheus_metrics_test.rs"
+
+[[test]]
+name = "proto_surface_test"
+path = "tests/interfaces/proto_surface_test.rs"
+
+[[test]]
+name = "server_embedding_test"
+path = "tests/interfaces/server_embedding_test.rs"
+
+[[test]]
+name = "table_alias_test"
+path = "tests/interfaces/table_alias_test.rs"
+
+[[test]]
+name = "unknown_fields_test"
+path = "tests/interfaces/unknown_fields_test.rs"
+
+[[test]]
+name = "update_semantics_test"
+path = "tests/interfaces/update_semantics_test.rs"
+
+
+# durability/
+[[test]]
+name = "backup_restore_test"
+path = "tests/durability/backup_restore_test.rs"
+
+[[test]]
+name = "delete_sweep_test"
+path = "tests/durability/delete_sweep_test.rs"
+
+[[test]]
+name = "index_compaction_test"
+path = "tests/durability/index_compaction_test.rs"
+
+[[test]]
+name = "index_persistence_test"
+path = "tests/durability/index_persistence_test.rs"
+
+[[test]]
+name = "restart_equivalence_test"
+path = "tests/durability/restart_equivalence_test.rs"
+
+[[test]]
+name = "row_reclamation_test"
+path = "tests/durability/row_reclamation_test.rs"
+
+[[test]]
+name = "schema_evolution_test"
+path = "tests/durability/schema_evolution_test.rs"
+
+[[test]]
+name = "table_export_test"
+path = "tests/durability/table_export_test.rs"
+
+[[test]]
+name = "wal_recovery_test"
+path = "tests/durability/wal_recovery_test.rs"
+
+
+# filters/
+[[test]]
+name = "facet_test"
+path = "tests/filters/facet_test.rs"
+
+[[test]]
+name = "filter_absent_field_test"
+path = "tests/filters/filter_absent_field_test.rs"
+
+[[test]]
+name = "filter_agreement_test"
+path = "tests/filters/filter_agreement_test.rs"
+
+[[test]]
+name = "filter_escalation_test"
+path = "tests/filters/filter_escalation_test.rs"
+
+[[test]]
+name = "filter_performance_test"
+path = "tests/filters/filter_performance_test.rs"
+
+[[test]]
+name = "filter_recovery_test"
+path = "tests/filters/filter_recovery_test.rs"
+
+[[test]]
+name = "geo_filter_test"
+path = "tests/filters/geo_filter_test.rs"
+
+[[test]]
+name = "in_graph_filter_test"
+path = "tests/filters/in_graph_filter_test.rs"
+
+[[test]]
+name = "payload_index_test"
+path = "tests/filters/payload_index_test.rs"
+
+[[test]]
+name = "scale_filters_test"
+path = "tests/filters/scale_filters_test.rs"
+
+
+# hygiene/
+[[test]]
+name = "ci_lockfiles_test"
+path = "tests/hygiene/ci_lockfiles_test.rs"
+
+[[test]]
+name = "concurrency_test"
+path = "tests/hygiene/concurrency_test.rs"
+
+[[test]]
+name = "layout_test"
+path = "tests/hygiene/layout_test.rs"
+
+[[test]]
+name = "documented_layout_test"
+path = "tests/hygiene/documented_layout_test.rs"
+
+[[test]]
+name = "env_prefix_test"
+path = "tests/hygiene/env_prefix_test.rs"
+
+[[test]]
+name = "quick_verification_test"
+path = "tests/hygiene/quick_verification_test.rs"
+
+
+# recall/
+[[test]]
+name = "dataset_test"
+path = "tests/recall/dataset_test.rs"
+
+[[test]]
+name = "e2e_recall_test"
+path = "tests/recall/e2e_recall_test.rs"
+
+[[test]]
+name = "parallel_build_recall_test"
+path = "tests/recall/parallel_build_recall_test.rs"
+
+[[test]]
+name = "quantized_recall_test"
+path = "tests/recall/quantized_recall_test.rs"
+
+[[test]]
+name = "recall_metrics_test"
+path = "tests/recall/recall_metrics_test.rs"
+
+[[test]]
+name = "storage_ann_benchmark_test"
+path = "tests/recall/storage_ann_benchmark_test.rs"
+
+
+# search/
+[[test]]
+name = "exact_search_test"
+path = "tests/search/exact_search_test.rs"
+
+[[test]]
+name = "full_text_recovery_test"
+path = "tests/search/full_text_recovery_test.rs"
+
+[[test]]
+name = "hnsw_pq_rerank_test"
+path = "tests/search/hnsw_pq_rerank_test.rs"
+
+[[test]]
+name = "knn_graph_test"
+path = "tests/search/knn_graph_test.rs"
+
+[[test]]
+name = "list_cursor_test"
+path = "tests/search/list_cursor_test.rs"
+
+[[test]]
+name = "named_vectors_test"
+path = "tests/search/named_vectors_test.rs"
+
+[[test]]
+name = "search_groups_test"
+path = "tests/search/search_groups_test.rs"
+
+[[test]]
+name = "search_quality_test"
+path = "tests/search/search_quality_test.rs"
+
+[[test]]
+name = "sparse_search_test"
+path = "tests/search/sparse_search_test.rs"
+
+
+# storage/
+[[test]]
+name = "memory_backpressure_test"
+path = "tests/storage/memory_backpressure_test.rs"
+
+[[test]]
+name = "memory_optimization_config_test"
+path = "tests/storage/memory_optimization_config_test.rs"
+
+[[test]]
+name = "partitioned_ivf_test"
+path = "tests/storage/partitioned_ivf_test.rs"
+
+[[test]]
+name = "phase3_integration_test"
+path = "tests/storage/phase3_integration_test.rs"
+
+[[test]]
+name = "records_on_disk_test"
+path = "tests/storage/records_on_disk_test.rs"
+
+[[test]]
+name = "storage_defaults_test"
+path = "tests/storage/storage_defaults_test.rs"
+
+[[test]]
+name = "streaming_quantize_test"
+path = "tests/storage/streaming_quantize_test.rs"
+
+[[test]]
+name = "table_index_params_test"
+path = "tests/storage/table_index_params_test.rs"
+
+[[test]]
+name = "tiered_search_basic_test"
+path = "tests/storage/tiered_search_basic_test.rs"
+
+[[test]]
+name = "tiered_search_test"
+path = "tests/storage/tiered_search_test.rs"
+
+[[test]]
+name = "vector_movement_basic_test"
+path = "tests/storage/vector_movement_basic_test.rs"
+
+[[test]]
+name = "vector_movement_test"
+path = "tests/storage/vector_movement_test.rs"
+
+[[test]]
+name = "vectors_f16_test"
+path = "tests/storage/vectors_f16_test.rs"
+
+[[test]]
+name = "vectors_on_disk_test"
+path = "tests/storage/vectors_on_disk_test.rs"
+
 [[bench]]
 name = "filter_performance_bench"
 harness = false

@@ -2,6 +2,10 @@
 
 // Dataset infrastructure tests
 
+// Shared module, one directory up now that this test lives in a scenario
+// folder. Cargo resolves `mod` relative to the file, so without the path it
+// would look for tests/recall/fixtures.rs and fail to compile.
+#[path = "../fixtures/mod.rs"]
 mod fixtures;
 
 use dxmt_vectordb::benchmarks::datasets::{
