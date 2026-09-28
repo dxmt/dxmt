@@ -65,6 +65,67 @@ CLIENTS = [
 PORT = int(os.environ.get("DXMT_EXAMPLES_PORT", "9999"))
 
 
+def load_dotenv():
+    """Read `vectordb/.env` into the environment, the way the server already does.
+
+    `AppConfig::load` pulls this file in through the `dotenv` crate, so the server sees the
+    keys without anyone exporting anything. Python did not, which meant the examples and the
+    server disagreed about what was configured -- and an example that wants a key would skip
+    while the server it is talking to has one. Same file, one place to edit.
+
+    Values already in the environment win, so `OPENAI_API_KEY=… scripts/run_examples.py`
+    still overrides the file.
+    """
+    path = ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+def resolve_provider():
+    """Point the OpenAI-compatible clients at whichever provider `.env` selects.
+
+    Every client the examples use -- the `openai` SDK, `langchain_openai`, mem0's embedder,
+    llama-index -- reads `OPENAI_API_KEY` and `OPENAI_BASE_URL`. Setting those two is
+    therefore the whole switch, and no example needs to know which provider it is talking to.
+
+    What an example *does* need to know is the model name, because those are deployment names
+    and do not carry across: this Azure resource serves `gpt-4.1-mini` and answers
+    `DeploymentNotFound` for `gpt-4o-mini`. `DXMT_CHAT_MODEL`, `DXMT_EMBED_MODEL` and
+    `DXMT_EMBED_DIMS` carry them, and each example falls back to its old hardcoded value when
+    they are unset, so nothing breaks for someone who just has an `OPENAI_API_KEY`.
+
+    Returns a one-line description for the run header, or None when nothing is configured.
+    """
+    provider = os.environ.get("DXMT_LLM_PROVIDER", "").strip().lower()
+    if provider == "azure":
+        key, base = os.environ.get("AZURE_OPENAI_KEY"), os.environ.get("AZURE_OPENAI_ENDPOINT")
+    elif provider == "gemini":
+        key, base = os.environ.get("GEMINI_API_KEY"), os.environ.get("GEMINI_BASE_URL")
+    elif provider in ("openai", ""):
+        key, base = os.environ.get("OPENAI_API_KEY"), os.environ.get("OPENAI_BASE_URL")
+        provider = "openai"
+    else:
+        sys.exit(f"DXMT_LLM_PROVIDER={provider!r} is not one of azure, gemini, openai")
+
+    if not key:
+        return None
+    os.environ["OPENAI_API_KEY"] = key
+    if base:
+        os.environ["OPENAI_BASE_URL"] = base.rstrip("/")
+    where = f" at {os.environ['OPENAI_BASE_URL']}" if base else ""
+    default = "(the example's own default)"
+    chat = os.environ.get("DXMT_CHAT_MODEL", default)
+    embed = os.environ.get("DXMT_EMBED_MODEL", default)
+    models = f"chat {chat}, embeddings {embed}"
+    return f"provider {provider}{where} -- {models}"
+
+
 class Example:
     """One example, and everything that has to be true before running it is meaningful."""
 
@@ -125,8 +186,11 @@ CATALOGUE = [
     Example("dxmt_haystack_rag.py", imports=("haystack", "sentence_transformers"), key=True),
     Example("crewai_dxmt_simple.py", imports=("crewai",), key=True),
     Example("crewai_dxmt_integration.py", imports=("crewai",), key=True),
-    Example("mem0_integration.py", imports=("mem0",), key=True),
-    Example("dxmt_mem0_simple.py", imports=("mem0", "dotenv"), key=True),
+    # mem0 runs every memory through an LLM to decide what is worth keeping, so these are
+    # dominated by round trips rather than by anything this database does: 195 s against
+    # OpenAI, more against Azure. The default 300 s cut the first one off mid-run.
+    Example("mem0_integration.py", imports=("mem0",), key=True, timeout=1200),
+    Example("dxmt_mem0_simple.py", imports=("mem0", "dotenv"), key=True, timeout=600),
     Example("metagpt_integration.py", imports=("llama_index",), key=True),
     # Needs the key in the *server's* environment as well as here: the table names a model
     # and the server does the embedding. The runner's server inherits this process's
@@ -204,6 +268,9 @@ def main():
                     help="cargo features the server was built with")
     args = ap.parse_args()
 
+    load_dotenv()
+    provider = resolve_provider()
+
     features = {f.strip() for f in args.features.replace(" ", ",").split(",") if f.strip()}
     plan = [e for e in CATALOGUE if not args.only or args.only in e.name]
     if not plan:
@@ -243,6 +310,7 @@ def main():
                        os.pathsep))
     sdk = check_sdk_is_ours(env)
     print(f"dxmt SDK from {sdk.parent}")
+    print(provider or "no LLM provider configured; the examples that need one will skip")
     passed, failed, skipped = [], [], []
     try:
         for e in plan:
@@ -252,11 +320,22 @@ def main():
                 print(f"SKIP  {e.name:<34} {why}")
                 continue
             t0 = time.time()
-            r = subprocess.run(
-                [sys.executable, str(EXAMPLES / e.name), *e.args],
-                cwd=ROOT, env=env, timeout=e.timeout,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            )
+            try:
+                r = subprocess.run(
+                    [sys.executable, str(EXAMPLES / e.name), *e.args],
+                    cwd=ROOT, env=env, timeout=e.timeout,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+            except subprocess.TimeoutExpired as expired:
+                # One example running long is a failure of that example, not of the run. The
+                # exception used to propagate and take the remaining examples with it, so a
+                # single slow provider hid everything after it in the catalogue -- which is
+                # the opposite of what this script is for.
+                dt = time.time() - t0
+                tail = (expired.stdout or b"").decode("utf-8", "replace")
+                failed.append((e.name, f"timed out after {e.timeout}s", tail))
+                print(f"FAIL  {e.name:<34} {dt:5.1f}s  timed out")
+                continue
             dt = time.time() - t0
             if r.returncode == 0:
                 passed.append(e.name)
@@ -270,7 +349,8 @@ def main():
             server.wait(timeout=30)
 
     for name, code, out in failed:
-        print(f"\n--- {name} exited {code} ---")
+        print(f"\n--- {name}: {code} ---" if isinstance(code, str)
+              else f"\n--- {name} exited {code} ---")
         print("\n".join(out.splitlines()[-25:]))
 
     print(f"\nexamples: {len(passed)} ran, {len(failed)} failed, {len(skipped)} skipped")

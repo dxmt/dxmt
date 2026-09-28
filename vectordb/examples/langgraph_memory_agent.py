@@ -11,8 +11,19 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
+import os
+
 from dxmt import DXMTClient
 from dxmt.langgraph_store import DXMTLangGraphStore
+
+
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "1536"))
 
 
 def example_basic_memory():
@@ -333,7 +344,7 @@ def example_real_world_integration():
     def embed_texts(texts: list[str]) -> list[list[float]]:
         """Generate embeddings using OpenAI."""
         response = openai_client.embeddings.create(
-            model="text-embedding-3-small", input=texts
+            model=EMBED_MODEL, input=texts
         )
         return [item.embedding for item in response.data]
 
@@ -341,7 +352,7 @@ def example_real_world_integration():
     client = DXMTClient(host="localhost", port=9999)
     store = DXMTLangGraphStore(
         client,
-        embedding_dims=1536,  # text-embedding-3-small dimension
+        embedding_dims=EMBED_DIMS,
         embed_fn=embed_texts,
         default_index_fields=["$"],  # Index entire document
         distance_metric="cosine",

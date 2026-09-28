@@ -41,6 +41,15 @@ except ImportError:
 
 # ---------- Configuration ----------
 
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "1536"))
+
+
 def rows(result):
     """The list inside what mem0 returns.
 
@@ -84,7 +93,7 @@ def create_dxmt_mem0_config(collection_name: str = "mem0"):
     vector_store = DXMTMemoryStore(
         collection_name=collection_name,
         client=dxmt_client,
-        embedding_model_dims=1536,  # OpenAI text-embedding-3-small
+        embedding_model_dims=EMBED_DIMS,
         distance_metric="cosine",
     )
 
@@ -99,20 +108,20 @@ def create_dxmt_mem0_config(collection_name: str = "mem0"):
             "config": {
                 "collection_name": collection_name,
                 "client": dxmt_client,
-                "embedding_model_dims": 1536,
+                "embedding_model_dims": EMBED_DIMS,
             }
         },
         "embedder": {
             "provider": "openai",
             "config": {
-                "model": "text-embedding-3-small",
-                "embedding_dims": 1536,
+                "model": EMBED_MODEL,
+                "embedding_dims": EMBED_DIMS,
             }
         },
         "llm": {
             "provider": "openai",
             "config": {
-                "model": "gpt-4o-mini",
+                "model": CHAT_MODEL,
                 "temperature": 0,
             }
         },

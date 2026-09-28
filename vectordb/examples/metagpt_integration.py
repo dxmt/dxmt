@@ -28,6 +28,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "1536"))
+
+
 def example_1_basic_rag():
     """Example 1: Basic RAG pipeline with DXMT."""
     print("\n" + "=" * 80)
@@ -54,7 +63,7 @@ def example_1_basic_rag():
     vector_store = DXMTVectorStore(
         client=client,
         table_name="metagpt_basic_docs",
-        dimension=1536,  # OpenAI text-embedding-3-small dimension
+        dimension=EMBED_DIMS,
         distance_metric="cosine",
         create_if_not_exists=True,
     )
@@ -146,7 +155,7 @@ def example_2_metagpt_retriever():
         retriever = create_dxmt_retriever(
             documents=documents,
             table_name="metagpt_retriever_demo",
-            dimension=1536,
+            dimension=EMBED_DIMS,
             similarity_top_k=3,
             host="localhost",
             port=9999,
@@ -230,7 +239,7 @@ def example_3_incremental_updates():
     print("\n📊 Setting up DXMT vector store...")
     client = DXMTClient(host="localhost", port=9999)
     vector_store = DXMTVectorStore(
-        client=client, table_name="metagpt_incremental", dimension=1536, create_if_not_exists=True
+        client=client, table_name="metagpt_incremental", dimension=EMBED_DIMS, create_if_not_exists=True
     )
 
     # Initial documents

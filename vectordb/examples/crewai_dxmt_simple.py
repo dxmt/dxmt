@@ -19,6 +19,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
 
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-large")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "3072"))
+
+
 def main():
     """Simple CrewAI + DXMT integration test."""
     print("\n" + "=" * 70)
@@ -49,7 +58,7 @@ def main():
     try:
         client.create_table(
             name=table_name,
-            dimension=3072,
+            dimension=EMBED_DIMS,
             distance_metric="cosine",
             description="CrewAI test documents"
         )

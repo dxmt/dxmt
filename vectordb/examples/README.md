@@ -49,8 +49,28 @@ Six read `DXMT_URL` or `DXMT_HOST`/`DXMT_PORT` and will follow a server elsewher
 | `metagpt_integration.py` | `llama-index` | yes | |
 | `generative_benchmark.py` | `openai` | yes | the key must also be in the **server's** environment |
 
-`OPENAI_API_KEY` comes from the environment. Never put a key in a file here -- keys have had to
-be scrubbed from this tree once already.
+## Which provider answers
+
+`scripts/run_examples.py` reads `vectordb/.env` -- the same file the server loads through
+`dotenv` -- and exports `OPENAI_API_KEY` and `OPENAI_BASE_URL` from whichever block
+`DXMT_LLM_PROVIDER` names: `azure`, `gemini` or `openai`. Every client these examples use
+honours those two, so switching provider touches no example. The run prints which one it
+resolved.
+
+**Model names are the part that does not carry across**, because they are deployment names.
+`DXMT_CHAT_MODEL`, `DXMT_EMBED_MODEL` and `DXMT_EMBED_DIMS` carry them, and each example falls
+back to the value it had before, so someone with nothing but an `OPENAI_API_KEY` sees no
+change. The Azure resource this was set up against serves `gpt-4.1-mini`,
+`text-embedding-3-small` and `text-embedding-3-large`, and answers `DeploymentNotFound` for
+`gpt-4o-mini` -- while its `models.list` returns 451 entries, because that is the catalogue
+and not what is deployed. **Probe a provider with a real call; the listing will lie to you.**
+
+Gemini needs two more things if you switch to it: its embeddings are 3072-wide, and
+`langchain_openai.OpenAIEmbeddings` needs `check_embedding_ctx_length=False` because its
+default path tokenises with tiktoken first and Gemini does not implement that endpoint.
+
+**Never put a key in a file here.** `vectordb/.env` is gitignored and is where they go; keys
+have had to be scrubbed from this tree once already.
 
 ## RAG without a key
 

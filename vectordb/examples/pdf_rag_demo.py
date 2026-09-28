@@ -33,6 +33,15 @@ except ImportError:
     print("⚠️  OpenAI not installed. Install with: pip install openai")
 
 
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-3.5-turbo")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "1536"))
+
+
 class PDFRAGSystem:
     """PDF RAG 系统 - 处理 PDF 并实现问答"""
 
@@ -285,7 +294,7 @@ class PDFRAGSystem:
         try:
             # 调用 OpenAI API
             response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=CHAT_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

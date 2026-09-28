@@ -21,6 +21,15 @@ from pathlib import Path
 # Add DXMT SDK to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "clients" / "dxmt-python-sdk"))
 
+# The provider's models come from the environment so one `.env` switch moves every example.
+# These are *deployment* names and do not carry between providers -- the Azure resource this
+# was written against serves `gpt-4.1-mini` and answers DeploymentNotFound for `gpt-4o-mini`.
+# The defaults are what this file used before, so nothing changes for a plain OPENAI_API_KEY.
+CHAT_MODEL = os.environ.get("DXMT_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("DXMT_EMBED_MODEL", "text-embedding-3-large")
+EMBED_DIMS = int(os.environ.get("DXMT_EMBED_DIMS", "3072"))
+
+
 def example_1_vector_search_tool():
     """Example 1: Using DXMT as a vector search tool for CrewAI agents."""
     print("\n" + "=" * 80)
@@ -45,7 +54,7 @@ def example_1_vector_search_tool():
     try:
         client.create_table(
             name=table_name,
-            dimension=3072,  # text-embedding-3-large dimension
+            dimension=EMBED_DIMS,
             distance_metric="cosine",
             description="Research documents for CrewAI agents"
         )
@@ -149,7 +158,7 @@ def example_2_memory_storage():
         "port": 9999,
         "table_name": "crew_long_term_memory",
         "user_id": "user_001",
-        "dimension": 3072
+        "dimension": EMBED_DIMS
     }
 
     long_term_storage = DXMTStorage(
@@ -216,7 +225,7 @@ def example_3_multi_agent_with_memory():
         "port": 9999,
         "table_name": "multi_agent_memory",
         "user_id": "project_001",
-        "dimension": 3072
+        "dimension": EMBED_DIMS
     }
 
     shared_memory = DXMTStorage(
