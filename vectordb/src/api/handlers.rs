@@ -2388,7 +2388,8 @@ pub async fn full_text_search(
     responses(
         (status = 200, description = "搜索成功", body = ApiResponse),
         (status = 400, description = "请求参数错误", body = ApiResponse),
-        (status = 404, description = "表不存在", body = ApiResponse)
+        (status = 404, description = "表不存在", body = ApiResponse),
+        (status = 501, description = "本次构建没有全文索引，`text` 无法作答", body = ApiResponse)
     ),
     tag = "search"
 ))]
@@ -2398,6 +2399,26 @@ pub async fn hybrid_search_combined(
     Path(table_name): Path<String>,
     ApiJson(request): ApiJson<HybridSearchRequest>,
 ) -> impl IntoResponse {
+    // A `text` component on a build without `text-bm25` used to be *dropped*, in
+    // `IntelligentIndexedStorage::hybrid_search`, where the engine is `None` when the feature is
+    // off -- and the dense half came back with a 200 on it, indistinguishable from a fusion that
+    // happened. That is the same defect `/hybrid_search` was fixed for ("it used to run the dense
+    // search, drop the other components, and return the result as if the fusion had happened"),
+    // and the two endpoints were answering it opposite ways.
+    //
+    // A body carrying only a vector still works: there is nothing to drop, so nothing to hide.
+    #[cfg(not(feature = "text-bm25"))]
+    {
+        if request.text.is_some() {
+            return ApiResponse::error(ApiError::new(
+                "FEATURE_DISABLED",
+                "This build has no full-text index, so the text half of a hybrid query cannot \
+                 be answered. Compile with --features text-bm25, or send the vector alone.",
+            ))
+            .into_response();
+        }
+    }
+
     // Validate inputs
     if request.vector.is_none() && request.text.is_none() {
         return ApiResponse::error(ApiError::new(

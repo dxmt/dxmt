@@ -48,6 +48,22 @@ SERVE_FLAGS=""
 _features=",$(echo "$DXMT_FEATURES" | tr ' ' ','), "
 case "$_features" in *,api-dashboard,*) SERVE_FLAGS="$SERVE_FLAGS --dashboard" ;; esac
 
+# What to hand pytest. `tests/api` unless the caller named files or directories, in which case
+# those are the run.
+#
+# This used to be the literal `tests/api "$@"`, so an argument meant to *narrow* the run was
+# appended to the whole directory and pytest collected the union -- `api_tests.sh -q
+# tests/api/test_dashboard.py` ran all 442 tests, not the one file. CI's dashboard job does
+# exactly that, on a server built with `api-dashboard` and no `text-bm25`, and the two hybrid
+# probes it thereby dragged in were failing.
+#
+# A flag and its value are not a path: `-k HybridSearchRequest` still runs the whole directory
+# filtered, which is what `-k` means.
+_targets="tests/api"
+for _arg in "$@"; do
+  case "$_arg" in -*) ;; *) [ -e "$_arg" ] && { _targets=""; break; } ;; esac
+done
+
 if [ "${DXMT_SKIP_BUILD:-0}" != "1" ]; then
   cargo build --bin vectordb ${DXMT_FEATURES:+--features "$DXMT_FEATURES"} || exit 1
 fi
@@ -125,7 +141,7 @@ for mode in $MODES; do
     # collapsed the pair into one name, which is what they always meant.
     DXMT_URL="http://127.0.0.1:$port" DXMT_STORAGE_MODE="$mode" DXMT_WAL_DIR="$wal_dir" \
     DXMT_BACKUP_ROOT="$backup_root" \
-      $PYTEST tests/api "$@"
+      $PYTEST $_targets "$@"
     rc=$?
     if [ "$rc" = 0 ]; then
       summary="$summary\n  $mode: PASS"

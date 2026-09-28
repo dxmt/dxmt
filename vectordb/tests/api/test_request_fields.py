@@ -137,8 +137,18 @@ def text(table, **body):
 
 
 def hybrid(table, **body):
+    """A hybrid body. `text` is **not** included by default -- the caller adds it.
+
+    It used to be hardcoded here, which put a text component into all ten probes, including the
+    six that are about `limit`, `filter`, `with_payload`, `with_vector`, `vector` and
+    `sparse_vector` and have nothing to do with the text arm. While `/search/hybrid` answered
+    200 on a build without `text-bm25` (dropping the text half silently) that was invisible.
+    Once it started refusing such a body with `FEATURE_DISABLED`, `needs_text()` did its job and
+    all ten skipped -- trading two honest failures for eight lost probes. Only the four that
+    assert something about the fusion of two arms need the feature.
+    """
     return post(f"/tables/{table}/search/hybrid",
-                {"vector": QUERY, "text": "widgets", "limit": 5, **body}, expect_ok=False)
+                {"vector": QUERY, "limit": 5, **body}, expect_ok=False)
 
 
 PROBES = {}
@@ -629,7 +639,7 @@ def _(table):
 
 @probe("HybridSearchRequest", "vector")
 def _(table):
-    assert ids(needs_text(hybrid(table, vector=VECTORS[0])))[0] == "r0"
+    assert ids(hybrid(table, vector=VECTORS[0]))[0] == "r0"
 
 
 @probe("HybridSearchRequest", "text")
@@ -643,13 +653,14 @@ def _(table):
 
 @probe("HybridSearchRequest", "limit")
 def _(table):
-    assert len(needs_text(hybrid(table, limit=2)).json()["data"]["hits"]) == 2
+    assert len(hybrid(table, limit=2).json()["data"]["hits"]) == 2
 
 
 @probe("HybridSearchRequest", "fusion_method")
 def _(table):
-    rrf = needs_text(hybrid(table, fusion_method="reciprocal_rank_fusion")).json()["data"]["hits"]
-    dbsf = needs_text(hybrid(table, fusion_method="dbsf")).json()["data"]["hits"]
+    rrf = needs_text(hybrid(table, text="widgets",
+                            fusion_method="reciprocal_rank_fusion")).json()["data"]["hits"]
+    dbsf = needs_text(hybrid(table, text="widgets", fusion_method="dbsf")).json()["data"]["hits"]
     assert [round(h["score"], 6) for h in rrf] != [round(h["score"], 6) for h in dbsf]
 
 
@@ -673,9 +684,9 @@ def _(table):
 
 @probe("HybridSearchRequest", "rrf_k")
 def _(table):
-    small = needs_text(hybrid(table, fusion_method="reciprocal_rank_fusion",
+    small = needs_text(hybrid(table, text="widgets", fusion_method="reciprocal_rank_fusion",
                               rrf_k=1)).json()["data"]["hits"]
-    large = needs_text(hybrid(table, fusion_method="reciprocal_rank_fusion",
+    large = needs_text(hybrid(table, text="widgets", fusion_method="reciprocal_rank_fusion",
                               rrf_k=600)).json()["data"]["hits"]
     assert [round(h["score"], 6) for h in small] != [round(h["score"], 6) for h in large]
 
@@ -684,30 +695,30 @@ def _(table):
 def _(table):
     # r4 is last on the dense ranking and owns sparse dimension 4, so the postings are the only
     # thing that can lift it.
-    without = ids(needs_text(hybrid(table, fusion_method="dbsf")))
-    with_sparse = ids(needs_text(hybrid(
+    without = ids(hybrid(table, fusion_method="dbsf"))
+    with_sparse = ids(hybrid(
         table, fusion_method="dbsf",
-        sparse_vector={"indices": [4], "values": [1.0], "dimension": 16})))
+        sparse_vector={"indices": [4], "values": [1.0], "dimension": 16}))
     assert with_sparse != without, f"the sparse half changed nothing: {with_sparse}"
 
 
 @probe("HybridSearchRequest", "filter")
 def _(table):
-    got = ids(needs_text(hybrid(table, limit=9, filter={"must": [
-        {"key": "topic", "operation": {"type": "Equal", "value": "beta"}}]})))
+    got = ids(hybrid(table, limit=9, filter={"must": [
+        {"key": "topic", "operation": {"type": "Equal", "value": "beta"}}]}))
     assert sorted(got) == ["r3", "r4"], got
 
 
 @probe("HybridSearchRequest", "with_payload")
 def _(table):
-    assert needs_text(hybrid(table, with_payload=True)).json()["data"]["hits"][0]["payload"]
-    assert needs_text(hybrid(table, with_payload=False)).json()["data"]["hits"][0]["payload"] is None
+    assert hybrid(table, with_payload=True).json()["data"]["hits"][0]["payload"]
+    assert hybrid(table, with_payload=False).json()["data"]["hits"][0]["payload"] is None
 
 
 @probe("HybridSearchRequest", "with_vector")
 def _(table):
-    assert needs_text(hybrid(table, with_vector=True)).json()["data"]["hits"][0]["vector"]
-    assert needs_text(hybrid(table, with_vector=False)).json()["data"]["hits"][0]["vector"] is None
+    assert hybrid(table, with_vector=True).json()["data"]["hits"][0]["vector"]
+    assert hybrid(table, with_vector=False).json()["data"]["hits"][0]["vector"] is None
 
 
 # ---- POST /tables/{t}/hybrid_search (the older endpoint) -------------------------------------

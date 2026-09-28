@@ -115,6 +115,41 @@ def test_an_absent_feature_says_so_rather_than_returning_nothing(text_table):
     assert "text-bm25" in error["message"], "the message should name the flag to compile with"
 
 
+def test_hybrid_refuses_a_text_half_it_cannot_answer(text_table):
+    """The same rule as above, on the endpoint where breaking it is hardest to notice.
+
+    `/search/text` with no feature has nothing to return but an error. `/search/hybrid` has the
+    dense half, and it used to return exactly that -- 200, a ranked page, `tookms`, everything a
+    fusion produces -- with the text component silently dropped in the storage layer, where
+    `full_text_engine` is `None` when the feature is off. A caller tuning `fusion_method` and
+    `vector_weight` against that page was tuning nothing, and had no way to find out.
+
+    That is the defect `/hybrid_search` was fixed for, and the two endpoints were answering it
+    opposite ways until 2026-09-28. It also defeated `test_request_fields.py`, whose
+    `needs_text()` decides to skip by looking for `FEATURE_DISABLED`: a 200 meant no skip, so
+    its two hybrid probes ran on a dense-only answer and failed -- which is how this was found,
+    in CI's dashboard job, whose server is built with `api-dashboard` and no `text-bm25`.
+
+    A body carrying only a vector still has to work on both builds: nothing is being dropped
+    there, so there is nothing to refuse.
+    """
+    vector_only = post(f"/tables/{text_table}/search/hybrid",
+                       {"vector": vector_for(0), "limit": 3}, expect_ok=False)
+    assert succeeded(vector_only), (
+        "a hybrid body with no text component must be answered whatever the build: "
+        f"{vector_only.status_code} {vector_only.text[:200]}"
+    )
+
+    with_text = post(f"/tables/{text_table}/search/hybrid",
+                     {"vector": vector_for(0), "text": "vector", "limit": 3}, expect_ok=False)
+    if succeeded(with_text):
+        return  # the feature is compiled in; the fusion tests below cover it
+    assert with_text.status_code == 501, f"expected 501, got {with_text.status_code}"
+    error = with_text.json()["error"]
+    assert error["code"] == "FEATURE_DISABLED"
+    assert "text-bm25" in error["message"], "the message should name the flag to compile with"
+
+
 def test_a_term_finds_the_document_that_contains_it(text_table):
     response = text_search(text_table, {"query": "quantization", "limit": 5})
     if feature_is_absent(response):

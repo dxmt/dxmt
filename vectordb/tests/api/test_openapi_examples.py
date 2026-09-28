@@ -76,7 +76,19 @@ NOT_RUN = {
     ("POST", "/tables/{t}/export"),
     ("POST", "/tables/import"),
 }
-MAY_BE_DISABLED = {("POST", "/tables/{t}/search/text")}
+#: Examples whose *documented body* needs an optional feature, so `FEATURE_DISABLED` is a
+#: correct answer rather than a refusal. `disabled_feature()` still fails the run when
+#: `DXMT_FEATURES` says the server has the feature, so this is not a way to stop looking.
+#:
+#: `/search/hybrid` joined the set on 2026-09-28, when that endpoint stopped answering 200 with
+#: the text half silently dropped. Its example carries `"text": "rust"`, so on a default build
+#: there is now nothing it can honestly return -- which is the point of the change, and this
+#: line is what keeps the walkthrough honest about it rather than the example being watered
+#: down to something a featureless build happens to accept.
+MAY_BE_DISABLED = {
+    ("POST", "/tables/{t}/search/text"),
+    ("POST", "/tables/{t}/search/hybrid"),
+}
 
 
 def spec_path(template):

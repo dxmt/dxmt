@@ -107,7 +107,7 @@ jobs:
       - name: Feature-gated test targets
         run: >
           cargo clippy --all-targets
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,text-bm25
           -- -D warnings
 
       # Compiling a test is not running it. Before this step the dataset, recall-metric and
@@ -115,10 +115,18 @@ jobs:
       # them to nothing -- and two of their tests went on importing types that had been taken
       # out of the crate, unnoticed, because the clippy step above was itself naming a feature that no
       # longer existed. Same feature list as the clippy step, so the two cannot drift.
+      # `text-bm25` is in this list for a reason that has nothing to do with the features above
+      # it. Two test *files* open with `#![cfg(feature = "text-bm25")]` --
+      # `restart_equivalence_test.rs` and `full_text_recovery_test.rs` -- and no job enabled it
+      # for `cargo test`: `verify` runs the default build, and this list did not name it. Both
+      # therefore reported `running 0 tests` everywhere, which is the failure mode the comment
+      # at the top of this file warns about and is invisible in a green log. The second of them
+      # is what guards the table-id / Tantivy-directory bug that left 135 orphaned index
+      # directories behind five tables.
       - name: Feature-gated tests
         run: >
           cargo test --tests
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,text-bm25
 
   build:
     name: release build
