@@ -1,14 +1,36 @@
 # Changelog
 
-Notable changes to DXMT VectorDB. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and the project aims at [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once there is
-something to be semantic about.
+Notable changes to DXMT VectorDB. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Nothing has been released yet.** `Cargo.toml` says `0.2.0`, no version has been published, and
-the `v0.2.0-*` tags in this repository are measurement checkpoints from benchmarking runs, not
-releases. Everything below is unreleased work on `main`.
+**What 1.0 promises, and what it does not.** The compatibility guarantee covers the HTTP API
+under `/api/v1` and the six clients' public surfaces: a breaking change there needs a major
+version. It does not cover anything `docs/SUPPORT_MATRIX.md` marks experimental, the cargo
+features that are off by default, the on-disk formats (which are versioned separately and
+migrate themselves), or the internals of the `dxmt-vectordb` crate as a library. Read that
+matrix before depending on a feature; it is kept current on purpose and is the answer to
+"can I use this", which is a different question from "does this exist".
+
+The `v0.2.0-*` tags in this repository are **not** releases -- they are measurement
+checkpoints from benchmarking runs, taken before anything was published. `v1.0.0` is the first
+release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-09-29
+
+First public release. Everything below was developed before any of it was published, so this
+entry is the whole history rather than a delta against a previous version.
+
+Every package in the repository carries this version: the server crate, the web console, and
+the six clients (Python, JavaScript, Rust, Go, LangChain, LlamaIndex). They were at four
+different numbers -- the JavaScript client was at `2.0.0`, ahead of the server -- and none had
+been published, so unifying them costs nothing now and removes the question of which client
+version goes with which server.
+
+`vectordb --version` exists as of this release. It answered `error: unexpected argument
+'--version' found` until the day of the tag, and it is the first thing anyone runs against a
+binary they were handed.
 
 ### Added
 

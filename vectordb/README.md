@@ -6,7 +6,7 @@ collection mode. Full-text search (Tantivy), GraphQL, WebSocket, Swagger and S3 
 build features — see [Feature flags](#feature-flags) — so a default build is the minimal
 supported single-node server and nothing more.
 
-> **Status: Alpha development, not production-ready.** Durability is a write-ahead log,
+> **Status: 1.0.** Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
 > Records and full vectors are **not** held in memory: with a WAL directory, which is the
 > default, they live in row files beside it (`wal/records/<table>.rec`,
@@ -488,7 +488,7 @@ make verify             # the full gate: fmt-check, clippy -D warnings, unit + a
 make verify-core        # the same without the full integration suite, for iterating
 ```
 
-The broader legacy scripts under `scripts/` are not part of the Alpha quality gate.
+The broader legacy scripts under `scripts/` are not part of the quality gate.
 
 Note that a default `cargo test` does not run the feature-gated suites — the benchmark,
 dataset, adaptive-index and LMDB tests compile to zero tests without their features. CI's
@@ -652,7 +652,7 @@ experimental, and what a feature has to have before it moves between the two.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures
   are logged without failing an already durable local write. Multi-process coordination and full
-  failure-injection coverage are not yet part of the Alpha contract.
+  failure-injection coverage are outside the 1.0 compatibility promise.
 - **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It rejects sparse/text fusion
   with `NOT_IMPLEMENTED` instead of silently discarding query components. For BM25 use
   `/search/text`; for real vector+text fusion use `/search/hybrid`.

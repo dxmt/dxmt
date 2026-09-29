@@ -1,6 +1,6 @@
 [package]
 name = "dxmt-vectordb"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["DXMT Team"]
 description = "A lightweight, horizontally scalable vector database with storage native architecture"

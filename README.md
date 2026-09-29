@@ -7,12 +7,18 @@ dispatch, hybrid retrieval, and a query language behind a REST API. Full-text se
 WebSocket and S3 are opt-in build features — a default build is the minimal supported
 single-node server and nothing more.
 
-> **Status: Alpha, not production-ready.** A write-ahead log plus periodic snapshots is the
-> durability story — `kill -9` and restart preserves your tables. Records and full vectors
-> live in row files beside the log; what stays resident is the graph, the quantization codes
-> and the id map, about 0.45 KB per 768-dimension row measured at 100 million. Read
-> [Known Limitations](vectordb/README.md#known-limitations) before depending on this for real
-> data.
+> **Status: 1.0.** A write-ahead log plus periodic snapshots is the durability story —
+> `kill -9` and restart preserves your tables. Records and full vectors live in row files
+> beside the log; what stays resident is the graph, the quantization codes and the id map,
+> about 0.45 KB per 768-dimension row measured at 100 million.
+>
+> The compatibility promise covers the HTTP API under `/api/v1` and the six clients' public
+> surfaces. It does **not** cover anything
+> [`docs/SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental, or the
+> cargo features that are off by default. That matrix answers "can I use this", which is a
+> different question from "does this exist", and
+> [Known Limitations](vectordb/README.md#known-limitations) is worth reading before you
+> depend on this for real data.
 
 ## Repository layout
 

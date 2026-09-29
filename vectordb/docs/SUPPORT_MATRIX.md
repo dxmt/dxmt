@@ -12,9 +12,10 @@ Everything below describes one process.
 Numbers quoted here were measured on one machine with the harness in this repository; the
 README carries the method beside each headline figure.
 
-## Supported Alpha Surface
+## What the 1.0 compatibility promise covers
 
-The following features are part of the intended single-node Alpha contract:
+A breaking change to anything in this table needs a major version. Everything here is
+single-node.
 
 | Area | Supported path | Notes |
 | --- | --- | --- |
@@ -30,7 +31,7 @@ The following features are part of the intended single-node Alpha contract:
 | Recovery | Snapshot load followed by WAL replay | A corrupt snapshot is a startup error after the covered WAL has been compacted. |
 | Durability failure | Mutations return HTTP 503 and the process becomes read-only until restart | The failed mutation is not acknowledged; it may have reached memory and is not guaranteed to survive recovery. `snapshot` and `backup` also refuse in this state — deliberately, so an unacknowledged in-memory write cannot become a new durable frontier — so a backup has to be taken from the on-disk WAL and snapshot directory instead. |
 | Text search | Tantivy/BM25 via `/search/text` | Requires the `text-bm25` feature and table text configuration. |
-| Hybrid search | Vector/text endpoint `/search/hybrid` | Sparse-vector fusion is not part of the Alpha contract. |
+| Hybrid search | Vector/text endpoint `/search/hybrid` | Sparse-vector fusion is outside the promise. |
 | Client surface | Python, JavaScript, Go and Rust clients | Every route each one calls is listed in `tests/api_contract_test.rs` and served by the router, and all four run against a live server in CI. The LangChain, LlamaIndex and LangGraph adapters go through the Python client and have live suites of their own. |
 | Authentication | `DXMT_API_KEY`, optional | Unset means open, which is what every comparable database ships. When set, every route but `/live`, `/ready` and `/health` requires `api-key` or `Authorization: Bearer`, compared in constant time. Every client can send it. |
 | Request validation | Unknown fields and parameters are refused | A body or query string carrying a field the server does not have is a 400 naming it, rather than being accepted and ignored — which is how `mode`, `alpha` and `named_vectors` each spent a period being sent, dropped, and answered wrongly. |
@@ -74,7 +75,8 @@ feature -- every capability below is in the HTTP API.
 
 ## Experimental or Not Yet Supported
 
-These modules may compile or have unit tests, but they are not part of the stable Alpha promise:
+These modules may compile or have unit tests, and are **not** covered by the 1.0 promise.
+They can change or be removed in a minor release:
 
 | Area | Current status | Required before promotion |
 | --- | --- | --- |
@@ -126,7 +128,7 @@ covered by a compacted WAL, so the snapshot directory must be included in backup
 
 ## Configuration Contract
 
-For the Alpha release, the documented persistence controls are:
+The documented persistence controls are:
 
 ```text
 DXMT_WAL_DIR

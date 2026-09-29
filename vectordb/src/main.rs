@@ -35,6 +35,10 @@ use dxmt_vectordb::{
 #[derive(Parser)]
 #[command(name = "vectordb")]
 #[command(about = "Unified VectorDB CLI", long_about = None)]
+// `vectordb --version` answered `error: unexpected argument '--version' found` right up to
+// the 1.0.0 tag. It is the first thing anyone runs against a binary they were handed, and the
+// only way to tell two builds apart in a bug report. From the manifest, so it cannot drift.
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

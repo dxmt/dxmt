@@ -145,9 +145,14 @@ use crate::types::{
     ),
     info(
         title = "DXMT VectorDB API",
-        description = "The HTTP surface of DXMT VectorDB. Alpha: see the repository's README \
-                       for what is supported and what is experimental.",
-        version = "0.2.0",
+        description = "The HTTP surface of DXMT VectorDB. See docs/SUPPORT_MATRIX.md for what \
+                       is supported and what is experimental.",
+        // `version` is deliberately absent: utoipa defaults it to `CARGO_PKG_VERSION`.
+        // Typing it here made a second copy of the version number, and a second copy drifts
+        // -- it still said 0.2.0 while `Cargo.toml` went to 1.0.0, which would have shipped
+        // a document describing the previous release to every generated client. The macro
+        // wants a string literal, so `env!()` is not an option; leaving it out is better
+        // than either.
         contact(
             name = "DXMT Team",
             url = "https://github.com/dxmt/dxmt"

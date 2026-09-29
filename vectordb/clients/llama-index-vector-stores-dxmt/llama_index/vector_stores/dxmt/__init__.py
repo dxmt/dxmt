@@ -18,4 +18,4 @@ __all__ = [
     "dxmt_hit_to_node",
 ]
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
