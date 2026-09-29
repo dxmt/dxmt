@@ -276,6 +276,40 @@ class DXMTVectorStore(BasePydanticVectorStore):
         # TODO: Implement with async client when needed
         return self.add(nodes, **kwargs)
 
+    def _ids_matching(self, dxmt_filter: dict) -> List[str]:
+        """Every record id the filter selects.
+
+        Three things this replaces, each of which was a defect in both callers:
+
+        **It reads the answer correctly.** The old code did `results.get("hits", [])` on the
+        return of `client.search`, which is a `list`. `query()` twenty lines below has the
+        comment "the DXMT SDK returns a list of hits directly, not a dict" -- the same file
+        knew. So `delete()` and `delete_nodes(filters=...)` raised
+        `AttributeError: 'list' object has no attribute 'get'` and deleted nothing, on every
+        call there has ever been. The unit tests mock the client, and a `MagicMock` does have
+        `.get()`; the integration tests cover `delete_nodes(node_ids=...)`, which takes the
+        other branch. Neither could see it.
+
+        **It scrolls instead of searching with a zero vector.** Selecting rows by filter is
+        not a nearest-neighbour question, and the old code faked one with `[0.0] * dimension`
+        -- a vector with no direction, which under this store's default cosine metric orders
+        the results arbitrarily. That did not matter while the whole match set came back, and
+        it mattered a great deal at the `k=10000` cap: past ten thousand rows the cap silently
+        decided *which* records were deleted, by an arbitrary ordering. `scroll` pages with a
+        cursor, so there is no cap and no vector.
+
+        **It does not swallow the error.** Both callers ended in `except DXMTError: pass`, so
+        a delete that failed for any reason at all reported success. A missing table is the
+        one case where doing nothing is right -- deleting from a table that is not there has
+        already achieved what the caller asked for -- and that case is now the only one caught.
+        """
+        try:
+            return [row["id"] for row in self.client.scroll(self.table_name, filter=dxmt_filter)]
+        except DXMTError as e:
+            if "TABLE_NOT_FOUND" in str(e):
+                return []
+            raise
+
     def delete(self, ref_doc_id: str, **delete_kwargs: Any) -> None:
         """Delete nodes by ref_doc_id.
 
@@ -286,35 +320,11 @@ class DXMTVectorStore(BasePydanticVectorStore):
             ref_doc_id: Reference document ID to delete.
             **delete_kwargs: Additional delete options.
         """
-        # Use metadata filter to find matching records
-        # We need to get records with this ref_doc_id
-        # Since DXMT doesn't have a direct "delete by filter" endpoint,
-        # we need to query first, then delete by IDs
-
-        try:
-            # Create a dummy query vector
-            dummy_vector = [0.0] * (self.dimension or 1536)
-
-            # Search with filter to find matching records
-            filter_dict = {"ref_doc_id": ref_doc_id}
-
-            results = self.client.search(
-                self.table_name,
-                vector=dummy_vector,
-                k=10000,  # Large number to get all matches
-                filter=filter_dict,
-            )
-
-            # Extract IDs
-            ids = [hit["id"] for hit in results.get("hits", [])]
-
-            # Delete by IDs if any found
-            if ids:
-                self.client.delete_records(self.table_name, ids)
-
-        except DXMTError:
-            # Table might not exist or other error
-            pass
+        # There is no delete-by-filter endpoint, so this selects the ids first and then
+        # deletes them.
+        ids = self._ids_matching({"ref_doc_id": ref_doc_id})
+        if ids:
+            self.client.delete_records(self.table_name, ids)
 
     def delete_nodes(
         self,
@@ -334,24 +344,9 @@ class DXMTVectorStore(BasePydanticVectorStore):
             self.client.delete_records(self.table_name, node_ids)
 
         elif filters is not None:
-            # Delete by filter - query first, then delete
-            try:
-                dxmt_filter = convert_llamaindex_filters_to_dxmt(filters)
-                dummy_vector = [0.0] * (self.dimension or 1536)
-
-                results = self.client.search(
-                    self.table_name,
-                    vector=dummy_vector,
-                    k=10000,
-                    filter=dxmt_filter,
-                )
-
-                ids = [hit["id"] for hit in results.get("hits", [])]
-                if ids:
-                    self.client.delete_records(self.table_name, ids)
-
-            except DXMTError:
-                pass
+            ids = self._ids_matching(convert_llamaindex_filters_to_dxmt(filters))
+            if ids:
+                self.client.delete_records(self.table_name, ids)
 
     def clear(self) -> None:
         """Clear all nodes from table.
@@ -404,7 +399,11 @@ class DXMTVectorStore(BasePydanticVectorStore):
             # of the score that comes from the vector side. Passing it unconditionally would
             # force that method on every caller, including the ones who never set it -- so
             # when it is unset the server stays on its own default fusion (`dbsf`), which
-            # normalises each side by its distribution and needs no weight.
+            # normalises each side by its distribution and needs no weight. Passing
+            # `query.alpha` straight through is what implements that: it defaults to `None`,
+            # and the SDK's `_fusion_body` omits both fields for `None` rather than inventing
+            # a weight. Verified rather than assumed -- `_fusion_body(None, None, None)`
+            # returns `{}`.
             results = self.client.hybrid_search(
                 self.table_name,
                 vector=query.query_embedding,
@@ -426,8 +425,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 filter=dxmt_filter,
             )
 
-        else:
-            # Standard vector search (DEFAULT mode)
+        elif query.mode == VectorStoreQueryMode.DEFAULT:
             if not query.query_embedding:
                 raise ValueError("query_embedding required for vector search")
 
@@ -436,6 +434,25 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 vector=query.query_embedding,
                 k=query.similarity_top_k,
                 filter=dxmt_filter,
+            )
+
+        else:
+            # `VectorStoreQueryMode` has nine values and this store serves three. The other
+            # six used to land in this branch when it was a bare `else` reading "standard
+            # vector search (DEFAULT mode)" -- so asking for MMR, SPARSE, SEMANTIC_HYBRID or
+            # any of the regression modes returned a plain dense page, with no diversity, no
+            # sparse arm, no warning and no error. A caller has no way to tell that from a
+            # result that honoured the mode, which is the worst shape a wrong answer can take.
+            #
+            # Two of these are worth wiring rather than refusing, and are not wired yet:
+            # the server has a real MMR (`lambda_mult`/`fetch_k`, reachable through the SDK's
+            # `search(mmr=...)`, and LlamaIndex hands the knob over as `query.mmr_threshold`),
+            # and it has `POST /search/sparse` behind the SDK's `sparse_search`. Until one of
+            # them is connected, saying so is the only honest answer.
+            raise NotImplementedError(
+                f"DXMTVectorStore does not serve VectorStoreQueryMode.{query.mode.name}. "
+                f"Supported: DEFAULT, HYBRID, TEXT_SEARCH (the last two need a server built "
+                f"with --features text-bm25)."
             )
 
         # Convert results to nodes

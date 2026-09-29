@@ -297,22 +297,28 @@ class TestDXMTVectorStoreQuery:
 
 
 class TestDXMTVectorStoreDelete:
-    """Tests for deleting nodes from vector store."""
+    """Tests for deleting nodes from vector store.
+
+    Two of these used to set `search.return_value = {"hits": [...]}` -- **a dict**, where the
+    SDK returns a `list`. So the mock asserted the author's belief about the client rather
+    than the client, and `delete()` passed here while raising
+    `AttributeError: 'list' object has no attribute 'get'` against every real server there
+    has ever been. `tests/test_integration.py::TestDeletionActuallyDeletes` is the half of
+    this that a mock cannot do: it counts rows on a server afterwards.
+    """
 
     def test_delete_by_ref_doc_id(self, vector_store, mock_dxmt_client):
         """Test deleting by reference document ID."""
-        # Setup mock response for search
-        mock_dxmt_client.search.return_value = {
-            "hits": [
-                {"id": "node1", "score": 1.0},
-                {"id": "node2", "score": 1.0},
-            ]
-        }
+        # `scroll` yields records, one dict each -- the shape `DXMTClient.scroll` returns.
+        mock_dxmt_client.scroll.return_value = iter([
+            {"id": "node1", "payload": {}},
+            {"id": "node2", "payload": {}},
+        ])
 
         vector_store.delete("doc123")
 
-        # Should have searched with ref_doc_id filter
-        mock_dxmt_client.search.assert_called_once()
+        mock_dxmt_client.scroll.assert_called_once()
+        assert mock_dxmt_client.scroll.call_args.kwargs["filter"] == {"ref_doc_id": "doc123"}
 
         # Should have deleted the found nodes
         mock_dxmt_client.delete_records.assert_called_once_with(
@@ -333,10 +339,7 @@ class TestDXMTVectorStoreDelete:
 
     def test_delete_nodes_by_filter(self, vector_store, mock_dxmt_client):
         """Test deleting nodes by metadata filter."""
-        # Setup mock response
-        mock_dxmt_client.search.return_value = {
-            "hits": [{"id": "node1", "score": 1.0}]
-        }
+        mock_dxmt_client.scroll.return_value = iter([{"id": "node1", "payload": {}}])
 
         filters = MetadataFilters(
             filters=[
@@ -346,11 +349,8 @@ class TestDXMTVectorStoreDelete:
 
         vector_store.delete_nodes(filters=filters)
 
-        # Should have searched with filter
-        mock_dxmt_client.search.assert_called_once()
-
-        # Should have deleted found nodes
-        mock_dxmt_client.delete_records.assert_called_once()
+        mock_dxmt_client.scroll.assert_called_once()
+        mock_dxmt_client.delete_records.assert_called_once_with("test_table", ["node1"])
 
     def test_clear(self, vector_store, mock_dxmt_client):
         """Test clearing all nodes (deleting table)."""

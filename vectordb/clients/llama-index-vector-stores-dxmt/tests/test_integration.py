@@ -8,7 +8,7 @@ import pytest
 import os
 from typing import List
 
-from llama_index.core import VectorStoreIndex, Document
+from llama_index.core import Document, StorageContext, VectorStoreIndex
 from llama_index.core.llms import MockLLM
 from llama_index.core.schema import TextNode
 from llama_index.core.vector_stores.types import (
@@ -408,6 +408,106 @@ class TestEndToEndRAG:
 
         # The document that shares words with the question comes back first.
         assert "javascript" in response.source_nodes[0].node.text.lower()
+
+
+class TestDeletionActuallyDeletes:
+    """`delete()` and `delete_nodes(filters=...)` raised on every call there had ever been.
+
+    Both did `results.get("hits", [])` on the return of `client.search`, which is a `list`.
+    Nothing caught it: the 22 unit tests hand the store a `MagicMock`, and a `MagicMock` has
+    `.get()`; the integration test above covers `delete_nodes(node_ids=...)`, which takes the
+    other branch of the same method. So the one branch that was broken was also the only one
+    with no coverage against a real server.
+
+    These assert on the *row count the server reports*, not on the call having been made.
+    A test that asserts `delete_records` was called is a test a `MagicMock` passes.
+    """
+
+    def _rows(self, store) -> int:
+        return len(list(store.client.scroll(store.table_name)))
+
+    def test_delete_by_ref_doc_id_removes_exactly_that_document(
+        self, vector_store, embed_model
+    ):
+        keep = Document(text="A document that must survive.", metadata={"keep": True})
+        drop = Document(text="A document that must be removed.", metadata={"keep": False})
+        index = VectorStoreIndex.from_documents(
+            [keep, drop],
+            storage_context=StorageContext.from_defaults(vector_store=vector_store),
+            embed_model=embed_model,
+        )
+        assert self._rows(vector_store) == 2
+
+        vector_store.delete(drop.doc_id)
+
+        remaining = list(vector_store.client.scroll(vector_store.table_name))
+        assert len(remaining) == 1, (
+            f"delete() left {len(remaining)} rows; it used to leave both and raise "
+            f"AttributeError on the way out"
+        )
+        assert "survive" in str(remaining[0].get("payload", {}))
+        del index
+
+    def test_delete_by_filter_removes_only_the_matching_rows(
+        self, vector_store, embed_model
+    ):
+        nodes = []
+        for i, lang in enumerate(["en", "fr", "en"]):
+            node = TextNode(text=f"document number {i}", metadata={"lang": lang})
+            node.embedding = embed_model.get_text_embedding(node.get_content())
+            nodes.append(node)
+        vector_store.add(nodes)
+        assert self._rows(vector_store) == 3
+
+        vector_store.delete_nodes(
+            filters=MetadataFilters(filters=[MetadataFilter(key="lang", value="fr")])
+        )
+
+        rows = list(vector_store.client.scroll(vector_store.table_name))
+        assert len(rows) == 2, f"expected the two `en` rows, got {len(rows)}"
+        assert all(r["payload"].get("lang") == "en" for r in rows), rows
+
+    def test_deleting_from_a_missing_table_is_a_no_op_and_everything_else_raises(
+        self, dxmt_host, dxmt_port
+    ):
+        """The one case worth swallowing, and the reason the blanket `except` was wrong.
+
+        Removing a document from a table that does not exist has already achieved what the
+        caller asked for. Every other failure used to be swallowed by the same `except
+        DXMTError: pass`, so a delete that could not run reported success.
+        """
+        absent = DXMTVectorStore(
+            table_name="llamaindex_no_such_table_zzz",
+            dimension=DIMENSION,
+            host=dxmt_host,
+            port=dxmt_port,
+        )
+        absent.delete("anything")  # must not raise
+
+    def test_an_unsupported_query_mode_is_refused_rather_than_answered(
+        self, vector_store, embed_model
+    ):
+        """Six of LlamaIndex's nine modes used to fall through to a plain dense search.
+
+        MMR is the one that shows why it matters: the caller asked for diversity, got none,
+        and the result is indistinguishable from one that honoured the mode.
+        """
+        node = TextNode(text="anything at all", metadata={})
+        node.embedding = embed_model.get_text_embedding(node.get_content())
+        vector_store.add([node])
+        q = embed_model.get_query_embedding("anything")
+
+        for mode in (
+            VectorStoreQueryMode.MMR,
+            VectorStoreQueryMode.SPARSE,
+            VectorStoreQueryMode.SEMANTIC_HYBRID,
+        ):
+            with pytest.raises(NotImplementedError, match=mode.name):
+                vector_store.query(
+                    VectorStoreQuery(
+                        query_embedding=q, similarity_top_k=2, mode=mode, query_str="x"
+                    )
+                )
 
 
 if __name__ == "__main__":
