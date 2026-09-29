@@ -4,15 +4,40 @@ DXMT VectorDB integration for LlamaIndex, providing a powerful vector store back
 
 ## Features
 
-- ✅ **Vector Similarity Search** - Fast and accurate similarity search with multiple distance metrics
-- ✅ **Hybrid Search** - Combine vector and full-text search for better results
-- ✅ **Metadata Filtering** - Filter results using complex metadata queries
-- ✅ **Multiple Index Types** - HNSW, IVF, IVF-PQ, LSH, BruteForce
-- ✅ **Batch Operations** - Optimized bulk insert with multiple modes
-- ✅ **Async Support** - Full async/await support for all operations
-- ✅ **Multiple Distance Metrics** - Cosine, Euclidean, Manhattan, Dot product
-- ✅ **Sparse Vectors** - Support for sparse vector representations
-- ✅ **Cloud-Native** - Object storage native architecture (S3, MinIO)
+- **Vector similarity search** — cosine, euclidean, manhattan and dot.
+- **Metadata filtering** — `MetadataFilters` translated to DXMT's filter language, including
+  `and`/`or` nesting.
+- **MMR** (`VectorStoreQueryMode.MMR`) — reranked **on the server**, not by a client-side
+  postprocessor, so the diversification draws on candidates that were never sent over the
+  wire. `mmr_threshold` is the usual lambda; `fetch_k=` sets how many candidates it reranks.
+- **Sparse search** (`VectorStoreQueryMode.SPARSE`) — pass
+  `DXMTVectorStore(..., sparse_encoder=fn)`, where `fn` maps a string to
+  `{"indices": [...], "values": [...], "dimension": n}`. The same encoder runs on insert.
+- **Hybrid and full-text search** — need a server built with `--features text-bm25`, which is
+  **not** the default. Without it they raise `FEATURE_DISABLED` rather than quietly returning
+  the vector half.
+- **Batch inserts**, sized by `batch_size`.
+
+A query mode this store does not serve — `SEMANTIC_HYBRID`, `SVM`, the regression modes —
+raises `NotImplementedError` naming the mode. It used to answer them with a plain dense
+search, which a caller cannot tell from a result that honoured the mode.
+
+### What this integration does not do
+
+Listed because the list above used to include them.
+
+- **Async is not really async.** `aquery` and `async_add` call the synchronous methods, so
+  every `await` blocks the event loop: twenty concurrent `aquery` calls take 14× the time of
+  one, and a coroutine scheduled every millisecond gets zero turns while a query is in
+  flight. Use the sync methods and your own thread pool until this is wired to the SDK's
+  async client, which does exist. (The LangChain integration in this repository is wired and
+  measures 1.0×.)
+- **No choice of index type.** `index_type=` is accepted and does not decide anything: the
+  server picks the index from the table's size and settings and overwrites the request. There
+  is no LSH implementation at all, and `ivf_pq` is refused by the server by name.
+- **Object storage is not a property of this package.** It is an HTTP client; where the
+  server keeps its data is the server's business, and its S3 backend is a non-default build
+  feature.
 
 ## Installation
 

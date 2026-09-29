@@ -136,15 +136,33 @@ Ignored when you pass `client=` — configure that client instead.
 
 ## Features
 
-- ✅ **Vector Similarity Search**: Multiple distance metrics (Cosine, Euclidean, Manhattan, Dot Product)
-- ✅ **Multiple Index Types**: HNSW, IVF, IVF-PQ, LSH, Brute Force
-- ✅ **Full-Text Search**: BM25 with Tantivy integration
-- ✅ **Hybrid Search**: Combine vector similarity + full-text search
-- ✅ **Chinese Text Support**: Jieba tokenizer for Chinese word segmentation
-- ✅ **Metadata Filtering**: Filter results by metadata
-- ✅ **Async Support**: Async operations for better performance
-- ✅ **Batch Operations**: Multiple insert modes for optimization
-- ✅ **Quantization**: Scalar, Product, Binary quantization support
+- **Vector similarity search** — cosine, euclidean, manhattan and dot. `dot_product`,
+  `dotproduct`, `inner_product`, `ip`, `l2` and `l1` are accepted as aliases, because those
+  are the spellings other vector stores use.
+- **Metadata filtering** — equality, comparison, `in`/`not in`, `contains`, and `and`/`or`
+  nesting.
+- **MMR** — `max_marginal_relevance_search`, reranked on the server.
+- **Async** — `aadd_texts`, `asimilarity_search`, `adelete` and the rest go through the SDK's
+  async client, so concurrent calls are actually concurrent. Measured: twenty concurrent
+  searches take 1.0× the time of one, and the event loop keeps running during a query.
+- **Batch inserts**, sized by `batch_size`.
+- **Full-text and hybrid search** — needs a server built with `--features text-bm25`, which
+  is **not** the default. Without it these raise `FEATURE_DISABLED` rather than silently
+  returning the vector half.
+
+### What this integration does not do
+
+Listed because the list above used to include them.
+
+- **No choice of index type.** `index_type=` is accepted and does not decide anything: the
+  server picks the index from the table's size and settings and overwrites the request. There
+  is no LSH implementation at all, and `ivf_pq` is refused by the server by name.
+- **No quantization controls.** The server quantizes on its own schedule; nothing here
+  configures it.
+- **No Chinese tokenizer.** A jieba tokenizer exists in the server and is registered with
+  Tantivy, but every text field is built with the default tokenizer, so Chinese text is not
+  segmented and BM25 over it finds little. Dense vector search is unaffected — it depends on
+  your embedding model, not on this.
 
 ## Advanced Usage
 
@@ -278,17 +296,18 @@ answer = qa_chain.invoke("What is DXMT VectorDB?")
 
 ## Performance
 
-DXMT VectorDB offers excellent performance characteristics:
+A table of latency, throughput and memory figures used to sit here, attributed to "standard
+server hardware" — no machine, no corpus, no date, and an `IVF-PQ` row for an index this
+server does not build. Numbers like that cannot be checked, reproduced or aged, so they are
+not numbers.
 
-| Metric | Value | Configuration |
-|--------|-------|---------------|
-| **Query Latency (p50)** | ~15ms | 1M vectors, 1536-dim, k=10 |
-| **Query Latency (p95)** | ~38ms | 1M vectors, 1536-dim, k=10 |
-| **Insert Throughput** | ~1500 docs/sec | Single server |
-| **Memory Usage** | ~5.5 GB | 1M vectors, HNSW index |
-| **Memory Usage (IVF-PQ)** | ~2 GB | 1M vectors, compressed |
+What is measured lives with the thing that measures it: `vectordb/README.md` carries the
+restart-and-query table across 10K to 10M rows, with the machine and the corpus stated, and
+`vectordb/docs/SUPPORT_MATRIX.md` carries recall per dataset. Both move when the code does.
 
-*Benchmarks run on standard server hardware. Performance may vary based on configuration and dataset.*
+The figure worth knowing *here*, because it is a property of this package rather than of the
+server: the async methods are genuinely concurrent — twenty concurrent `asimilarity_search`
+calls take 1.0× the wall time of one.
 
 ### Performance Tuning
 
