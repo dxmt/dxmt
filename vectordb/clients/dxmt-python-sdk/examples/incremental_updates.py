@@ -6,7 +6,7 @@
     - Error handling with retry logic
     - Real-world CDC patterns
     - Comprehensive statistics
-    See INCREMENTAL_UPDATES_IMPROVEMENTS.md for details.
+    Handles re-indexing, deletes and upserts without rebuilding the table.
 
 This example demonstrates:
 1. Updating vector embeddings when content changes

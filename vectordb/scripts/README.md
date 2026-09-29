@@ -12,10 +12,10 @@ tells you quickly.
 
 | script | what it does | named in |
 | --- | --- | --- |
-| `api_tests.sh` | starts a server per storage mode and runs `tests/api` against each | `make test-api`, CI, both CLAUDE.md files |
-| `run_wal_tests.sh` | the WAL recovery targets | `vectordb/CLAUDE.md` |
+| `api_tests.sh` | starts a server per storage mode and runs `tests/api` against each | `make test-api`, and three CI jobs |
+| `run_wal_tests.sh` | the WAL recovery targets | run by hand |
 | `make_compat_fixture.py` | writes a data directory for `tests/compat` to open with a later build | `CONTRIBUTING.md`, `tests/compat/test_compat.py` |
-| `soak.py` | end-to-end soak against a real `vectordb serve` | the 24-hour soak in the design notes |
+| `soak.py` | end-to-end soak against a real `vectordb serve` | run by hand |
 | `soak_long.py` | the same, over hours to a day | |
 | `http_ingest_rate.py` | ingest rate over HTTP, plus recall and the quantization that lands after the load | `README.md`'s measured-performance section |
 

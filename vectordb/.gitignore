@@ -126,3 +126,9 @@ pdf/
 *.pem
 *.key
 gcp_bucket.config
+
+# Demo corpora the examples download at run time. They are other people's writing -- the
+# LlamaIndex example fetches Paul Graham's essay from run-llama/llama_index -- and are not
+# covered by this project's licence. A vendored copy was removed before the first public
+# release; this keeps the next `git add` from putting it back.
+clients/llama-index-vector-stores-dxmt/examples/data/

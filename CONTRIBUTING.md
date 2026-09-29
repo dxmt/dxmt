@@ -142,9 +142,18 @@ A few conventions this repository holds to, which reviewers will ask about:
 - **No credentials, ever, not even in a throwaway script.** Read them from the environment
   (`DXMT_AWS_ACCESS_KEY_ID`, `OPENAI_API_KEY`, …).
 - **Paste real command output into the commit message.** Not "this should work".
-- **No progress-report markdown.** Files like `*_SUMMARY.md`, `*_REPORT.md`, `*_COMPLETE.md`
-  accumulated to 89 of them once and were deleted. Durable knowledge goes in `docs/` or a
-  README; everything else belongs in the pull request description.
+- **No progress-report markdown.** Not a file whose subject is the work rather than the
+  software: an improvement summary, an evaluation, a validation report, a dated list of
+  issues found, anything opening with a status line and a tick. 89 of them accumulated once
+  and were deleted. Durable knowledge goes in `docs/` or a README; everything else belongs in
+  the pull request description.
+
+  That deletion matched on `*_SUMMARY.md`, `*_REPORT.md` and `*_COMPLETE.md`, and six files
+  survived it by being named something else -- `_IMPROVEMENTS`, `_EVALUATION`, `_VALIDATED`,
+  `_ISSUES`, and one called `测试报告.md`, which is "test report" in a language the patterns
+  did not cover. They were found on the way to the first public push, still asserting
+  "✅ 所有测试通过" and "Overall Rating: 8.5/10" from January. **The rule is about what the
+  file is, not what it is called**, which is why it is written that way now.
 
 ## Reporting a bug
 

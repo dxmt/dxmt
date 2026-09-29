@@ -181,6 +181,6 @@ source venv/bin/activate
 
 ## 更多信息
 
-- 完整测试报告: `TEST_REPORT.md`
+- 测试结果以 CI 为准：`.github/workflows/ci.yml` 的 `sdk-live` job 会跑这个套件
 - 验证报告: `SDK_VERIFICATION_REPORT.md`
 - 主文档: `README.md`

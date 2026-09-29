@@ -175,6 +175,12 @@ python hybrid_search.py
 
 ### 5. Paul Graham Essay (`paul_graham_essay.py`)
 
+> The essay is **not** distributed with this repository. The script downloads it from
+> `run-llama/llama_index` on first run, into `data/paul_graham/`, which is gitignored. It is
+> Paul Graham's writing, not ours, and it is not covered by this project's Apache-2.0
+> licence — a vendored copy was removed before the first public release for that reason.
+> Any other text file works: point `SimpleDirectoryReader` at a directory of your own.
+
 **What it demonstrates:**
 - Classic LlamaIndex document-indexing example
 - Loading and indexing long documents
