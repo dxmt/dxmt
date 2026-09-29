@@ -37,16 +37,19 @@ from langchain_dxmt import DXMTVectorDB
 DXMT_HOST = os.getenv("DXMT_HOST", "localhost")
 DXMT_PORT = int(os.getenv("DXMT_PORT", "9999"))
 
-# Skip all tests if langchain-tests not installed
+# The import above already says `langchain_tests`; these messages named
+# `langchain-standard-tests`, which is what the package used to be called and is not on PyPI
+# under that name -- so anyone who followed the instruction got "No matching distribution"
+# and the official conformance suite stayed skipped.
 pytestmark = pytest.mark.skipif(
     not LANGCHAIN_TESTS_AVAILABLE,
-    reason="langchain-standard-tests not installed. Install with: pip install langchain-standard-tests",
+    reason="langchain-tests not installed. Install with: pip install langchain-tests",
 )
 
 
 @pytest.mark.skipif(
     not LANGCHAIN_TESTS_AVAILABLE,
-    reason="langchain-standard-tests not available",
+    reason="langchain-tests not available",
 )
 class TestDXMTVectorStoreIntegrationTests(VectorStoreIntegrationTests):
     """Official LangChain VectorStore integration tests for DXMT.

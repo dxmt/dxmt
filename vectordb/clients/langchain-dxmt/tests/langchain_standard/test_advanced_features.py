@@ -22,12 +22,15 @@ from typing import Any, Generator
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 # `langchain-openai` is an optional dev extra, not a dependency of this package. Imported at
 # module scope it turns "the extra is not installed" into a collection error that fails the
 # whole run, unit tests included.
-OpenAIEmbeddings = pytest.importorskip(
-    "langchain_openai", reason="langchain-openai is not installed"
-).OpenAIEmbeddings
+# Local, deterministic, no key. These files used to `importorskip("langchain_openai")` and
+# then skip the whole module again when `OPENAI_API_KEY` was unset, so none of them had ever
+# run -- not here, not in CI. `DXMT_TEST_EMBEDDING=openai` still runs them against a real
+# model. See `tests/local_embedding.py`.
+from local_embedding import embedding_dimension, make_embeddings
 
 from langchain_dxmt import DXMTVectorDB, DXMTError
 
@@ -35,18 +38,13 @@ from langchain_dxmt import DXMTVectorDB, DXMTError
 # Configuration
 DXMT_HOST = os.getenv("DXMT_HOST", "localhost")
 DXMT_PORT = int(os.getenv("DXMT_PORT", "9999"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-pytestmark = pytest.mark.skipif(
-    not OPENAI_API_KEY,
-    reason="OPENAI_API_KEY not set - skipping advanced feature tests",
-)
 
 
 @pytest.fixture
-def embeddings() -> OpenAIEmbeddings:
-    """Create OpenAI embeddings instance."""
-    return OpenAIEmbeddings()
+def embeddings() -> Embeddings:
+    """Deterministic by default; a real model when DXMT_TEST_EMBEDDING=openai."""
+    return make_embeddings()
 
 
 @pytest.fixture
@@ -59,13 +57,13 @@ def test_table_name() -> str:
 @pytest.fixture
 def vectorstore(
     test_table_name: str,
-    embeddings: OpenAIEmbeddings,
+    embeddings: Embeddings,
 ) -> Generator[DXMTVectorDB, None, None]:
     """Create vector store for testing."""
     store = DXMTVectorDB(
         table_name=test_table_name,
         embedding=embeddings,
-        dimension=1536,
+        dimension=embedding_dimension(),
         host=DXMT_HOST,
         port=DXMT_PORT,
     )
@@ -85,7 +83,7 @@ class TestMMRSearch:
     def test_mmr_search_type(
         self,
         vectorstore: DXMTVectorDB,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test MMR search for diversity.
 
@@ -373,7 +371,7 @@ class TestValidationErrors:
     def test_dimension_mismatch(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test that embedding dimension must match table dimension."""
         # Create store with wrong dimension

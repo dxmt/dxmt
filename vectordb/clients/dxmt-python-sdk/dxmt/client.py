@@ -1015,6 +1015,77 @@ class DXMTClient:
         response.raise_for_status()
         return response.json().get("data", {}).get("hits", [])
 
+    @staticmethod
+    def _sparse_body(
+        sparse_vector: dict[str, Any],
+        limit: int,
+        filter: Optional[Filter],
+        with_payload: bool,
+        with_vector: bool,
+        payload_fields: Optional[list[str]],
+        score_threshold: Optional[float],
+    ) -> dict[str, Any]:
+        """The request body for `/search/sparse`, shared by the sync and async pair.
+
+        One function, because the two used to be the place where a field gets added to one
+        call and not the other, and nothing notices until a caller on the async path finds
+        an option that silently does nothing.
+        """
+        body: dict[str, Any] = {
+            "sparse_vector": sparse_vector,
+            "limit": limit,
+            "with_payload": with_payload,
+            "with_vector": with_vector,
+        }
+        converted = convert_simple_filter_to_dxmt(filter)
+        if converted is not None:
+            body["filter"] = converted
+        if payload_fields is not None:
+            body["payload_fields"] = payload_fields
+        if score_threshold is not None:
+            body["score_threshold"] = score_threshold
+        return body
+
+    async def asparse_search(
+        self,
+        table_name: str,
+        sparse_vector: dict[str, Any],
+        *,
+        limit: int = 10,
+        filter: Optional[Filter] = None,
+        with_payload: bool = True,
+        with_vector: bool = False,
+        payload_fields: Optional[list[str]] = None,
+        score_threshold: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        """`sparse_search` on the event loop. See it for what the arguments mean.
+
+        It was the one search endpoint with no async twin, which made
+        `VectorStoreQueryMode.SPARSE` the one mode the LlamaIndex integration could not
+        answer without blocking.
+        """
+        body = self._sparse_body(
+            sparse_vector,
+            limit,
+            filter,
+            with_payload,
+            with_vector,
+            payload_fields,
+            score_threshold,
+        )
+        try:
+            response = await self.async_client.post(
+                f"/tables/{_seg(table_name)}/search/sparse", json=body
+            )
+            response.raise_for_status()
+            return response.json().get("data", {}).get("hits", [])
+        except httpx.HTTPStatusError as e:
+            msg = f"Sparse search failed: {e.response.text}"
+            raise DXMTSearchError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error during sparse search: {e}"
+            raise DXMTConnectionError(msg) from e
+
     def search_groups(
         self,
         table_name: str,

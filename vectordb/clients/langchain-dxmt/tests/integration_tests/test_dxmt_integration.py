@@ -9,36 +9,60 @@ Prerequisites:
 """
 
 import os
+import re
 import time
 from typing import Any
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 # `langchain-openai` is an optional dev extra, not a dependency of this package. Imported at
 # module scope it turns "the extra is not installed" into a collection error that fails the
 # whole run, unit tests included.
-OpenAIEmbeddings = pytest.importorskip(
-    "langchain_openai", reason="langchain-openai is not installed"
-).OpenAIEmbeddings
+# Local, deterministic, no key. These files used to `importorskip("langchain_openai")` and
+# then skip the whole module again when `OPENAI_API_KEY` was unset, so none of them had ever
+# run -- not here, not in CI. `DXMT_TEST_EMBEDDING=openai` still runs them against a real
+# model. See `tests/local_embedding.py`.
+from local_embedding import embedding_dimension, make_embeddings
 
-from langchain_dxmt import DXMTVectorDB, DXMTClient, DXMTError
+from langchain_dxmt import DXMTVectorDB, DXMTClient, DXMTError, DXMTConnectionError
+
+def needs_text_bm25(fn):
+    """Skip -- or fail, when the run says the server has it -- on an absent full-text index.
+
+    `text-bm25` is not a default cargo feature, so a stock server answers `FEATURE_DISABLED`
+    for anything with a text arm. These tests used to raise instead, which made a build
+    choice look like a defect. `DXMT_FEATURES=text-bm25` turns the skip back into a failure,
+    the same ratchet `tests/api/` uses, so a build that quietly lost the feature cannot pass.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except DXMTError as e:
+            if "FEATURE_DISABLED" not in str(e):
+                raise
+            declared = {f for f in re.split(r"[,\s]+", os.getenv("DXMT_FEATURES", "")) if f}
+            if "text-bm25" in declared:
+                pytest.fail(f"DXMT_FEATURES says text-bm25 is present, but: {e}")
+            pytest.skip("server built without text-bm25")
+
+    return wrapper
+
 
 
 # Check if we can run integration tests
 DXMT_HOST = os.getenv("DXMT_HOST", "localhost")
 DXMT_PORT = int(os.getenv("DXMT_PORT", "9999"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-pytestmark = pytest.mark.skipif(
-    not OPENAI_API_KEY,
-    reason="OPENAI_API_KEY not set - skipping integration tests",
-)
 
 
 @pytest.fixture
-def embeddings() -> OpenAIEmbeddings:
-    """Create OpenAI embeddings instance."""
-    return OpenAIEmbeddings()
+def embeddings() -> Embeddings:
+    """Deterministic by default; a real model when DXMT_TEST_EMBEDDING=openai."""
+    return make_embeddings()
 
 
 @pytest.fixture
@@ -51,13 +75,13 @@ def test_table_name() -> str:
 @pytest.fixture
 def vector_store(
     test_table_name: str,
-    embeddings: OpenAIEmbeddings,
+    embeddings: Embeddings,
 ) -> DXMTVectorDB:
     """Create vector store for testing."""
     store = DXMTVectorDB(
         table_name=test_table_name,
         embedding=embeddings,
-        dimension=1536,
+        dimension=embedding_dimension(),
         host=DXMT_HOST,
         port=DXMT_PORT,
         index_type="hnsw",
@@ -76,14 +100,14 @@ def vector_store(
 @pytest.fixture
 def vector_store_with_text(
     test_table_name: str,
-    embeddings: OpenAIEmbeddings,
+    embeddings: Embeddings,
 ) -> DXMTVectorDB:
     """Create vector store with full-text search enabled."""
     table_name = f"{test_table_name}_text"
     store = DXMTVectorDB(
         table_name=table_name,
         embedding=embeddings,
-        dimension=1536,
+        dimension=embedding_dimension(),
         host=DXMT_HOST,
         port=DXMT_PORT,
         index_type="hnsw",
@@ -264,6 +288,7 @@ class TestAdvancedFeatures:
         for doc in results:
             assert doc.metadata["language"] == "python"
 
+    @needs_text_bm25
     def test_hybrid_search(
         self,
         vector_store_with_text: DXMTVectorDB,
@@ -298,7 +323,7 @@ class TestAdvancedFeatures:
     def test_different_index_types(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test different index configurations."""
         index_types = ["hnsw", "ivf", "brute_force"]
@@ -309,7 +334,7 @@ class TestAdvancedFeatures:
             store = DXMTVectorDB(
                 table_name=table_name,
                 embedding=embeddings,
-                dimension=1536,
+                dimension=embedding_dimension(),
                 host=DXMT_HOST,
                 port=DXMT_PORT,
                 index_type=index_type,
@@ -330,7 +355,7 @@ class TestAdvancedFeatures:
     def test_different_distance_metrics(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test different distance metrics."""
         metrics = ["cosine", "euclidean", "dot_product"]
@@ -341,7 +366,7 @@ class TestAdvancedFeatures:
             store = DXMTVectorDB(
                 table_name=table_name,
                 embedding=embeddings,
-                dimension=1536,
+                dimension=embedding_dimension(),
                 host=DXMT_HOST,
                 port=DXMT_PORT,
                 distance_metric=metric,
@@ -433,7 +458,7 @@ class TestLangChainIntegration:
     def test_from_texts_factory(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test creating store from texts."""
         texts = ["Factory text 1", "Factory text 2"]
@@ -446,7 +471,7 @@ class TestLangChainIntegration:
             embedding=embeddings,
             metadatas=metadatas,
             table_name=table_name,
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
         )
@@ -464,7 +489,7 @@ class TestLangChainIntegration:
     def test_from_documents_factory(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test creating store from documents."""
         documents = [
@@ -480,7 +505,7 @@ class TestLangChainIntegration:
             documents=documents,
             embedding=embeddings,
             table_name=table_name,
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
         )
@@ -499,7 +524,7 @@ class TestLangChainIntegration:
 class TestErrorHandling:
     """Test error handling."""
 
-    def test_invalid_table_name(self, embeddings: OpenAIEmbeddings) -> None:
+    def test_invalid_table_name(self, embeddings: Embeddings) -> None:
         """Test creating store with invalid table name."""
         # Empty table name should be handled gracefully
         # (either use default or raise clear error)
@@ -507,7 +532,7 @@ class TestErrorHandling:
             store = DXMTVectorDB(
                 table_name="",
                 embedding=embeddings,
-                dimension=1536,
+                dimension=embedding_dimension(),
                 host=DXMT_HOST,
                 port=DXMT_PORT,
             )
@@ -520,7 +545,7 @@ class TestErrorHandling:
     def test_missing_dimension(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
         """Test creating store without dimension."""
         with pytest.raises(ValueError) as exc_info:
@@ -538,22 +563,29 @@ class TestErrorHandling:
     def test_connection_error(
         self,
         test_table_name: str,
-        embeddings: OpenAIEmbeddings,
+        embeddings: Embeddings,
     ) -> None:
-        """Test handling connection errors."""
-        # Try to connect to invalid host
-        store = DXMTVectorDB(
-            table_name=test_table_name,
-            embedding=embeddings,
-            dimension=1536,
-            host="invalid-host-12345",
-            port=99999,
-            create_table_if_not_exists=False,
-        )
+        """An unreachable server says so, and does not say the table is missing.
 
-        # Operations should raise connection error
-        with pytest.raises(DXMTError):
-            store.add_texts(["Test"])
+        This test could not pass as written: with `create_table_if_not_exists=False` the
+        constructor verifies the table, so the failure happens there, outside the
+        `pytest.raises` block that expected it on `add_texts`. It failed before this change
+        too -- with `ValueError: Table ... does not exist: [Errno -3] Temporary failure in
+        name resolution`, which was the defect: a blanket `except Exception` turned DNS
+        failures, refused connections and timeouts into "your table does not exist", sending
+        whoever mistyped a host to look for a table that is sitting there fine.
+
+        Now the constructor fails fast with the error that actually happened.
+        """
+        with pytest.raises(DXMTConnectionError):
+            DXMTVectorDB(
+                table_name=test_table_name,
+                embedding=embeddings,
+                dimension=embedding_dimension(),
+                host="invalid-host-12345",
+                port=99999,
+                create_table_if_not_exists=False,
+            )
 
 
 class TestPerformance:

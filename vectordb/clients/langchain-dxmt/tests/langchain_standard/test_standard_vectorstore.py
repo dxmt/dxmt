@@ -12,6 +12,7 @@ Prerequisites:
 """
 
 import os
+import re
 from typing import Any, Generator
 
 import pytest
@@ -20,28 +21,50 @@ from langchain_core.embeddings import Embeddings
 # `langchain-openai` is an optional dev extra, not a dependency of this package. Imported at
 # module scope it turns "the extra is not installed" into a collection error that fails the
 # whole run, unit tests included.
-OpenAIEmbeddings = pytest.importorskip(
-    "langchain_openai", reason="langchain-openai is not installed"
-).OpenAIEmbeddings
+# Local, deterministic, no key. These files used to `importorskip("langchain_openai")` and
+# then skip the whole module again when `OPENAI_API_KEY` was unset, so none of them had ever
+# run -- not here, not in CI. `DXMT_TEST_EMBEDDING=openai` still runs them against a real
+# model. See `tests/local_embedding.py`.
+from local_embedding import embedding_dimension, make_embeddings
 
-from langchain_dxmt import DXMTVectorDB
+from langchain_dxmt import DXMTVectorDB, DXMTError
+
+def needs_text_bm25(fn):
+    """Skip -- or fail, when the run says the server has it -- on an absent full-text index.
+
+    `text-bm25` is not a default cargo feature, so a stock server answers `FEATURE_DISABLED`
+    for anything with a text arm. These tests used to raise instead, which made a build
+    choice look like a defect. `DXMT_FEATURES=text-bm25` turns the skip back into a failure,
+    the same ratchet `tests/api/` uses, so a build that quietly lost the feature cannot pass.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except DXMTError as e:
+            if "FEATURE_DISABLED" not in str(e):
+                raise
+            declared = {f for f in re.split(r"[,\s]+", os.getenv("DXMT_FEATURES", "")) if f}
+            if "text-bm25" in declared:
+                pytest.fail(f"DXMT_FEATURES says text-bm25 is present, but: {e}")
+            pytest.skip("server built without text-bm25")
+
+    return wrapper
+
 
 
 # Configuration
 DXMT_HOST = os.getenv("DXMT_HOST", "localhost")
 DXMT_PORT = int(os.getenv("DXMT_PORT", "9999"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-pytestmark = pytest.mark.skipif(
-    not OPENAI_API_KEY,
-    reason="OPENAI_API_KEY not set - skipping LangChain standard tests",
-)
 
 
 @pytest.fixture
-def embeddings() -> Embeddings:
-    """Create embeddings instance for testing."""
-    return OpenAIEmbeddings()
+def embeddings():
+    """Deterministic by default; a real model when DXMT_TEST_EMBEDDING=openai."""
+    return make_embeddings()
 
 
 @pytest.fixture
@@ -50,7 +73,7 @@ def vectorstore(embeddings: Embeddings) -> Generator[DXMTVectorDB, None, None]:
     store = DXMTVectorDB(
         table_name="langchain_standard_test",
         embedding=embeddings,
-        dimension=1536,
+        dimension=embedding_dimension(),
         host=DXMT_HOST,
         port=DXMT_PORT,
     )
@@ -157,7 +180,7 @@ class TestStandardVectorStoreInterface:
             texts=texts,
             embedding=embeddings,
             table_name="from_texts_test",
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
         )
@@ -180,7 +203,7 @@ class TestStandardVectorStoreInterface:
             documents=documents,
             embedding=embeddings,
             table_name="from_docs_test",
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
         )
@@ -373,13 +396,14 @@ class TestEdgeCases:
 class TestDXMTSpecificFeatures:
     """Test DXMT-specific features beyond standard interface."""
 
+    @needs_text_bm25
     def test_hybrid_search(self, embeddings: Embeddings) -> None:
         """Test hybrid search (vector + text)."""
         # Create store with full-text search enabled
         vectorstore = DXMTVectorDB(
             table_name="hybrid_test",
             embedding=embeddings,
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
             enable_full_text_search=True,
@@ -411,7 +435,7 @@ class TestDXMTSpecificFeatures:
         store1 = DXMTVectorDB(
             table_name="existing_table_test",
             embedding=embeddings,
-            dimension=1536,
+            dimension=embedding_dimension(),
             host=DXMT_HOST,
             port=DXMT_PORT,
         )

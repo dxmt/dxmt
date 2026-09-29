@@ -289,9 +289,18 @@ jobs:
         run: DXMT_URL=http://127.0.0.1:19999 go test ./...
         working-directory: vectordb/clients/dxmt-go-sdk
 
+      # `langchain-tests` carries LangChain's official VectorStore conformance suite, and
+      # installing it is what makes that suite run at all. Before this, 50 tests in this
+      # package -- the conformance suite plus the two live files -- skipped themselves
+      # everywhere: they needed `langchain-openai`, `OPENAI_API_KEY`, and a provider that
+      # actually serves embeddings, and CI has none of the three. They embed locally now
+      # (`tests/local_embedding.py`), so the only thing still missing was this line. The
+      # skip message used to say `pip install langchain-standard-tests`, which is the name
+      # the package had before it was renamed and is not on PyPI, so following the
+      # instruction could not work either.
       - name: LangChain adapter tests
         run: |
-          python -m pip install -e .
+          python -m pip install -e . langchain-tests
           DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
         working-directory: vectordb/clients/langchain-dxmt
 
