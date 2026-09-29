@@ -489,8 +489,10 @@ class TestDeletionActuallyDeletes:
     ):
         """Six of LlamaIndex's nine modes used to fall through to a plain dense search.
 
-        MMR is the one that shows why it matters: the caller asked for diversity, got none,
-        and the result is indistinguishable from one that honoured the mode.
+        MMR and SPARSE were two of them and are wired now (`TestServerSideModes` below);
+        these four have no counterpart on this server, so the answer is to say so. A caller
+        cannot tell a silently-ignored mode from an honoured one, which is the worst shape a
+        wrong answer can take.
         """
         node = TextNode(text="anything at all", metadata={})
         node.embedding = embed_model.get_text_embedding(node.get_content())
@@ -498,9 +500,10 @@ class TestDeletionActuallyDeletes:
         q = embed_model.get_query_embedding("anything")
 
         for mode in (
-            VectorStoreQueryMode.MMR,
-            VectorStoreQueryMode.SPARSE,
             VectorStoreQueryMode.SEMANTIC_HYBRID,
+            VectorStoreQueryMode.SVM,
+            VectorStoreQueryMode.LOGISTIC_REGRESSION,
+            VectorStoreQueryMode.LINEAR_REGRESSION,
         ):
             with pytest.raises(NotImplementedError, match=mode.name):
                 vector_store.query(
@@ -508,6 +511,175 @@ class TestDeletionActuallyDeletes:
                         query_embedding=q, similarity_top_k=2, mode=mode, query_str="x"
                     )
                 )
+
+
+class TestServerSideModes:
+    """MMR and sparse search, judged by whether the answer *changed*.
+
+    A wiring test that asserts "the mode returned some rows" passes just as well when the
+    mode was ignored -- which is exactly what these two did before being connected. So the
+    corpus is built so that a mode which was honoured and a mode which was dropped cannot
+    produce the same page.
+
+    Both are reranked or scored **on the server**: LlamaIndex's own MMR is a postprocessor
+    that can only diversify within the rows the store already returned, and it needs their
+    vectors on the client; DXMT does it in `assemble_hits`, where the candidates' vectors are
+    already to hand.
+    """
+
+    @staticmethod
+    def _unit(v):
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+    @staticmethod
+    def _sparse_of(text: str) -> dict:
+        """Word -> one of 16 buckets. Deterministic, and the shape the server wants."""
+        buckets: dict = {}
+        for w in text.lower().split():
+            b = sum(map(ord, w)) % 16
+            buckets[b] = buckets.get(b, 0.0) + 1.0
+        idx = sorted(buckets)
+        return {"indices": idx, "values": [buckets[i] for i in idx], "dimension": 16}
+
+    @pytest.fixture
+    def clustered(self, dxmt_host, dxmt_port):
+        """Three tight clusters, and a store that knows how to encode sparse vectors.
+
+        The query sits on cluster A, so a plain ranking returns A's near-duplicates; anything
+        that reaches B or C did so because it was diversified.
+        """
+        import time
+
+        store = DXMTVectorStore(
+            table_name=f"test_llamaindex_modes_{int(time.time() * 1000)}",
+            dimension=DIMENSION,
+            host=dxmt_host,
+            port=dxmt_port,
+            sparse_encoder=self._sparse_of,
+        )
+        nodes = []
+        for axis, tag in enumerate("abc"):
+            for i in range(5):
+                vec = [0.0] * DIMENSION
+                vec[axis] = 1.0
+                vec[10 + i] = 0.01 * (i + 1)
+                node = TextNode(text=f"cluster {tag} item {i}", metadata={"cluster": tag})
+                node.embedding = self._unit(vec)
+                node.node_id = f"{tag}{i}"
+                nodes.append(node)
+        store.add(nodes)
+        yield store
+        try:
+            store.clear()
+        except Exception:
+            pass
+
+    def _query_vector(self):
+        v = [0.0] * DIMENSION
+        v[0], v[1], v[2] = 1.0, 0.02, 0.01
+        return self._unit(v)
+
+    def test_mmr_returns_a_more_diverse_page_than_the_plain_ranking(self, clustered):
+        q = self._query_vector()
+        plain = clustered.query(VectorStoreQuery(query_embedding=q, similarity_top_k=6))
+        diverse = clustered.query(
+            VectorStoreQuery(
+                query_embedding=q,
+                similarity_top_k=6,
+                mode=VectorStoreQueryMode.MMR,
+                mmr_threshold=0.2,
+            )
+        )
+        plain_clusters = {n.metadata["cluster"] for n in plain.nodes}
+        mmr_clusters = {n.metadata["cluster"] for n in diverse.nodes}
+        assert len(mmr_clusters) > len(plain_clusters), (
+            f"MMR covered {sorted(mmr_clusters)} and the plain ranking covered "
+            f"{sorted(plain_clusters)}; a mode that was dropped would tie"
+        )
+
+    def test_lambda_one_is_the_plain_ranking_and_lambda_zero_is_the_most_diverse(
+        self, clustered
+    ):
+        """What catches the knob being ignored, or passed through inverted.
+
+        `mmr_threshold` and the server's `lambda_mult` are the same lambda -- both score
+        `l*sim(q,d) - (1-l)*max sim(d,d')`, both default to 0.5, both make 0 the most diverse
+        end. At 1.0 MMR is the plain ranking *by definition*, so the two must agree exactly;
+        an inverted mapping would make it the most diverse page instead.
+        """
+        q = self._query_vector()
+        plain = clustered.query(VectorStoreQuery(query_embedding=q, similarity_top_k=6))
+        at_one = clustered.query(
+            VectorStoreQuery(
+                query_embedding=q,
+                similarity_top_k=6,
+                mode=VectorStoreQueryMode.MMR,
+                mmr_threshold=1.0,
+            )
+        )
+        assert [n.node_id for n in at_one.nodes] == [n.node_id for n in plain.nodes]
+
+        at_zero = clustered.query(
+            VectorStoreQuery(
+                query_embedding=q,
+                similarity_top_k=6,
+                mode=VectorStoreQueryMode.MMR,
+                mmr_threshold=0.0,
+            )
+        )
+        # Strictly more, not "at least as much": the equality above already holds for free
+        # when MMR is ignored entirely, so without this the test would pass against a store
+        # that dropped the mode -- which is the state this wiring replaced. Verified by
+        # injection: with the MMR branch disabled, this line is what fails.
+        assert len({n.metadata["cluster"] for n in at_zero.nodes}) > len(
+            {n.metadata["cluster"] for n in plain.nodes}
+        ), "lambda=0.0 must diversify; equal coverage means the mode was not applied"
+
+    def test_sparse_search_reaches_a_record_the_dense_arm_cannot(self, clustered):
+        """Its vector points at cluster C and its words at cluster A's buckets.
+
+        A dense search for the cluster-A query cannot return it, so finding it proves the
+        sparse index answered rather than the dense one.
+        """
+        odd = TextNode(text="zzz zzz zzz qqq", metadata={"cluster": "odd"})
+        vec = [0.0] * DIMENSION
+        vec[2] = 1.0
+        odd.embedding = self._unit(vec)
+        odd.node_id = "odd0"
+        clustered.add([odd])
+
+        q = self._query_vector()
+        sparse = clustered.query(
+            VectorStoreQuery(
+                query_embedding=q,
+                query_str="zzz zzz zzz qqq",
+                similarity_top_k=3,
+                mode=VectorStoreQueryMode.SPARSE,
+            )
+        )
+        dense = clustered.query(VectorStoreQuery(query_embedding=q, similarity_top_k=3))
+        sparse_ids = [n.node_id for n in sparse.nodes]
+        assert "odd0" in sparse_ids, sparse_ids
+        assert sparse_ids != [n.node_id for n in dense.nodes]
+
+    def test_sparse_without_an_encoder_is_refused(self, dxmt_host, dxmt_port):
+        """Not a dense search with a different label on it."""
+        store = DXMTVectorStore(
+            table_name="llamaindex_sparse_no_encoder",
+            dimension=DIMENSION,
+            host=dxmt_host,
+            port=dxmt_port,
+        )
+        with pytest.raises(ValueError, match="sparse_encoder"):
+            store.query(
+                VectorStoreQuery(
+                    query_embedding=[0.1] * DIMENSION,
+                    query_str="anything",
+                    similarity_top_k=2,
+                    mode=VectorStoreQueryMode.SPARSE,
+                )
+            )
 
 
 if __name__ == "__main__":

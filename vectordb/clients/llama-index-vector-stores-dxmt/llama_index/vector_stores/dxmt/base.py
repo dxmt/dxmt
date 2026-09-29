@@ -36,11 +36,11 @@ class DXMTVectorStore(BasePydanticVectorStore):
 
     This vector store provides integration with DXMT VectorDB, supporting:
     - Vector similarity search with multiple distance metrics
-    - Hybrid search combining vector and full-text search
-    - Multiple index types (HNSW, IVF, IVF-PQ, LSH, BruteForce)
+    - MMR, reranked on the server rather than by a client-side postprocessor
+    - Sparse-vector search, when a ``sparse_encoder`` is configured
+    - Hybrid search combining vector and full-text search (server needs ``text-bm25``)
     - Metadata filtering with complex filter expressions
-    - Batch operations with optimized insert modes
-    - Async operations
+    - Batch operations
 
     Examples:
         Basic usage:
@@ -91,6 +91,10 @@ class DXMTVectorStore(BasePydanticVectorStore):
     # Private attributes
     _client: Optional[DXMTClient] = PrivateAttr(default=None)
     _table_created: bool = PrivateAttr(default=False)
+    #: Text -> `{"indices": [...], "values": [...], "dimension": n}`. A private attribute and
+    #: not a field, for the reason `api_key` is not one: a pydantic field comes back out of
+    #: `to_dict()` and a serialised index, and a callable does not survive that trip.
+    _sparse_encoder: Optional[Callable[[str], Dict[str, Any]]] = PrivateAttr(default=None)
 
     def __init__(
         self,
@@ -106,6 +110,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
         text_fields: Optional[List[Dict[str, Any]]] = None,
         batch_size: int = 100,
         api_key: Optional[str] = None,
+        sparse_encoder: Optional[Callable[[str], Dict[str, Any]]] = None,
         **kwargs: Any,
     ):
         """Initialize DXMT vector store.
@@ -126,6 +131,13 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 Options: "standard", "lock_free", "streaming", "deferred_index",
                 "ultimate", "batch", etc. Defaults to "standard".
             batch_size: Batch size for bulk operations. Defaults to 100.
+            sparse_encoder: Turns a string into ``{"indices": [...], "values": [...],
+                "dimension": n}``. Set it and records carry a sparse vector on the way in and
+                ``VectorStoreQueryMode.SPARSE`` becomes answerable; leave it unset and sparse
+                mode is refused rather than quietly answered with a dense search.
+                ``LlamaIndex``'s ``VectorStoreQuery`` has no field for a sparse vector, so the
+                encoder has to live on the store -- the same shape the Pinecone and Qdrant
+                integrations use.
             api_key: The server's API key, if it was started with ``DXMT_API_KEY``. Handed to
                 the client and not kept on this model: every other argument here is a pydantic
                 field and comes back out of ``to_dict()``, ``repr()`` and a serialised index,
@@ -160,6 +172,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
             )
 
         self._table_created = False
+        self._sparse_encoder = sparse_encoder
 
     @property
     def client(self) -> DXMTClient:
@@ -220,7 +233,7 @@ class DXMTVectorStore(BasePydanticVectorStore):
 
         # Convert nodes to DXMT records
         records = []
-        sparse_encoder = add_kwargs.get("sparse_encoder")
+        sparse_encoder = add_kwargs.get("sparse_encoder") or self._sparse_encoder
 
         for node in nodes:
             metadata = node_to_metadata_dict(
@@ -373,9 +386,13 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 - query_str: Query string for text search
                 - similarity_top_k: Number of top results to return
                 - filters: Optional metadata filters
-                - mode: Query mode (DEFAULT, HYBRID, TEXT_SEARCH, etc.)
+                - mode: DEFAULT, MMR, SPARSE, HYBRID or TEXT_SEARCH. Anything else is
+                  refused by name rather than answered with a dense search.
+                - mmr_threshold: MMR's lambda, 0 = most diverse, 1 = plain ranking
+                - sparse_top_k: page size for SPARSE, falling back to similarity_top_k
                 - alpha: Hybrid search weight (0=text only, 1=vector only)
-            **kwargs: Additional query options.
+            **kwargs: Additional query options. `fetch_k` sets how many candidates MMR
+                reranks; diversity can only come from candidates that were fetched.
 
         Returns:
             VectorStoreQueryResult containing nodes, similarities, and IDs.
@@ -436,23 +453,67 @@ class DXMTVectorStore(BasePydanticVectorStore):
                 filter=dxmt_filter,
             )
 
-        else:
-            # `VectorStoreQueryMode` has nine values and this store serves three. The other
-            # six used to land in this branch when it was a bare `else` reading "standard
-            # vector search (DEFAULT mode)" -- so asking for MMR, SPARSE, SEMANTIC_HYBRID or
-            # any of the regression modes returned a plain dense page, with no diversity, no
-            # sparse arm, no warning and no error. A caller has no way to tell that from a
-            # result that honoured the mode, which is the worst shape a wrong answer can take.
+        elif query.mode == VectorStoreQueryMode.MMR:
+            # Diversified ranking, reranked **on the server**. LlamaIndex's own MMR is a
+            # postprocessor over whatever the store returned, which can only diversify within
+            # `similarity_top_k` rows and needs their vectors on the client; DXMT reranks
+            # inside `assemble_hits`, where the candidates' vectors are already to hand.
             #
-            # Two of these are worth wiring rather than refusing, and are not wired yet:
-            # the server has a real MMR (`lambda_mult`/`fetch_k`, reachable through the SDK's
-            # `search(mmr=...)`, and LlamaIndex hands the knob over as `query.mmr_threshold`),
-            # and it has `POST /search/sparse` behind the SDK's `sparse_search`. Until one of
-            # them is connected, saying so is the only honest answer.
+            # `mmr_threshold` and `lambda_mult` are the same λ, checked rather than assumed:
+            # both score `λ·sim(q,d) - (1-λ)·max sim(d,d')`, both default to 0.5, and in both
+            # 0 is maximum diversity and 1 is the plain ranking. Passing it straight through
+            # would be a silent wrong answer if either had been the other way round.
+            if not query.query_embedding:
+                raise ValueError("query_embedding required for MMR search")
+
+            # Diversity can only come from candidates that were fetched, so `fetch_k` is the
+            # real knob and LlamaIndex has nowhere to put it. Five times the page, floored at
+            # the server's own default of 20 -- the ratio LangChain uses for its 4/20 pair --
+            # and `fetch_k=` overrides it.
+            fetch_k = kwargs.get("fetch_k") or max(query.similarity_top_k * 5, 20)
+            mmr = {"fetch_k": fetch_k}
+            if query.mmr_threshold is not None:
+                mmr["lambda_mult"] = query.mmr_threshold
+
+            results = self.client.search(
+                self.table_name,
+                vector=query.query_embedding,
+                k=query.similarity_top_k,
+                filter=dxmt_filter,
+                mmr=mmr,
+            )
+
+        elif query.mode == VectorStoreQueryMode.SPARSE:
+            # `VectorStoreQuery` carries no sparse vector -- only `sparse_top_k`, a size for a
+            # thing it has no field for -- so the encoder lives on the store and runs here.
+            if self._sparse_encoder is None:
+                raise ValueError(
+                    "VectorStoreQueryMode.SPARSE needs a sparse encoder. Pass "
+                    "DXMTVectorStore(..., sparse_encoder=fn), where fn maps a string to "
+                    '{"indices": [...], "values": [...], "dimension": n}. The same encoder '
+                    "is used on the way in, so the two halves cannot disagree."
+                )
+            if not query.query_str:
+                raise ValueError("query_str required for sparse search")
+
+            results = self.client.sparse_search(
+                self.table_name,
+                sparse_vector=self._sparse_encoder(query.query_str),
+                limit=query.sparse_top_k or query.similarity_top_k,
+                filter=dxmt_filter,
+            )
+
+        else:
+            # `VectorStoreQueryMode` has nine values and this store serves five. The other
+            # four used to land here when this was a bare `else` reading "standard vector
+            # search (DEFAULT mode)", so asking for SEMANTIC_HYBRID or any of the regression
+            # modes returned a plain dense page with no warning and no error -- which a caller
+            # cannot tell from a result that honoured the mode, the worst shape a wrong answer
+            # can take.
             raise NotImplementedError(
                 f"DXMTVectorStore does not serve VectorStoreQueryMode.{query.mode.name}. "
-                f"Supported: DEFAULT, HYBRID, TEXT_SEARCH (the last two need a server built "
-                f"with --features text-bm25)."
+                f"Supported: DEFAULT, MMR, SPARSE, HYBRID, TEXT_SEARCH (the last two need a "
+                f"server built with --features text-bm25; SPARSE needs a sparse_encoder)."
             )
 
         # Convert results to nodes
