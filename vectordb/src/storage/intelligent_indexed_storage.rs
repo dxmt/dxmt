@@ -2813,7 +2813,13 @@ impl IntelligentIndexedStorage {
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
-            embedding: None,
+            // Was `None`, so an exported text table imported as one that refuses text. The
+            // config names an environment variable for the key, never the key, so carrying it
+            // to another server carries nothing secret; if that server lacks the variable, the
+            // first embed says so by name, which beats a table that silently stopped embedding.
+            // `create_table` only probes the model when the dimension is zero, and an imported
+            // table always has one, so this makes no provider call.
+            embedding: meta.table.embedding.clone(),
         };
         self.create_table(config).await?;
 
@@ -3803,7 +3809,13 @@ impl IntelligentIndexedStorage {
             payload_schema: meta.table.payload_schema.clone(),
             schema_version: meta.table.schema_version,
             named_vectors: meta.table.named_vectors.clone(),
-            embedding: None,
+            // Was `None`: every other field was copied from the snapshot head and this one was
+            // dropped, so **every clean restart** -- `main` snapshots on SIGTERM -- turned a
+            // text table into one that refuses text, rows intact. WAL replay was never affected
+            // (`CreateTableWithConfig` carries the whole config), which is why the reopen test
+            // that skipped the snapshot stayed green. No provider call: this path goes through
+            // `create_table_inner`, which never probes the model.
+            embedding: meta.table.embedding.clone(),
         };
         // Not `create_table`: this container is being rebuilt from a snapshot that already
         // describes it, so re-logging the creation would grow the WAL on every restart.
@@ -7449,7 +7461,10 @@ impl IntelligentIndexedStorage {
                 payload_schema: src.table.payload_schema.clone(),
                 schema_version: src.table.schema_version,
                 named_vectors: None,
-                embedding: None,
+                // A copy embeds the way its source does. The records below carry their vectors,
+                // so nothing is re-embedded while branching; the model matters for what is
+                // written to the branch afterwards.
+                embedding: src.table.embedding.clone(),
             };
 
             let records: Vec<CreateRecordRequest> = src

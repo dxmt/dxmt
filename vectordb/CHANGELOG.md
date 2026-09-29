@@ -17,6 +17,20 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A table's embedding model survives a restart.** In 1.0.0, every clean restart turned a
+  table that embeds text into one that refuses it: the rows came back intact, and `/search` or
+  an insert carrying `text` answered `INVALID_INPUT: table has no embedding model`. `main`
+  snapshots on SIGTERM, and `restore_table` rebuilt each table from the snapshot head copying
+  every field but `embedding`, which it set to `None`. WAL replay carried the config and was
+  never affected -- which is why `the_model_survives_a_reopen`, whose comment said the config
+  "is in the snapshot and in the WAL's table record", stayed green: it never took a snapshot.
+  `import_table` and `branch_table` had the same `embedding: None`, so an exported-then-imported
+  table and a branch lost the model too. All three now copy it; three tests cover the three
+  paths, and each failed before the change. Found by restarting a 1M-row table while measuring
+  DXMT against vectorgraph-rs's benchmark corpus.
+
 ## [1.0.0] - 2026-09-29
 
 First public release. Everything below was developed before any of it was published, so this

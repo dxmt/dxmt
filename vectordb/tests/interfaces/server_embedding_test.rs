@@ -535,6 +535,127 @@ async fn the_model_survives_a_reopen() {
     assert_eq!(hits[0].id, "a");
 }
 
+/// The half of the test above that it did not check: a reopen through a **snapshot**.
+///
+/// `the_model_survives_a_reopen` says the config "is in the snapshot and in the WAL's table
+/// record", and exercises only the second. It drops the storage without snapshotting, so the
+/// reopen replays `CreateTableWithConfig` -- which carries `embedding` and was always fine.
+/// A real restart takes the other path: `main` snapshots on a clean shutdown, and the next
+/// start rebuilds each table in `restore_table` from the snapshot head. That rebuild wrote
+/// `embedding: None` while copying every other field across, so **every clean restart turned a
+/// text table into one that refuses text** -- the rows intact, `/search` with `text` answering
+/// `INVALID_INPUT: table has no embedding model`. Found measuring DXMT against
+/// vectorgraph-rs's corpus on 1.0.0, by restarting the server between two runs.
+#[tokio::test]
+async fn the_model_survives_a_snapshot_and_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let wal = dir.path().join("wal");
+    let (base, _) = serve(Behaviour::Normal).await;
+
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal.clone()))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("persist", Some(config(&base))))
+            .await
+            .unwrap();
+        storage
+            .insert_records("persist", vec![text_record("a", "alpha bravo")])
+            .await
+            .unwrap();
+        // What `main` does on SIGTERM, and what the periodic snapshot does every five minutes.
+        storage.snapshot().await.unwrap();
+    }
+
+    let storage = IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal))
+        .await
+        .unwrap();
+    let reopened = storage.get_table("persist").await.unwrap();
+    let embedding = reopened
+        .embedding
+        .expect("the model did not survive a snapshot and restart");
+    assert_eq!(embedding.model, "bag-of-words");
+    assert_eq!(embedding.base_url.as_deref(), Some(base.as_str()));
+
+    let hits = storage
+        .search(
+            "persist",
+            SearchQuery {
+                text: Some("alpha".to_string()),
+                top_k: 1,
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a text search after a snapshot restart")
+        .hits;
+    assert_eq!(hits[0].id, "a");
+}
+
+/// `import_table` rebuilt the table's config the same way `restore_table` did, with the same
+/// `embedding: None`, so exporting a text table and importing it -- the documented way to move
+/// one between servers -- produced a table that refuses text.
+#[tokio::test]
+async fn the_model_survives_an_export_and_import() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let wal = dir.path().join("wal");
+    let file = dir.path().join("persist.dxmt");
+    let (base, _) = serve(Behaviour::Normal).await;
+
+    let storage = IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal))
+        .await
+        .unwrap();
+    storage
+        .create_table(table("persist", Some(config(&base))))
+        .await
+        .unwrap();
+    storage
+        .insert_records("persist", vec![text_record("a", "alpha bravo")])
+        .await
+        .unwrap();
+    storage.export_table("persist", &file).await.unwrap();
+    storage
+        .import_table(&file, Some("imported"), false)
+        .await
+        .unwrap();
+
+    let embedding = storage
+        .get_table("imported")
+        .await
+        .unwrap()
+        .embedding
+        .expect("the model did not survive an export and import");
+    assert_eq!(embedding.model, "bag-of-words");
+    assert_eq!(embedding.base_url.as_deref(), Some(base.as_str()));
+}
+
+/// A branch is a copy -- `branch_table` copies the graph parameters for exactly that reason --
+/// and it dropped the model, so a branch of a text table could not take text.
+#[tokio::test]
+async fn a_branch_keeps_the_model() {
+    let (base, _) = serve(Behaviour::Normal).await;
+    let storage = open().await;
+    storage
+        .create_table(table("persist", Some(config(&base))))
+        .await
+        .unwrap();
+    storage
+        .insert_records("persist", vec![text_record("a", "alpha bravo")])
+        .await
+        .unwrap();
+    storage.branch_table("persist", "persist_b").await.unwrap();
+
+    let embedding = storage
+        .get_table("persist_b")
+        .await
+        .unwrap()
+        .embedding
+        .expect("the branch lost the model");
+    assert_eq!(embedding.model, "bag-of-words");
+}
+
 #[tokio::test]
 async fn the_endpoint_can_move_but_the_model_cannot() {
     let (base, _) = serve(Behaviour::Normal).await;
