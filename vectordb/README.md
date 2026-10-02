@@ -1,11 +1,11 @@
 # DXMT VectorDB
 
 A single-node vector database written in Rust. HNSW, HNSW-PQ and product quantization with
-runtime SIMD dispatch, payload filtering, hybrid retrieval, server-side embedding and a query
-language behind one REST API, with Swagger and a read-only console served by default.
-Full-text search (Tantivy), GraphQL, WebSocket, gRPC and S3 are opt-in build features — see
-[Feature flags](#feature-flags) — so a default build is the supported single-node server and
-nothing more.
+runtime SIMD dispatch, payload filtering, full-text (BM25, with Chinese segmentation) and
+hybrid retrieval, server-side embedding and a query language behind one REST API, with
+Swagger and a read-only console served by default. GraphQL, WebSocket, gRPC and S3 are opt-in
+build features — see [Feature flags](#feature-flags) — so a default build is the supported
+single-node server and nothing more.
 
 > **Status: 1.0.** Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
@@ -427,10 +427,17 @@ export DXMT_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 ### Feature Flags
 
 Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,
-`server-embedding`.
+`server-embedding`, `text-bm25`.
 
-Opt-in: `text-bm25`, `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `benchmarks`,
+Opt-in: `api-graphql`, `api-ws`, `api-grpc`, `s3-storage`, `benchmarks`,
 `experimental-indexes`, `adaptive-index`, `test-failpoints`.
+
+`text-bm25` became a default on 2026-10-02. A build without it (`--no-default-features` plus
+the rest) still compiles and still answers `/search/text`, and `/search/hybrid` with `text`,
+with `501 FEATURE_DISABLED` rather than a dense-only page. A table's text field may declare
+`"analyzer": "chinese"`, which indexes and queries that table with jieba word segmentation
+(lowercased, mixed-script text included); the default analyzer sees a Chinese sentence as one
+word and cannot find anything shorter than it.
 
 That is the whole list. Until 2026-09-27 it also advertised `gpu`, `cluster`, `multimodal`,
 `embeddings`, `python`, `metrics` and `hf-datasets`: of those, two did not compile, three

@@ -70,11 +70,13 @@ impl<'a> JiebaTokenStream<'a> {
             // Perform word segmentation
             let words = self.jieba.cut(self.text, false);
 
-            // Calculate byte offsets
+            // Calculate byte offsets. `cut` hands back punctuation and whitespace as tokens
+            // of their own; a term with no letter or digit in it is not a word anyone
+            // searches for, and indexing it makes every document match "，".
             let mut byte_offset = 0;
             for word in words {
                 let word_bytes = word.len();
-                if !word.trim().is_empty() {
+                if word.chars().any(char::is_alphanumeric) {
                     self.tokens
                         .push((word.to_string(), byte_offset, byte_offset + word_bytes));
                 }
@@ -130,8 +132,18 @@ mod tests {
             tokens.push(stream.token().text.clone());
         }
 
-        assert!(!tokens.is_empty());
-        println!("Tokens: {:?}", tokens);
+        assert_eq!(tokens, vec!["中文", "分词", "测试"]);
+    }
+
+    #[test]
+    fn punctuation_and_spaces_are_not_terms() {
+        let mut tokenizer = JiebaTokenizer::new();
+        let mut stream = tokenizer.token_stream("你好，世界！ hello, world.");
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().text.clone());
+        }
+        assert_eq!(tokens, vec!["你好", "世界", "hello", "world"]);
     }
 
     #[test]

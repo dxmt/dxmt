@@ -1,7 +1,7 @@
 """Full-text search, and what it does when it is not compiled in.
 
-`text-bm25` is not a default feature, so on a plain build these routes answer 501 with
-`FEATURE_DISABLED` and a message naming the flag. That is the behaviour worth pinning first:
+`text-bm25` is a default feature since 2026-10-02; a build without it (CI's `minimal-core`
+job compiles one) answers these routes with 501 `FEATURE_DISABLED` and a message naming the flag. That is the behaviour worth pinning first:
 several defects fixed in this repo were endpoints that returned an empty result where they
 should have returned an error, and an absent feature reporting "no matches" would be the same
 mistake in a more misleading place.

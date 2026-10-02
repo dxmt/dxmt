@@ -324,7 +324,10 @@ protoc-bin-vendored = { version = "3.0", optional = true }
 # harder to evaluate than one you can. `api-dashboard` compiles with no bundle present
 # (`allow_missing`), so a checkout without Node still builds; the server then says so and
 # serves everything else.
-default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard", "server-embedding"]
+# `text-bm25` is default since 2026-10-02: hybrid retrieval is what an evaluator tries second,
+# and `cargo run -- serve` answered it with FEATURE_DISABLED. It costs tantivy and jieba's
+# dictionary at build time and nothing at run time until a table enables full text.
+default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard", "server-embedding", "text-bm25"]
 experimental = [
     "benchmarks",
     "adaptive-index",

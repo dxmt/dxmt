@@ -9454,6 +9454,20 @@ impl IntelligentIndexedStorage {
 
         let default_fields: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
 
+        // The analyzer is per text field in the table's configuration and per index in
+        // tantivy's schema, so the table's fields have to agree; one `chinese` field makes the
+        // whole index jieba-tokenized, which also segments the ASCII words in mixed text.
+        let tokenizer = match &table.text_fields {
+            Some(fields)
+                if fields
+                    .iter()
+                    .any(|f| f.analyzer == crate::types::table::TextAnalyzer::Chinese) =>
+            {
+                "jieba"
+            }
+            _ => "default",
+        };
+
         let config = FullTextConfig {
             index_path,
             index_memory_mb: 256,
@@ -9462,6 +9476,7 @@ impl IntelligentIndexedStorage {
             enable_fuzzy_search: true,
             default_search_fields: default_fields,
             field_boosts: std::collections::HashMap::new(),
+            tokenizer: tokenizer.to_string(),
         };
 
         FullTextSearchEngine::new(config).await

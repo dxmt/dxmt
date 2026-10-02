@@ -348,4 +348,99 @@ mod full_text_search_tests {
         assert_eq!(result.total, 1, "Expected exactly 1 result due to filter");
         assert_eq!(result.hits[0].id, "tech1");
     }
+
+    /// A table whose text field declares `analyzer: chinese` has to find a word inside a
+    /// sentence written without spaces. Tantivy's default tokenizer splits on non-alphanumeric
+    /// characters, and CJK ideographs are alphanumeric, so a Chinese sentence is one token and
+    /// no query shorter than the sentence ever matches it. The jieba tokenizer was registered
+    /// under the name "jieba" from the start and no field was ever told to use it; `analyzer`
+    /// was parsed, stored, and read by nothing.
+    async fn chinese_table(storage: &IntelligentIndexedStorage, name: &str, analyzer: TextAnalyzer) {
+        let table_config = TableConfig {
+            name: name.to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            description: None,
+            index_type: None,
+            text_fields: Some(vec![TextFieldConfig {
+                name: "content".to_string(),
+                source: TextSource::MetadataField("text".to_string()),
+                analyzer,
+                boost: 1.0,
+            }]),
+            enable_full_text_search: true,
+            memory_optimization: None,
+            payload_schema: None,
+            schema_version: 1,
+            named_vectors: None,
+            hnsw: None,
+            quantization: None,
+            payload_index: None,
+            embedding: None,
+        };
+        storage.create_table(table_config).await.expect("create table");
+        let texts = [
+            ("zh1", "向量数据库支持混合检索和全文搜索"),
+            ("zh2", "机器学习模型需要大量的训练数据"),
+            ("zh3", "The English sentence mentions Machine Learning too"),
+        ];
+        let records = texts
+            .iter()
+            .enumerate()
+            .map(|(i, (id, text))| CreateRecordRequest {
+                id: id.to_string(),
+                vector: vec![i as f32 * 0.1 + 0.1; 4],
+                sparse_vector: None,
+                payload: Some(serde_json::json!({ "text": text })),
+                named_vectors: None,
+                text: None,
+            })
+            .collect();
+        storage.insert_records(name, records).await.expect("insert");
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    async fn text_hits(storage: &IntelligentIndexedStorage, table: &str, query: &str) -> Vec<String> {
+        let request = FullTextSearchRequest {
+            query: query.to_string(),
+            fields: None,
+            limit: 10,
+            offset: 0,
+            highlight: false,
+            fuzzy: None,
+            filter: None,
+        };
+        let mut ids: Vec<String> = storage
+            .full_text_search(table, request)
+            .await
+            .expect("search")
+            .hits
+            .iter()
+            .map(|h| h.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_chinese_analyzer_finds_a_word_inside_a_sentence() {
+        let storage = create_test_storage().await;
+        chinese_table(&storage, "zh", TextAnalyzer::Chinese).await;
+
+        assert_eq!(text_hits(&storage, "zh", "全文搜索").await, vec!["zh1"]);
+        assert_eq!(text_hits(&storage, "zh", "训练数据").await, vec!["zh2"]);
+        // Mixed text: the ASCII words are still words, and case does not matter.
+        assert_eq!(text_hits(&storage, "zh", "machine learning").await, vec!["zh3"]);
+        assert!(text_hits(&storage, "zh", "区块链").await.is_empty(), "a word in no document");
+    }
+
+    #[tokio::test]
+    async fn the_standard_analyzer_is_still_the_default_and_still_cannot() {
+        // Pinned so the Chinese case above is known to be the analyzer and not a tokenizer
+        // change for every table: the default tokenizer sees the whole sentence as one word.
+        let storage = create_test_storage().await;
+        chinese_table(&storage, "std", TextAnalyzer::Standard).await;
+        assert!(text_hits(&storage, "std", "全文搜索").await.is_empty());
+        assert_eq!(text_hits(&storage, "std", "machine learning").await, vec!["zh3"]);
+    }
 }

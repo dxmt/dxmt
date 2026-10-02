@@ -86,6 +86,12 @@ pub struct FullTextConfig {
 
     /// Field boosts
     pub field_boosts: HashMap<String, f32>,
+
+    /// The tantivy tokenizer every text field is indexed and queried with: `"default"`
+    /// (split on non-alphanumeric, lowercase) or `"jieba"` (Chinese word segmentation, then
+    /// lowercase). One per index, because it is part of the schema and the schema is written
+    /// into the index directory: a field cannot change tokenizer after the fact.
+    pub tokenizer: String,
 }
 
 impl Default for FullTextConfig {
@@ -108,6 +114,7 @@ impl Default for FullTextConfig {
                 "description".to_string(),
             ],
             field_boosts,
+            tokenizer: "default".to_string(),
         }
     }
 }
@@ -265,48 +272,22 @@ impl FullTextSearchEngine {
         let id_field =
             schema_builder.add_text_field("id", tantivy::schema::STRING | tantivy::schema::STORED);
 
-        // Create text field options with default tokenizer for English text
-        // Note: For Chinese text, change .set_tokenizer("default") to .set_tokenizer("jieba")
-        #[cfg(feature = "text-bm25")]
+        // Every text field shares one tokenizer, named by the table's analyzer. The query
+        // parser tokenizes the query with the field's tokenizer, so index and query agree by
+        // construction; what must not happen is a field indexed under one and searched under
+        // another, which is why this is a schema property and not a search parameter.
         let text_options = {
             let text_indexing = TextFieldIndexing::default()
-                .set_tokenizer("default") // Use default tokenizer for English (was: "jieba" for Chinese)
+                .set_tokenizer(&config.tokenizer)
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions);
             TextOptions::default()
                 .set_indexing_options(text_indexing)
                 .set_stored()
         };
-
-        #[cfg(not(feature = "text-bm25"))]
-        let text_options = tantivy::schema::TEXT | tantivy::schema::STORED;
-
-        // Content fields with jieba tokenizer
-        #[cfg(feature = "text-bm25")]
         let content_field = schema_builder.add_text_field("content", text_options.clone());
-        #[cfg(feature = "text-bm25")]
         let title_field = schema_builder.add_text_field("title", text_options.clone());
-        #[cfg(feature = "text-bm25")]
         let description_field = schema_builder.add_text_field("description", text_options.clone());
-        #[cfg(feature = "text-bm25")]
         let tags_field = schema_builder.add_text_field("tags", text_options.clone());
-
-        // Fallback for non-text-bm25 builds
-        #[cfg(not(feature = "text-bm25"))]
-        let content_field = schema_builder
-            .add_text_field("content", tantivy::schema::TEXT | tantivy::schema::STORED);
-        #[cfg(not(feature = "text-bm25"))]
-        let title_field =
-            schema_builder.add_text_field("title", tantivy::schema::TEXT | tantivy::schema::STORED);
-        #[cfg(not(feature = "text-bm25"))]
-        let description_field = schema_builder.add_text_field(
-            "description",
-            tantivy::schema::TEXT | tantivy::schema::STORED,
-        );
-        #[cfg(not(feature = "text-bm25"))]
-        let tags_field = schema_builder.add_text_field(
-            "tags",
-            tantivy::schema::TEXT | tantivy::schema::STORED | tantivy::schema::FAST,
-        );
 
         // Metadata as JSON string (stored only)
         let metadata_field = schema_builder.add_text_field("metadata", tantivy::schema::STORED);
@@ -345,12 +326,21 @@ impl FullTextSearchEngine {
                 .map_err(|e| crate::Error::Internal(format!("Failed to create index: {}", e)))?
         };
 
-        // Register Chinese tokenizer (Jieba) if text-bm25 feature is enabled
-        #[cfg(feature = "text-bm25")]
-        {
+        // Registered on every index, whichever tokenizer its fields name: an index directory
+        // written with "jieba" fields has to find the tokenizer when it is reopened, and the
+        // name is checked when the writer is created, not when a field is first indexed.
+        if config.tokenizer == "jieba" {
             use crate::search::jieba_tokenizer::JiebaTokenizer;
-            let tokenizer = JiebaTokenizer::new();
-            index.tokenizers().register("jieba", tokenizer);
+            use tantivy::tokenizer::{LowerCaser, TextAnalyzer};
+            let analyzer = TextAnalyzer::builder(JiebaTokenizer::new())
+                .filter(LowerCaser)
+                .build();
+            index.tokenizers().register("jieba", analyzer);
+        } else if config.tokenizer != "default" {
+            return Err(crate::Error::InvalidInput(format!(
+                "unknown full-text tokenizer `{}`; the choices are `default` and `jieba`",
+                config.tokenizer
+            )));
         }
 
         // Create index writer with configured memory
