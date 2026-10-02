@@ -29,7 +29,7 @@ from dxmt import (
 # Main LangChain integration
 from langchain_dxmt.vectorstores import DXMTVectorDB
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     # LangChain integration

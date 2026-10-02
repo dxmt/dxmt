@@ -1,6 +1,6 @@
 {
   "name": "dxmt-dashboard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Read-only web console for DXMT VectorDB, served by the server binary at /dashboard",
   "type": "module",

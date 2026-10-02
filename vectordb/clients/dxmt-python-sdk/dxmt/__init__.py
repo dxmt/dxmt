@@ -113,7 +113,7 @@ except ImportError:
     initialize_dxmt = None  # type: ignore
     initial_dxmt = None  # type: ignore
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "UploadResult",

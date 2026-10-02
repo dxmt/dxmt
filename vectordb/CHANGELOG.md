@@ -17,6 +17,8 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-02
+
 ### Fixed
 
 - **A table's embedding model survives a restart.** In 1.0.0, every clean restart turned a
