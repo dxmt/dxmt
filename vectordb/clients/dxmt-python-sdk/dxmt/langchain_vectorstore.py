@@ -1,7 +1,14 @@
-"""DXMT VectorStore for LangChain.
+"""DXMT VectorStore for LangChain -- the Bisheng compatibility layer.
 
-This module provides a LangChain VectorStore implementation for DXMT VectorDB,
-enabling integration with LangChain-based frameworks like Bisheng.
+**New LangChain code should use the `langchain-dxmt` package** (`clients/langchain-dxmt/`,
+`from langchain_dxmt import DXMTVectorStore`). That is the adapter kept against LangChain's
+standard test suite and against a live server in CI; it also carries MMR, server-side
+embedding and the full filter translation.
+
+This module stays because Bisheng (`dxmt.bisheng_integration`) imports it by this path and
+constructs it with these keyword arguments. It is a plain synchronous `VectorStore`: the
+`a*` methods run the sync ones on a thread, nothing more is wrapped, and it is tested with a
+mocked client only.
 
 Example:
     ```python

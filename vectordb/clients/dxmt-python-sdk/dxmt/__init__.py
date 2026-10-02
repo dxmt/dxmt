@@ -102,7 +102,8 @@ except ImportError:
     DXMTRetriever = None  # type: ignore
     create_dxmt_retriever = None  # type: ignore
 
-# Optional Bisheng/LangChain integration (requires langchain package)
+# Optional Bisheng compatibility layer (requires langchain). For LangChain itself use the
+# `langchain-dxmt` package; see the docstring of `langchain_vectorstore.py`.
 try:
     from .langchain_vectorstore import DXMTVectorStore as DXMTLangChainVectorStore
     from .bisheng_integration import initialize_dxmt, initial_dxmt
