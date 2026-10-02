@@ -187,8 +187,8 @@ def setup_test_table(
         config["enable_full_text_search"] = True
         config["text_fields"] = [{
             "name": "content",
-            "source": {"MetadataField": "text"},
-            "analyzer": "Standard",
+            "source": {"metadata_field": "text"},
+            "analyzer": "standard",
             "boost": 1.0,
         }]
 

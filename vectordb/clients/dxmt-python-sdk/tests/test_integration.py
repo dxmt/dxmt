@@ -457,25 +457,40 @@ class TestAsyncOperations:
                 assert len(results) <= 3
 
 
+def _needs_text(call):
+    """Run a text-bearing search, skipping on the one error that means the build cannot.
+
+    A default build has no full-text index and refuses the text half of a hybrid query
+    with `FEATURE_DISABLED` rather than answering with the dense half alone (it used to
+    degrade silently, which is how these tests passed on a server that could not do what
+    they asked). Any other error is a failure.
+    """
+    try:
+        return call()
+    except DXMTSearchError as exc:
+        if "FEATURE_DISABLED" in str(exc):
+            pytest.skip("server was built without the text-bm25 feature")
+        raise
+
+
 class TestHybridSearch:
     """Test hybrid search (vector + text)."""
 
-    def test_hybrid_search_balanced(
+    def test_hybrid_search_returns_ranked_hits(
         self, client: Client, setup_hybrid_table: str
     ) -> None:
-        """Test hybrid search with balanced weights."""
         query_vector = [0.5] * 128
-        results = client.hybrid_search(
+        results = _needs_text(lambda: client.hybrid_search(
             table_name=setup_hybrid_table,
             vector=query_vector,
             text="machine learning",
-            vector_weight=0.5,  # Balanced
+            vector_weight=0.5,
             k=5,
-        )
-
-        assert len(results) <= 5
-        assert all("id" in r for r in results)
-        assert all("score" in r for r in results)
+        ))
+        assert 0 < len(results) <= 5
+        assert all("id" in r and "score" in r for r in results)
+        scores = [r["score"] for r in results]
+        assert scores == sorted(scores, reverse=True)
 
     def test_the_weight_changes_the_ranking(self, client: Client) -> None:
         """`vector_weight` has to reach a fusion method that reads it.
@@ -483,8 +498,9 @@ class TestHybridSearch:
         The server's default fusion is `dbsf`, which normalises each side by its own
         distribution and ignores the weight -- and this SDK sent the weight without ever
         naming a method, so 0.0 and 1.0 came back with identical rows and identical scores.
-        Every test above passes a weight and asserts only the shape of the answer, which is
-        how a knob that did nothing stayed in the API and in three integrations' docs.
+        The tests this file used to carry passed a weight and asserted only the shape of
+        the answer, which is how a knob that did nothing stayed in the API and in three
+        integrations' docs.
         """
         name = f"fusion_{random.randint(1000, 9999)}"
         try:
@@ -501,11 +517,10 @@ class TestHybridSearch:
             ])
 
             def top(**kwargs):
-                hits = client.hybrid_search(
+                hits = _needs_text(lambda: client.hybrid_search(
                     name, vector=[1.0, 0.0, 0.0], text="python", k=2, **kwargs
-                )
-                if not hits:
-                    pytest.skip("hybrid search returned nothing; full-text may be disabled")
+                ))
+                assert hits, "hybrid search returned nothing on a full-text build"
                 return hits[0]["id"]
 
             assert top(vector_weight=1.0) == "vec"
@@ -517,50 +532,15 @@ class TestHybridSearch:
         finally:
             client.delete_table(name)
 
-    def test_hybrid_search_text_only(
-        self, client: Client, setup_hybrid_table: str
-    ) -> None:
-        """Test hybrid search with text-only (vector_weight=0)."""
-        query_vector = [0.5] * 128
-        results = client.hybrid_search(
-            table_name=setup_hybrid_table,
-            vector=query_vector,
-            text="machine learning",
-            vector_weight=0.0,  # Text only
-            k=5,
-        )
-
-        assert len(results) <= 5
-
-    def test_hybrid_search_vector_only(
-        self, client: Client, setup_hybrid_table: str
-    ) -> None:
-        """Test hybrid search with vector-only (vector_weight=1)."""
-        query_vector = [0.5] * 128
-        results = client.hybrid_search(
-            table_name=setup_hybrid_table,
-            vector=query_vector,
-            text="machine learning",
-            vector_weight=1.0,  # Vector only
-            k=5,
-        )
-
-        assert len(results) <= 5
-
 
 class TestFullTextSearch:
     """Test full-text search."""
 
     def test_full_text_search(self, client: Client, setup_hybrid_table: str) -> None:
         """Test pure full-text search."""
-        try:
-            results = client.full_text_search(
-                table_name=setup_hybrid_table, query="machine learning", k=5
-            )
-        except DXMTSearchError as exc:
-            if "FEATURE_DISABLED" in str(exc):
-                pytest.skip("server was built without the text-bm25 feature")
-            raise
+        results = _needs_text(lambda: client.full_text_search(
+            table_name=setup_hybrid_table, query="machine learning", k=5
+        ))
 
         assert isinstance(results, list)
         assert len(results) <= 5
@@ -597,3 +577,191 @@ class TestEdgeCases:
     def test_health_metrics_expose_storage_state(self, client: Client) -> None:
         body = client.health_metrics()
         assert body["storage"]["ready"] is True
+
+
+# ---------------------------------------------------------------------------------------
+# The routes the suite above never reached. Each test is judged by its effect on the
+# server -- a count that moved, a filter that was refused, a file that came back as a
+# table -- rather than by "the call did not raise". A `delete()` that raised on every call
+# stayed green for months behind a mock in one of the adapter packages.
+# ---------------------------------------------------------------------------------------
+
+
+def _unit(i: int, dim: int = 4) -> list[float]:
+    v = [0.0] * dim
+    v[i % dim] = 1.0
+    v[(i + 1) % dim] = 0.3
+    return v
+
+
+def _payload(record: dict) -> dict:
+    return record.get("payload") or record.get("metadata") or {}
+
+
+@pytest.fixture(scope="module")
+def wrapped_table(client: Client) -> Generator[str, None, None]:
+    name = f"routes_{random.randint(1000, 9999)}"
+    try:
+        client.delete_table(name)
+    except Exception:
+        pass
+    client.create_table(name=name, dimension=4, distance_metric="cosine")
+    client.insert_records(
+        name,
+        [
+            {
+                "id": f"r{i}",
+                "vector": _unit(i),
+                "payload": {"g": "a" if i % 2 else "b", "n": i, "lang": "en" if i < 4 else "fr"},
+                "sparse_vector": {"indices": [i % 3], "values": [1.0], "dimension": 8},
+            }
+            for i in range(6)
+        ],
+    )
+    yield name
+    try:
+        client.delete_table(name)
+    except Exception:
+        pass
+
+
+class TestEveryRouteTheClientWraps:
+    def test_update_merge_keeps_the_other_fields(self, client: Client, wrapped_table: str) -> None:
+        client.update_record(wrapped_table, "r2", payload={"n": 22}, merge_mode="merge")
+        md = _payload(client.get_records(wrapped_table, ["r2"])[0])
+        assert (md["n"], md["g"], md["lang"]) == (22, "b", "en")
+
+    def test_search_modes_and_mmr_answer_from_the_same_table(self, client: Client, wrapped_table: str) -> None:
+        assert client.search(wrapped_table, vector=_unit(3), k=3)[0]["id"] == "r3"
+        assert client.search(wrapped_table, vector=_unit(3), k=3, search_mode="exact")[0]["id"] == "r3"
+        hits = client.search(wrapped_table, vector=_unit(3), k=6, filter={"g": "a"})
+        assert hits and all(_payload(h)["g"] == "a" for h in hits)
+        assert len(client.search(wrapped_table, vector=_unit(3), k=3, mmr={"lambda_mult": 0.5, "fetch_k": 6})) == 3
+
+    def test_scroll_list_and_count_agree_with_the_filter(self, client: Client, wrapped_table: str) -> None:
+        rows = list(client.scroll(wrapped_table, filter={"lang": "fr"}))
+        assert len(rows) == 2 and all(_payload(r)["lang"] == "fr" for r in rows)
+        assert len(client.list_records(wrapped_table, limit=10)) == 6
+        assert client.count(wrapped_table) == 6
+        assert client.count(wrapped_table, filter={"g": "b"}) == 3
+
+    def test_facets_count_each_value(self, client: Client, wrapped_table: str) -> None:
+        body = client.facets(wrapped_table, "g")
+        counts = {b["value"]: b["count"] for b in body["hits"]}
+        assert counts == {"a": 3, "b": 3}
+        # `matched` is what the filter selected and `covered` how many of those had a value;
+        # the difference is what the facet cannot describe, and a chart needs both.
+        assert (body["matched"], body["covered"]) == (6, 6)
+
+    def test_sparse_search_hits_only_the_matching_dimension(self, client: Client, wrapped_table: str) -> None:
+        hits = client.sparse_search(wrapped_table, {"indices": [1], "values": [1.0], "dimension": 8}, limit=6)
+        ids = {h["id"] for h in hits}
+        assert ids and ids <= {"r1", "r4"}
+
+    def test_search_groups_returns_one_group_per_value(self, client: Client, wrapped_table: str) -> None:
+        body = client.search_groups(wrapped_table, vector=_unit(0), group_by="g", groups=2, group_size=2)
+        groups = body["groups"]
+        assert len(groups) == 2
+        assert {g["group_id"] for g in groups} == {"a", "b"}
+        assert all(len(g["hits"]) == 2 for g in groups)
+
+    def test_dxql_select_filters_rows(self, client: Client, wrapped_table: str) -> None:
+        body = client.query(f"SELECT * FROM {wrapped_table} WHERE lang = 'fr' LIMIT 10")
+        records = body.get("data", body).get("records", body)
+        assert {r["id"] for r in records} == {"r4", "r5"}
+
+    def test_an_alias_works_on_every_table_route(self, client: Client, wrapped_table: str) -> None:
+        alias = f"{wrapped_table}_alias"
+        client.set_alias(alias, wrapped_table)
+        try:
+            assert alias in str(client.aliases())
+            assert client.count(alias) == 6
+        finally:
+            client.delete_alias(alias)
+        assert alias not in str(client.aliases())
+
+    def test_a_dropped_payload_field_is_refused_in_a_filter(self, client: Client, wrapped_table: str) -> None:
+        from dxmt.exceptions import DXMTError
+
+        report = client.payload_index(wrapped_table)
+        assert isinstance(report, dict) and report
+        client.drop_payload_index_field(wrapped_table, "n")
+        try:
+            with pytest.raises(DXMTError):
+                client.search(wrapped_table, vector=_unit(0), k=2, filter={"n": 1})
+        finally:
+            client.index_payload_field(wrapped_table, "n")
+        assert len(client.search(wrapped_table, vector=_unit(0), k=2, filter={"n": 1})) == 1
+
+    def test_export_then_import_gives_the_table_back(self, client: Client, wrapped_table: str) -> None:
+        root = os.environ.get("DXMT_BACKUP_ROOT")
+        if not root:
+            pytest.skip("set DXMT_BACKUP_ROOT to the server's backup root to run the export round trip")
+        dest = os.path.join(root, f"{wrapped_table}.export")
+        copy = f"{wrapped_table}_copy"
+        client.export_table(wrapped_table, dest)
+        try:
+            client.import_table(dest, name=copy)
+            assert client.count(copy) == client.count(wrapped_table)
+            assert _payload(client.get_records(copy, ["r2"])[0]) == _payload(client.get_records(wrapped_table, ["r2"])[0])
+        finally:
+            try:
+                client.delete_table(copy)
+            except Exception:
+                pass
+
+    def test_text_routes_refuse_rather_than_degrade_without_bm25(self, client: Client, wrapped_table: str) -> None:
+        from dxmt.exceptions import DXMTError
+
+        assert len(client.hybrid_search(wrapped_table, vector=_unit(0), k=3)) == 3
+        try:
+            client.full_text_search(wrapped_table, "anything", k=3)
+        except DXMTError as exc:
+            assert "FEATURE_DISABLED" in str(exc)
+            with pytest.raises(DXMTError, match="FEATURE_DISABLED"):
+                client.hybrid_search(wrapped_table, vector=_unit(0), text="x", k=3)
+        # A build with text-bm25 answers both; there is nothing to refuse.
+
+    def test_upload_batches_and_delete_by_filter_remove_what_they_match(self, client: Client, wrapped_table: str) -> None:
+        client.upload(wrapped_table, [{"id": f"u{i}", "vector": _unit(i), "payload": {"g": "u"}} for i in range(250)], batch_size=100)
+        assert client.count(wrapped_table) == 256
+        client.delete_records(wrapped_table, ids=["u0", "u1"])
+        assert client.count(wrapped_table) == 254
+        client.delete_records(wrapped_table, filter={"g": "u"})
+        assert client.count(wrapped_table) == 6
+
+    @pytest.mark.asyncio
+    async def test_the_async_twins_reach_the_same_server(self, wrapped_table: str) -> None:
+        from dxmt.exceptions import DXMTError
+
+        a = Client(host=TEST_HOST, port=TEST_PORT, api_key=TEST_API_KEY)
+        name = f"{wrapped_table}_async"
+        try:
+            assert await a.ahealth_check()
+            await a.acreate_table(name, dimension=4)
+            assert name in str(await a.alist_tables())
+            await a.ainsert_records(
+                name,
+                [{"id": f"x{i}", "vector": _unit(i), "payload": {"n": i},
+                  "sparse_vector": {"indices": [i % 2], "values": [1.0], "dimension": 4}} for i in range(4)],
+            )
+            await a.aupdate_record(name, "x1", payload={"m": 1}, merge_mode="merge")
+            assert _payload((await a.aget_records(name, ["x1"]))[0]) == {"n": 1, "m": 1}
+            assert (await a.asearch(name, vector=_unit(2), k=2))[0]["id"] == "x2"
+            sparse = await a.asparse_search(name, {"indices": [1], "values": [1.0], "dimension": 4}, limit=4)
+            assert sparse and {h["id"] for h in sparse} <= {"x1", "x3"}
+            assert len([r async for r in a.ascroll(name)]) == 4
+            assert len(await a.alist_records(name, limit=10)) == 4
+            assert len(await a.ahybrid_search(name, vector=_unit(0), k=2)) == 2
+            assert "records" in str(await a.aquery(f"SELECT * FROM {name} LIMIT 2"))
+            await a.adelete_records(name, ids=["x0"])
+            assert len(await a.alist_records(name, limit=10)) == 3
+            await a.adelete_table(name)
+            with pytest.raises(DXMTError):
+                await a.aget_table(name)
+        finally:
+            try:
+                await a.adelete_table(name)
+            except Exception:
+                pass
+            await a.aclose()

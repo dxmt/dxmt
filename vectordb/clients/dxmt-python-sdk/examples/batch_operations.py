@@ -154,7 +154,7 @@ def main() -> None:
 
         for i in range(0, total_records, chunk_size):
             chunk = generate_records(i + 1, min(chunk_size, total_records - i), dimension)
-            duration = benchmark_insert(client, table_name, chunk, "parallel")
+            duration = benchmark_insert(client, table_name, chunk)
             total_duration += duration
 
             print(f"  Chunk {i // chunk_size + 1}/{total_records // chunk_size}: "
@@ -252,7 +252,7 @@ def main() -> None:
             try:
                 # Generate new records to insert
                 new_records = generate_records(10000 + (batch_num - 1) * 100, 50, dimension)
-                insert_duration = benchmark_insert(client, table_name, new_records, "batch", max_retries=3)
+                insert_duration = benchmark_insert(client, table_name, new_records, max_retries=3)
                 print(f"    - ✅ Inserted {len(new_records)} new records in {insert_duration:.4f}s")
                 success_count += 1
 

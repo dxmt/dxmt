@@ -1,13 +1,5 @@
 """Incremental updates example for DXMT Python SDK.
 
-⚠️  NOTE: For production use, see `incremental_updates_improved.py` which includes:
-    - Content change detection (50% cost savings)
-    - Performance measurement (18x speedup for metadata)
-    - Error handling with retry logic
-    - Real-world CDC patterns
-    - Comprehensive statistics
-    Handles re-indexing, deletes and upserts without rebuilding the table.
-
 This example demonstrates:
 1. Updating vector embeddings when content changes
 2. Updating metadata without changing vectors

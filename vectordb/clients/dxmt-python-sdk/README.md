@@ -202,7 +202,7 @@ results = client.hybrid_search(
     table_name="documents",
     vector=[0.1, 0.2, ...],          # Vector query
     text_query="machine learning",   # Text query
-    alpha=0.5,                        # Balance (0=text only, 1=vector only)
+    vector_weight=0.5,                # 0=text only, 1=vector only; omit to let the server fuse with dbsf
     limit=10
 )
 ```
@@ -338,7 +338,7 @@ results = client.hybrid_search(
     table_name="articles",
     vector=query_embedding,
     text_query="deep learning",
-    alpha=0.5,  # 0.5 = balanced, 0.0 = text only, 1.0 = vector only
+    vector_weight=0.5,  # 0.0 = text only, 1.0 = vector only; omit for the server's dbsf
     limit=10
 )
 ```
@@ -481,7 +481,6 @@ for mem in results:
 - Timestamp tracking (created_at, updated_at)
 - Cost-efficient tiered storage
 
-**Examples:** See [../examples/mem0_integration.py](../examples/mem0_integration.py) for comprehensive usage examples
 
 ## API Reference
 
@@ -528,26 +527,33 @@ Insert records into a table.
 }
 ```
 
-#### `search(table_name, vector, limit=10, filter=None, **kwargs)`
+#### `search(table_name, vector=None, text=None, k=10, filter=None, search_mode=None, offset=0, mmr=None, ...)`
 
-Search for similar vectors.
+Search for similar vectors. `limit` is accepted as an alias for `k`.
 
 **Parameters:**
 - `table_name` (str): Table name
-- `vector` (list[float]): Query vector
-- `limit` (int): Number of results
+- `vector` (list[float]): Query vector -- or `text` (str) on a table with a server-side embedding model
+- `k` (int): Number of results (default 10)
 - `filter` (dict): Metadata filter
+- `search_mode` (str): `fast` / `normal` / `accurate` / `exact`; `exact` scores every row and is the ground truth the others approximate
+- `mmr` (dict): `{"lambda_mult": 0.5, "fetch_k": 50}` re-ranks the candidates for diversity
 
-#### `hybrid_search(table_name, vector, text_query, alpha=0.5, limit=10)`
+#### `hybrid_search(table_name, vector=None, text=None, vector_weight=None, fusion_method=None, k=10, filter=None)`
 
-Hybrid search combining vector + text.
+Hybrid search combining vector + text. Needs a server built with `text-bm25`; a default build
+refuses a request carrying `text` with `FEATURE_DISABLED` rather than answering from the vector alone.
+`text_query`, `alpha` and `limit` are accepted as aliases for `text`, `vector_weight` and `k`.
 
 **Parameters:**
 - `table_name` (str): Table name
 - `vector` (list[float]): Query vector
-- `text_query` (str): Text query
-- `alpha` (float): Weight (0=text only, 1=vector only)
-- `limit` (int): Number of results
+- `text` (str): Text query
+- `vector_weight` (float): 0 = text only, 1 = vector only. **No default**: when omitted, nothing is sent and
+  the server fuses with `dbsf`, which normalises each side by its own score distribution and has no weight to
+  tune. Passing a weight selects `weighted_sum` unless `fusion_method` names another method
+  (`reciprocal_rank_fusion` also reads the weight).
+- `k` (int): Number of results
 
 ### Async Methods
 

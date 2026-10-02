@@ -45,8 +45,11 @@ single-node.
 ## What each client covers
 
 Six clients ship from this repository, and they are not equivalent. Python and JavaScript
-follow the whole HTTP surface; Rust and Go are deliberately small clients over the core, kept
-honest by live tests in CI rather than by feature parity. Picking one of the latter for a
+wrap most of the HTTP surface -- every route in the table below, plus aliases, payload-index
+policy, facets, grouped search, export/import and DXQL -- and leave the operational routes
+(snapshot, backup, branch, named vectors, schema evolution) to a raw request; Rust and Go are
+deliberately small clients over the core, kept honest by live tests in CI rather than by
+feature parity. Picking one of the latter for a
 feature it does not wrap means one `rawRequest`-shaped call of your own, not a missing server
 feature -- every capability below is in the HTTP API.
 

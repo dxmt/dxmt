@@ -294,7 +294,7 @@ def main() -> None:
             similarity = result["score"]
 
             print(f"\n{i}. {result['id']} (Similarity: {similarity:.4f})")
-            print(f'   "{payload["text"]}"')
+            print(f'   "{payload["content"]}"')
             print(f"   Author: {payload['author']}, Type: {payload['type']}")
 
             if similarity > 0.9:

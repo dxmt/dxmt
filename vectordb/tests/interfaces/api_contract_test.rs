@@ -202,7 +202,7 @@ const CONTRACTS: &[Contract] = &[
     Contract {
         method: "POST",
         path: "/tables/{t}/records/list",
-        caller: "dashboard",
+        caller: "python, js, dashboard",
     },
     Contract {
         method: "POST",

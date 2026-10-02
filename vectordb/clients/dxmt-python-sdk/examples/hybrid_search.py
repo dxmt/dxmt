@@ -4,6 +4,7 @@ This example demonstrates combining vector similarity search with full-text sear
 """
 
 from dxmt import Client
+from dxmt.exceptions import DXMTSearchError
 
 
 def main() -> None:
@@ -73,6 +74,22 @@ def main() -> None:
 
     query_vector = [0.15] * 128
     text_query = "machine learning"
+
+    # A default build (`cargo run -- serve`) has no full-text index. The server then refuses
+    # the text half of a hybrid query with FEATURE_DISABLED rather than quietly answering
+    # from the vector alone, so this is the honest place to stop.
+    try:
+        client.hybrid_search(table_name="articles", vector=query_vector, text=text_query, k=1)
+    except DXMTSearchError as exc:
+        if "FEATURE_DISABLED" in str(exc):
+            print("\nThis server was built without full-text search (feature `text-bm25`),")
+            print("so hybrid and text queries are refused. Vector-only search still works:")
+            for i, r in enumerate(client.search(table_name="articles", vector=query_vector, k=3), 1):
+                print(f"{i}. ID: {r['id']}  Score: {r['score']:.4f}")
+            client.delete_table("articles")
+            client.close()
+            return
+        raise
 
     # Try different alpha values
     alphas = [0.0, 0.3, 0.5, 0.7, 1.0]

@@ -270,7 +270,7 @@ def _gpt_answer(question: str, memories: list[tuple[Memory, float]]) -> str:
         f"New question: {question}"
     )
     resp = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model=os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=150,
         temperature=0.3,
