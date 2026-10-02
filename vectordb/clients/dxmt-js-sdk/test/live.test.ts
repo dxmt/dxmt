@@ -113,3 +113,135 @@ suite('DXMT live bulk load and export', () => {
     expect(even.every((r) => r.metadata?.parity === 'even' && r.vector?.length === 4)).toBe(true);
   });
 });
+
+suite('a record that came out of the client goes back in', () => {
+  // `scroll()`, `getRecord()` and every search hit hand back `created_at`, `updated_at`,
+  // `version`, `status`, `payload_json` and `score` beside the fields a write takes. The
+  // server's request type is `deny_unknown_fields`, and `upload()` used to spread the whole
+  // record, so read-modify-write -- the most ordinary thing to do with a record -- was a 400
+  // on every batch, reported as `uploaded: 0` with the refusal in `failed[]`, not thrown.
+  const tableName = `js_roundtrip_${Date.now()}`;
+  const client = liveClient();
+  afterAll(async () => {
+    try { await client.deleteTable(tableName); } catch { /* best effort */ }
+  });
+
+  it('scroll -> edit -> upload and insertRecords both succeed', async () => {
+    await client.createTable({ name: tableName, dimension: 4, distance_metric: 'cosine' });
+    await client.insertRecords({
+      table_name: tableName,
+      records: [
+        { id: 'a', vector: [1, 0, 0, 0], metadata: { k: 1 } },
+        { id: 'b', vector: [0, 1, 0, 0], metadata: { k: 2 } },
+      ],
+    });
+    const rows = [];
+    for await (const r of client.scroll(tableName, { withVector: true })) rows.push(r);
+    expect(rows.length).toBe(2);
+    for (const r of rows) r.metadata = { ...(r.metadata ?? {}), touched: true };
+
+    const uploaded = await client.upload(tableName, rows);
+    expect(uploaded.failed, JSON.stringify(uploaded.failed).slice(0, 300)).toEqual([]);
+    expect(uploaded.uploaded).toBe(2);
+
+    const back = await client.insertRecords({ table_name: tableName, records: rows });
+    expect(back.count).toBe(2);
+
+    const a = await client.getRecord(tableName, 'a');
+    expect(a.metadata?.touched).toBe(true);
+    expect(a.metadata?.k).toBe(1);
+  });
+});
+
+suite('an error carries the server\'s code', () => {
+  // The class is chosen by status, the code was the class's constant: `DIMENSION_MISMATCH`
+  // arrived as `VALIDATION_ERROR` and `TABLE_NOT_FOUND` as `NOT_FOUND`, so a caller could
+  // see that the server refused and not why.
+  const tableName = `js_errors_${Date.now()}`;
+  const client = liveClient();
+  afterAll(async () => {
+    try { await client.deleteTable(tableName); } catch { /* best effort */ }
+  });
+
+  it('keeps TABLE_NOT_FOUND, DIMENSION_MISMATCH and the HTTP status', async () => {
+    await client.createTable({ name: tableName, dimension: 4 });
+    const missing = await client.getTable('js_no_such_table_zz').catch((e) => e);
+    expect(missing.code).toBe('TABLE_NOT_FOUND');
+    expect(missing.status).toBe(404);
+
+    const wrongDim = await client
+      .insertRecords({ table_name: tableName, records: [{ id: 'x', vector: [1, 0] }] })
+      .catch((e) => e);
+    expect(wrongDim.status).toBe(400);
+    expect(String(wrongDim.code)).toMatch(/DIMENSION|VALIDATION_FAILED/);
+    expect(wrongDim.code).not.toBe('VALIDATION_ERROR');
+  });
+});
+
+suite('every method the other suites do not reach', () => {
+  // Twelve methods had no test of any kind, live or mocked. Each is called once and judged
+  // by its effect on the server, not by returning without throwing.
+  const tableName = `js_sweep_${Date.now()}`;
+  const imported = `${tableName}_imp`;
+  const client = liveClient();
+  afterAll(async () => {
+    for (const t of [tableName, imported]) {
+      try { await client.deleteTable(t); } catch { /* best effort */ }
+    }
+  });
+
+  it('listTables, getTableStats, searchGroups, aliases, payload index, export/import, facets, sparse', async () => {
+    await client.createTable({ name: tableName, dimension: 4 });
+    await client.insertRecords({
+      table_name: tableName,
+      records: [0, 1, 2, 3].map((i) => ({
+        id: `r${i}`,
+        vector: [i === 0 ? 1 : 0.1, i === 1 ? 1 : 0.1, i === 2 ? 1 : 0.1, i === 3 ? 1 : 0.1],
+        metadata: { g: i % 2 === 0 ? 'even' : 'odd', n: i },
+        sparse_vector: { indices: [i % 2], values: [1], dimension: 4 },
+      })),
+    });
+
+    const tables = await client.listTables();
+    expect(tables.map((t) => t.name)).toContain(tableName);
+
+    const stats = await client.getTableStats(tableName);
+    expect(stats.record_count).toBe(4);
+
+    const groups = await client.searchGroups(tableName, [1, 0, 0, 0], 'g', { groups: 2, groupSize: 1 });
+    expect(groups.groups.length).toBe(2);
+
+    const alias = `${tableName}_alias`;
+    await client.setAlias(alias, tableName);
+    expect((await client.aliases())[alias]).toBe(tableName);
+    expect(await client.count(alias)).toBe(4);
+    await client.deleteAlias(alias);
+    expect((await client.aliases())[alias]).toBeUndefined();
+
+    const report = await client.payloadIndex(tableName);
+    expect(report.built).toBe(true);
+    await client.dropPayloadIndexField(tableName, 'n');
+    const refused = await client
+      .search({ table_name: tableName, vector: [1, 0, 0, 0], top_k: 2,
+        filter: { must: [{ key: 'n', operation: { type: 'Equal', value: 1 } }] } })
+      .catch((e) => e);
+    expect(refused).toBeInstanceOf(Error);
+    await client.indexPayloadField(tableName, 'n');
+    const filtered = await client.search({ table_name: tableName, vector: [1, 0, 0, 0], top_k: 2,
+      filter: { must: [{ key: 'n', operation: { type: 'Equal', value: 1 } }] } });
+    expect(filtered.map((h) => h.id)).toEqual(['r1']);
+
+    const facets = await client.facets(tableName, 'g');
+    expect(facets.hits.map((h) => h.value).sort()).toEqual(['even', 'odd']);
+
+    const sparse = await client.sparseSearch(tableName, { indices: [1], values: [1], dimension: 4 }, { limit: 4 });
+    expect(sparse.map((h) => h.id).sort()).toEqual(['r1', 'r3']);
+
+    const root = process.env.DXMT_BACKUP_ROOT;
+    if (root) {
+      await client.exportTable(tableName, `${root}/${tableName}.dxmt`);
+      await client.importTable(`${root}/${tableName}.dxmt`, { name: imported });
+      expect(await client.count(imported)).toBe(4);
+    }
+  });
+});

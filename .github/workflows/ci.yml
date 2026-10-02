@@ -328,7 +328,7 @@ jobs:
           npm ci
           npm test
           npm run build
-          DXMT_LIVE_URL=http://127.0.0.1:19999 npm test -- --run test/live.test.ts
+          DXMT_LIVE_URL=http://127.0.0.1:19999 npm test -- --run test/live.test.ts test/langchain-live.test.ts
         working-directory: vectordb/clients/dxmt-js-sdk
 
       # Every client again, against a server that requires a key. On the test side
@@ -359,5 +359,5 @@ jobs:
           (cd clients/dxmt-go-sdk && DXMT_URL=http://127.0.0.1:19998 go test ./...)
           (cd clients/langchain-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
           (cd clients/llama-index-vector-stores-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
-          (cd clients/dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts)
+          (cd clients/dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts test/langchain-live.test.ts)
         working-directory: vectordb

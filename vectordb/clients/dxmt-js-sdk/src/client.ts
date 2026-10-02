@@ -156,8 +156,19 @@ export class DXMTClient {
 
       clearTimeout(timeoutId);
 
-      // Parse response
-      const data = await response.json();
+      // Parse response. A body that is not JSON -- a proxy's HTML 502, an empty 404 for a
+      // path that does not exist -- used to surface as a parse error with the status gone,
+      // which is the one fact that would have explained it.
+      let data: any;
+      try {
+        data = await response.json();
+      } catch {
+        throw new DXMTError(
+          `HTTP ${response.status} from ${method} ${path}: the body is not JSON`,
+          'UNSTRUCTURED',
+          { status: response.status }
+        );
+      }
 
       // Check for errors
       if (!response.ok) {
@@ -784,12 +795,7 @@ export class DXMTClient {
     const result: UploadResult = { uploaded: 0, batches: 0, retries: 0, failed: [] };
 
     const send = async (batch: VectorRecord[]): Promise<void> => {
-      const body = {
-        records: batch.map(({ metadata, ...record }) => ({
-          ...record,
-          ...(metadata === undefined ? {} : { payload: metadata }),
-        })),
-      };
+      const body = { records: batch.map((record) => this.toWireRecord(record)) };
       for (let attempt = 0; ; attempt++) {
         let status: number | undefined;
         let error: string;
@@ -894,11 +900,8 @@ export class DXMTClient {
         `/tables/${encodeURIComponent(params.table_name)}/records`,
         {
           // The public SDK calls this field `metadata`; the Rust wire contract calls it
-          // `payload`. Send the server shape explicitly so metadata is not silently discarded.
-          records: params.records.map(({ metadata, ...record }) => ({
-            ...record,
-            ...(metadata === undefined ? {} : { payload: metadata }),
-          })),
+          // `payload`, and accepts only the fields `toWireRecord` sends.
+          records: params.records.map((record) => this.toWireRecord(record)),
         }
       );
       const insertedIds = response.inserted_ids || [];
@@ -1283,6 +1286,33 @@ export class DXMTClient {
       ...this.headers,
       ...headers,
     };
+  }
+
+  /**
+   * The inverse of `normalizeRecord`: an SDK record as the server's `CreateRecordRequest`.
+   *
+   * A whitelist, not "everything but `metadata`". A record that came *out* of this client --
+   * from `scroll()`, `getRecord()` or a search hit -- carries `created_at`, `updated_at`,
+   * `version`, `status`, `payload_json` and `score`, and the server's request type is
+   * `deny_unknown_fields`, so spreading one back into `upload()` was a 400 on the whole batch
+   * (`unknown field \`created_at\``). Read-modify-write is the most ordinary thing to do with
+   * a record, and it did not work. `metadata` wins over `payload` when both are present,
+   * because `metadata` is the field this SDK documents.
+   */
+  private toWireRecord(record: VectorRecord): Record<string, unknown> {
+    const r = record as VectorRecord & {
+      payload?: Metadata;
+      text?: string;
+      named_vectors?: Record<string, number[]> | null;
+    };
+    const payload = r.metadata !== undefined ? r.metadata : r.payload;
+    const wire: Record<string, unknown> = { id: r.id };
+    if (r.vector !== undefined && r.vector !== null) wire.vector = r.vector;
+    if (r.text !== undefined) wire.text = r.text;
+    if (r.sparse_vector !== undefined && r.sparse_vector !== null) wire.sparse_vector = r.sparse_vector;
+    if (r.named_vectors !== undefined && r.named_vectors !== null) wire.named_vectors = r.named_vectors;
+    if (payload !== undefined) wire.payload = payload;
+    return wire;
   }
 
   /** Convert the server's `payload` field to the SDK's `metadata` field. */

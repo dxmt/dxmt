@@ -8,8 +8,12 @@
  * Base error class for all DXMT errors.
  */
 export class DXMTError extends Error {
-  public readonly code?: string;
+  /** The server's error code when it sent one (`TABLE_NOT_FOUND`, `DIMENSION_MISMATCH`,
+   *  `FEATURE_DISABLED`, ...), otherwise this client's own. */
+  public code?: string;
   public readonly details?: any;
+  /** The HTTP status, when the error came from a response. */
+  public status?: number;
 
   constructor(message: string, code?: string, details?: any) {
     super(message);
@@ -108,6 +112,18 @@ export function parseErrorResponse(
   const code = nested?.code || data?.code;
   const details = nested?.details || data?.details;
 
+  // The class is chosen by status so callers can `instanceof`; the *code* is the server's
+  // own whenever it sent one. These used to be overwritten by each class's constant --
+  // `DIMENSION_MISMATCH` arrived as `VALIDATION_ERROR`, `TABLE_NOT_FOUND` as `NOT_FOUND`,
+  // `FEATURE_DISABLED` on a 503 as `CONNECTION_ERROR` -- so a caller could tell *that* the
+  // server refused but not *why*, which is the only question an error code answers.
+  const err = classify(status, message, code, details);
+  if (code) err.code = code;
+  err.status = status;
+  return err;
+}
+
+function classify(status: number, message: string, code: string | undefined, details: any): DXMTError {
   switch (status) {
     case 400:
       return new DXMTValidationError(message, details);

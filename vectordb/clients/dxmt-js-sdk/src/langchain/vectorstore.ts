@@ -45,7 +45,8 @@ import type {
 export class DXMTVectorStore extends VectorStore {
   declare FilterType: Record<string, any>;
 
-  private client: DXMTClient;
+  /** The underlying client, for anything the store does not wrap. */
+  readonly client: DXMTClient;
   private collectionName: string;
   private dimension?: number;
   private distanceMetric: string;
@@ -97,7 +98,12 @@ export class DXMTVectorStore extends VectorStore {
       // Try to get existing table
       await this.client.getTable(this.collectionName);
     } catch (error) {
-      // Table doesn't exist, create it
+      // Only a missing table means "create it". This caught *every* failure -- a 401, a
+      // timeout, a 500 -- and went on to create, so the user saw a create error (or a
+      // duplicate-table error) instead of the one that actually happened.
+      if ((error as { code?: string }).code !== 'TABLE_NOT_FOUND') {
+        throw error;
+      }
       if (!this.dimension) {
         // Auto-detect dimension from embeddings
         const testVector = await this.embeddings.embedQuery('test');
@@ -121,6 +127,15 @@ export class DXMTVectorStore extends VectorStore {
 
     const mustConditions = [];
     for (const [key, value] of Object.entries(filter)) {
+      // Equality on a scalar is the whole language here. An object -- LangChain's
+      // `{ year: { $gte: 2020 } }` shape -- used to be wrapped in `Equal` and sent, which the
+      // server refuses as an object target; saying so here names the limit instead.
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        throw new DXMTValidationError(
+          `filter on "${key}": this store supports equality on scalars only; ` +
+            `for ranges and other operators use DXMTClient.search with a DXMT filter`
+        );
+      }
       mustConditions.push({
         key,
         operation: { type: 'Equal' as const, value },
@@ -159,9 +174,11 @@ export class DXMTVectorStore extends VectorStore {
     // Generate embeddings
     const vectors = await this.embeddings.embedDocuments(texts);
 
-    // Generate IDs if not provided
+    // Explicit ids, then the document's own `id`, then a generated one. `Document.id` was
+    // ignored and every add minted `Date.now()-random`; since inserts are upserts, a caller
+    // re-adding a document they had given an id got a second copy rather than an update.
     const ids =
-      options?.ids || documents.map(() => this.generateId());
+      options?.ids || documents.map((doc) => doc.id ?? this.generateId());
 
     if (ids.length !== documents.length) {
       throw new DXMTValidationError(
@@ -350,11 +367,24 @@ export class DXMTVectorStore extends VectorStore {
    *
    * @param params - Deletion parameters
    */
-  async delete(params: { ids: string[] }): Promise<void> {
-    await this.client.deleteRecords({
-      table_name: this.collectionName,
-      record_ids: params.ids,
-    });
+  async delete(params?: { ids?: string[]; filter?: Record<string, any> }): Promise<void> {
+    // The base class signature is `delete(params?)`; this took a required `{ ids }` and threw
+    // a TypeError on anything else, while the client underneath deletes by filter as well.
+    if (params?.ids?.length) {
+      await this.client.deleteRecords({
+        table_name: this.collectionName,
+        record_ids: params.ids,
+      });
+      return;
+    }
+    if (params?.filter) {
+      await this.client.deleteRecords({
+        table_name: this.collectionName,
+        filter: this.convertFilter(params.filter),
+      });
+      return;
+    }
+    throw new DXMTValidationError('delete() needs { ids } or { filter }');
   }
 
   /**

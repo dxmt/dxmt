@@ -41,11 +41,6 @@ export interface DXMTVectorStoreConfig {
   distanceMetric?: 'cosine' | 'euclidean' | 'dot' | 'manhattan';
 
   /**
-   * Index type.
-   */
-  indexType?: 'hnsw' | 'hnsw_pq' | 'ivf_pq' | 'diskann' | 'diskann_enhanced';
-
-  /**
    * Request timeout in milliseconds.
    * @default 30000
    */

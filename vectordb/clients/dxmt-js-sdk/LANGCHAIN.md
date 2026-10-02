@@ -80,7 +80,6 @@ interface DXMTVectorStoreConfig {
   // Vector configuration (optional)
   dimension?: number; // auto-detected from embeddings
   distanceMetric?: 'cosine' | 'euclidean' | 'dot' | 'manhattan';
-  indexType?: 'hnsw' | 'hnsw_pq' | 'ivf_pq' | 'diskann';
 
   // Client options (optional)
   timeout?: number; // default: 30000

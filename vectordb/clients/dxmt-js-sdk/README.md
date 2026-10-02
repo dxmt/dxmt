@@ -6,22 +6,6 @@ Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/dxmt/d
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 
-## Breaking changes in 2.0.0
-
-The 1.x client did not match the server's wire format in several places, so these are fixes
-that change the published types:
-
-- `listTables()` returns `TableInfo[]`, not `string[]`. The server has always returned table
-  objects.
-- Successful responses are unwrapped from the `{ success, data }` envelope before they are
-  returned. 1.x handed the envelope back for some calls and the payload for others.
-- `searchVectors()` reads the server's `hits` (it read `results`, which is never sent) and
-  sends `top_k` (it sent `k`, which the server ignores in favour of its default of 10).
-- `deleteRecords()` sends `ids`, the field the server reads. Deleting by `filter` now throws
-  instead of silently deleting nothing — the server has no such route yet.
-- `insertRecords()` maps `metadata` to the server's `payload`; 1.x dropped it.
-- New: `updateRecord()` and `healthMetrics()`.
-
 ## Features
 
 - ✅ **Full TypeScript support** with complete type definitions
@@ -29,8 +13,12 @@ that change the published types:
 - ✅ **Comprehensive error handling** with custom error classes
 - ✅ **Works in Node.js and browsers** (with bundler)
 - ✅ **Zero dependencies** (except cross-fetch for compatibility)
-- ✅ **Full DXMT API coverage** - tables, records, search, filters
-- ✅ **Production-ready** with timeout handling and retry logic
+- ✅ **Tables, records, search, filters, facets, grouping, sparse search, aliases, payload-index
+  controls, export/import, health** -- 26 methods. Not wrapped: `PATCH /tables/{t}`, branch,
+  bulk insert, the knn graph, batch search, index rebuild/drop, snapshot, backup, DXQL and the
+  root probes; call those over HTTP.
+- ✅ **Timeouts on every call; retries in `upload()`** -- the batched writer retries what a
+  retry can fix (no answer, 429, 5xx). Every other method is a single request.
 
 ## Installation
 
@@ -341,9 +329,10 @@ try {
 
 ```typescript
 const health = await client.healthCheck();
-console.log('Status:', health.status);
-console.log('Version:', health.version);
-console.log('Uptime:', health.uptime_seconds);
+console.log('Status:', health.status);      // "healthy" | "degraded"
+console.log('Ready:', health.ready);        // false while durability is degraded
+console.log('Accepting:', health.accepting_requests);
+// Build version and uptime are not in /health; GET /status at the server root has them.
 ```
 
 ## Examples
@@ -437,10 +426,10 @@ const results = await client.search({ ... });
 
 ## API Reference
 
-There is no generated reference yet; the public surface is the source:
-- [Client](./src/client.ts)
-- [Types](./src/types.ts)
-- [Errors](./src/errors.ts)
+There is no generated reference yet. The published package ships `dist/index.d.ts`, which is
+the whole public surface with its doc comments; in a checkout the source is
+`src/client.ts`, `src/types.ts` and `src/errors.ts`. (The `src/` links that stood here
+pointed at files the published package does not contain.)
 
 ## DXMT Server
 
