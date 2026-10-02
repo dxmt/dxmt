@@ -198,11 +198,23 @@ brackets:
 The default is now one dimension per subspace below 64, two below 256, four from there (the
 bold column). At 25 dimensions the code was the whole problem and the new layout is exact at
 `normal`; at 100 and 200 it is worth three points and then matches the unquantized graph to
-within the noise -- **what remains there is the traversal budget**, `ef_search` 100 on a
-corpus where HNSW needs several times that for 0.99 (`accurate`, 4x the budget, reaches
-0.977 on glove-100 and 0.9455 on glove-200). Calibrating that budget per table is the next
-change; until then `accurate` is the mode for a recall target on a hard corpus. A table
-created before this change keeps the layout it was built with.
+within the noise. **What remains there is the corpus, not the graph.** hnswlib built on the
+same glove-100 rows, same machine, M=16 and `ef_construction` 200, queried at the budgets
+`normal` and `accurate` use:
+
+| glove-100, recall@10 | ef 512 (`normal`) | ef 2048 (`accurate`) |
+| --- | --- | --- |
+| hnswlib 0.8 | 0.9160 | 0.9745 |
+| DXMT, unquantized | 0.9210 | 0.9770 |
+| DXMT, PQ 2 dims/subspace | 0.9235 | 0.9760 |
+
+Doubling `ef_construction`, doubling `m` or inserting in batches of 100 moved `normal` by at
+most 1.6 points. So on a corpus like this the recall a budget buys is what HNSW buys, and a
+recall *target* has to be met by spending more budget on that table than on an easy one --
+calibrating `ef_search` per table against its own exact scan is the next change; until
+then `accurate` is the mode for a hard corpus. The same run put hnswlib's build at 13,000
+rows/s on 16 threads against about 4,300 here, which is the ingest gap stated in cores. A
+table created before this change keeps the layout it was built with.
 
 **A small fraction of records cannot be found by the graph on some corpora.** Searching with
 a vector that is already stored returns it for **100% of a modern-embedding corpus** — 60,000
