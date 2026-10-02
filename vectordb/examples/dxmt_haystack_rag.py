@@ -448,7 +448,7 @@ def main():
     print("  ✓ Integration with Haystack pipelines")
     print("  ✓ RAG workflows with DXMT backend")
     print("\nDXMT Benefits:")
-    print("  - 98% cost reduction with tiered storage")
+    print("  - rows on disk, only the graph in memory")
     print("  - 3.56M QPS vector search capability")
     print("  - Self-hosted, no vendor lock-in")
     print("  - Scales from embedded to distributed")

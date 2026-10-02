@@ -3,7 +3,7 @@ name = "dxmt-vectordb"
 version = "1.0.1"
 edition = "2021"
 authors = ["DXMT Team"]
-description = "A lightweight, horizontally scalable vector database with storage native architecture"
+description = "A lightweight single-node vector database written in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"
 

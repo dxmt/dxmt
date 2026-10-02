@@ -76,7 +76,7 @@ def example_1_vector_search_tool():
     # Add sample documents
     print("\n📝 Adding sample documents to DXMT...")
     sample_docs = [
-        "DXMT VectorDB uses tiered storage (Memory→SSD→S3) for 98% cost savings",
+        "DXMT VectorDB keeps records and vectors in row files and only the HNSW-PQ graph in memory",
         "CrewAI enables multi-agent collaboration with role-based task delegation",
         "Vector databases excel at semantic search and similarity matching",
         "Python is the most popular language for AI and machine learning applications",
@@ -411,7 +411,6 @@ def main():
         print("\n📚 Key Takeaways:")
         print("  ✓ DXMT integrates seamlessly with CrewAI")
         print("  ✓ Two integration levels: Tools and Storage")
-        print("  ✓ 98% cost savings with tiered storage")
         print("  ✓ High-performance vector search (<100ms)")
         print("  ✓ Supports multi-agent collaboration")
         print("\n🚀 Ready for production use!")

@@ -31,7 +31,7 @@ Make sure the DXMT server is running:
 
 ```bash
 # In the vectordb directory
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 
 # Or using make
 make run
@@ -431,7 +431,7 @@ Error: Cannot connect to DXMT server
 ```bash
 # Start the server
 cd /path/to/vectordb
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 ```
 
 ### OpenAI API Error

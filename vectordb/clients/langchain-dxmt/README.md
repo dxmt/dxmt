@@ -6,7 +6,7 @@
 [![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/dxmt/vectordb/branch/main/graph/badge.svg)](https://codecov.io/gh/dxmt/vectordb)
 
-Official LangChain integration for DXMT VectorDB - a lightweight, horizontally scalable vector database with storage native architecture written in Rust.
+Official LangChain integration for DXMT VectorDB - a lightweight single-node vector database written in Rust.
 
 ## Table of Contents
 

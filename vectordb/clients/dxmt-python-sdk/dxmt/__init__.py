@@ -1,7 +1,7 @@
 """DXMT Python SDK.
 
-Official Python SDK for DXMT VectorDB - A lightweight, horizontally scalable
-vector database with storage native architecture written in Rust.
+Official Python SDK for DXMT VectorDB - a lightweight single-node vector database
+written in Rust.
 
 Example:
     >>> from dxmt import Client

@@ -294,7 +294,6 @@ def main():
         print("✓ Memory updates")
         print("✓ Memory cleanup")
         print("\nDXMT provides:")
-        print("- Cost-efficient tiered storage (98% cost reduction)")
         print("- High performance (3.56M QPS vector search)")
         print("- Self-hosted, no vendor lock-in")
 

@@ -17,7 +17,7 @@ This directory contains comprehensive examples demonstrating various use cases a
 
 ```bash
 # From the repository root
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 ```
 
 ### 2. Install Dependencies

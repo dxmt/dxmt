@@ -101,7 +101,7 @@ else
     echo ""
     echo "   To start the DXMT server:"
     echo "   $ cd ../../  # Go to vectordb directory"
-    echo "   $ cargo run -- serve --simple --memory-limit 1024"
+    echo "   $ cargo run -- serve"
     echo ""
 fi
 echo ""

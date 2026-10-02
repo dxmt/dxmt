@@ -39,7 +39,7 @@ export OPENAI_API_KEY='your-api-key-here'
 ```bash
 # In the vectordb directory
 cd ../../
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 ```
 
 ### 4. Run the Evaluation

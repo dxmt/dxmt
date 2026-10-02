@@ -279,7 +279,7 @@ def create_sample_knowledge_base() -> List[Dict[str, Any]]:
     """
     return [
         {
-            "text": "DXMT VectorDB is a lightweight, horizontally scalable vector database designed for AI applications. It supports multiple index types including HNSW, IVF, IVF-PQ, and LSH for different performance requirements.",
+            "text": "DXMT VectorDB is a lightweight single-node vector database designed for AI applications. It supports multiple index types including HNSW, IVF, IVF-PQ, and LSH for different performance requirements.",
             "metadata": {"source": "product_overview.md", "category": "product"}
         },
         {

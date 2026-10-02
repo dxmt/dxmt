@@ -68,7 +68,7 @@ def example_1_basic_langchain():
     print("\n📝 Adding documents...")
     documents = [
         Document(
-            page_content="DXMT VectorDB provides 98% cost savings through tiered storage architecture.",
+            page_content="DXMT VectorDB keeps records and vectors in row files beside a write-ahead log and only the HNSW-PQ graph in memory.",
             metadata={"source": "dxmt_docs", "category": "features"}
         ),
         Document(
@@ -93,7 +93,7 @@ def example_1_basic_langchain():
     queries = [
         "What is DXMT?",
         "Tell me about Bisheng",
-        "What are the cost savings?",
+        "Where does DXMT keep its records?",
     ]
 
     for query in queries:
@@ -358,7 +358,6 @@ def main():
         print("  ✓ Works seamlessly with Bisheng's initialization pattern")
         print("  ✓ Supports similarity search with scores")
         print("  ✓ Metadata filtering for refined searches")
-        print("  ✓ 98% cost savings with tiered storage")
         print("  ✓ High-performance vector search (<100ms)")
         print("\n🚀 Ready for production use with Bisheng!")
 

@@ -82,7 +82,7 @@ def main():
     # Step 3: Add test documents
     print("\n[3/5] Adding test documents...")
     documents = [
-        "DXMT VectorDB provides 98% cost savings through tiered storage",
+        "DXMT VectorDB keeps records and vectors in row files and only the HNSW-PQ graph in memory",
         "CrewAI enables powerful multi-agent AI systems",
         "Vector databases excel at semantic similarity search",
     ]

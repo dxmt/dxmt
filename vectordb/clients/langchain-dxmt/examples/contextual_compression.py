@@ -118,7 +118,7 @@ def main():
     docs = [
         Document(
             page_content="""
-DXMT VectorDB is a lightweight, horizontally scalable vector database.
+DXMT VectorDB is a lightweight single-node vector database.
 It supports multiple index types including HNSW, IVF, and BruteForce.
 The company was founded in 2023 by a team of database engineers.
 Our office is located in San Francisco, California.

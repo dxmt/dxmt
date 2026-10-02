@@ -4,7 +4,7 @@
 [![Python Version](https://img.shields.io/pypi/pyversions/dxmt-python-sdk)](https://pypi.org/project/dxmt-python-sdk/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Official Python SDK for DXMT VectorDB - a lightweight, horizontally scalable vector database with storage native architecture written in Rust.
+Official Python SDK for DXMT VectorDB - a lightweight single-node vector database written in Rust.
 
 ## Features
 
@@ -479,7 +479,6 @@ for mem in results:
 - Automatic deduplication via hash
 - Efficient filtering and semantic search
 - Timestamp tracking (created_at, updated_at)
-- Cost-efficient tiered storage
 
 
 ## API Reference

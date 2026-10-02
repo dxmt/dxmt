@@ -1,8 +1,8 @@
 /**
  * DXMT VectorDB JavaScript SDK
  *
- * Official JavaScript/TypeScript SDK for DXMT VectorDB - A lightweight,
- * horizontally scalable vector database with storage native architecture.
+ * Official JavaScript/TypeScript SDK for DXMT VectorDB - a lightweight single-node
+ * vector database written in Rust.
  *
  * @packageDocumentation
  *

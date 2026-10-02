@@ -1,10 +1,11 @@
 # DXMT VectorDB
 
-A vector database written in Rust. HNSW, HNSW-PQ and product quantization with runtime SIMD
-dispatch, hybrid retrieval and a query language behind a REST API, plus a zero-config
-collection mode. Full-text search (Tantivy), GraphQL, WebSocket, Swagger and S3 are opt-in
-build features — see [Feature flags](#feature-flags) — so a default build is the minimal
-supported single-node server and nothing more.
+A single-node vector database written in Rust. HNSW, HNSW-PQ and product quantization with
+runtime SIMD dispatch, payload filtering, hybrid retrieval, server-side embedding and a query
+language behind one REST API, with Swagger and a read-only console served by default.
+Full-text search (Tantivy), GraphQL, WebSocket, gRPC and S3 are opt-in build features — see
+[Feature flags](#feature-flags) — so a default build is the supported single-node server and
+nothing more.
 
 > **Status: 1.0.** Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
@@ -35,8 +36,8 @@ supported single-node server and nothing more.
 > writability at startup, so an unwritable `backups/` is a refusal to start rather than a
 > surprise for whoever takes the first backup. When configured, snapshots, WAL chunks and
 > partition segments are mirrored to object storage, but that mirror is still experimental and
-> local WAL remains the readiness boundary. Distributed/cluster code exists but is not
-> production-ready. See [Known Limitations](#known-limitations).
+> local WAL remains the readiness boundary. There is no replication or clustering: this is
+> one process on one machine. See [Known Limitations](#known-limitations).
 
 Anything this README does not describe is experimental, even when its module compiles or has
 standalone tests.

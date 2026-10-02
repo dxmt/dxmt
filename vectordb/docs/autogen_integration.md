@@ -28,10 +28,10 @@
 
 ### What is DXMT VectorDB?
 
-DXMT is a lightweight, horizontally scalable vector database with object storage native architecture. Unlike traditional vector databases that optimize for in-memory search, DXMT optimizes for cloud-native cost efficiency through tiered storage.
+DXMT is a lightweight single-node vector database written in Rust. Unlike traditional vector databases that optimize for in-memory search, DXMT optimizes for cloud-native cost efficiency through tiered storage.
 
 **Key Features:**
-- **Tiered Storage:** Memory → SSD → S3 for 98% cost savings
+- **Disk-resident rows:** records and vectors in row files, only the graph in memory
 - **Full-Text Search:** Tantivy + BM25 ranking engine
 - **Hybrid Search:** Combine vector similarity and text relevance
 - **Horizontal Scalability:** Linear performance scaling
@@ -39,7 +39,7 @@ DXMT is a lightweight, horizontally scalable vector database with object storage
 
 ### Why Use DXMT with AutoGen?
 
-1. **Cost Efficiency:** 98% cost reduction vs in-memory-only solutions
+1. **Memory footprint:** about 0.5 KB resident per 768-dimension row
 2. **Scalability:** Handle millions of memories across thousands of agents
 3. **Persistence:** Durable storage with S3 backend
 4. **Advanced Search:** Full-text and hybrid search capabilities

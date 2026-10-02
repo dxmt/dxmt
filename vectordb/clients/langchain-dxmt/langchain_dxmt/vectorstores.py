@@ -75,7 +75,7 @@ def _extract_payload(record: dict[str, Any]) -> dict[str, Any]:
 class DXMTVectorDB(VectorStore):
     """DXMT VectorDB vector store integration.
 
-    DXMT is a lightweight, horizontally scalable vector database with:
+    DXMT is a lightweight single-node vector database with:
     - Multiple index types (HNSW, IVF, IVF-PQ, LSH)
     - Full-text search with BM25 and Chinese support (Jieba)
     - Hybrid search (vector + text)

@@ -72,9 +72,9 @@ def example_1_basic_rag():
     print("📝 Creating sample documents...")
     documents = [
         Document(
-            text="DXMT VectorDB is a lightweight, horizontally scalable vector database "
-            "with storage native architecture. It provides 98% cost savings through "
-            "tiered storage (Memory → SSD → S3).",
+            text="DXMT VectorDB is a lightweight single-node vector database "
+            "written in Rust. Records and vectors live in row files beside a write-ahead "
+            "log; only the HNSW-PQ graph stays in memory.",
             metadata={"source": "dxmt_docs", "category": "overview"},
         ),
         Document(
@@ -373,7 +373,6 @@ def main():
         print("    - PersistableRAGRetriever (persist)")
         print("    - QueryableRAGRetriever (query_total_count)")
         print("    - DeletableRAGRetriever (clear)")
-        print("  ✓ 98% cost savings with tiered storage")
         print("  ✓ High-performance vector search (<100ms)")
         print("\n🚀 Ready for production use with MetaGPT!")
 

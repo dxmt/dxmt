@@ -1,5 +1,5 @@
-//! DXMT VectorDB - A lightweight, horizontally scalable vector database
-//! with object storage native architecture.
+//! DXMT VectorDB - a lightweight single-node vector database: WAL durability, HNSW-PQ
+//! indexing, payload filtering and server-side embedding behind one HTTP API.
 
 pub mod api;
 #[cfg(feature = "benchmarks")]

@@ -60,7 +60,7 @@ def main():
             metadata={"category": "documentation", "source": "docs", "topic": "vector-db"}
         ),
         Document(
-            text="DXMT VectorDB is a lightweight, horizontally scalable vector database with object storage native architecture.",
+            text="DXMT VectorDB is a lightweight single-node vector database written in Rust.",
             metadata={"category": "product", "source": "website", "topic": "dxmt"}
         ),
         Document(

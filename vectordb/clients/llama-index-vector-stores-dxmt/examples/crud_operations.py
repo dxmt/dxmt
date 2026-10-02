@@ -437,7 +437,6 @@ def best_practices():
     DXMT-Specific Tips:
     ✓ Leverage DXMT's automatic persistence
     ✓ Use metadata filtering for efficient queries
-    ✓ Take advantage of tiered storage for cost savings
     ✓ Monitor vector quality after updates
     ✓ Use appropriate index type for your scale
     """)

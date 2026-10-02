@@ -98,7 +98,6 @@ class DXMTDocumentStore:
         - Full-text search with BM25 ranking
         - Vector similarity search (cosine, euclidean, dot product)
         - Metadata filtering with complex boolean logic
-        - Tiered storage for 98% cost reduction vs all-memory
         - High-performance search (3.56M QPS capability)
         - Automatic embedding storage and retrieval
         - Async operation support

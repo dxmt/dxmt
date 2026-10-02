@@ -108,11 +108,10 @@ class DXMTStorage(Storage):
     """CrewAI Storage implementation using DXMT VectorDB.
 
     Implements the CrewAI Storage interface with DXMT backend, providing
-    persistent memory storage with cost-efficient tiered storage.
+    persistent memory storage on a single-node vector database.
 
     Features:
         - Multi-scope memory (user_id, agent_id, run_id)
-        - Tiered storage (98% cost savings vs all-memory)
         - High-performance vector search (<100ms P99)
         - Support for all memory types (short_term, long_term, entities, external)
         - Automatic embedding generation

@@ -132,7 +132,6 @@ class DXMTVectorSearchTool(BaseTool):
         - Metadata filtering (simple and advanced)
         - Custom embedding function support
         - Score threshold filtering
-        - Tiered storage benefits (98% cost savings)
 
     Args:
         dxmt_config: Configuration for DXMT connection and search

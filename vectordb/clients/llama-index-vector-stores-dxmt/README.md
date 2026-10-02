@@ -369,26 +369,18 @@ mypy llama_index
 
 - Python 3.9+
 - llama-index-core >= 0.11.0
-- dxmt >= 0.2.0
+- dxmt >= 1.0.0
 - DXMT server running (for integration tests)
 
 ## Architecture
 
-DXMT VectorDB uses an **object storage native architecture** optimized for cloud deployments:
-
-```
-Memory (Hot)  → 512MB LRU cache, <1ms latency
-    ↓
-SSD (Warm)    → 10GB filesystem cache, <50ms latency
-    ↓
-S3 (Cold)     → Unlimited capacity, <500ms latency
-```
-
-Key features:
-- **Runtime adaptive index selection** - Automatically chooses the best algorithm
-- **Ephemeral VM support** - 30-day VM lifecycle with sub-5min recovery
-- **Cost-optimized** - 70-90% cost savings vs all-memory solutions
-- **Single codebase** - Same binary for embedded, single-node, and distributed modes
+DXMT is a single-node server. Records and full vectors live in row files beside a
+write-ahead log; only the HNSW-PQ graph, the PQ codes and the id map stay resident (about
+0.5 KB per 768-dimension row at 10M rows). A table is an exact graph below 65,536 rows and a
+quantized one above, with an exact rerank of the candidates from the row file. Durability is
+the WAL plus periodic snapshots; `search_mode: "exact"` scores every row and is the ground
+truth the approximate modes are measured against. `vectordb/docs/SUPPORT_MATRIX.md` in the
+repository says which parts are covered by the 1.0 compatibility promise.
 
 ## Contributing
 

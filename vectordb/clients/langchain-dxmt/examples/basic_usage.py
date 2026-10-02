@@ -46,7 +46,7 @@ def main() -> None:
             metadata={"source": "langchain_docs", "topic": "introduction"},
         ),
         Document(
-            page_content="DXMT VectorDB is a lightweight, horizontally scalable vector database.",
+            page_content="DXMT VectorDB is a lightweight single-node vector database.",
             metadata={"source": "dxmt_docs", "topic": "introduction"},
         ),
         Document(

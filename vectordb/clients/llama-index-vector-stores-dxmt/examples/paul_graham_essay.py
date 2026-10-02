@@ -271,7 +271,7 @@ def main():
             print("   $ python paul_graham_essay.py --clean")
         elif "Connection" in error_msg or "refused" in error_msg:
             print("\n💡 Hint: Make sure DXMT server is running:")
-            print("   $ cargo run -- serve --simple --memory-limit 1024")
+            print("   $ cargo run -- serve")
 
         import traceback
         traceback.print_exc()

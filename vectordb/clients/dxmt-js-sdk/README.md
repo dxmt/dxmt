@@ -1,6 +1,6 @@
 # DXMT JavaScript SDK
 
-Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/dxmt/dxmt) - A lightweight, horizontally scalable vector database with storage native architecture.
+Official JavaScript/TypeScript SDK for [DXMT VectorDB](https://github.com/dxmt/dxmt) - A lightweight single-node vector database written in Rust.
 
 [![npm version](https://badge.fury.io/js/dxmt-js-sdk.svg)](https://www.npmjs.com/package/dxmt-js-sdk)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)

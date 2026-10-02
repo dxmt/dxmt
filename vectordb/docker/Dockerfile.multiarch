@@ -115,7 +115,7 @@ ARG VERSION
 
 # 添加OCI标签
 LABEL org.opencontainers.image.title="DXMT VectorDB" \
-      org.opencontainers.image.description="Lightweight, horizontally scalable vector database for AI applications" \
+      org.opencontainers.image.description="Lightweight single-node vector database for AI applications" \
       org.opencontainers.image.authors="DXMT Team" \
       org.opencontainers.image.vendor="DXMT" \
       org.opencontainers.image.licenses="Apache-2.0" \

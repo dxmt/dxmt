@@ -68,13 +68,13 @@ DXMT server is not running.
 Start the DXMT server:
 ```bash
 cd /path/to/vectordb
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 ```
 
 Or in a separate terminal:
 ```bash
 # Terminal 1: Server
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 
 # Terminal 2: Run examples
 cd llama-index-vector-stores-dxmt/examples
@@ -166,8 +166,7 @@ dimension=3072
 
 ### 1. Check server resources
 ```bash
-# Make sure server has enough memory
-cargo run -- serve --simple --memory-limit 2048  # Increase memory
+cargo run -- serve
 ```
 
 ### 2. Use smaller dataset
@@ -390,7 +389,7 @@ When running examples, make sure:
 
 ```bash
 # Start server
-cargo run -- serve --simple --memory-limit 1024
+cargo run -- serve
 
 # Set API key
 export OPENAI_API_KEY='your-key'
