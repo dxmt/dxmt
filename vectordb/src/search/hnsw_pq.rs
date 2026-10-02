@@ -48,6 +48,44 @@ pub struct HnswPqConfig {
 }
 
 impl HnswPqConfig {
+    /// How many PQ subspaces a table of this width gets when nobody says otherwise.
+    ///
+    /// It was `dimension / 4` everywhere -- four dimensions per subspace, the layout
+    /// measured at 768 (192 bytes a code, recall@100 held at 1M and 10M). Applied to a
+    /// 25-dimension corpus that is five subspaces of five dimensions: a 100-byte vector in a
+    /// 5-byte code, and the walk on those codes cannot tell neighbours apart. Measured on
+    /// 2026-10-02, 1.18M rows, recall@10 at `normal` against the published ground truth:
+    ///
+    /// | corpus     | dims/subspace 4 (old) | 2      | 1      | no PQ  |
+    /// |------------|-----------------------|--------|--------|--------|
+    /// | glove-25   | 0.7595 (5 x 5)        |        | 1.0000 | 1.0000 |
+    /// | glove-100  | 0.8950                | 0.9235 | 0.9275 |        |
+    /// | glove-200  | 0.8485                | 0.8775 |        |        |
+    /// | gist-960   | 0.9780                |        |        |        |
+    ///
+    /// At 25 dimensions the code was the whole problem; one dimension per subspace -- a
+    /// 4x code rather than 20x -- is exact at `normal`, for 0.7 ms. At 100 and 200 the finer
+    /// code buys three points and the rest of the gap is the traversal budget, which is a
+    /// different knob (`ef_search`, the rerank pool) and a different change. So: one
+    /// dimension per subspace below 64, two below 256, four from there, rounded to the
+    /// nearest divisor of the width that does not make a subspace coarser than that.
+    pub fn default_subvectors(dimension: usize) -> usize {
+        if dimension == 0 {
+            return 1;
+        }
+        let dims_per_subspace = match dimension {
+            0..=63 => 1,
+            64..=255 => 2,
+            _ => 4,
+        };
+        let wanted = dimension.div_ceil(dims_per_subspace);
+        // The smallest divisor of `dimension` that is at least `wanted`: at most
+        // `dims_per_subspace` dimensions in any subspace, never more.
+        (wanted..=dimension)
+            .find(|m| dimension.is_multiple_of(*m))
+            .unwrap_or(dimension)
+    }
+
     pub const DEFAULT_QUANTIZE_AT_ROWS: usize = 65_536;
     pub const DEFAULT_RERANK_FACTOR: usize = 5;
     pub const DEFAULT_RERANK_MIN: usize = 100;
@@ -119,11 +157,9 @@ impl HnswPqIndex {
     ) -> crate::Result<Self> {
         let mut config = config.unwrap_or_default();
         if !dimension.is_multiple_of(config.num_subvectors) {
-            // 4 dimensions per subspace where it divides, else the largest that does.
-            config.num_subvectors = (1..=dimension)
-                .rev()
-                .find(|m| dimension.is_multiple_of(*m) && dimension / m >= 4)
-                .unwrap_or(dimension);
+            // A count that does not divide the width cannot be honoured; the width's own
+            // default is the nearest thing to what was asked that can.
+            config.num_subvectors = HnswPqConfig::default_subvectors(dimension);
         }
         Ok(Self {
             hnsw: HnswIndex::new(distance_metric, Some(config.hnsw_config.clone())),
@@ -684,12 +720,43 @@ mod tests {
 
     #[test]
     fn subvectors_fall_back_to_a_divisor_of_the_dimension() {
+        // The default config says 192, which does not divide 100; the width's own rule does.
         let index = HnswPqIndex::new(100, DistanceMetric::Euclidean, None).unwrap();
         assert_eq!(
-            index.config.num_subvectors, 25,
-            "100 dims: 25 subspaces of 4"
+            index.config.num_subvectors, 50,
+            "100 dims: 50 subspaces of 2"
         );
         let index = HnswPqIndex::new(768, DistanceMetric::Euclidean, None).unwrap();
         assert_eq!(index.config.num_subvectors, 192);
+    }
+
+    /// The layout the width gets by default, per the table in `default_subvectors`.
+    #[test]
+    fn default_subvectors_follow_the_width() {
+        let cases = [
+            (25, 25), // one dimension per subspace below 64
+            (32, 32),
+            (50, 50),
+            (64, 32), // two per subspace from 64
+            (100, 50),
+            (128, 64),
+            (200, 100),
+            (255, 255), // prime: nothing divides it, so one per subspace
+            (256, 64),  // four per subspace from 256
+            (384, 96),
+            (768, 192),
+            (960, 240),
+            (1024, 256),
+            (1536, 384),
+            (3072, 768),
+        ];
+        for (dim, want) in cases {
+            assert_eq!(
+                HnswPqConfig::default_subvectors(dim),
+                want,
+                "{dim} dimensions"
+            );
+            assert!(dim.is_multiple_of(HnswPqConfig::default_subvectors(dim)));
+        }
     }
 }

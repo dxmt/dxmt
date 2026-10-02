@@ -542,8 +542,11 @@ curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 
 # recall@10 = |overlap| / 10
 ```
 
-It costs a full pass over the table's vectors, so it is refused above `DXMT_EXACT_SCAN_MAX` rows
-(default 1,000,000) rather than running for minutes; a filter narrows what it has to read.
+It costs a full pass over the table's vectors: **300 ms for 1M × 960 with the row file in page
+cache** (measured 2026-10-02, release build, 16 cores), on a thread pool of its own so other
+queries do not wait; a cold read of the file is the real cost, about a second per gigabyte.
+It is refused above `DXMT_EXACT_SCAN_MAX` rows (default 10,000,000) rather than running for
+minutes on a table that large; a filter narrows what it has to read.
 
 Four things the table does not say on its own:
 

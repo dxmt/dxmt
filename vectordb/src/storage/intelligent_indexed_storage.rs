@@ -533,6 +533,8 @@ struct InsertRequest {
     table_name: String,
     records: Vec<CreateRecordRequest>,
     response_tx: oneshot::Sender<crate::Result<Vec<Record>>>,
+    /// When the request entered the channel; the processor charges the gap to `queue`.
+    enqueued_at: std::time::Instant,
 }
 
 /// What an edit to one record asks for, as a struct rather than eight positionals.
@@ -1084,6 +1086,68 @@ const MAX_COALESCED_REQUESTS: usize = 32;
 const MAX_COALESCED_RECORDS: usize = 50_000;
 
 /// 后台插入处理器 - 单线程处理所有插入，消除锁竞争
+/// Where an insert's wall time goes, cumulative, one line per 250 groups.
+///
+/// `HnswIndex` already reports its three build phases this way, and on a 1M x 960 load those
+/// three summed to a third of the wall time: the other two thirds were somewhere in the path
+/// around them -- row file, record store, WAL, the queue -- and nothing said where. These are
+/// the stages of that path. Wall time, not CPU, for the same reason as the graph's: the
+/// question is what a batch waits on. `prepare` and `wal` are measured on the caller's side
+/// of the channel, per request; the rest in the processor, per group.
+mod insert_stages {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub const QUEUE: usize = 0;
+    pub const ROW_FILE: usize = 1;
+    pub const MAP: usize = 2;
+    pub const GRAPH: usize = 3;
+    pub const TEXT: usize = 4;
+    pub const WAL: usize = 5;
+    pub const PREPARE: usize = 6;
+    const NAMES: [&str; 7] = [
+        "queue", "row_file", "map", "graph", "text", "wal", "prepare",
+    ];
+    static NS: [AtomicU64; 7] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static GROUPS: AtomicU64 = AtomicU64::new(0);
+    static ROWS: AtomicU64 = AtomicU64::new(0);
+    const LOG_EVERY: u64 = 250;
+
+    pub fn add(stage: usize, started: std::time::Instant) {
+        add_duration(stage, started.elapsed());
+    }
+
+    pub fn add_duration(stage: usize, d: std::time::Duration) {
+        NS[stage].fetch_add(d.as_nanos() as u64, Relaxed);
+    }
+
+    /// Called once per group, after every stage the processor owns.
+    pub fn group_done(rows: usize) {
+        ROWS.fetch_add(rows as u64, Relaxed);
+        let n = GROUPS.fetch_add(1, Relaxed) + 1;
+        if n.is_multiple_of(LOG_EVERY) {
+            let parts: Vec<String> = NAMES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("{} {:.0} ms", name, NS[i].load(Relaxed) as f64 / 1e6))
+                .collect();
+            tracing::info!(
+                "insert stages after {} groups ({} rows): {}",
+                n,
+                ROWS.load(Relaxed),
+                parts.join(", ")
+            );
+        }
+    }
+}
+
 async fn insertion_processor(
     mut rx: mpsc::UnboundedReceiver<InsertRequest>,
     tables: Arc<RwLock<HashMap<String, IntelligentTableData>>>,
@@ -1175,9 +1239,14 @@ async fn process_insert_group(
         Vec::with_capacity(group.len());
     let mut batches: Vec<Vec<CreateRecordRequest>> = Vec::with_capacity(group.len());
     for req in group {
+        // The oldest request's wait is the group's wait; the younger ones overlapped it.
+        if batches.is_empty() {
+            insert_stages::add_duration(insert_stages::QUEUE, req.enqueued_at.elapsed());
+        }
         senders.push(Some(req.response_tx));
         batches.push(req.records);
     }
+    let group_rows: usize = batches.iter().map(|b| b.len()).sum();
 
     let result: crate::Result<Vec<(usize, Vec<Record>)>> = async {
         // Vectors go to the row file before the records become visible, outside the map
@@ -1191,6 +1260,7 @@ async fn process_insert_group(
             (t.vector_file.clone(), t.table.dimension)
         };
         let mut appended_rows: Vec<Vec<Option<u64>>> = Vec::new();
+        let stage = std::time::Instant::now();
         if let Some(file) = &vector_file {
             let mut items: Vec<(&str, &[f32])> = Vec::new();
             let mut slots: Vec<(usize, usize)> = Vec::new();
@@ -1208,7 +1278,9 @@ async fn process_insert_group(
                 appended_rows[slot][i] = Some(row);
             }
         }
+        insert_stages::add(insert_stages::ROW_FILE, stage);
 
+        let stage = std::time::Instant::now();
         let (index, named_indexes, table_meta, to_remove, to_insert, owners) = {
             let mut tables = TimedWrite {
                 guard: tables.write().await,
@@ -1402,6 +1474,7 @@ async fn process_insert_group(
         // cannot, and an eight-core machine built the index on one of them. Merging the queued
         // requests is what makes the batch big enough for that to pay. The batch also takes the
         // index's write lock once rather than once per record.
+        insert_stages::add(insert_stages::MAP, stage);
         let named_work: Vec<(RecordId, Option<HashMap<String, DenseVector>>)> = to_insert
             .iter()
             .map(|(id, _, named)| (id.clone(), named.clone()))
@@ -1412,6 +1485,7 @@ async fn process_insert_group(
         // one. Handed to the graph it used to take a node without data and corrupt every index
         // after it; the graph refuses it now, and refusing it there would fail the whole batch,
         // so it is left out here instead.
+        let stage = std::time::Instant::now();
         index
             .insert_batch(
                 to_insert
@@ -1421,6 +1495,7 @@ async fn process_insert_group(
                     .collect(),
             )
             .await?;
+        insert_stages::add(insert_stages::GRAPH, stage);
 
         // Named vector spaces are a separate index per space; nothing measured points at
         // them, so they keep the straightforward loop.
@@ -1442,6 +1517,7 @@ async fn process_insert_group(
 
         #[cfg(feature = "text-bm25")]
         {
+            let stage = std::time::Instant::now();
             let engine = {
                 let tables = tables.read().await;
                 tables
@@ -1466,6 +1542,7 @@ async fn process_insert_group(
                     warn!("Failed to commit full-text index: {}", e);
                 }
             }
+            insert_stages::add(insert_stages::TEXT, stage);
         }
         #[cfg(not(feature = "text-bm25"))]
         let _ = &table_meta;
@@ -1473,6 +1550,7 @@ async fn process_insert_group(
         Ok(owners)
     }
     .await;
+    insert_stages::group_done(group_rows);
 
     // 发送响应
     match result {
@@ -3325,7 +3403,7 @@ impl IntelligentIndexedStorage {
                 m: 16,
                 ef_construction: Self::default_ef_construction(),
                 ef_search: Self::DEFAULT_EF_SEARCH,
-                num_subvectors: dimension / 4,
+                num_subvectors: crate::search::hnsw_pq::HnswPqConfig::default_subvectors(dimension),
                 num_centroids: 256,
                 enable_reranking: true,
                 quantize_at_rows: None,
@@ -4803,6 +4881,7 @@ impl IntelligentIndexedStorage {
         self.ensure_resident(tablename).await?;
 
         let mut requests = requests;
+        let stage = std::time::Instant::now();
         // Checked before the lock is taken, because this is the insert path: every batch on
         // every table would otherwise pay a `tables` read lock and a `Table` clone to discover
         // that it has nothing to embed.
@@ -4818,6 +4897,7 @@ impl IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
             self.fill_vectors_from_text(&table, &mut requests).await?;
         }
+        insert_stages::add(insert_stages::PREPARE, stage);
         // 创建响应 channel
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -4827,6 +4907,7 @@ impl IntelligentIndexedStorage {
                 table_name: tablename.to_string(),
                 records: requests,
                 response_tx,
+                enqueued_at: std::time::Instant::now(),
             })
             .map_err(|e| crate::Error::Internal(format!("Failed to send insert request: {}", e)))?;
 
@@ -4844,6 +4925,7 @@ impl IntelligentIndexedStorage {
         // means serialising the WAL entry from a borrow (a `WalEntryRef` with the same serde
         // shape, so replay keeps decoding) -- see the insert-path notes (not distributed) for
         // what that clone costs and what it would take.
+        let stage = std::time::Instant::now();
         self.wal_append(
             inserted
                 .iter()
@@ -4854,6 +4936,7 @@ impl IntelligentIndexedStorage {
                 .collect(),
         )
         .await?;
+        insert_stages::add(insert_stages::WAL, stage);
 
         // Deliberately no index re-evaluation here. A rebuild is O(n) over the whole table and
         // runs to completion before the caller's write returns, so triggering it from the write
@@ -7726,12 +7809,17 @@ impl IntelligentIndexedStorage {
     /// cheaper shape to fall back to, because the whole point of the mode is that it does not
     /// approximate. So it refuses instead, and says how many rows it would have had to read.
     ///
-    /// A million 768-dimension rows is 3 GB off disk and a few seconds of arithmetic. That is
-    /// a reasonable thing to ask for deliberately and an unreasonable thing to trigger from a
-    /// button, which is why the number is here rather than unbounded: at 100M rows the same
-    /// request is minutes of full-file reads, and the caller has no way to tell the difference
-    /// from a hang. `DXMT_EXACT_SCAN_MAX` raises it for anyone who means it.
-    const EXACT_SCAN_MAX_DEFAULT: usize = 1_000_000;
+    /// The number was a million, on the reasoning that a million 768-dimension rows is 3 GB
+    /// off disk and "a few seconds of arithmetic". Measured on 2026-10-02 (release build,
+    /// 16 cores, the row file in page cache): **1M x 960 scores in 300 ms** (ten queries,
+    /// 292-371 ms), on the scan's own rayon pool, so nothing else waited. The arithmetic was
+    /// never the cost; a cold read of the row file is, at roughly a second per gigabyte on
+    /// ordinary NVMe. Ten million is therefore ~3 s warm and under a minute cold at 768-960
+    /// dimensions, and a million rows was exactly the size at which a trustworthy ground
+    /// truth is most wanted and was being refused. The cap stays, because at 100M rows a cold
+    /// scan is minutes and the caller cannot tell that from a hang; `DXMT_EXACT_SCAN_MAX`
+    /// moves it either way.
+    const EXACT_SCAN_MAX_DEFAULT: usize = 10_000_000;
 
     fn exact_scan_max() -> usize {
         crate::config::env::var("DXMT_EXACT_SCAN_MAX")
@@ -7795,10 +7883,12 @@ impl IntelligentIndexedStorage {
             m: 16,
             ef_construction: Self::default_ef_construction(),
             ef_search: Self::DEFAULT_EF_SEARCH,
-            // 4 dimensions per subspace (192 bytes at 768): the code size that kept
-            // recall@100 at 1M and 10M (docs/architecture/disk-index.md §2). `HnswPqIndex::new`
-            // rounds it to a divisor of the dimension.
-            num_subvectors: config.dimension / 4,
+            // Four dimensions per subspace at 768 (192 bytes a code, the size that kept
+            // recall@100 at 1M and 10M, docs/architecture/disk-index.md §2), finer below:
+            // `HnswPqConfig::default_subvectors` has the measurements.
+            num_subvectors: crate::search::hnsw_pq::HnswPqConfig::default_subvectors(
+                config.dimension,
+            ),
             num_centroids: 256,
             enable_reranking: true,
             quantize_at_rows: None,
@@ -10428,6 +10518,7 @@ mod tests {
                     })
                     .collect(),
                 response_tx,
+                enqueued_at: std::time::Instant::now(),
             },
             response_rx,
         )

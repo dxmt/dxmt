@@ -70,7 +70,7 @@ feature -- every capability below is in the HTTP API.
 | Grouped search | `search/groups` | Groups a window of nearest neighbours by a payload field, widening it until enough groups appear (cap 10,000 candidates). `candidates_fetched` and `ungrouped` are in the answer because grouping over a window cannot see a group whose every member is further away than the window reached. |
 | Counting | `records/count` | Exact, with or without a filter, computed from the index that answers the filter rather than by paging the matches. |
 | Paging | `records/list` by cursor | `next_cursor` goes back as `cursor`, and a record present for a whole scroll is returned exactly once however the table is written to meanwhile. An offset is still accepted, and still shifts under concurrent inserts. |
-| Ground truth | `search_mode: "exact"` | Scores every live row, so recall is measurable on your own data rather than only against a published dataset. Refused above `DXMT_EXACT_SCAN_MAX` rows (default 1,000,000) and for named vector spaces. |
+| Ground truth | `search_mode: "exact"` | Scores every live row, so recall is measurable on your own data rather than only against a published dataset. 300 ms for 1M x 960 with the row file in page cache (2026-10-02); a cold read of the file is the real cost. Refused above `DXMT_EXACT_SCAN_MAX` rows (default 10,000,000 since 2026-10-02; it was 1,000,000, which refused exactly the size where a ground truth is most wanted) and for named vector spaces. |
 | API reference | `GET /api/docs` | Swagger UI and the OpenAPI document, served by default (`--no-swagger` turns it off); `api-swagger` is a default feature. Every documented example is executed by `tests/api/test_openapi_examples.py`, so the document cannot drift from the server. |
 | Web console | `GET /dashboard` | Read-only, served by default when the bundle was compiled in (`make dashboard-build`); `--no-dashboard` turns it off, and `--dashboard` makes a missing bundle a refusal to start rather than a warning. Behind `DXMT_API_KEY` like every other route. |
 | Monitoring | `GET /metrics` | Prometheus text exposition at the root, in the default build: `dxmt_up`, `dxmt_tables`, `dxmt_records`, `dxmt_ongoing_operations{kind=…}`, `dxmt_operations_total`, the WAL/snapshot frontier and the last-sync and last-snapshot timestamps. `tests/prometheus_metrics_test.rs` parses every sample, so a value a scraper would reject fails the build. |
@@ -168,12 +168,27 @@ that are not scored against our own exact scan.
 **Ingest rate tracks dimension, not rows.** 10,125/s at 25 dimensions down to 811/s at 960,
 over HTTP with JSON on the wire.
 
-**On a low-dimension corpus, use `accurate`.** `normal` is 0.745 on glove-25 and 0.9965 on
-sift-128, and the difference is product quantization: a PQ code separates a 25-dimension
-neighbourhood far less than a 128- or 960-dimension one, so more of the answer has to come
-from the exact rerank that `accurate` widens. The alternative, if the memory is available, is
-to turn quantization off for that table — `quantization.quantize_at_rows` above the table's
-eventual size — which measured 1.0000 at `normal` on glove-25 for 466 MB against 263 MB.
+**The PQ code is sized by the table's width** (since 2026-10-02; `HnswPqConfig::default_subvectors`).
+It was four dimensions per subspace at every width, the layout measured at 768, and at 25
+dimensions that was a 100-byte vector in a 5-byte code -- the 0.745 in the table above is that
+code, not the graph. Re-measured on 2026-10-02, 1.18M rows, recall@10 at `normal`, p50 in
+brackets:
+
+| corpus | 4 dims/subspace (old default) | 2 | 1 | no PQ |
+| --- | --- | --- | --- | --- |
+| glove-25 | 0.7595 (3.0 ms) | — | **1.0000** (3.7 ms) | 1.0000 (3.8 ms) |
+| glove-100 | 0.8950 (4.6 ms) | **0.9235** (5.6 ms) | 0.9275 (6.3 ms) | 0.9210 (3.8 ms) |
+| glove-200 | 0.8485 (5.5 ms) | **0.8775** (6.5 ms) | 0.8810 (5.3 ms) | — |
+| gist-960 | **0.9780** (7.8 ms) | — | — | — |
+
+The default is now one dimension per subspace below 64, two below 256, four from there (the
+bold column). At 25 dimensions the code was the whole problem and the new layout is exact at
+`normal`; at 100 and 200 it is worth three points and then matches the unquantized graph to
+within the noise -- **what remains there is the traversal budget**, `ef_search` 100 on a
+corpus where HNSW needs several times that for 0.99 (`accurate`, 4x the budget, reaches
+0.977 on glove-100 and 0.9455 on glove-200). Calibrating that budget per table is the next
+change; until then `accurate` is the mode for a recall target on a hard corpus. A table
+created before this change keeps the layout it was built with.
 
 **A small fraction of records cannot be found by the graph on some corpora.** Searching with
 a vector that is already stored returns it for **100% of a modern-embedding corpus** — 60,000
