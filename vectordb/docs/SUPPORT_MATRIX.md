@@ -165,8 +165,22 @@ that are not scored against our own exact scan.
 | glove-50 | 1.18M × 50 | cosine | 6,052/s | 0.7995 | 0.8445 | 0.9715 | 8.2 ms |
 | glove-200 | 1.18M × 200 | cosine | 1,995/s | 0.7425 | 0.8620 | 0.9495 | 11.4 ms |
 
-**Ingest rate tracks dimension, not rows.** 10,125/s at 25 dimensions down to 811/s at 960,
-over HTTP with JSON on the wire.
+**Ingest rate tracks dimension, not rows -- and the 811/s at 960 was the client.** Re-measured
+on 2026-10-02 (release build, 16 cores, the first 300K rows of GIST-960, batches of 1,000):
+
+| client | rows/s | where the client's time went |
+| --- | --- | --- |
+| 1 client, Python stdlib `json` (every earlier figure) | 762 | 201 s encoding, 193 s waiting on the server |
+| 1 client, orjson (what the Python SDK uses) | 972 | 39 s encoding, 270 s waiting |
+| 4 clients, orjson | **1,507** | 16 s encoding, 180 s waiting -- the server's ceiling |
+
+A 1,000 x 960 batch is a 20 MB JSON body that stdlib `json` takes 0.8 s to produce and the
+server 0.12 s to parse and validate. The SDK's `upload(parallel=N)` with orjson installed is
+the shape that reaches the ceiling. Inside the server, per-stage timers over a 1M load (one
+`info` line per 250 groups) put **graph construction at 81%** of storage time, the WAL at 14%
+(the vector is written to the row file and again, compressed, to the log), the row file at
+3% and the record map at 2%; the server averaged 7 of 16 cores under one client. The next
+gain is the planner's parallel efficiency, not the wire.
 
 **The PQ code is sized by the table's width** (since 2026-10-02; `HnswPqConfig::default_subvectors`).
 It was four dimensions per subspace at every width, the layout measured at 768, and at 25
