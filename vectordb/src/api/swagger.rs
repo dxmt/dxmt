@@ -91,6 +91,8 @@ use crate::types::{
             crate::api::handlers::ImportTableRequest,
             crate::api::handlers::KnnGraphRequest,
             crate::api::handlers::PayloadUpdateMode,
+            crate::api::handlers::OnError,
+            crate::api::handlers::RowError,
             crate::types::record::FullTextSearchRequest,
             crate::types::record::HybridSearchRequest,
             crate::types::record::HybridSearchQuery,

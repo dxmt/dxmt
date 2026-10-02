@@ -68,15 +68,37 @@ impl SparseIndex {
         Ok(())
     }
 
-    /// Delete a vector from the index by id
+    /// Delete a vector from the index by id. Deleting an id the index never held is a no-op.
+    ///
+    /// It was not: `num_vectors` went down by one on *every* call, and the storage layer
+    /// calls this for every record that is deleted or overwritten, sparse vector or not --
+    /// which is right, since the record may once have had one. Five records without a
+    /// sparse vector deleted from a table holding five with one took the count to zero, and
+    /// `search` answers an empty page when the count is zero without reading a posting. The
+    /// postings were all still there; sparse and hybrid search returned nothing for a table
+    /// that was full. Found by a request-field probe that happened to run after four
+    /// others, each of which inserted and deleted a plain record.
     pub fn delete(&mut self, id: &str) -> crate::Result<()> {
-        for list in self.inverted_index.values_mut() {
+        let mut removed = false;
+        let mut touched: Vec<u32> = Vec::new();
+        for (dim, list) in self.inverted_index.iter_mut() {
+            let before = list.len();
             list.retain(|p| p.id != id);
+            if list.len() != before {
+                removed = true;
+                touched.push(*dim);
+            }
         }
-        // Recompute dim_max_value for affected dimensions
-        for (dim, list) in &self.inverted_index {
-            let max = list.iter().map(|p| p.value.abs()).fold(0.0f32, f32::max);
-            self.dim_max_value.insert(*dim, max);
+        if !removed {
+            return Ok(());
+        }
+        // Only the dimensions the id appeared in can have a new maximum.
+        for dim in touched {
+            let max = self.inverted_index[&dim]
+                .iter()
+                .map(|p| p.value.abs())
+                .fold(0.0f32, f32::max);
+            self.dim_max_value.insert(dim, max);
         }
         self.num_vectors = self.num_vectors.saturating_sub(1);
         Ok(())
@@ -245,6 +267,31 @@ mod tests {
             results[0].1, results[1].1,
             "the scores were not actually tied, so this proves nothing"
         );
+    }
+
+    /// Deleting ids the index does not hold must not make it forget the ones it does.
+    #[test]
+    fn deleting_absent_ids_does_not_empty_the_index() {
+        let mut index = SparseIndex::new();
+        index
+            .insert("kept".into(), &make_sparse(vec![4], vec![1.0]))
+            .unwrap();
+        for ghost in ["f1", "f2", "f3", "doomed", "oe-good"] {
+            index.delete(ghost).unwrap();
+        }
+        assert_eq!(index.len(), 1);
+        let results = index.search(&make_sparse(vec![4], vec![1.0]), 5);
+        assert_eq!(
+            results.len(),
+            1,
+            "the one indexed vector is gone: {results:?}"
+        );
+        assert_eq!(results[0].0, "kept");
+
+        // And a real deletion still works, including the per-dimension maximum.
+        index.delete("kept").unwrap();
+        assert!(index.is_empty());
+        assert!(index.search(&make_sparse(vec![4], vec![1.0]), 5).is_empty());
     }
 
     #[test]

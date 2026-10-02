@@ -260,6 +260,19 @@ def _(table):
     assert get(f"/tables/{table}").json()["data"]["record_count"] == len(VECTORS)
 
 
+@probe("BatchInsertRequest", "on_error")
+def _(table):
+    # The same batch is refused outright without the field and written in part with it.
+    batch = [{"id": "oe-good", "vector": [0.1, 0.1, 0.1, 0.9]}, {"id": "oe-bad", "vector": [1.0]}]
+    refused = post(f"/tables/{table}/records", {"records": batch}, expect_ok=False)
+    assert refused.status_code == 400
+    try:
+        data = post(f"/tables/{table}/records", {"records": batch, "on_error": "skip"}).json()["data"]
+        assert data["inserted_ids"] == ["oe-good"] and data["failed"][0]["id"] == "oe-bad"
+    finally:
+        call("DELETE", f"/tables/{table}/records", {"ids": ["oe-good"]}, expect_ok=False)
+
+
 @probe("OptimizedBatchInsertRequest", "records")
 def _(table):
     post(f"/tables/{table}/records/bulk", {"records": [

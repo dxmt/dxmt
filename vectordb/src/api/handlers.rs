@@ -126,7 +126,39 @@ pub struct CreateTableRequest {
 #[serde(deny_unknown_fields)]
 pub struct BatchInsertRequest {
     pub records: Vec<CreateRecordRequest>,
+    /// What a record that fails validation does to the rest of the batch.
+    ///
+    /// `fail` (the default) writes nothing and answers 400 with every failing row listed
+    /// under `error.details.failed`. `skip` writes the rows that pass and lists the rest
+    /// under `data.failed` on a 200. The default stays all-or-nothing because a caller who
+    /// did not ask for partial success must not get one; `skip` is for the bulk load, where
+    /// one malformed row in a million should cost one row and not the batch.
+    #[serde(default)]
+    pub on_error: OnError,
 }
+
+/// See [`BatchInsertRequest::on_error`].
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OnError {
+    #[default]
+    Fail,
+    Skip,
+}
+
+/// One record a batch validation refused: its position in `records`, its id, and why.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct RowError {
+    pub index: usize,
+    pub id: String,
+    pub error: String,
+}
+
+/// How many failing rows a refusal lists. The count is always exact; the list is a sample
+/// large enough to fix a file by and small enough not to be the file.
+const MAX_REPORTED_ROW_ERRORS: usize = 100;
 
 /// 优化的批量插入请求（支持不同的插入模式）
 #[derive(Debug, Deserialize)]
@@ -156,11 +188,15 @@ const MAX_RECORD_ID_LENGTH: usize = 128;
 const MAX_DIMENSION: usize = 4096;
 const MIN_DIMENSION: usize = 1;
 
-/// Comprehensive batch validation
+/// Batch validation: the batch-level checks fail outright (`Err`); every per-row defect is
+/// collected and returned (`Ok(errors)`), so the caller can list them all or skip them.
+///
+/// It used to return at the first bad row, which made a bulk load a round trip per defect:
+/// a million-row file with fifty bad rows was fifty refusals, each naming one.
 fn validate_batch_insert(
     request: &BatchInsertRequest,
     table: &crate::types::table::Table,
-) -> Result<(), String> {
+) -> Result<Vec<RowError>, String> {
     use crate::types::vector::VectorValidator;
     use std::collections::HashSet;
 
@@ -177,36 +213,40 @@ fn validate_batch_insert(
         ));
     }
 
-    // 2. ID uniqueness within batch
+    let mut errors = Vec::new();
     let mut seen_ids = HashSet::new();
     for (idx, record) in request.records.iter().enumerate() {
-        if !seen_ids.insert(&record.id) {
-            return Err(format!(
-                "Duplicate ID '{}' found at position {}",
-                record.id, idx
-            ));
-        }
-    }
+        let mut fail = |error: String| {
+            errors.push(RowError {
+                index: idx,
+                id: record.id.clone(),
+                error,
+            })
+        };
 
-    // 3. Validate each record (ID, vector, sparse_vector)
-    for (idx, record) in request.records.iter().enumerate() {
-        // ID validation
+        // 2. ID: non-empty, bounded, well-formed, unique within the batch. The second copy
+        // of a duplicated id is the one refused, so the first keeps its place.
         if record.id.is_empty() {
-            return Err(format!("Record at position {} has empty ID", idx));
+            fail("empty ID".to_string());
+            continue;
         }
-
         if record.id.len() > MAX_RECORD_ID_LENGTH {
-            return Err(format!(
-                "Record ID at position {} exceeds maximum length of {} characters",
-                idx, MAX_RECORD_ID_LENGTH
+            fail(format!(
+                "ID exceeds maximum length of {} characters",
+                MAX_RECORD_ID_LENGTH
             ));
+            continue;
         }
-
         if let Err(e) = validate_record_id(&record.id) {
-            return Err(format!("Invalid record ID at position {}: {}", idx, e));
+            fail(format!("invalid ID: {}", e));
+            continue;
+        }
+        if !seen_ids.insert(&record.id) {
+            fail(format!("duplicate ID '{}' within the batch", record.id));
+            continue;
         }
 
-        // Dense vector validation.
+        // 3. Dense vector validation.
         //
         // An empty vector is left to the storage layer on a table with an embedding model:
         // that is where the text becomes the vector, and where the record that has neither is
@@ -223,25 +263,21 @@ fn validate_batch_insert(
                 table.dimension,
                 table.distance_metric,
             ) {
-                return Err(format!(
-                    "Invalid vector at position {} (ID: '{}'): {}",
-                    idx, record.id, e
-                ));
+                fail(format!("invalid vector: {}", e));
+                continue;
             }
         }
 
-        // Sparse vector validation (if present)
+        // 4. Sparse vector validation (if present)
         if let Some(ref sparse_vec) = record.sparse_vector {
             if let Err(e) = sparse_vec.validate() {
-                return Err(format!(
-                    "Invalid sparse vector at position {} (ID: '{}'): {}",
-                    idx, record.id, e
-                ));
+                fail(format!("invalid sparse vector: {}", e));
+                continue;
             }
         }
     }
 
-    Ok(())
+    Ok(errors)
 }
 
 /// Payload update mode: replace or merge
@@ -983,29 +1019,60 @@ pub async fn insert_records(
         Err(e) => return error_response(e),
     };
 
-    // Comprehensive batch validation
-    if let Err(e) = validate_batch_insert(&request, &table) {
+    // Validation. A batch-level fault (empty, too large) is one message; per-row faults are
+    // a list, and what happens next depends on `on_error`.
+    let row_errors = match validate_batch_insert(&request, &table) {
+        Ok(errors) => errors,
+        Err(e) => {
+            let body = ApiResponse::error(ApiError {
+                code: "VALIDATION_FAILED".to_string(),
+                message: e,
+                details: None,
+            });
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
+    };
+    let total = request.records.len();
+    let failed_count = row_errors.len();
+    let records = if failed_count == 0 {
+        request.records
+    } else if request.on_error == OnError::Skip && failed_count < total {
+        let bad: std::collections::HashSet<usize> = row_errors.iter().map(|e| e.index).collect();
+        request
+            .records
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !bad.contains(i))
+            .map(|(_, r)| r)
+            .collect()
+    } else {
+        let first = &row_errors[0];
         let body = ApiResponse::error(ApiError {
             code: "VALIDATION_FAILED".to_string(),
-            message: e,
-            details: None,
+            message: format!(
+                "{} of {} records are invalid; nothing was written. First: record {} (ID '{}'): {}",
+                failed_count, total, first.index, first.id, first.error
+            ),
+            details: Some(serde_json::json!({
+                "failed": &row_errors[..row_errors.len().min(MAX_REPORTED_ROW_ERRORS)],
+                "failed_count": failed_count,
+                "hint": "send on_error: \"skip\" to write the valid rows and have the rest listed",
+            })),
         });
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    }
+    };
 
     // Start tracking this operation
     let _guard = state.server_health.start_insert();
 
-    match state
-        .storage
-        .insert_records(&table_name, request.records)
-        .await
-    {
+    match state.storage.insert_records(&table_name, records).await {
         Ok(inserted_records) => {
             let ids: Vec<&str> = inserted_records.iter().map(|r| r.id.as_str()).collect();
             let response = serde_json::json!({
                 "inserted_ids": ids,
-                "count": ids.len()
+                "count": ids.len(),
+                "failed": &row_errors[..row_errors.len().min(MAX_REPORTED_ROW_ERRORS)],
+                "failed_count": failed_count,
             });
             ApiResponse::success(response).into_response()
         }
