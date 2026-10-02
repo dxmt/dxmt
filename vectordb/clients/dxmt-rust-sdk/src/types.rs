@@ -30,12 +30,12 @@ pub struct ApiError {
     pub details: Option<serde_json::Value>,
 }
 
-/// Four routes answer outside the envelope, with a bare `{"error": "...", "details": "..."}`
-/// and no `success` field -- batch insert's validation and overload paths, and two in the DXQL
-/// handler. That is a server inconsistency rather than a second contract, but a client cannot
-/// wish it away: the most common first mistake anyone makes is a vector of the wrong
-/// dimension, and that is one of the four. Both shapes are read here so the caller gets the
-/// server's own words either way.
+/// One route still answers outside the envelope, with a bare `{"error": "..."}` and no
+/// `success` field: `POST /query`, the DXQL handler, which this client never calls. Batch
+/// insert's validation and overload paths used to as well -- the wrong-dimension refusal, the
+/// most common first mistake anyone makes, arrived bare -- and were moved onto the envelope on
+/// 2026-09-27. The bare shape is still read, because a client that rejected it would turn a
+/// future regression on the server into an unreadable error here instead of a readable one.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum ErrorBody {
@@ -58,13 +58,21 @@ impl From<ErrorBody> for ApiError {
     }
 }
 
-/// How distance is measured in a table. The server takes these lowercase.
+/// How distance is measured in a table, spelled the way the server's `DistanceMetric`
+/// parses it: `cosine`, `euclidean`, `dot`, `manhattan`.
+///
+/// `DotProduct` serialized as `"dotproduct"` -- `rename_all = "lowercase"` on the variant
+/// name -- and the server has never accepted that spelling, so every table ever created with
+/// it was a 400 `INVALID_DISTANCE_METRIC`. Nothing caught it because the live test builds its
+/// table with `Cosine`. `Manhattan` was missing outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceMetric {
     Cosine,
     Euclidean,
+    #[serde(rename = "dot")]
     DotProduct,
+    Manhattan,
 }
 
 #[derive(Debug, Clone, Serialize)]

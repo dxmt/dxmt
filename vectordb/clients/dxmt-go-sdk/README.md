@@ -62,10 +62,15 @@ Printing the client with `%v`, `%+v` or `%#v` shows `<redacted>` in place of the
 * **Record ids are percent-encoded into the path.** `doc.md#3` and `s3://bucket/key.pdf` are
   ordinary ids in a RAG corpus and both break an unencoded URL — the first at the fragment
   delimiter, the second by turning one path segment into three.
-* **Two error shapes.** Most routes answer inside the envelope with `{code, message}`; four
-  answer with a bare `{"error": "...", "details": "..."}` — batch insert's validation and
-  overload paths and two in the DXQL handler. Both arrive as `*APIError`; the bare ones carry
-  the code `UNSTRUCTURED`, because there is no code in the body to pass through.
+* **Errors keep the server's words.** A refusal arrives as `*APIError` with the server's own
+  `Code` and `Message`; a body that is not JSON (a proxy's 502 page, an empty 404 for a path
+  that does not exist) arrives as a plain error naming the HTTP status; a server that never
+  answered wraps the `net` error. One route on the server, `POST /query`, still answers with a
+  bare `{"error": "..."}`; this client does not call it, and would read it as code
+  `UNSTRUCTURED` if it did.
+* **Every `DistanceMetric` constant creates a table.** `DotProduct` was `"dotproduct"` in
+  1.0.0, a spelling the server rejects; it is `"dot"` now, and `Manhattan` exists. The live
+  test creates one table per constant.
 
 ## Run it
 

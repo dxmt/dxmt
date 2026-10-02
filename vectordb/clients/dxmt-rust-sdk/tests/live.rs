@@ -190,7 +190,13 @@ async fn an_id_with_reserved_characters_addresses_the_right_record() {
     // The shapes a RAG corpus actually produces. Unencoded, `#` truncates the path at the
     // fragment, `/` splits one segment into two, and the request lands somewhere else entirely
     // -- usually on a different record, which is worse than an error.
-    let awkward = ["README.md#3", "s3://bucket/key.pdf", "page 12", "a+b&c=d", "100%"];
+    let awkward = [
+        "README.md#3",
+        "s3://bucket/key.pdf",
+        "page 12",
+        "a+b&c=d",
+        "100%",
+    ];
     let records: Vec<Record> = awkward
         .iter()
         .enumerate()
@@ -199,22 +205,101 @@ async fn an_id_with_reserved_characters_addresses_the_right_record() {
     db.insert(table, records).await.expect("insert");
 
     for (i, id) in awkward.iter().enumerate() {
-        let read = db.get(table, id).await.unwrap_or_else(|e| panic!("get {id:?}: {e}"));
+        let read = db
+            .get(table, id)
+            .await
+            .unwrap_or_else(|e| panic!("get {id:?}: {e}"));
         assert_eq!(&read.id, id, "the id came back changed");
         assert_eq!(read.payload()["n"], i, "{id:?} addressed the wrong record");
 
-        db.update(table, id, Update::default().payload(json!({ "n": i, "seen": true })).merge())
-            .await
-            .unwrap_or_else(|e| panic!("update {id:?}: {e}"));
+        db.update(
+            table,
+            id,
+            Update::default()
+                .payload(json!({ "n": i, "seen": true }))
+                .merge(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("update {id:?}: {e}"));
         let after = db.get(table, id).await.expect("get after update");
-        assert_eq!(after.payload()["seen"], true, "{id:?} updated the wrong record");
+        assert_eq!(
+            after.payload()["seen"],
+            true,
+            "{id:?} updated the wrong record"
+        );
     }
 
     let deleted = db
         .delete(table, awkward.iter().map(|s| s.to_string()).collect())
         .await
         .expect("delete");
-    assert_eq!(deleted.deleted, awkward.len(), "every awkward id should delete");
+    assert_eq!(
+        deleted.deleted,
+        awkward.len(),
+        "every awkward id should delete"
+    );
 
     db.delete_table(table).await.expect("drop");
+}
+
+/// Every metric the enum offers creates a table.
+///
+/// `DotProduct` serialized as `"dotproduct"`, which the server has never accepted, and the
+/// one live test built its table with `Cosine` -- so a variant that could not create a table
+/// shipped in 1.0.0. This creates one of each and reads the metric back, which is the only
+/// way a spelling the server rejects can fail here rather than at a user's first call.
+#[tokio::test]
+async fn every_distance_metric_creates_a_table() {
+    let Some(db) = connect().await else { return };
+    for (metric, name) in [
+        (DistanceMetric::Cosine, "live_m_cosine"),
+        (DistanceMetric::Euclidean, "live_m_euclid"),
+        (DistanceMetric::DotProduct, "live_m_dot"),
+        (DistanceMetric::Manhattan, "live_m_manhattan"),
+    ] {
+        let _ = db.delete_table(name).await;
+        let created = db
+            .create_table(CreateTable::new(name, DIM).metric(metric))
+            .await
+            .unwrap_or_else(|e| panic!("{metric:?} should create a table, got {e}"));
+        assert_eq!(created.name, name);
+        // And `get_table`, which nothing else exercised: the nested-`table` unwrap.
+        let described = db.get_table(name).await.expect("get_table");
+        assert_eq!(described.name, name);
+        assert_eq!(described.dimension, DIM);
+        db.delete_table(name).await.expect("drop");
+    }
+}
+
+/// `list_tables` returns every table, not the first fifty.
+///
+/// The route is paginated with a default of fifty; the client sent no parameters and took
+/// the first page as the whole answer. Sixty tables is the smallest corpus that tells the
+/// two apart.
+#[tokio::test]
+async fn list_tables_is_not_cut_at_the_servers_default_page() {
+    let Some(db) = connect().await else { return };
+    let names: Vec<String> = (0..60).map(|i| format!("live_many_{i:02}")).collect();
+    for name in &names {
+        let _ = db.delete_table(name).await;
+        db.create_table(CreateTable::new(name, DIM))
+            .await
+            .expect("create");
+    }
+    let listed = db.list_tables().await.expect("list");
+    let seen: std::collections::HashSet<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+    let missing: Vec<&String> = names
+        .iter()
+        .filter(|n| !seen.contains(n.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "list_tables returned {} of {} tables; missing {:?}…",
+        names.len() - missing.len(),
+        names.len(),
+        &missing[..missing.len().min(5)]
+    );
+    for name in &names {
+        db.delete_table(name).await.expect("drop");
+    }
 }

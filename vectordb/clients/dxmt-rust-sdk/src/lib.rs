@@ -38,9 +38,15 @@ pub enum Error {
     #[error("{} ({}): {}", .status, .error.code, .error.message)]
     Api { status: u16, error: ApiError },
     /// The server answered with something this client could not read.
-    #[error("unexpected response from {path}: {source}")]
+    ///
+    /// `status` is kept because the body that cannot be read is usually *why* it cannot be
+    /// read: a proxy's HTML 502, axum's empty 404 for a path that does not exist, a plain-text
+    /// gateway timeout. Dropping it reported all of those as "unexpected response", which is
+    /// true and useless.
+    #[error("unexpected response from {path} (HTTP {status}): {source}")]
     Decode {
         path: String,
+        status: u16,
         #[source]
         source: serde_json::Error,
     },
@@ -138,14 +144,30 @@ impl Client {
         self.send("POST", "/tables", Some(&table)).await
     }
 
+    /// Every table on the server.
+    ///
+    /// The route is paginated and defaults to fifty, and this used to issue one unparameterised
+    /// request -- so a server with more than fifty tables answered with the first fifty and no
+    /// sign that anything was missing. It pages now, by the `total` the server reports.
     pub async fn list_tables(&self) -> Result<Vec<TableInfo>, Error> {
         #[derive(serde::Deserialize)]
         struct Listing {
             #[serde(default)]
             tables: Vec<TableInfo>,
+            #[serde(default)]
+            total: usize,
         }
-        let listing: Listing = self.send::<(), _>("GET", "/tables", None).await?;
-        Ok(listing.tables)
+        const PAGE: usize = 200;
+        let mut out = Vec::new();
+        loop {
+            let path = format!("/tables?limit={PAGE}&offset={}", out.len());
+            let page: Listing = self.send::<(), _>("GET", &path, None).await?;
+            let got = page.tables.len();
+            out.extend(page.tables);
+            if got < PAGE || out.len() >= page.total {
+                return Ok(out);
+            }
+        }
     }
 
     /// Describe one table.
@@ -302,6 +324,7 @@ impl Client {
         let envelope: Envelope<T> =
             serde_json::from_str(&text).map_err(|source| Error::Decode {
                 path: path.to_string(),
+                status,
                 source,
             })?;
         match (envelope.success, envelope.data, envelope.error) {
@@ -335,6 +358,7 @@ impl Client {
         let envelope: Envelope<serde_json::Value> =
             serde_json::from_str(&text).map_err(|source| Error::Decode {
                 path: path.to_string(),
+                status,
                 source,
             })?;
         if envelope.success {

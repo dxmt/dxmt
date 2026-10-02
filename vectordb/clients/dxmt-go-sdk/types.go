@@ -7,11 +7,11 @@ import (
 
 // envelope wraps every response the server sends.
 //
-// Four routes answer outside it, with a bare {"error": "...", "details": "..."} and no
-// "success" field -- batch insert's validation and overload paths, and two in the DXQL handler.
-// That is a server inconsistency rather than a second contract, but a client cannot wish it
-// away: the most common first mistake anyone makes is a vector of the wrong dimension, and that
-// is one of the four. Both shapes decode here.
+// One route still answers outside it, with a bare {"error": "..."} and no "success" field:
+// POST /query, the DXQL handler, which this client does not call. Batch insert's validation
+// and overload paths used to as well -- the wrong-dimension refusal arrived bare -- and moved
+// onto the envelope on 2026-09-27. The bare shape still decodes, because a client that rejected
+// it would turn a future server regression into an unreadable error instead of a readable one.
 type envelope struct {
 	Success bool            `json:"success"`
 	Data    json.RawMessage `json:"data"`
@@ -38,13 +38,19 @@ func (e *APIError) Error() string {
 //	if errors.As(err, &apiErr) && apiErr.IsNotFound() { ... }
 func (e *APIError) IsNotFound() bool { return e.Status == 404 }
 
-// DistanceMetric is how a table measures distance. The server takes these lowercase.
+// DistanceMetric is how a table measures distance, spelled the way the server parses it:
+// cosine, euclidean, dot, manhattan.
+//
+// DotProduct was "dotproduct" in 1.0.0, a spelling the server has never accepted, so a table
+// created with it was a 400 INVALID_DISTANCE_METRIC on every call. The live test used Cosine,
+// so nothing noticed. Manhattan was missing.
 type DistanceMetric string
 
 const (
 	Cosine     DistanceMetric = "cosine"
 	Euclidean  DistanceMetric = "euclidean"
-	DotProduct DistanceMetric = "dotproduct"
+	DotProduct DistanceMetric = "dot"
+	Manhattan  DistanceMetric = "manhattan"
 )
 
 // CreateTable describes a table to make. Dimension is required; everything else has a server
@@ -126,6 +132,10 @@ func (u Update) MarshalJSON() ([]byte, error) {
 
 // Operation is a payload comparison, tagged the way the server expects:
 // {"type": "Equal", "value": ...}.
+//
+// omitempty on an `any` field omits only a nil interface, so false, 0 and "" are sent and
+// filter as values (TestAFilterOnAFalsyValueFilters pins that); the operations that take no
+// value -- IsEmpty, IsNull -- are the ones that omit it, which the server expects.
 type Operation struct {
 	Type  string `json:"type"`
 	Value any    `json:"value,omitempty"`

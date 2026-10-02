@@ -59,10 +59,16 @@ let db = dxmt_client::Client::new("https://db.example.com")?.with_api_key("your-
   you ask for two ids and only one was there.
 * **An update with no vector keeps the stored one**, along with the sparse and named vectors.
   That is what makes a payload-only update safe on a table used for hybrid search.
-* **Two error shapes.** Most routes answer inside the envelope with a `{code, message}`; four
-  answer with a bare `{"error": "...", "details": "..."}` — batch insert's validation and
-  overload paths and two in the DXQL handler. Both arrive as `Error::Api`; the bare ones carry
-  the code `UNSTRUCTURED`, because there is no code in the body to pass through.
+* **Errors keep the server's words.** A refusal arrives as `Error::Api` with the server's own
+  `code` and `message`; a body that is not JSON at all (a proxy's 502 page, an empty 404 for a
+  path that does not exist) arrives as `Error::Decode` carrying the HTTP status, and a server
+  that never answered is `Error::Transport`. The three are separate variants so a caller can
+  tell them apart without matching on strings. One route on the server, `POST /query`, still
+  answers with a bare `{"error": "..."}`; this client does not call it, and would read it as
+  code `UNSTRUCTURED` if it did.
+* **Every `DistanceMetric` variant creates a table.** `DotProduct` serialized as
+  `"dotproduct"` in 1.0.0, a spelling the server rejects; it is `"dot"` now, and `Manhattan`
+  exists. The live test creates one table per variant.
 
 ## Run it
 
@@ -70,7 +76,8 @@ let db = dxmt_client::Client::new("https://db.example.com")?.with_api_key("your-
 cd vectordb && cargo run -- serve          # port 9999
 cd vectordb/clients/dxmt-rust-sdk
 cargo run --example basic_crud             # the five operations, end to end
-cargo test                                 # live tests; they skip when no server answers
+cargo test                                 # tests/live.rs skips when no server answers;
+                                           # tests/api_key.rs needs none and always runs
 DXMT_URL=http://host:9999 cargo test       # point either elsewhere
 ```
 

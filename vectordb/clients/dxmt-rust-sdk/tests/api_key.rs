@@ -42,7 +42,10 @@ async fn the_key_is_sent_as_the_api_key_header() {
     let db = Client::new(url).unwrap().with_api_key("s3cret");
     db.list_tables().await.unwrap();
     let headers = server.join().unwrap();
-    assert!(headers.contains(&"api-key: s3cret".to_string()), "{headers:?}");
+    assert!(
+        headers.contains(&"api-key: s3cret".to_string()),
+        "{headers:?}"
+    );
 }
 
 #[tokio::test]
@@ -50,12 +53,17 @@ async fn without_a_key_no_header_is_sent() {
     let (url, server) = one_request();
     Client::new(url).unwrap().list_tables().await.unwrap();
     let headers = server.join().unwrap();
-    assert!(!headers.iter().any(|h| h.starts_with("api-key:")), "{headers:?}");
+    assert!(
+        !headers.iter().any(|h| h.starts_with("api-key:")),
+        "{headers:?}"
+    );
 }
 
 #[test]
 fn debug_output_does_not_contain_the_key() {
-    let db = Client::new("http://127.0.0.1:9").unwrap().with_api_key("s3cret");
+    let db = Client::new("http://127.0.0.1:9")
+        .unwrap()
+        .with_api_key("s3cret");
     let printed = format!("{db:?}");
     assert!(!printed.contains("s3cret"), "{printed}");
     assert!(printed.contains("<redacted>"), "{printed}");

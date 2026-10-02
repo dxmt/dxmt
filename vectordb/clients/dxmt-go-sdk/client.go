@@ -32,7 +32,10 @@ type Client struct {
 
 // String keeps the key out of logs: %v and %+v would otherwise print every field, unexported
 // ones included.
-func (c *Client) String() string {
+//
+// Value receivers, not pointer receivers: with the latter, fmt.Sprintf("%v", *c) -- the value,
+// which a caller reaches by dereferencing -- bypassed both methods and printed the key.
+func (c Client) String() string {
 	key := ""
 	if c.apiKey != "" {
 		key = " api-key=<redacted>"
@@ -41,7 +44,7 @@ func (c *Client) String() string {
 }
 
 // GoString does the same for %#v.
-func (c *Client) GoString() string { return c.String() }
+func (c Client) GoString() string { return c.String() }
 
 // Option configures a Client.
 type Option func(*Client)
@@ -99,12 +102,27 @@ func (c *Client) CreateTable(ctx context.Context, table CreateTable) (TableInfo,
 }
 
 // ListTables returns every table on the server.
+//
+// The route is paginated and defaults to fifty. This used to issue one unparameterised
+// request, so a server with more than fifty tables answered with the first fifty and no sign
+// that anything was missing. It pages now, by the total the server reports.
 func (c *Client) ListTables(ctx context.Context) ([]TableInfo, error) {
-	var listing struct {
-		Tables []TableInfo `json:"tables"`
+	const page = 200
+	var out []TableInfo
+	for {
+		var listing struct {
+			Tables []TableInfo `json:"tables"`
+			Total  int         `json:"total"`
+		}
+		path := fmt.Sprintf("/tables?limit=%d&offset=%d", page, len(out))
+		if err := c.do(ctx, http.MethodGet, path, nil, &listing); err != nil {
+			return nil, err
+		}
+		out = append(out, listing.Tables...)
+		if len(listing.Tables) < page || len(out) >= listing.Total {
+			return out, nil
+		}
 	}
-	err := c.do(ctx, http.MethodGet, "/tables", nil, &listing)
-	return listing.Tables, err
 }
 
 // GetTable describes one table.
@@ -223,7 +241,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("dxmt: unexpected response from %s: %w", path, err)
+		// The status is usually why the body is unreadable -- a proxy's HTML 502, an empty 404
+		// for a path that does not exist -- so it goes in the message rather than being lost.
+		return fmt.Errorf("dxmt: unexpected response from %s (HTTP %d): %w", path, resp.StatusCode, err)
 	}
 	if !env.Success || present(env.Error) {
 		return apiError(resp.StatusCode, env)
@@ -236,7 +256,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			Message: "success with no data"}
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
-		return fmt.Errorf("dxmt: unexpected data from %s: %w", path, err)
+		return fmt.Errorf("dxmt: unexpected data from %s (HTTP %d): %w", path, resp.StatusCode, err)
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ package dxmt_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -118,7 +119,9 @@ func TestRecordSurvivesInsertReadUpdateAndDelete(t *testing.T) {
 	if err := db.Update(ctx, table, "r1", dxmt.Update{Payload: map[string]any{}}); err != nil {
 		t.Fatalf("clearing update: %v", err)
 	}
-	read, _ = db.Get(ctx, table, "r1")
+	if read, err = db.Get(ctx, table, "r1"); err != nil {
+		t.Fatalf("get after clearing update: %v", err)
+	}
 	if len(read.Payload()) != 0 {
 		t.Fatalf("an empty payload must clear it, got %v", read.Payload())
 	}
@@ -189,7 +192,12 @@ func TestSearchRanksOwnVectorFirstAndRespectsAFilter(t *testing.T) {
 
 	query = dxmt.NewSearch(vector(0), 1)
 	query.WithVector = true
-	withVector, _ := db.Search(ctx, table, query)
+	// Checked, not discarded: a failed search here used to give a zero result and the next
+	// line indexed Hits[0] -- an index-out-of-range panic instead of the search's own error.
+	withVector, err := db.Search(ctx, table, query)
+	if err != nil || len(withVector.Hits) == 0 {
+		t.Fatalf("search with vector: %v (hits %d)", err, len(withVector.Hits))
+	}
 	if len(withVector.Hits[0].Vector) != dim {
 		t.Fatal("WithVector should return the stored vector")
 	}
@@ -228,7 +236,10 @@ func TestIDWithReservedCharactersAddressesTheRightRecord(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("update %q: %v", id, err)
 		}
-		after, _ := db.Get(ctx, table, id)
+		after, err := db.Get(ctx, table, id)
+		if err != nil {
+			t.Fatalf("get %q after update: %v", id, err)
+		}
 		if after.Payload()["seen"] != true {
 			t.Fatalf("%q updated the wrong record", id)
 		}
@@ -248,8 +259,9 @@ func TestServerErrorReachesTheCallerIntact(t *testing.T) {
 	table := "go_sdk_errors"
 	freshTable(t, db, ctx, table)
 
-	// Wrong dimension: the server refuses through the un-enveloped path, and the client must
-	// pass its reason through rather than flattening it into "request failed".
+	// Wrong dimension: the server refuses inside the envelope (it answered bare until
+	// 2026-09-27, and the client reads both shapes), and the client must pass the reason
+	// through rather than flattening it into "request failed".
 	_, err := db.Insert(ctx, table, []dxmt.Record{{ID: "bad", Vector: []float32{1, 2}}})
 	var apiErr *dxmt.APIError
 	if !errors.As(err, &apiErr) {
@@ -263,4 +275,112 @@ func TestServerErrorReachesTheCallerIntact(t *testing.T) {
 	if !errors.As(err, &apiErr) || !apiErr.IsNotFound() {
 		t.Fatalf("searching a missing table should 404, got %v", err)
 	}
+}
+
+// Every DistanceMetric constant creates a table.
+//
+// DotProduct was "dotproduct" in 1.0.0, a spelling the server has never accepted, and the
+// other tests build their tables with Cosine -- so a constant that could not create a table
+// shipped. One table per constant, read back, is the only way a wrong spelling fails here
+// rather than at a user's first call.
+func TestEveryDistanceMetricCreatesATable(t *testing.T) {
+	db, ctx := connect(t)
+	for _, m := range []dxmt.DistanceMetric{dxmt.Cosine, dxmt.Euclidean, dxmt.DotProduct, dxmt.Manhattan} {
+		name := "go_sdk_metric_" + string(m)
+		_ = db.DeleteTable(ctx, name)
+		created, err := db.CreateTable(ctx, dxmt.CreateTable{Name: name, Dimension: dim, DistanceMetric: m})
+		if err != nil {
+			t.Fatalf("%s should create a table: %v", m, err)
+		}
+		if created.Name != name {
+			t.Fatalf("%s: created %q", m, created.Name)
+		}
+		described, err := db.GetTable(ctx, name) // the nested-"table" unwrap, exercised nowhere else
+		if err != nil || described.Dimension != dim {
+			t.Fatalf("%s: get table: %v (dimension %d)", m, err, described.Dimension)
+		}
+		if err := db.DeleteTable(ctx, name); err != nil {
+			t.Fatalf("drop %s: %v", name, err)
+		}
+	}
+}
+
+// A filter on false, zero or the empty string filters on that value.
+//
+// Operation.Value is `any` with omitempty, and it is easy to read that as dropping every
+// falsy value; it does not -- omitempty omits only a nil interface -- but the only filters
+// ever sent live were against truthy values, so nothing had shown it either way.
+func TestAFilterOnAFalsyValueFilters(t *testing.T) {
+	db, ctx := connect(t)
+	table := "go_sdk_falsy"
+	freshTable(t, db, ctx, table)
+	if _, err := db.Insert(ctx, table, []dxmt.Record{
+		{ID: "t", Vector: vector(0), Payload: map[string]any{"active": true, "n": 1, "name": "x"}},
+		{ID: "f", Vector: vector(1), Payload: map[string]any{"active": false, "n": 0, "name": ""}},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		cond dxmt.Condition
+	}{
+		{"false", dxmt.Eq("active", false)},
+		{"zero", dxmt.Eq("n", 0)},
+		{"empty string", dxmt.Eq("name", "")},
+	} {
+		q := dxmt.NewSearch(vector(0), 5)
+		q.Filter = dxmt.All(tc.cond)
+		res, err := db.Search(ctx, table, q)
+		if err != nil {
+			t.Fatalf("filter on %s: %v", tc.name, err)
+		}
+		if len(res.Hits) != 1 || res.Hits[0].ID != "f" {
+			t.Fatalf("filter on %s: want [f], got %d hits", tc.name, len(res.Hits))
+		}
+	}
+}
+
+// ListTables returns every table, not the server's first page.
+//
+// The route defaults to fifty per page; the client sent no parameters and took that page as
+// the whole answer. Sixty tables is the smallest corpus that tells the two apart.
+func TestListTablesIsNotCutAtTheServersDefaultPage(t *testing.T) {
+	db, ctx := connect(t)
+	names := make([]string, 60)
+	for i := range names {
+		names[i] = fmt.Sprintf("go_sdk_many_%02d", i)
+		_ = db.DeleteTable(ctx, names[i])
+		if _, err := db.CreateTable(ctx, dxmt.CreateTable{Name: names[i], Dimension: dim}); err != nil {
+			t.Fatalf("create %s: %v", names[i], err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, n := range names {
+			_ = db.DeleteTable(ctx, n)
+		}
+	})
+	listed, err := db.ListTables(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, tb := range listed {
+		seen[tb.Name] = true
+	}
+	var missing []string
+	for _, n := range names {
+		if !seen[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("ListTables returned %d of %d tables; missing %v", len(names)-len(missing), len(names), missing[:firstN(len(missing), 5)])
+	}
+}
+
+func firstN(n, cap int) int {
+	if n < cap {
+		return n
+	}
+	return cap
 }

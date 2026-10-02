@@ -275,10 +275,16 @@ jobs:
       # no such distribution on PyPI, and a non-editable resolution would test the adapters
       # against an SDK this commit does not contain.
       # The Rust client is the third one that has to keep working against a real server, and
-      # the only one whose tests compile. `--test live` rather than `cargo test`: the doctest
-      # in lib.rs is `no_run`, so building it adds a link step that proves nothing here.
-      - name: Rust client live tests
-        run: DXMT_URL=http://127.0.0.1:19999 cargo test --test live
+      # the only one whose tests compile. `--test live --test api_key` rather than `cargo test`:
+      # the doctest in lib.rs is `no_run`, so building it adds a link step that proves nothing
+      # here. `api_key` was left out when this read `--test live` alone, so the one test that
+      # proves the key reaches the wire -- against a local listener, no server needed -- ran on
+      # developer machines and nowhere else.
+      - name: Rust client tests, live and api-key
+        run: |
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+          DXMT_URL=http://127.0.0.1:19999 cargo test --test live --test api_key
         working-directory: vectordb/clients/dxmt-rust-sdk
 
       - uses: actions/setup-go@v5
