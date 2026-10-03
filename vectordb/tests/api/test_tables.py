@@ -13,7 +13,7 @@ this suite exists to remove.
 
 import uuid
 
-from .helpers.client import delete, get, post, succeeded
+from .helpers.client import call, delete, get, post, succeeded
 from .helpers.corpus import CORPUS, DIM, create_table, insert_corpus, query_at
 
 
@@ -99,3 +99,36 @@ def test_a_table_with_a_different_metric_answers_differently(table):
 
 def test_getting_a_table_that_does_not_exist_is_a_404(table):
     assert get("/tables/definitely_not_a_table", expect_ok=False).status_code == 404
+
+
+def test_a_recall_target_is_set_by_patch_and_calibration_reports_what_it_measured(empty_table):
+    """`recall_target` is the one table setting that drives a measurement rather than a
+    rebuild. The probe here is small on purpose: the point is the contract -- the field is
+    stored, a calibration can be asked for, and what comes back names the budget, the recall
+    it measured and the curve it chose from. Whether the budget is *right* is measured in
+    `tests/recall/calibration_test.rs` on a corpus where it can be wrong."""
+    rows = [
+        {"id": f"c{i}", "vector": [((i * 7919 + d * 104729) % 1000) / 1000.0 - 0.5 for d in range(DIM)]}
+        for i in range(64)
+    ]
+    post(f"/tables/{empty_table}/records", {"records": rows})
+
+    call("PATCH", f"/tables/{empty_table}", {"recall_target": 0.9})
+    table = get(f"/tables/{empty_table}").json()["data"]["table"]
+    assert table["recall_target"] == 0.9
+    assert table["recall"] is None, "nothing has measured anything yet"
+
+    cal = post(f"/tables/{empty_table}/recall/calibrate").json()["data"]["calibration"]
+    assert cal["target"] == 0.9
+    assert cal["sample"] > 0 and cal["at_rows"] == 64
+    assert cal["curve"][0]["ef_search"] <= cal["ef_search"]
+    assert all(0.0 <= p["recall"] <= 1.0 for p in cal["curve"])
+    assert cal["met"] is True, f"64 rows should be exact at any budget: {cal}"
+    stats = get(f"/tables/{empty_table}/stats").json()["data"]
+    assert stats["ef_search"]["calibrated"] == cal["ef_search"]
+    assert stats["recall"]["measured"] == cal["measured"]
+
+    # `0` opts the table out, and discards what was measured.
+    call("PATCH", f"/tables/{empty_table}", {"recall_target": 0})
+    assert get(f"/tables/{empty_table}").json()["data"]["table"]["recall"] is None
+    assert post(f"/tables/{empty_table}/recall/calibrate").json()["data"]["calibration"] is None

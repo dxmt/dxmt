@@ -3589,7 +3589,260 @@ impl IntelligentIndexedStorage {
                 retuned
             );
         }
+
+        // Recall calibration rides the same sweep: it needs the graph settled and runs a
+        // bounded number of searches, so once an interval is the right cadence. A failure
+        // on one table is logged and does not stop the others.
+        let names: Vec<String> = {
+            let tables = self.read_tables("reevaluate_indexes").await;
+            tables.keys().cloned().collect()
+        };
+        for name in names {
+            match self.calibrate_recall(&name, false).await {
+                Ok(Some(cal)) => info!(
+                    "Calibrated '{}': ef_search {} reaches recall@10 {:.4} (target {:.2}, {} queries, {} rows{})",
+                    name,
+                    cal.ef_search,
+                    cal.measured,
+                    cal.target,
+                    cal.sample,
+                    cal.at_rows,
+                    if cal.met { "" } else { "; target NOT met at the largest budget tried" }
+                ),
+                Ok(None) => {}
+                Err(e) => warn!("Recall calibration of '{}' skipped: {}", name, e),
+            }
+        }
         Ok(rebuilt)
+    }
+
+    /// Server-wide recall target for tables that do not name one. `0` disables calibration.
+    fn default_recall_target() -> f64 {
+        crate::config::env::var("DXMT_RECALL_TARGET")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(Self::DEFAULT_RECALL_TARGET)
+    }
+    const DEFAULT_RECALL_TARGET: f64 = 0.95;
+    /// Below this many rows the graph is exact or near it at any budget, and a calibration
+    /// would measure nothing but noise. `force` ignores it, for the endpoint and the tests.
+    const CALIBRATION_MIN_ROWS: usize = 20_000;
+    /// Queries per calibration, each made from a pair of sampled rows. Fifty put the
+    /// measurement within a few points of the truth, which is the resolution the doubling
+    /// series below can act on anyway.
+    const CALIBRATION_SAMPLE: usize = 50;
+    const CALIBRATION_K: usize = 10;
+    /// The largest multiple of the configured budget the calibration will try.
+    const CALIBRATION_MAX_SCALE: usize = 8;
+
+    /// Measure recall@10 on this table's own rows at a doubling series of budgets and keep
+    /// the smallest that meets the target. See [`RecallCalibration`] for why.
+    ///
+    /// Returns `Ok(None)` when there is nothing to do: calibration is off for the table, the
+    /// table is too small, the index has no budget to tune, or it was calibrated at a size
+    /// the table has not yet doubled. `force` skips the size and staleness checks.
+    pub async fn calibrate_recall(
+        &self,
+        tablename: &str,
+        force: bool,
+    ) -> crate::Result<Option<crate::types::table::RecallCalibration>> {
+        use crate::types::table::{CalibrationPoint, RecallCalibration};
+        let tablename = &*self.resolve(tablename);
+
+        // Phase 1, under the map lock: decide, and draw the sample.
+        let (target, configured_ef, rows, sample_ids) = {
+            let tables = self.read_tables("calibrate_recall").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            let target = data
+                .table
+                .recall_target
+                .unwrap_or_else(Self::default_recall_target);
+            // `<= 0`, and NaN, mean off; above 1 is a request nothing can meet.
+            if target.is_nan() || target <= 0.0 {
+                return Ok(None);
+            }
+            if target > 1.0 {
+                return Err(crate::Error::InvalidInput(format!(
+                    "recall_target {target} is not in (0, 1]"
+                )));
+            }
+            let Some(configured_ef) = data.selected_algorithm.configured_ef_search() else {
+                return Ok(None); // brute force: exact already, nothing to tune
+            };
+            let rows = data.records.len();
+            if !force {
+                if rows < Self::CALIBRATION_MIN_ROWS {
+                    return Ok(None);
+                }
+                if let Some(prev) = &data.table.recall {
+                    if prev.target == target && (rows as u64) < prev.at_rows.saturating_mul(2) {
+                        return Ok(None);
+                    }
+                }
+            }
+            if rows < Self::CALIBRATION_K + 2 {
+                return Ok(None);
+            }
+            let mut rng =
+                <rand::rngs::SmallRng as rand::SeedableRng>::seed_from_u64(rows as u64 ^ 0x5eed);
+            let ids = data
+                .records
+                .sample_ids(Self::CALIBRATION_SAMPLE * 2, &mut rng);
+            (target, configured_ef, rows, ids)
+        };
+        let vectors = self.vectors_of(tablename, &sample_ids).await?;
+        if vectors.len() < 2 {
+            return Ok(None);
+        }
+
+        // The queries. A stored row as a query flatters the graph: it is a node, its true
+        // neighbours are its own edges, and on a corpus where held-out queries get 0.21 at a
+        // small budget the rows themselves got 0.90 (uniform 128-d noise, 20K rows). A point
+        // a third of the way from one stored row to another is off the graph like a real
+        // query and tracks held-out recall within one or two points on glove-100, erring on
+        // the low side on gist and lastfm (hnswlib, 2026-10-03), so a budget chosen on it is
+        // enough or slightly more than enough -- the right direction to be wrong in.
+        let queries: Vec<Vec<f32>> = vectors
+            .chunks(2)
+            .filter(|pair| pair.len() == 2)
+            .map(|pair| {
+                let (a, b) = (&pair[0].1, &pair[1].1);
+                a.iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| x + 0.35 * (y - x))
+                    .collect()
+            })
+            .collect();
+
+        // Ground truth: the exact scan, through the same entry point a caller would use.
+        let k = Self::CALIBRATION_K;
+        let mut truth: Vec<(Vec<f32>, Vec<RecordId>)> = Vec::with_capacity(queries.len());
+        for query in queries {
+            let exact = self
+                .search_with_budget(
+                    tablename,
+                    SearchQuery {
+                        vector: query.clone(),
+                        top_k: k,
+                        limit: k,
+                        search_mode: SearchMode::Exact,
+                        with_payload: false,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await?;
+            let ids: Vec<RecordId> = exact.hits.into_iter().map(|h| h.id).collect();
+            if ids.len() == k {
+                truth.push((query, ids));
+            }
+        }
+        if truth.is_empty() {
+            return Ok(None);
+        }
+
+        // The graph, at the configured budget and doublings of it.
+        let mut curve: Vec<CalibrationPoint> = Vec::new();
+        let mut chosen: Option<(usize, f32)> = None;
+        let mut scale = 1usize;
+        while scale <= Self::CALIBRATION_MAX_SCALE {
+            let ef = configured_ef * scale;
+            let mut hits_sum = 0usize;
+            let mut lat: Vec<f32> = Vec::with_capacity(truth.len());
+            for (query, ids) in &truth {
+                let started = std::time::Instant::now();
+                let got = self
+                    .search_with_budget(
+                        tablename,
+                        SearchQuery {
+                            vector: query.clone(),
+                            top_k: k,
+                            limit: k,
+                            search_mode: SearchMode::Normal,
+                            with_payload: false,
+                            ..Default::default()
+                        },
+                        Some(ef),
+                    )
+                    .await?;
+                lat.push(started.elapsed().as_secs_f32() * 1000.0);
+                let found: std::collections::HashSet<&str> =
+                    got.hits.iter().map(|h| h.id.as_str()).collect();
+                hits_sum += ids.iter().filter(|t| found.contains(t.as_str())).count();
+            }
+            let recall = hits_sum as f32 / (truth.len() * k) as f32;
+            lat.sort_by(|a, b| a.total_cmp(b));
+            let p50_ms = lat[lat.len() / 2];
+            curve.push(CalibrationPoint {
+                ef_search: ef,
+                recall,
+                p50_ms,
+            });
+            if f64::from(recall) >= target {
+                chosen = Some((ef, recall));
+                break;
+            }
+            scale *= 2;
+        }
+        let met = chosen.is_some();
+        let (ef_search, measured) =
+            chosen.unwrap_or_else(|| curve.last().map(|p| (p.ef_search, p.recall)).unwrap());
+        let cal = RecallCalibration {
+            target,
+            ef_search,
+            measured,
+            met,
+            sample: truth.len(),
+            at_rows: rows as u64,
+            at: chrono::Utc::now(),
+            curve,
+        };
+
+        // Phase 2: record it. The table may have been dropped meanwhile; that is not an error.
+        let mut tables = self.write_tables("calibrate_recall").await;
+        if let Some(data) = tables.get_mut(tablename) {
+            data.table.recall = Some(cal.clone());
+            data.table.updated_at = chrono::Utc::now();
+        }
+        Ok(Some(cal))
+    }
+
+    /// The stored vectors of `ids`, in no particular order; ids that are gone are left out.
+    async fn vectors_of(
+        &self,
+        tablename: &str,
+        ids: &[RecordId],
+    ) -> crate::Result<Vec<(RecordId, Vec<f32>)>> {
+        let (in_memory, on_disk, file) = {
+            let tables = self.read_tables("vectors_of").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            let mut in_memory: Vec<(RecordId, Vec<f32>)> = Vec::new();
+            let mut on_disk: Vec<(RecordId, u64)> = Vec::new();
+            for id in ids {
+                if let Some(row) = data.vector_row(id) {
+                    on_disk.push((id.clone(), row));
+                } else if let Some(r) = data.records.get(id) {
+                    if !r.vector.is_empty() {
+                        in_memory.push((id.clone(), r.vector.clone()));
+                    }
+                }
+            }
+            (in_memory, on_disk, data.vector_file.clone())
+        };
+        let mut out = in_memory;
+        if let (Some(file), false) = (file, on_disk.is_empty()) {
+            let rows: Vec<u64> = on_disk.iter().map(|(_, r)| *r).collect();
+            for ((id, _), vector) in on_disk.into_iter().zip(file.read_rows(&rows)) {
+                if let Some(vector) = vector {
+                    out.push((id, vector));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 把冷表从内存里放掉。返回被驱逐的表名。
@@ -5044,6 +5297,19 @@ impl IntelligentIndexedStorage {
     }
 
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        self.search_with_budget(tablename, query, None).await
+    }
+
+    /// `search`, with the traversal budget named by the caller instead of derived from the
+    /// table. `None` is the ordinary path. Recall calibration is the caller that names one:
+    /// it walks the same graph through the same code at a series of budgets, so what it
+    /// measures is what a query at that budget would get.
+    async fn search_with_budget(
+        &self,
+        tablename: &str,
+        query: SearchQuery,
+        ef_override: Option<usize>,
+    ) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
@@ -5260,7 +5526,15 @@ impl IntelligentIndexedStorage {
                 // A named vector space has its own index; the table's algorithm describes the
                 // default one, so only claim its `ef_search` when that is what is being searched.
                 if query.vector_name.is_none() {
-                    table_data.selected_algorithm.configured_ef_search()
+                    // The calibrated budget, when there is one, is the table's own answer
+                    // to "what does this corpus need"; it only ever raises the configured
+                    // value, so a table whose configured budget is already enough keeps it.
+                    let configured = table_data.selected_algorithm.configured_ef_search();
+                    match (&table_data.table.recall, configured) {
+                        (Some(cal), Some(c)) => Some(cal.ef_search.max(c)),
+                        (Some(cal), None) => Some(cal.ef_search),
+                        (None, c) => c,
+                    }
                 } else {
                     None
                 },
@@ -5280,7 +5554,10 @@ impl IntelligentIndexedStorage {
         // grows with it; see `ef_for_rows`. Read here rather than at create time because the
         // size a table is created with (10,000 rows, an estimate) is not the size it is
         // searched at.
-        let default_ef = Self::ef_for_rows(configured_ef.unwrap_or(100), total_records);
+        let default_ef = match ef_override {
+            Some(ef) => ef,
+            None => Self::ef_for_rows(configured_ef.unwrap_or(100), total_records),
+        };
         // Use adaptive EF when SearchMode::Auto and a filter is present
         let ef_hint = if let Some((_, selectivity)) = &cardinality_and_sel {
             query
@@ -7682,6 +7959,14 @@ impl IntelligentIndexedStorage {
             "index_size_bytes": index_stats.index_size_bytes,
             "memory_usage_bytes": record_bytes + vector_row_bytes + index_stats.index_size_bytes,
             "disk_usage_bytes": disk_bytes,
+            // The budget `normal` actually searches with, and where it came from. The
+            // configured value alone said nothing about what a query on this corpus gets.
+            "ef_search": {
+                "configured": data.selected_algorithm.configured_ef_search(),
+                "calibrated": data.table.recall.as_ref().map(|c| c.ef_search),
+                "recall_target": data.table.recall_target.unwrap_or_else(Self::default_recall_target),
+            },
+            "recall": data.table.recall,
         }))
     }
 

@@ -496,6 +496,7 @@ async fn table_alterations_survive_a_restart() {
                     drop_fields: Vec::new(),
                     payload_index: None,
                     embedding: None,
+                    recall_target: None,
                 },
             )
             .await

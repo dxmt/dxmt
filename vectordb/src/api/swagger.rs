@@ -55,6 +55,7 @@ use crate::types::{
         crate::api::handlers::hybrid_search,
         // index
         crate::api::handlers::rebuild_index,
+        crate::api::handlers::calibrate_recall,
         crate::api::handlers::drop_index,
         crate::api::handlers::payload_index_report,
         crate::api::handlers::index_payload_field,
@@ -92,6 +93,8 @@ use crate::types::{
             crate::api::handlers::KnnGraphRequest,
             crate::api::handlers::PayloadUpdateMode,
             crate::api::handlers::OnError,
+            crate::types::table::RecallCalibration,
+            crate::types::table::CalibrationPoint,
             crate::api::handlers::RowError,
             crate::types::record::FullTextSearchRequest,
             crate::types::record::HybridSearchRequest,

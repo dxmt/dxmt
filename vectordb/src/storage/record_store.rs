@@ -408,6 +408,34 @@ impl RowStore {
             .collect()
     }
 
+    /// Up to `n` distinct live ids chosen uniformly, without walking the table: the id
+    /// table is addressable by ordinal, so this draws ordinals and skips tombstones.
+    pub fn sample_ids(&self, n: usize, rng: &mut impl rand::Rng) -> Vec<RecordId> {
+        let rows = self.ids.rows() as u32;
+        let live = rows as usize - self.tombstone.iter().filter(|t| **t).count();
+        if live == 0 {
+            return Vec::new();
+        }
+        if live <= n {
+            return self.ids();
+        }
+        let mut seen = std::collections::HashSet::with_capacity(n);
+        let mut out = Vec::with_capacity(n);
+        // Rejection sampling; with `live > n` and tombstones a minority this terminates in
+        // a few draws per pick. The cap is a guard against a table that is nearly all
+        // tombstones, where it degrades to a bounded number of misses rather than a hang.
+        let mut draws = 0usize;
+        while out.len() < n && draws < n * 64 {
+            draws += 1;
+            let r = rng.gen_range(0..rows);
+            if self.tombstone[r as usize] || !seen.insert(r) {
+                continue;
+            }
+            out.push(self.ids.id(r).to_string());
+        }
+        out
+    }
+
     /// One page of records, newest `created_at` first with ties by id, decoding only the page.
     ///
     /// This is what a record browser asks for, and answering it used to cost the whole table.
@@ -869,6 +897,28 @@ impl RecordStore {
         match self {
             RecordStore::Memory(m) => m.keys().cloned().collect(),
             RecordStore::Disk(s) => s.ids(),
+        }
+    }
+
+    /// Up to `n` distinct ids chosen uniformly. One pass over the keys in memory (reservoir
+    /// sampling); constant-time draws by ordinal on disk.
+    pub fn sample_ids(&self, n: usize, rng: &mut impl rand::Rng) -> Vec<RecordId> {
+        match self {
+            RecordStore::Memory(m) => {
+                let mut out: Vec<RecordId> = Vec::with_capacity(n);
+                for (i, id) in m.keys().enumerate() {
+                    if out.len() < n {
+                        out.push(id.clone());
+                    } else {
+                        let j = rng.gen_range(0..=i);
+                        if j < n {
+                            out[j] = id.clone();
+                        }
+                    }
+                }
+                out
+            }
+            RecordStore::Disk(s) => s.sample_ids(n, rng),
         }
     }
 

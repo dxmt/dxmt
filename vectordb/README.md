@@ -548,6 +548,18 @@ queries do not wait; a cold read of the file is the real cost, about a second pe
 It is refused above `DXMT_EXACT_SCAN_MAX` rows (default 10,000,000) rather than running for
 minutes on a table that large; a filter narrows what it has to read.
 
+**The server runs that comparison itself and tunes the budget from it.** How much recall a
+given `ef_search` buys is a property of the corpus -- glove-100 needs four times the budget
+of a 768-dimension embedding corpus for the same recall@10, and hnswlib on the same rows
+shows the same curve -- so a fixed default is either too little on a hard corpus or wasted on
+an easy one. Every table has a `recall_target` (default 0.95; `PATCH /tables/{t}` with
+`{"recall_target": 0.98}` changes it, `0` opts out). From 20,000 rows, and again whenever the
+table doubles, the server makes queries from pairs of its own rows, scores them exactly, and
+raises the `normal` budget by doublings until recall@10 meets the target; `accurate` is four
+times whatever that is. `POST /tables/{t}/recall/calibrate` does it on demand, and
+`GET /tables/{t}/stats` shows the budget in use, the recall measured, and the curve it came
+from.
+
 Four things the table does not say on its own:
 
 - **The client is inside the measurement.** Those QPS figures come from VectorDBBench's Python

@@ -831,6 +831,34 @@ pub async fn rebuild_index(
     }
 }
 
+/// Measure this table's recall@10 against its own exact scan and set the `normal` search
+/// budget to the smallest that meets the table's recall target. The sweep does this on its
+/// own once a table is large enough and again whenever it doubles; this runs it now, at any
+/// size, and returns what it found. See `RecallCalibration`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/recall/calibrate",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    responses(
+        (status = 200, description = "The calibration, or null when the table has nothing to calibrate (calibration off, a brute-force index, or fewer rows than a sample needs)", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
+pub async fn calibrate_recall(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.calibrate_recall(&table_name, true).await {
+        Ok(cal) => ApiResponse::success(serde_json::json!({
+            "table": table_name,
+            "calibration": cal,
+        }))
+        .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Write every table to disk and compact the write-ahead log up to that point. A snapshot is the
 /// only copy of what it covers once the log is trimmed, so back up the snapshot directory like the
 /// data it is. Refused while local durability is degraded, so an unacknowledged write cannot become

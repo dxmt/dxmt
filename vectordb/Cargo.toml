@@ -580,6 +580,10 @@ name = "exact_search_test"
 path = "tests/search/exact_search_test.rs"
 
 [[test]]
+name = "calibration_test"
+path = "tests/recall/calibration_test.rs"
+
+[[test]]
 name = "full_text_recovery_test"
 path = "tests/search/full_text_recovery_test.rs"
 

@@ -51,6 +51,59 @@ pub struct Table {
     /// vectors, which is what every table did before this existed.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// recall@10 this table's `normal` search mode should reach, measured against the
+    /// table's own exact scan. Unset means the server's default (`DXMT_RECALL_TARGET`,
+    /// 0.95); `0` turns calibration off for this table.
+    #[serde(default)]
+    pub recall_target: Option<f64>,
+    /// What the last calibration found: the `ef_search` that meets the target on this
+    /// table's own data, and the curve it was chosen from. Derived from the records, so a
+    /// restart may lose it; the next sweep measures again.
+    #[serde(default)]
+    pub recall: Option<RecallCalibration>,
+}
+
+/// One calibration of a table's traversal budget against its own exact scan.
+///
+/// HNSW's recall at a given `ef` is a property of the corpus: on glove-100, M=16, hnswlib and
+/// this graph both give 0.92 at ef 512 and 0.97 at 2,048, while a 768-dimension embedding
+/// corpus clears 0.98 at 512. A fixed budget therefore under-delivers on the hard corpus or
+/// over-spends on the easy one. The calibration samples stored vectors, scores them exactly,
+/// walks the graph at a doubling series of budgets, and keeps the smallest that meets the
+/// target. The queries are points a third of the way between pairs of stored rows: a stored
+/// row itself is a node whose true neighbours are its own edges and flatters the graph badly
+/// (0.90 where held-out queries got 0.21, on 128-d noise), while the interpolated point is
+/// off the graph like a real query and tracks held-out recall within a few points, erring
+/// low. The target is a floor on that measurement, not a promise about every query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct RecallCalibration {
+    /// The recall@10 asked for.
+    pub target: f64,
+    /// The budget `normal` uses now; `accurate` is four times it.
+    pub ef_search: usize,
+    /// recall@10 measured at `ef_search` on the sample.
+    pub measured: f32,
+    /// Whether `measured` reached `target`. False means the largest budget tried fell short
+    /// and `ef_search` is that largest budget.
+    pub met: bool,
+    /// Queries in the sample.
+    pub sample: usize,
+    /// Rows in the table when measured; the sweep measures again once the table has doubled.
+    pub at_rows: u64,
+    pub at: DateTime<Utc>,
+    /// Every budget tried, smallest first.
+    pub curve: Vec<CalibrationPoint>,
+}
+
+/// One point on a calibration curve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+pub struct CalibrationPoint {
+    pub ef_search: usize,
+    pub recall: f32,
+    /// Median single-query latency inside the server at this budget, milliseconds.
+    pub p50_ms: f32,
 }
 
 /// 索引类型
@@ -208,6 +261,11 @@ pub struct TableAlterRequest {
     /// which is a real thing that happens and which otherwise needs the table recreated.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// Set this table's recall target (see [`Table::recall_target`]); `0` turns calibration
+    /// off. Any previous calibration is discarded and the next sweep measures against the
+    /// new target.
+    #[serde(default)]
+    pub recall_target: Option<f64>,
 }
 
 /// Named vector space configuration (multi-vector support)
@@ -552,6 +610,8 @@ impl Table {
             quantization: config.quantization,
             payload_index: config.payload_index,
             embedding: config.embedding,
+            recall_target: None,
+            recall: None,
         })
     }
 
@@ -575,6 +635,10 @@ impl Table {
         }
         if let Some(embedding) = &req.embedding {
             updated.embedding = Some(embedding.clone());
+        }
+        if let Some(target) = req.recall_target {
+            updated.recall_target = Some(target);
+            updated.recall = None;
         }
 
         // Mutate payload_schema

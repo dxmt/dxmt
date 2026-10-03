@@ -805,6 +805,26 @@ def alterable(table):
     delete(f"/tables/{name}", expect_ok=False)
 
 
+@probe("TableAlterRequest", "recall_target")
+def _(table):
+    # The field has to reach the table: it is read back, and `0` makes a calibration a no-op
+    # where a positive target makes it return a measurement. A table of its own, with enough
+    # rows for a top-10 to exist; the shared corpus has five.
+    name = f"{table}_recall"
+    post("/tables", {"name": name, "dimension": 4, "distance_metric": "cosine"})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": f"r{i}", "vector": [((i * 7 + d * 13) % 10) / 10.0 + 0.05 for d in range(4)]}
+            for i in range(16)]})
+        assert alter(name, recall_target=0.9).json()["success"] is True
+        assert get(f"/tables/{name}").json()["data"]["table"]["recall_target"] == 0.9
+        assert post(f"/tables/{name}/recall/calibrate").json()["data"]["calibration"] is not None
+        assert alter(name, recall_target=0).json()["success"] is True
+        assert post(f"/tables/{name}/recall/calibrate").json()["data"]["calibration"] is None
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
 @probe("TableAlterRequest", "description")
 def _(table, alterable=None):
     name = alterable or table

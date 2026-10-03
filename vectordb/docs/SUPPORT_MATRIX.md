@@ -36,6 +36,7 @@ single-node.
 | Authentication | `DXMT_API_KEY`, optional | Unset means open, which is what every comparable database ships. When set, every route but `/live`, `/ready` and `/health` requires `api-key` or `Authorization: Bearer`, compared in constant time. Every client can send it. |
 | Request validation | Unknown fields and parameters are refused | A body or query string carrying a field the server does not have is a 400 naming it, rather than being accepted and ignored — which is how `mode`, `alpha` and `named_vectors` each spent a period being sent, dropped, and answered wrongly. |
 | Per-table export/import | `tables/{t}/export`, `tables/import` | One table to a file and back, on this server or another. Records keep their ids, payloads, versions and `created_at`; the graph is not in the file and the import rebuilds it. Both paths are bounded by `DXMT_BACKUP_ROOT` — the path comes off the wire and this server has no authentication, so an unbounded export is a write primitive and an unbounded import a read one. |
+| Recall calibration | `recall_target` on the table, `POST /tables/{t}/recall/calibrate` | The `normal` budget is measured against the table's own exact scan and raised until recall@10 meets the target (default 0.95); automatic from 20,000 rows and at each doubling. Details and the measurements behind the method are under "Recall on published ground truth". |
 | Diversity reranking | `mmr` on `search` | Server-side MMR over the candidates' own vectors, so no client-side re-embedding. Diversity is bounded by `fetch_k`. |
 | Facets / value counts | `POST /tables/{t}/facets` | How many records hold each value of a payload field, optionally under a filter. Computed from the payload index, which is already a value-to-records map, so it does not page the table. **The answer carries `covered` and `matched` and a caller must read them**: an index-backed facet loses what the index does not hold as a *count of zero* rather than as an absence, so a record with no value for the field -- or one whose value is an object, which the index records as presence only -- is in no bucket at all. Their difference is what the facet cannot describe, and `hits` alone will show a corpus that is not the corpus. A field the table's `payload_index` excludes is refused rather than counted as zero, for the same reason a filter on one is. `covered` costs a transient set of record ordinals, because a record with an array value belongs in several buckets and summing counts would double it. The page is the `limit` most common values (default 20, capped at 1,000), count descending then value ascending so two identical calls answer identically; `distinct_values` says how many there were. **Measured at 1M rows, 2026-09-26**: 37 ms on an 8-value field, 71 ms on a 2,000-value one. Under a filter matching 6,290 records it is still 13 ms and 23 ms -- **the walk is over the field's postings, not over the matched rows**, so a facet inside a narrow filter costs what the whole field costs, not what the selection costs. Budget by the field's size, not by the filter's. |
 | Geographic filtering | `GeoRadius` and `GeoBox` on any payload field holding `{"lat": …, "lon": …}` | The first filter whose value is an object, which is why it has an index half of its own: a bounding box of latitudes intersected with one of longitudes is not a circle, and the search path **takes the index's answer** rather than re-checking it, so a superset would be wrong records returned as right ones. The geo half stores both coordinates together, uses the latitude order to bound the walk, and runs `GeoPoint::distance_m` -- the same function `Record::matches_filter` calls, on the same `f64` bits -- in place. A box whose west edge is east of its east edge crosses the antimeridian. A coordinate written as a two-element array is **not** a point: GeoJSON says `[lon, lat]` and every map UI says `[lat, lon]`, and guessing puts a record on the wrong continent with nothing about the answer looking wrong. Geometry that is not on the earth is a 400, not an empty page. Costs 24 bytes a point on top of the two numeric entries the same value already makes -- `shop.lat` range filters keep working -- and `payload_index`'s `except` is how to decline it. `tests/geo_filter_test.rs` checks the index against the matcher on 60 random circles over a random corpus. **Measured at 1M rows, 2026-09-26** (`tests/scale_filters_test.rs`, 16C/62G): a radius costs what its latitude band costs and nothing more -- 0.09 ms at 1 km (60 matches), 1.2 ms at 10 km (6,290), 13.4 ms at 100 km (125,000), 32.7 ms at 1,000 km (375,000). Memory for one geographic field at 1M rows is **56 MB**: 24 MB of points plus 16 MB each for the `lat` and `lon` numeric halves that keep `field.lat` range filters working. |
@@ -210,11 +211,23 @@ same glove-100 rows, same machine, M=16 and `ef_construction` 200, queried at th
 
 Doubling `ef_construction`, doubling `m` or inserting in batches of 100 moved `normal` by at
 most 1.6 points. So on a corpus like this the recall a budget buys is what HNSW buys, and a
-recall *target* has to be met by spending more budget on that table than on an easy one --
-calibrating `ef_search` per table against its own exact scan is the next change; until
-then `accurate` is the mode for a hard corpus. The same run put hnswlib's build at 13,000
-rows/s on 16 threads against about 4,300 here, which is the ingest gap stated in cores. A
-table created before this change keeps the layout it was built with.
+recall *target* has to be met by spending more budget on that table than on an easy one.
+**That is what recall calibration does** (2026-10-03): every table has a `recall_target`
+(default `DXMT_RECALL_TARGET`, 0.95; `PATCH /tables/{t}` sets it, `0` opts out). Once a table
+holds 20,000 rows, and again each time it doubles, the index sweep samples pairs of stored
+rows, makes queries a third of the way between them, scores those exactly, walks the graph at
+the configured `ef_search` and doublings of it up to 8x, and keeps the smallest budget whose
+recall@10 meets the target; `normal` searches with that budget from then on and `accurate`
+with four times it. `POST /tables/{t}/recall/calibrate` runs it now at any size; the result
+-- budget, measured recall, the whole curve with per-budget p50 -- is on the table and in
+`GET /tables/{t}/stats` under `recall` and `ef_search`. Interpolated queries rather than the
+rows themselves because a stored row is a node whose true neighbours are its own edges: on
+128-d noise the rows measured 0.90 where held-out queries got 0.21; the interpolated point
+tracks held-out recall within one or two points on glove-100 and errs low on gist and lastfm
+(hnswlib, same machine). The calibration is derived from the records, so a restart may drop
+it until the next sweep. The same run put hnswlib's build at 13,000 rows/s on 16 threads
+against about 4,300 here, which is the ingest gap stated in cores. A table created before
+the PQ change keeps the layout it was built with.
 
 **A small fraction of records cannot be found by the graph on some corpora.** Searching with
 a vector that is already stored returns it for **100% of a modern-embedding corpus** — 60,000
