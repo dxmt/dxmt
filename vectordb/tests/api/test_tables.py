@@ -132,3 +132,17 @@ def test_a_recall_target_is_set_by_patch_and_calibration_reports_what_it_measure
     call("PATCH", f"/tables/{empty_table}", {"recall_target": 0})
     assert get(f"/tables/{empty_table}").json()["data"]["table"]["recall"] is None
     assert post(f"/tables/{empty_table}/recall/calibrate").json()["data"]["calibration"] is None
+
+
+def test_a_reachability_repair_reports_what_it_found_and_the_stats_keep_the_count(table):
+    """The repair's effect is measured in `HnswIndex`'s own tests and on GIST (2.25% of stored
+    vectors not returned by their own query before, 0.45% after, 1,563 nodes given an in-edge
+    in 80 ms at 100K rows). Over HTTP the contract is the shape: two counts, and the stats
+    carrying them forward."""
+    data = post(f"/tables/{table}/index/repair").json()["data"]
+    assert data["table"] == table
+    assert isinstance(data["stranded"], int) and isinstance(data["repaired"], int)
+    assert data["repaired"] <= data["stranded"]
+    reach = get(f"/tables/{table}/stats").json()["data"]["reachability"]
+    assert reach["stranded_at_last_repair"] == data["stranded"]
+    assert reach["repaired_total"] >= data["repaired"]

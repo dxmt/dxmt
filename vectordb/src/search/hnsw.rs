@@ -2129,6 +2129,114 @@ impl HnswIndex {
     /// Add the reverse edge on every neighbour `idx` chose, pruning any list that overflows.
     ///
     /// `&self`, so a batch can run this for many nodes at once.
+    /// Give every node nothing points at an in-edge again, so a search can reach it.
+    ///
+    /// `select_neighbors_heuristic` keeps fewer than `m` edges when candidates crowd each
+    /// other, and a node's in-edges are other nodes' out-edges: a node that loses every
+    /// pruning contest on every list it was on -- not at insert, when it still has them, but a
+    /// thousand inserts later as its neighbours fill up -- ends with no in-edges at all. It is
+    /// in the graph and no query returns it, at any `ef`; 2% of GIST-960 at 100K rows and 5%
+    /// at a million, measured. The two insert-time fixes the paper offers were tried and
+    /// removed (see the heuristic's doc): one costs 1.8x the build on GIST and degrades a
+    /// clustered corpus, the other fixes 0.4 of the 2 points because stranding does not
+    /// happen at insert. This is the shape that fits what was measured: a pass over the
+    /// layer-0 in-degrees, which is an O(edges) read -- tens of milliseconds at a million
+    /// rows -- and a single edge added per stranded node, from the nearest of its own
+    /// out-neighbours back to it.
+    ///
+    /// The added edge is not put through the heuristic, which is what removed it in the
+    /// first place: when the neighbour's list is full, the edge replaces the neighbour's
+    /// farthest link, provided that link has another in-edge somewhere, so one node is never
+    /// freed at the cost of stranding another. Searches run concurrently; each list is
+    /// edited under its own lock, one at a time, like `link_back`.
+    ///
+    /// Returns `(stranded, repaired)`. The difference is nodes whose every out-neighbour's
+    /// list was full of singletons, which the next pass may see differently.
+    pub fn repair_reachability(&self) -> (usize, usize) {
+        let n = self.nodes.len();
+        if n < 2 {
+            return (0, 0);
+        }
+        let mut in_degree = vec![0u32; n];
+        let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
+        for from in 0..n {
+            if self.nodes.is_deleted(from) {
+                continue;
+            }
+            self.nodes.copy_links(from, 0, &mut links);
+            for &to in &links {
+                if let Some(d) = in_degree.get_mut(to as usize) {
+                    *d += 1;
+                }
+            }
+        }
+        let stranded: Vec<usize> = (0..n)
+            .filter(|&i| {
+                in_degree[i] == 0 && !self.nodes.is_deleted(i) && Some(i) != self.entry_point
+            })
+            .collect();
+        let max_m0 = self.config.max_m0;
+        let mut repaired = 0usize;
+        for &idx in &stranded {
+            // Its own out-neighbours, nearest first: the nodes that already consider it
+            // close enough to point at, and the ones a walk towards it will pass through.
+            self.nodes.copy_links(idx, 0, &mut links);
+            let mut candidates: Vec<(usize, f32)> = links
+                .iter()
+                .map(|&f| f as usize)
+                .filter(|&f| f != idx && !self.nodes.is_deleted(f))
+                .map(|f| (f, self.node_distance(idx, f)))
+                .collect();
+            candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let mut done = false;
+            for (from, _) in candidates {
+                // `Some(evicted)` when the edge went in; the evicted link, if any, has one
+                // in-edge fewer from here on, and the count has to say so or a later eviction
+                // could take its last one.
+                let outcome: Option<Option<u32>> = self
+                    .nodes
+                    .with_links_mut(from, 0, |list| {
+                        if list.contains(idx as u32) {
+                            return Some(None);
+                        }
+                        if list.len() < max_m0 && list.push(idx as u32) {
+                            return Some(None);
+                        }
+                        // Full: evict the farthest link that is not somebody's only in-edge.
+                        let mut farthest: Option<(usize, f32)> = None;
+                        for (pos, &l) in list.as_slice().iter().enumerate() {
+                            if in_degree[l as usize] <= 1 {
+                                continue;
+                            }
+                            let d = self.node_distance(from, l as usize);
+                            if farthest.is_none_or(|(_, fd)| d > fd) {
+                                farthest = Some((pos, d));
+                            }
+                        }
+                        let (pos, _) = farthest?;
+                        let mut kept: Vec<u32> = list.as_slice().to_vec();
+                        let evicted = kept[pos];
+                        kept[pos] = idx as u32;
+                        list.set(&kept);
+                        Some(Some(evicted))
+                    })
+                    .flatten();
+                if let Some(evicted) = outcome {
+                    in_degree[idx] += 1;
+                    if let Some(e) = evicted {
+                        in_degree[e as usize] = in_degree[e as usize].saturating_sub(1);
+                    }
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                repaired += 1;
+            }
+        }
+        (stranded.len(), repaired)
+    }
+
     fn link_back_all(&self, idx: usize, level: usize, entry_level: usize) {
         // Copy the plan out and drop the guard before taking any write lock, so that no
         // thread ever holds two edge locks at once.
@@ -2309,6 +2417,10 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
 
     fn as_hnsw(&self) -> Option<&HnswIndex> {
         Some(self)
+    }
+
+    fn repair_reachability(&self) -> (usize, usize) {
+        HnswIndex::repair_reachability(self)
     }
 
     fn as_hnsw_mut(&mut self) -> Option<&mut HnswIndex> {
@@ -2609,6 +2721,70 @@ mod reachability_tests {
     /// pruning contest, and the obvious synthesis — a far outlier — is *protected* by the
     /// heuristic, because its distance to the other candidates is about its distance to the
     /// node being linked, so it never reads as crowded.
+    /// A node with its in-edges cut by hand is unreachable, and one repair pass brings it
+    /// back -- found by a search for its own vector, which is the operation that fails on a
+    /// stranded node. Cut by hand because no synthetic corpus reproduces the stranding (see
+    /// `a_clustered_corpus_strands_nobody`); the mechanism is what this pins.
+    #[test]
+    fn a_repair_pass_gives_a_stranded_node_an_in_edge_back() {
+        let mut index = HnswIndex::new(DistanceMetric::Euclidean, Some(HnswConfig::default()));
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut vectors: Vec<DenseVector> = Vec::new();
+        for i in 0..3_000 {
+            let v: DenseVector = (0..16).map(|_| rng.gen::<f32>()).collect();
+            vectors.push(v.clone());
+            index.insert(format!("v{i:06}"), v).unwrap();
+        }
+        assert!(
+            orphans(&index).is_empty(),
+            "the corpus itself strands nobody"
+        );
+
+        // Strand ten nodes: remove each from every list that points at it, on every layer.
+        let victims: Vec<usize> = (0..10).map(|k| 100 + k * 251).collect();
+        let n = index.nodes.len();
+        let mut links = Vec::new();
+        for from in 0..n {
+            for layer in 0..index.nodes.layers(from) {
+                index.nodes.copy_links(from, layer, &mut links);
+                if links.iter().any(|&l| victims.contains(&(l as usize))) {
+                    let kept: Vec<u32> = links
+                        .iter()
+                        .copied()
+                        .filter(|&l| !victims.contains(&(l as usize)))
+                        .collect();
+                    index
+                        .nodes
+                        .with_links_mut(from, layer, |slot| slot.set(&kept));
+                }
+            }
+        }
+        let stranded = orphans(&index);
+        assert_eq!(stranded.len(), 10, "{stranded:?}");
+        for &v in &victims {
+            let got = index.search(&vectors[v], 1).unwrap();
+            assert_ne!(
+                got[0].0,
+                format!("v{v:06}"),
+                "a node with no in-edges should not be found by its own vector"
+            );
+        }
+
+        let (found, repaired) = index.repair_reachability();
+        assert_eq!((found, repaired), (10, 10));
+        assert!(orphans(&index).is_empty(), "{:?}", orphans(&index));
+        for &v in &victims {
+            let got = index.search(&vectors[v], 1).unwrap();
+            assert_eq!(
+                got[0].0,
+                format!("v{v:06}"),
+                "reachable again by its own vector"
+            );
+        }
+        // A second pass has nothing to do and changes nothing.
+        assert_eq!(index.repair_reachability(), (0, 0));
+    }
+
     #[test]
     fn a_clustered_corpus_strands_nobody() {
         let mut index = HnswIndex::new(DistanceMetric::Euclidean, Some(HnswConfig::default()));

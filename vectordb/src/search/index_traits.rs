@@ -91,6 +91,12 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// Give nodes nothing points at an in-edge again; `(stranded, repaired)`. Only a graph
+    /// index has anything to repair. See `HnswIndex::repair_reachability`.
+    fn repair_reachability(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// Slots the index holds, tombstoned ones included, where [`Self::len`] counts only the
     /// live ones.
     ///

@@ -399,6 +399,10 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         Ok(())
     }
 
+    fn repair_reachability(&self) -> (usize, usize) {
+        self.hnsw.repair_reachability()
+    }
+
     fn slot_count(&self) -> usize {
         crate::search::index_traits::VectorIndex::slot_count(&self.hnsw)
     }

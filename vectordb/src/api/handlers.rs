@@ -831,6 +831,35 @@ pub async fn rebuild_index(
     }
 }
 
+/// Give every graph node that nothing points at an in-edge again, now rather than at the
+/// next sweep. A stranded node is in the table and in the index and no query returns it at
+/// any budget; `GET /tables/{t}/stats` reports under `reachability` how many the last pass
+/// found. See `HnswIndex::repair_reachability`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/tables/{table_name}/index/repair",
+    params(("table_name" = String, Path, description = "Table name", example = "demo")),
+    responses(
+        (status = 200, description = "How many nodes had no in-edge and how many were given one", body = ApiResponse),
+        (status = 404, description = "No such table", body = ApiResponse)
+    ),
+    tag = "index"
+))]
+pub async fn repair_reachability(
+    State(state): State<AppState>,
+    Path(table_name): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.repair_reachability(&table_name).await {
+        Ok((stranded, repaired)) => ApiResponse::success(serde_json::json!({
+            "table": table_name,
+            "stranded": stranded,
+            "repaired": repaired,
+        }))
+        .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Measure this table's recall@10 against its own exact scan and set the `normal` search
 /// budget to the smallest that meets the table's recall target. The sweep does this on its
 /// own once a table is large enough and again whenever it doubles; this runs it now, at any

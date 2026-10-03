@@ -296,6 +296,12 @@ impl IndexWrapper {
         self.index.read().await.is_quantized()
     }
 
+    /// One reachability repair pass over the graph, under the read lock: the pass edits edge
+    /// lists through their own locks, the same way a concurrent insert's `link_batch` does.
+    pub async fn repair_reachability(&self) -> (usize, usize) {
+        self.index.read().await.repair_reachability()
+    }
+
     pub fn is_quantizing(&self) -> bool {
         self.quantizing.load(std::sync::atomic::Ordering::SeqCst)
     }

@@ -746,6 +746,13 @@ struct IntelligentTableData {
     /// 性能统计（Arc<Mutex> 支持在读锁持有期间并发更新）
     performance_stats: Arc<Mutex<PerformanceStats>>,
 
+    /// What the last reachability repair found and what every pass has repaired so far.
+    /// `stranded_last` is the number of nodes with no in-edge the last pass saw -- the
+    /// figure a `GET /tables/{t}/stats` reader wants when "search with a stored vector
+    /// does not return it" comes up. See `HnswIndex::repair_reachability`.
+    stranded_last: Arc<std::sync::atomic::AtomicUsize>,
+    repaired_total: Arc<AtomicU64>,
+
     /// The two indexes that are a pure function of the records, and are rebuilt rather than
     /// restored. `None` means "not built yet" -- see [`IntelligentTableData::derived`].
     derived: parking_lot::RwLock<Option<DerivedIndexes>>,
@@ -3590,13 +3597,24 @@ impl IntelligentIndexedStorage {
             );
         }
 
-        // Recall calibration rides the same sweep: it needs the graph settled and runs a
-        // bounded number of searches, so once an interval is the right cadence. A failure
-        // on one table is logged and does not stop the others.
+        // Reachability repair and recall calibration ride the same sweep: both want the
+        // graph settled and both are bounded work. Repair first, so the calibration measures
+        // the graph a query will see. A failure on one table is logged and does not stop the
+        // others.
         let names: Vec<String> = {
             let tables = self.read_tables("reevaluate_indexes").await;
             tables.keys().cloned().collect()
         };
+        for name in &names {
+            match self.repair_reachability(name).await {
+                Ok((0, _)) => {}
+                Ok((stranded, repaired)) => info!(
+                    "Reachability repair on '{}': {} node(s) had no in-edge, {} given one",
+                    name, stranded, repaired
+                ),
+                Err(e) => warn!("Reachability repair on '{}' skipped: {}", name, e),
+            }
+        }
         for name in names {
             match self.calibrate_recall(&name, false).await {
                 Ok(Some(cal)) => info!(
@@ -3614,6 +3632,27 @@ impl IntelligentIndexedStorage {
             }
         }
         Ok(rebuilt)
+    }
+
+    /// One reachability repair pass over a table's graph; `(stranded, repaired)`. The sweep
+    /// runs it every interval; `POST /tables/{t}/index/repair` runs it now.
+    pub async fn repair_reachability(&self, tablename: &str) -> crate::Result<(usize, usize)> {
+        let tablename = &*self.resolve(tablename);
+        let (index, stranded_last, repaired_total) = {
+            let tables = self.read_tables("repair_reachability").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            (
+                data.index.clone(),
+                Arc::clone(&data.stranded_last),
+                Arc::clone(&data.repaired_total),
+            )
+        };
+        let (stranded, repaired) = index.repair_reachability().await;
+        stranded_last.store(stranded, Ordering::Relaxed);
+        repaired_total.fetch_add(repaired as u64, Ordering::Relaxed);
+        Ok((stranded, repaired))
     }
 
     /// Server-wide recall target for tables that do not name one. `0` disables calibration.
@@ -4921,6 +4960,8 @@ impl IntelligentIndexedStorage {
             named_indexes,
             index_decision,
             performance_stats: Arc::new(Mutex::new(PerformanceStats::default())),
+            stranded_last: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            repaired_total: Arc::new(AtomicU64::new(0)),
             // A table being created has no records, so an empty pair is already correct and
             // there is nothing to rebuild. `restore_table` clears this back to `None`.
             derived: parking_lot::RwLock::new(Some(DerivedIndexes {
@@ -7967,6 +8008,14 @@ impl IntelligentIndexedStorage {
                 "recall_target": data.table.recall_target.unwrap_or_else(Self::default_recall_target),
             },
             "recall": data.table.recall,
+            // Nodes the last repair pass found with no in-edge -- in the graph and unreachable
+            // by any query until the pass gave them one -- and how many every pass has
+            // repaired. A non-zero `repaired_total` on a table is the graph doing what the
+            // heuristic's pruning undid; see `HnswIndex::repair_reachability`.
+            "reachability": {
+                "stranded_at_last_repair": data.stranded_last.load(Ordering::Relaxed),
+                "repaired_total": data.repaired_total.load(Ordering::Relaxed),
+            },
         }))
     }
 

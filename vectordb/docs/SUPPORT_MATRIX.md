@@ -244,6 +244,19 @@ Deduplication and near-duplicate detection are the workloads that hit it, and
 never received. The standard mitigation (`keepPrunedConnections`) was implemented, measured
 on three corpora and removed — see `select_neighbors_heuristic` for the table.
 
+**Since 2026-10-03 the index sweep repairs it after the fact.** Stranding happens a thousand
+inserts later, as a node's neighbours fill up and prune it off their lists, so the fix that
+matched the measurement is a pass over the layer-0 in-degrees -- an O(edges) read -- that
+gives every node nothing points at one in-edge back, from the nearest of its own
+out-neighbours; a full list evicts its farthest link, never one that is somebody's only
+in-edge. On GIST-960 at 100K rows one pass found 1,563 nodes with no in-edge and repaired
+all of them in 80 ms; stored vectors not returned by their own query went from 45 to 9 of
+2,000 (2.25% to 0.45%), recall@10 against the exact scan 0.995 to 0.996, and a second pass
+found nothing. The remaining 0.45% have in-edges and are still not found at the `normal`
+budget. The sweep runs it every `DXMT_REINDEX_INTERVAL_SECS`; `POST /tables/{t}/index/repair`
+runs it now; `GET /tables/{t}/stats` reports `reachability.stranded_at_last_repair` and
+`repaired_total`.
+
 **A standard dataset may not load as it ships.** GIST-960 contains ten all-zero descriptors
 and nytimes-256 contains 239. They are legitimate under euclidean (the origin is a point) and
 meaningless under cosine (no direction), and are accepted and refused accordingly. What is

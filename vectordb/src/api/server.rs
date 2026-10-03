@@ -15,8 +15,8 @@ use crate::{
         get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
         hybrid_search_combined, import_table, index_payload_field, insert_records,
         insert_records_optimized, knn_graph, list_aliases, list_records, list_tables, liveness,
-        payload_index_report, prometheus_metrics, readiness, rebuild_index, search_groups,
-        search_vectors, set_alias, sparse_search, update_record, AppState,
+        payload_index_report, prometheus_metrics, readiness, rebuild_index, repair_reachability,
+        search_groups, search_vectors, set_alias, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -464,6 +464,10 @@ pub async fn create_app_with_storage(
         .route(
             "/tables/:table_name/recall/calibrate",
             post(calibrate_recall),
+        )
+        .route(
+            "/tables/:table_name/index/repair",
+            post(repair_reachability),
         )
         // 快照：把所有表落盘，下次启动只回放快照之后的 WAL
         .route("/snapshot", post(create_snapshot))
