@@ -17,6 +17,69 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-03
+
+Every package carries this version. The HTTP API gains fields and routes and loses none;
+the Python, JavaScript, Rust and Go clients each had defects found by running every method
+against a live server, and `docs/SUPPORT_MATRIX.md` was re-measured where it was stale.
+
+### Added
+
+- **Recall calibration.** Every table has a `recall_target` (default 0.95; `PATCH /tables/{t}`
+  sets it, `0` opts out). From 20,000 rows, and again whenever a table doubles, the index
+  sweep makes queries from pairs of the table's own rows, scores them with the exact scan,
+  and raises the `normal` search budget by doublings until recall@10 meets the target.
+  `POST /tables/{t}/recall/calibrate` runs it on demand; `GET /tables/{t}/stats` reports the
+  budget in use, the recall measured and the curve. On glove-100 the graph measures the same
+  recall per budget as hnswlib at the same parameters, so the budget is what a target buys.
+- **Reachability repair.** The same sweep gives every graph node that nothing points at an
+  in-edge back (`POST /tables/{t}/index/repair` runs it now). On GIST-960 at 100K rows one
+  pass repaired 1,563 nodes in 80 ms and took stored vectors not returned by their own query
+  from 2.25% to 0.45%, recall unchanged.
+- **`on_error: "skip"` on `POST /tables/{t}/records`** writes the valid rows and lists the
+  rest; the default refusal now lists every invalid row (`error.details.failed`), not the
+  first.
+- **Full-text search in the default build** (`text-bm25`), and a `"analyzer": "chinese"`
+  text field is now actually tokenized with jieba -- the setting was parsed and read by
+  nothing, so Chinese full-text search found a sentence only by the whole sentence.
+- A per-stage insert timer (`insert stages` log line), an in-process build profiler
+  (`tests/recall/build_profile_test.rs`), and live tests in CI for every route the Python
+  and JavaScript clients wrap, including export/import.
+
+### Changed
+
+- **PQ code size follows the table's width**: one dimension per subspace below 64, two below
+  256, four from there. glove-25 `normal` recall@10 0.76 -> 1.00 for +0.7 ms; glove-100 and
+  glove-200 +3 points. Tables built before keep their layout.
+- **`search_mode: "exact"` is allowed to 10M rows** (was 1M): 1M x 960 measures 300 ms with
+  the row file in page cache.
+- **The graph builds 1.7x faster** at 100 dimensions (3,365 -> 5,841 rows/s in-process,
+  hnswlib 7,963 on the same rows): the next neighbour's vector is prefetched during the walk
+  and the prune, and parallel planning starts at 1,024 rows instead of 10,000, with the rows
+  of a chunk linked to their nearest siblings afterwards. At 960 dimensions the server was
+  already at parity. The AVX2 distance kernels use four FMA accumulators.
+- Every description that said "horizontally scalable", "98% cost savings" or `serve --simple`
+  now says what the server is: a single-node database. The matrix's filter-latency cliff
+  (160-800 ms at 12-50% selectivity) was re-measured at 4-8 ms and the entry corrected.
+
+### Fixed
+
+- **A row the WAL never saw is indexed on restart.** A write reaches the row file before its
+  log entry; a crash in that window, or a backup whose `records/` copy was taken after a write
+  and whose `wal.log` copy before it, left a record `GET` returned and no ordinary search found.
+  A restore whose index holds fewer rows than the row files now inserts the difference.
+- **Sparse search answered nothing after deletes of records without a sparse vector**: the
+  index's count went down on every delete whether or not the id had a posting, and reached
+  zero, at which point `search` returned an empty page without reading a posting.
+- JavaScript client: a record read back could not be written back (`created_at` etc. were
+  sent and refused, and `upload()` did not throw); error codes were replaced by the class's;
+  the LangChain store ignored `Document.id`, could not delete by filter, and sent filters the
+  server refuses. Rust and Go clients: `dot`/`manhattan` could not create a table;
+  `list_tables` was cut at the server's default page. Python client: the live suite's hybrid
+  tests had been failing on CI's default build since 2026-09-28; four examples could not run.
+- Python and JavaScript READMEs, `SUPPORT_MATRIX.md` and the Python SDK's examples directory
+  no longer describe methods, defaults, files or claims that do not exist.
+
 ## [1.0.1] - 2026-10-02
 
 ### Fixed
