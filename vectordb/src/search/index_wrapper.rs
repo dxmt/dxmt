@@ -65,14 +65,18 @@ impl IndexWrapper {
     /// milliseconds, large enough that the acquisitions are a rounding error: 5,000 rows is
     /// eight of them, against 5,000 if each record took the lock.
     const SERIAL_BATCH_CHUNK: usize = 128;
+    /// The smallest chunk worth planning in parallel; below it the serial path is as fast.
+    const MIN_PARALLEL_CHUNK: usize = 16;
 
     /// Whether the graph will plan this batch in parallel, asked under a read lock.
-    async fn plans_batch_in_parallel(&self, batch: usize) -> bool {
+    /// How many rows the graph will plan in parallel right now; `None` for an index that
+    /// is not a graph. See `HnswIndex::parallel_batch_limit`.
+    async fn parallel_batch_limit(&self) -> Option<usize> {
         self.index
             .read()
             .await
             .as_hnsw()
-            .is_some_and(|hnsw| hnsw.plans_batches_in_parallel(batch))
+            .map(|hnsw| hnsw.parallel_batch_limit())
     }
 
     /// Insert several vectors under one write lock.
@@ -115,9 +119,23 @@ impl IndexWrapper {
         // and the worst search drops to 302 ms. This is not the per-record locking this method
         // replaced: that took the lock two thousand times for a two-thousand-row batch, where
         // this takes it forty.
-        if !self.plans_batch_in_parallel(items.len()).await {
-            for chunk in items.chunks(Self::SERIAL_BATCH_CHUNK) {
-                self.insert_chunk(chunk.to_vec()).await?;
+        // The graph says how many rows it will plan in parallel at its current size (a share
+        // of its nodes; see `HnswIndex::parallel_batch_limit`), and that number grows with
+        // every chunk that lands, so a batch into a young graph is planned in increasing
+        // chunks rather than serially until a fixed size. Below the seed, or when the chunk
+        // would be smaller than a parallel plan is worth, the rows go in one at a time in
+        // small chunks: those are the first hundred-odd rows of a table, nothing more.
+        let mut rest = items;
+        while !rest.is_empty() {
+            let limit = self.parallel_batch_limit().await;
+            let take = match limit {
+                Some(limit) if limit >= Self::MIN_PARALLEL_CHUNK => limit.min(rest.len()),
+                Some(_) => Self::SERIAL_BATCH_CHUNK.min(rest.len()),
+                None => rest.len(),
+            };
+            let chunk: Vec<(String, Vec<f32>)> = rest.drain(..take).collect();
+            self.insert_chunk(chunk).await?;
+            if !rest.is_empty() {
                 // Dropping the lock is not enough on its own. tokio's `RwLock` is
                 // write-preferring, so this task re-queues for the next chunk before a waiting
                 // reader is served, and starves it for the rest of the batch: chunking without
@@ -125,8 +143,6 @@ impl IndexWrapper {
                 // reader that is already waiting take the lock before the next chunk asks.
                 tokio::task::yield_now().await;
             }
-        } else {
-            self.insert_chunk(items).await?;
         }
 
         // The phased path talks to the inner graph directly, so an index wrapping it never saw

@@ -184,6 +184,11 @@ prost = { version = "0.12", optional = true }
 # Search and indexing
 tantivy = { version = "0.25", optional = true }
 jieba-rs = { version = "0.8", optional = true }
+# In-process sampling profiler for the build-rate test under `benchmarks`: SIGPROF and
+# backtraces, so it works where `perf_event_open` is locked down (perf_event_paranoid 4,
+# ptrace_scope 1 -- the development box, as it happens), which is where a profile is
+# otherwise impossible to get.
+pprof = { version = "0.15", features = ["flamegraph"], optional = true }
 
 # Graph processing (already exists, no need to add again)
 
@@ -335,7 +340,7 @@ experimental = [
 ]
 tokio-runtime = []
 basic-storage = []
-benchmarks = []
+benchmarks = ["pprof"]
 adaptive-index = ["experimental-indexes"]
 experimental-indexes = []
 test-failpoints = []
@@ -586,6 +591,11 @@ path = "tests/recall/calibration_test.rs"
 [[test]]
 name = "rows_ahead_of_log_test"
 path = "tests/durability/rows_ahead_of_log_test.rs"
+
+[[test]]
+name = "build_profile_test"
+path = "tests/recall/build_profile_test.rs"
+required-features = ["benchmarks"]
 
 [[test]]
 name = "full_text_recovery_test"

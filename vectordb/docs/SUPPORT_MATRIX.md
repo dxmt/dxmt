@@ -180,8 +180,29 @@ server 0.12 s to parse and validate. The SDK's `upload(parallel=N)` with orjson 
 the shape that reaches the ceiling. Inside the server, per-stage timers over a 1M load (one
 `info` line per 250 groups) put **graph construction at 81%** of storage time, the WAL at 14%
 (the vector is written to the row file and again, compressed, to the log), the row file at
-3% and the record map at 2%; the server averaged 7 of 16 cores under one client. The next
-gain is the planner's parallel efficiency, not the wire.
+3% and the record map at 2%.
+
+**The graph build itself, measured in-process against hnswlib on the same rows and box**
+(`tests/recall/build_profile_test.rs`, which also writes a flamegraph through an
+in-process sampler, since `perf` is unavailable where this is developed). 100K x 100 uniform,
+16 threads, rows/s:
+
+| | graph alone | through storage |
+| --- | --- | --- |
+| before 2026-10-03 | 3,365 | 2,607 |
+| + prefetch of the next neighbour's vector in the walk and the prune | 4,688 | 3,766 |
+| + parallel planning from the first 1,024 rows instead of the first 10,000, with the rows of a chunk linked to their nearest siblings afterwards | **5,841** | **4,170** |
+| hnswlib 0.8, M=16, ef_construction 200 | 7,963 | — |
+
+The profile said the build was distance-bound (63% of CPU samples in the AVX2 kernel) and a
+kernel four times faster at the arithmetic moved the rate not at all: the samples were
+memory stalls on the neighbour's vector, which the prefetch hides. The serial floor below
+10,000 nodes was 14% of the samples and more of the wall. At 960 dimensions the server was
+already at parity with hnswlib (1,507 against 1,239). At 25 dimensions the graph now builds
+at 9,800 rows/s and the storage path around it at 5,600, so there the per-row cost of the
+record store, map and WAL is the larger share -- that is the next gain for low-dimension
+tables; recall on glove-25 and glove-100 was re-measured after these changes and did not
+move (1.000 and 0.9335 at `normal`).
 
 **The PQ code is sized by the table's width** (since 2026-10-02; `HnswPqConfig::default_subvectors`).
 It was four dimensions per subspace at every width, the layout measured at 768, and at 25

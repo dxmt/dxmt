@@ -663,10 +663,25 @@ fn report_phases(nodes: usize) {
     }
 }
 
-/// Below this many nodes a batch is inserted one record at a time. Early records are
-/// what the rest of the graph hangs off, so letting a batch of them plan without seeing
-/// each other costs real recall; past this size it does not.
-const PARALLEL_PLAN_MIN_NODES: usize = 10_000;
+/// A batch is planned in parallel only when it is at most this fraction of the graph:
+/// `nodes / PARALLEL_PLAN_MAX_SHARE`. The rows of one batch are planned against the graph as
+/// it stood before any of them, so they never choose each other as neighbours; while a batch
+/// is a small share of the graph that costs nothing measurable, and when it is a large share
+/// it costs real recall, because early records are what the rest of the graph hangs off.
+///
+/// This replaces a fixed floor of 10,000 nodes below which every row went in one at a time
+/// on one thread. That floor was 14% of the CPU samples of a 100K build and a larger share
+/// of its wall time, since nothing else ran meanwhile. Under the proportional rule the caller
+/// chunks a batch to the share the graph allows -- 64 rows at 1,024 nodes, 625 at 10,000 --
+/// and only the first `PARALLEL_PLAN_SEED` rows are serial.
+///
+/// An eighth, from 128 nodes, was tried first and failed two self-retrieval tests on
+/// corpora of a thousand-odd rows: a graph that young has no backbone yet, and a chunk of
+/// sixteen rows that cannot see each other is a sixteenth of it. A sixteenth from a thousand
+/// nodes passes them and costs the 100K build under a second.
+const PARALLEL_PLAN_MAX_SHARE: usize = 16;
+/// Nodes the graph needs before any batch is planned in parallel.
+const PARALLEL_PLAN_SEED: usize = 1_024;
 /// Below this many records the rayon fan-out costs more than the serial loop.
 const PARALLEL_PLAN_MIN_BATCH: usize = 16;
 /// How many records a bulk build hands to `insert_batch` at a time.
@@ -924,6 +939,13 @@ impl QuantizedStore {
         &self.codes[idx * self.m..(idx + 1) * self.m]
     }
 
+    /// The code's bytes, for a prefetch hint; empty past the end rather than a panic.
+    #[inline]
+    fn code_bytes(&self, idx: usize) -> &[u8] {
+        let start = idx * self.m;
+        self.codes.get(start..start + self.m).unwrap_or(&[])
+    }
+
     fn push(&mut self, vector: &[f32]) -> crate::Result<()> {
         let code = self.encode(vector);
         self.codes.extend_from_slice(&code);
@@ -1113,6 +1135,38 @@ impl HnswIndex {
     }
 
     /// Distance from the query to node `idx` under `scorer`.
+    /// Ask the cache for node `idx`'s scoring data ahead of its use. On x86-64 a hint per
+    /// cache line of the vector, or of the PQ code when the graph is quantized; elsewhere
+    /// nothing. A hint for an index past the end is harmless, so the bound is the only check.
+    #[inline]
+    fn prefetch(&self, idx: usize) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            if idx >= self.nodes.len() {
+                return;
+            }
+            let bytes: &[u8] = match &self.quantized {
+                Some(store) => store.code_bytes(idx),
+                None => {
+                    let v = self.nodes.vector(idx);
+                    // SAFETY: a reinterpretation for address arithmetic only; nothing reads it.
+                    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
+                }
+            };
+            let mut offset = 0;
+            while offset < bytes.len() {
+                // SAFETY: prefetch takes any address and never faults.
+                unsafe { _mm_prefetch(bytes.as_ptr().add(offset) as *const i8, _MM_HINT_T0) };
+                offset += 64;
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = idx;
+        }
+    }
+
     #[inline]
     fn score(&self, scorer: &QueryScorer<'_>, idx: usize) -> f32 {
         match scorer {
@@ -1430,7 +1484,18 @@ impl HnswIndex {
                 // before any neighbour is scored, so a search never holds a lock while it
                 // computes, and a writer pruning some node never waits on a reader's walk.
                 self.nodes.copy_links(current.idx, layer, &mut links);
-                for &neighbor_idx in links.iter() {
+                // The edge list is known before any neighbour is scored, so the next
+                // neighbour's vector can be on its way while this one is being scored. The
+                // walk's cost is this load: a 100-dimension vector is seven cache lines at a
+                // random address in a flat array larger than L2, and with nothing in flight
+                // each visit paid the full miss -- the in-process profile charged 63% of the
+                // build's CPU to the distance kernel, and a kernel four times faster at the
+                // arithmetic moved the build rate not at all. hnswlib prefetches here for
+                // the same reason.
+                for (at, &neighbor_idx) in links.iter().enumerate() {
+                    if let Some(&next) = links.get(at + 1) {
+                        self.prefetch(next as usize);
+                    }
                     let neighbor_idx = neighbor_idx as usize;
                     if neighbor_idx >= self.nodes.len()
                         || visited.contains(neighbor_idx)
@@ -1900,12 +1965,26 @@ impl HnswIndex {
     /// order. Only one batch may be in flight at a time -- the storage layer's insert
     /// processor is a single task, which is what makes releasing the lock between phases safe.
     pub fn insert_batch(&mut self, items: Vec<(RecordId, DenseVector)>) -> crate::Result<()> {
-        let Some(prepared) = self.prepare_batch(items)? else {
-            return Ok(());
-        };
-        let plans = self.plan_batch(&prepared);
-        let applied = self.apply_batch(prepared, plans);
-        self.link_batch(&applied);
+        // In chunks the graph will plan in parallel at its current size, which grow as the
+        // chunks land; the first rows of an empty graph go in one at a time. The wrapper
+        // does the same split around its locks; this is the same rule for a caller holding
+        // the graph directly.
+        let mut rest = items;
+        while !rest.is_empty() {
+            let limit = self.parallel_batch_limit();
+            let take = if limit >= PARALLEL_PLAN_MIN_BATCH {
+                limit.min(rest.len())
+            } else {
+                PARALLEL_PLAN_MIN_BATCH.min(rest.len())
+            };
+            let chunk: Vec<(RecordId, DenseVector)> = rest.drain(..take).collect();
+            let Some(prepared) = self.prepare_batch(chunk)? else {
+                continue;
+            };
+            let plans = self.plan_batch(&prepared);
+            let applied = self.apply_batch(prepared, plans);
+            self.link_batch(&applied);
+        }
         Ok(())
     }
 
@@ -1919,8 +1998,21 @@ impl HnswIndex {
     /// all of it -- measured over HTTP on 2026-09-25.
     pub fn plans_batches_in_parallel(&self, batch: usize) -> bool {
         batch >= PARALLEL_PLAN_MIN_BATCH
-            && self.nodes.len() >= PARALLEL_PLAN_MIN_NODES
+            && batch <= self.parallel_batch_limit()
             && self.entry_point.is_some()
+    }
+
+    /// The largest batch the graph will plan in parallel right now: the share of its nodes
+    /// `PARALLEL_PLAN_MAX_SHARE` allows, or zero while it is younger than the seed. A caller
+    /// with more rows than this splits them and asks again, since the limit grows with every
+    /// chunk it lands.
+    pub fn parallel_batch_limit(&self) -> usize {
+        let nodes = self.nodes.len();
+        if nodes < PARALLEL_PLAN_SEED || self.entry_point.is_none() {
+            0
+        } else {
+            nodes / PARALLEL_PLAN_MAX_SHARE
+        }
     }
 
     /// Draw the levels and reject duplicates. `&mut self` for the RNG; no distance work.
@@ -1931,10 +2023,7 @@ impl HnswIndex {
         &mut self,
         items: Vec<(RecordId, DenseVector)>,
     ) -> crate::Result<Option<PreparedBatch>> {
-        if items.len() < PARALLEL_PLAN_MIN_BATCH
-            || self.nodes.len() < PARALLEL_PLAN_MIN_NODES
-            || self.entry_point.is_none()
-        {
+        if !self.plans_batches_in_parallel(items.len()) {
             for (id, vector) in items {
                 self.insert(id, vector)?;
             }
@@ -2028,10 +2117,73 @@ impl HnswIndex {
             .nodes
             .par_iter()
             .for_each(|&(idx, level)| graph.link_back_all(idx, level, entry_level));
+        graph.link_siblings(&applied.nodes);
         record_phase(2, started);
         // The batch counter advances with the last phase, so one line covers one batch
         // however the caller split it.
         report_phases(graph.nodes.len());
+    }
+
+    /// Link the rows of one batch to their nearest neighbours *within the batch*.
+    ///
+    /// A batch is planned against the graph as it stood before any of it, so two rows of the
+    /// same batch never choose each other, however close they are; the serial path never had
+    /// this gap, because each row saw every row before it. On a large graph the gap is a
+    /// fraction of a percent of the candidates and invisible. On a young one it is not: with
+    /// parallel planning starting at a thousand nodes, a self-retrieval test on a 1,500-row
+    /// table failed intermittently -- the stored vector's true neighbours were in its own
+    /// chunk and it had no edge to any of them.
+    ///
+    /// So each new node is offered its `m` nearest siblings at layer 0, in both directions,
+    /// through the same `link_back` that adds a reverse edge -- the heuristic keeps the edge
+    /// or not, exactly as it would have had the sibling been in the graph already. The
+    /// pairwise distances are `n^2` for a batch of `n`: at the 1,000 rows a request carries
+    /// that is a million at 100 dimensions, about a millisecond on sixteen cores, against the
+    /// hundreds of millions the planning cost.
+    fn link_siblings(&self, nodes: &[(usize, usize)]) {
+        if nodes.len() < 2 {
+            return;
+        }
+        let m = self.config.m;
+        let idxs: Vec<usize> = nodes.iter().map(|&(idx, _)| idx).collect();
+        // A sibling is worth offering only if it is nearer than the farthest link the node
+        // already chose: anything beyond that would have lost the selection to what is there.
+        // On a large graph that is almost no sibling, and the pass costs the pairwise
+        // distances and nothing else; the first version offered the `m` nearest siblings
+        // unconditionally, and 32,000 prunings a batch took the build from 6,262 to 4,465
+        // rows/s. (A node with fewer than `m` links has room, so for it the bar is infinity.)
+        let nearest: Vec<Vec<usize>> = idxs
+            .par_iter()
+            .map(|&i| {
+                let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
+                self.nodes.copy_links(i, 0, &mut links);
+                let bar = if links.len() < m {
+                    f32::INFINITY
+                } else {
+                    links
+                        .iter()
+                        .map(|&l| self.node_distance(i, l as usize))
+                        .fold(0.0f32, f32::max)
+                };
+                let mut d: Vec<(usize, f32)> = idxs
+                    .iter()
+                    .filter(|&&j| j != i)
+                    .map(|&j| (j, self.node_distance(i, j)))
+                    .filter(|&(_, dist)| dist < bar)
+                    .collect();
+                d.sort_by(|a, b| a.1.total_cmp(&b.1));
+                d.truncate(m);
+                d.into_iter().map(|(j, _)| j).collect()
+            })
+            .collect();
+        idxs.par_iter()
+            .zip(nearest.par_iter())
+            .for_each(|(&i, near)| {
+                for &j in near {
+                    self.link_back(i, 0, j);
+                    self.link_back(j, 0, i);
+                }
+            });
     }
 
     /// The read-only half of an insert: which neighbours this vector should link to, per layer.
@@ -2280,6 +2432,11 @@ impl HnswIndex {
             // the `max_neighbors` closest instead would undo the diversity on exactly the
             // nodes that matter most -- the ones popular enough to overflow. The new edge
             // takes part in the selection like any other.
+            // Every link's data is about to be read, at addresses known now; ask for them
+            // all before the first distance rather than paying each miss in turn.
+            for &n in links.as_slice() {
+                self.prefetch(n as usize);
+            }
             let mut neighbors_with_dist: Vec<(usize, f32)> = links
                 .as_slice()
                 .iter()

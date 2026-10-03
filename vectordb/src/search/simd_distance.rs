@@ -38,7 +38,7 @@ fn resolve_dot_product() -> DotProductFn {
         if is_x86_feature_detected!("avx512f") {
             return |a, b| unsafe { dot_product_avx512(a, b) };
         }
-        if is_x86_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return |a, b| unsafe { dot_product_avx2(a, b) };
         }
         if is_x86_feature_detected!("sse4.1") {
@@ -64,7 +64,7 @@ impl SimdDistance for DistanceMetric {
                 unsafe {
                     return self.calculate_avx512(a, b);
                 }
-            } else if is_x86_feature_detected!("avx2") {
+            } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 unsafe {
                     return self.calculate_avx2(a, b);
                 }
@@ -314,59 +314,65 @@ unsafe fn manhattan_distance_avx512(a: &[f32], b: &[f32]) -> f32 {
 /// - Requires AVX2 CPU feature to be available
 /// - Input slices must have the same length
 /// - Pointers must be valid for the entire slice length
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
-    // Safety check: ensure equal lengths
     debug_assert_eq!(a.len(), b.len(), "Input vectors must have equal length");
-
-    // Safety check: ensure slices are not empty
-    if a.is_empty() {
-        return 0.0;
-    }
-
-    let mut sum = _mm256_setzero_ps();
-    let mut i = 0;
     let len = a.len();
-
-    // Safety check: ensure we don't read past array bounds
-    debug_assert!(
-        a.as_ptr() as usize != 0,
-        "Null pointer detected for slice a"
-    );
-    debug_assert!(
-        b.as_ptr() as usize != 0,
-        "Null pointer detected for slice b"
-    );
-
-    // Process 8 elements at a time with bounds checking
-    while i + 8 <= len {
-        // Safety: we've checked that i + 8 <= len
-        debug_assert!(i + 8 <= len);
-
-        let va = _mm256_loadu_ps(a.as_ptr().add(i));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-        let prod = _mm256_mul_ps(va, vb);
-        sum = _mm256_add_ps(sum, prod);
-        i += 8
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // Four independent accumulators, fused multiply-add. One accumulator makes every
+    // iteration wait on the previous add (four cycles of latency per eight floats, so two
+    // floats a cycle); the core retires two FMAs a cycle, which four chains let it do. This
+    // is the difference between the graph build spending 63% of its CPU in this function
+    // and spending it on the walk -- measured with the in-process profiler on 100K x 100,
+    // where the build went from 3,678 to the figure in the commit that introduced this.
+    let mut s0 = _mm256_setzero_ps();
+    let mut s1 = _mm256_setzero_ps();
+    let mut s2 = _mm256_setzero_ps();
+    let mut s3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= len {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)), s0);
+        s1 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(pa.add(i + 8)),
+            _mm256_loadu_ps(pb.add(i + 8)),
+            s1,
+        );
+        s2 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(pa.add(i + 16)),
+            _mm256_loadu_ps(pb.add(i + 16)),
+            s2,
+        );
+        s3 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(pa.add(i + 24)),
+            _mm256_loadu_ps(pb.add(i + 24)),
+            s3,
+        );
+        i += 32;
     }
-
-    // 水平求和
-    let sum_high = _mm256_extractf128_ps(sum, 1);
-    let sum_low = _mm256_castps256_ps128(sum);
-    let sum128 = _mm_add_ps(sum_low, sum_high);
-
-    let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
-    let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 1));
-
-    let mut result = _mm_cvtss_f32(sum32);
-
-    // 处理剩余元素
-    while i < a.len() {
+    while i + 8 <= len {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)), s0);
+        i += 8;
+    }
+    let sum = _mm256_add_ps(_mm256_add_ps(s0, s1), _mm256_add_ps(s2, s3));
+    let mut result = hsum256(sum);
+    while i < len {
         result += a[i] * b[i];
         i += 1;
     }
-
     result
+}
+
+/// Horizontal sum of eight lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum256(v: __m256) -> f32 {
+    let high = _mm256_extractf128_ps(v, 1);
+    let low = _mm256_castps256_ps128(v);
+    let s128 = _mm_add_ps(low, high);
+    let s64 = _mm_add_ps(s128, _mm_movehl_ps(s128, s128));
+    let s32 = _mm_add_ss(s64, _mm_shuffle_ps(s64, s64, 1));
+    _mm_cvtss_f32(s32)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -441,51 +447,49 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
 /// - Requires AVX2 CPU feature to be available
 /// - Input slices must have the same length
 /// - Pointers must be valid for the entire slice length
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
-    // Safety check: handle empty slices
-    if a.is_empty() {
-        return 0.0;
-    }
-
-    // Safety check: ensure valid pointers
-    debug_assert!(a.as_ptr() as usize != 0, "Null pointer for slice a");
-    debug_assert!(b.as_ptr() as usize != 0, "Null pointer for slice b");
-
-    let mut sum = _mm256_setzero_ps();
-    let mut i = 0;
+    debug_assert_eq!(a.len(), b.len(), "Input vectors must have equal length");
     let len = a.len();
-
-    // Process 8 elements at a time with bounds checking
-    while i + 8 <= len {
-        // Safety: we've checked that i + 8 <= len
-        debug_assert!(i + 8 <= len, "Index out of bounds");
-
-        let va = _mm256_loadu_ps(a.as_ptr().add(i));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-        let diff = _mm256_sub_ps(va, vb);
-        let squared = _mm256_mul_ps(diff, diff);
-        sum = _mm256_add_ps(sum, squared);
-        i += 8
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // Four accumulators and FMA, for the reason given on `dot_product_avx2`.
+    let mut s0 = _mm256_setzero_ps();
+    let mut s1 = _mm256_setzero_ps();
+    let mut s2 = _mm256_setzero_ps();
+    let mut s3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= len {
+        let d0 = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
+        let d1 = _mm256_sub_ps(
+            _mm256_loadu_ps(pa.add(i + 8)),
+            _mm256_loadu_ps(pb.add(i + 8)),
+        );
+        let d2 = _mm256_sub_ps(
+            _mm256_loadu_ps(pa.add(i + 16)),
+            _mm256_loadu_ps(pb.add(i + 16)),
+        );
+        let d3 = _mm256_sub_ps(
+            _mm256_loadu_ps(pa.add(i + 24)),
+            _mm256_loadu_ps(pb.add(i + 24)),
+        );
+        s0 = _mm256_fmadd_ps(d0, d0, s0);
+        s1 = _mm256_fmadd_ps(d1, d1, s1);
+        s2 = _mm256_fmadd_ps(d2, d2, s2);
+        s3 = _mm256_fmadd_ps(d3, d3, s3);
+        i += 32;
     }
-
-    // 水平求和
-    let sum_high = _mm256_extractf128_ps(sum, 1);
-    let sum_low = _mm256_castps256_ps128(sum);
-    let sum128 = _mm_add_ps(sum_low, sum_high);
-
-    let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
-    let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 1));
-
-    let mut result = _mm_cvtss_f32(sum32);
-
-    // 处理剩余元素
-    while i < a.len() {
+    while i + 8 <= len {
+        let d = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)));
+        s0 = _mm256_fmadd_ps(d, d, s0);
+        i += 8;
+    }
+    let sum = _mm256_add_ps(_mm256_add_ps(s0, s1), _mm256_add_ps(s2, s3));
+    let mut result = hsum256(sum);
+    while i < len {
         let diff = a[i] - b[i];
         result += diff * diff;
         i += 1;
     }
-
     result.sqrt()
 }
 
@@ -716,6 +720,41 @@ pub fn normalize_vector_simd(vector: &mut [f32]) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unrolled kernels against the scalar definition, at lengths that exercise every
+    /// branch: under one 8-lane block, one block, a 32-lane block plus an 8-lane remainder
+    /// plus a scalar tail, and the widths tables are built at.
+    #[test]
+    fn unrolled_kernels_agree_with_the_scalar_definition() {
+        for len in [
+            1usize, 3, 7, 8, 9, 15, 16, 25, 31, 32, 33, 40, 47, 64, 100, 128, 200, 768, 960, 1536,
+        ] {
+            let a: Vec<f32> = (0..len)
+                .map(|i| ((i * 7919) % 101) as f32 / 101.0 - 0.5)
+                .collect();
+            let b: Vec<f32> = (0..len)
+                .map(|i| ((i * 104729) % 97) as f32 / 97.0 - 0.5)
+                .collect();
+            let dot_ref: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            let l2_ref: f32 = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f32>()
+                .sqrt();
+            let dot = dot_product(&a, &b);
+            let l2 = DistanceMetric::Euclidean.calculate_simd(&a, &b).unwrap();
+            let tol = 1e-4 * (1.0 + len as f32 / 64.0);
+            assert!(
+                (dot - dot_ref).abs() <= tol,
+                "dot at len {len}: {dot} vs {dot_ref}"
+            );
+            assert!(
+                (l2 - l2_ref).abs() <= tol,
+                "euclidean at len {len}: {l2} vs {l2_ref}"
+            );
+        }
+    }
 
     #[test]
     fn test_simd_support_detection() {
