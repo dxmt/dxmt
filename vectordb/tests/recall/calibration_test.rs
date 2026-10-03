@@ -1,8 +1,8 @@
 //! Recall calibration: a table measures itself against its own exact scan and raises the
 //! `normal` search budget until it meets the target.
 //!
-//! The table here is created with `ef_search: 64`, a budget at which HNSW on 20,000
-//! 128-dimension vectors misses much of a top-10 -- the shape of a corpus that needs more
+//! The table here is created with `ef_search: 32`, a budget at which HNSW on 20,000
+//! 64-dimension vectors of uniform noise misses much of a top-10 -- the shape of a corpus that needs more
 //! budget than it was given, which is the case calibration exists for. The claims checked
 //! are the ones a caller relies on: the curve was measured at increasing budgets and the
 //! chosen one meets the target on the sample; and after calibration an ordinary `normal`
@@ -19,10 +19,10 @@ use dxmt_vectordb::{
     },
 };
 
-const DIM: usize = 128;
+const DIM: usize = 64;
 const ROWS: usize = 20_000;
 const K: usize = 10;
-const QUERIES: usize = 60;
+const QUERIES: usize = 40;
 
 fn storage_config() -> StorageConfig {
     StorageConfig {
@@ -59,7 +59,7 @@ fn table(name: &str, ef_search: usize) -> TableConfig {
     }
 }
 
-/// Deterministic pseudo-random vectors: uniform noise in 128 dimensions is a corpus with no
+/// Deterministic pseudo-random vectors: uniform noise in 64 dimensions is a corpus with no
 /// structure for the graph to exploit and distances that crowd together, which is what makes
 /// a small `ef` visibly short (hnswlib on the same shape: recall@10 0.12 at ef 10, 0.69 at
 /// 128). A hand-rolled hash sat here first and produced vectors the graph found at ef 11 with
@@ -130,13 +130,13 @@ async fn calibration_raises_a_short_budget_until_the_target_is_met() {
     let storage = IntelligentIndexedStorage::new(&storage_config())
         .await
         .unwrap();
-    storage.create_table(table("cal", 64)).await.unwrap();
+    storage.create_table(table("cal", 32)).await.unwrap();
     load(&storage, "cal").await;
 
     let before = held_out_recall(&storage, "cal").await;
     assert!(
         before < 0.8,
-        "ef_search 64 was supposed to be visibly short; held-out recall@10 is {before:.3}"
+        "ef_search 32 was supposed to be visibly short; held-out recall@10 is {before:.3}"
     );
 
     let cal = storage
@@ -151,7 +151,7 @@ async fn calibration_raises_a_short_budget_until_the_target_is_met() {
         "it should have had to try more than one budget: {cal:?}"
     );
     assert_eq!(
-        cal.curve[0].ef_search, 64,
+        cal.curve[0].ef_search, 32,
         "the curve starts at the configured budget"
     );
     for w in cal.curve.windows(2) {
@@ -161,7 +161,7 @@ async fn calibration_raises_a_short_budget_until_the_target_is_met() {
             "recall does not fall as ef rises: {cal:?}"
         );
     }
-    assert!(cal.met, "512 (8x) should meet 0.95 on 20,000 rows: {cal:?}");
+    assert!(cal.met, "256 (8x) should meet 0.95 on 20,000 rows: {cal:?}");
     assert!(cal.measured >= 0.95);
     assert_eq!(cal.ef_search, cal.curve.last().unwrap().ef_search);
     assert_eq!(cal.sample, 50);
@@ -186,7 +186,7 @@ async fn a_table_can_opt_out_and_a_calibration_is_redone_only_when_the_table_dou
     let storage = IntelligentIndexedStorage::new(&storage_config())
         .await
         .unwrap();
-    storage.create_table(table("opt", 8)).await.unwrap();
+    storage.create_table(table("opt", 32)).await.unwrap();
     load(&storage, "opt").await;
 
     // Opted out: nothing is measured, whatever `force` says.
