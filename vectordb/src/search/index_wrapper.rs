@@ -433,6 +433,25 @@ impl IndexWrapper {
         (index.len(), index.slot_count())
     }
 
+    /// Of `ids`, the ones this index holds no live entry for -- under one read lock for the
+    /// whole walk. `None` when the index cannot answer membership (see
+    /// `VectorIndex::contains_id`).
+    pub async fn missing_ids<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a RecordId>,
+    ) -> Option<Vec<RecordId>> {
+        let index = self.index.read().await;
+        let mut missing = Vec::new();
+        for id in ids {
+            match index.contains_id(id) {
+                Some(true) => {}
+                Some(false) => missing.push(id.clone()),
+                None => return None,
+            }
+        }
+        Some(missing)
+    }
+
     /// Get index length - requires read lock
     pub async fn len(&self) -> usize {
         let index = self.index.read().await;

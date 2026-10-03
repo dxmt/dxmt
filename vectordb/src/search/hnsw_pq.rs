@@ -403,6 +403,10 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         self.hnsw.repair_reachability()
     }
 
+    fn contains_id(&self, id: &str) -> Option<bool> {
+        crate::search::index_traits::VectorIndex::contains_id(&self.hnsw, id)
+    }
+
     fn slot_count(&self) -> usize {
         crate::search::index_traits::VectorIndex::slot_count(&self.hnsw)
     }

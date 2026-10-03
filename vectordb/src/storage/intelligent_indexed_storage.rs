@@ -870,6 +870,37 @@ impl IntelligentTableData {
         parking_lot::RwLockWriteGuard::map(self.derived.write(), |slot| slot)
     }
 
+    /// The stored vectors of `ids`, from the row file where there is one and from the record
+    /// otherwise; ids that are gone are left out.
+    fn vectors_for_ids(&self, ids: &[RecordId]) -> Vec<(RecordId, Vec<f32>)> {
+        let mut out = Vec::with_capacity(ids.len());
+        let mut by_row: Vec<(u64, &RecordId)> = Vec::new();
+        for id in ids {
+            match self.vector_row(id) {
+                Some(row) => by_row.push((row, id)),
+                None => {
+                    if let Some(r) = self.records.get(id) {
+                        if !r.vector.is_empty() {
+                            out.push((id.clone(), r.vector.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if let (Some(file), false) = (&self.vector_file, by_row.is_empty()) {
+            by_row.sort_unstable();
+            for chunk in by_row.chunks(4096) {
+                let rows: Vec<u64> = chunk.iter().map(|(row, _)| *row).collect();
+                for ((_, id), vector) in chunk.iter().zip(file.read_rows(&rows)) {
+                    if let Some(vector) = vector {
+                        out.push(((*id).clone(), vector));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn vectors_for_index(&self) -> Vec<(RecordId, Vec<f32>)> {
         let Some(file) = &self.vector_file else {
             let mut out = Vec::with_capacity(self.records.len());
@@ -4331,6 +4362,32 @@ impl IntelligentIndexedStorage {
         } else {
             data.vectors_for_index()
         };
+        // The rows can be newer than the index. A write reaches the row file, fsynced,
+        // before its WAL entry is appended; a crash in that window -- or a backup whose
+        // `records/` copy was taken after a write and whose `wal.log` copy before it -- leaves
+        // the record in the store with nothing to put it in the graph: `GET` returns it, the
+        // exact scan finds it, and no ordinary search ever will. The counts are a cheap gate;
+        // when they disagree, every id the index does not hold is inserted below. A record
+        // that is in the index and not in the rows (a delete that reached the rows and not the
+        // index) can hide behind matching counts, and is left to the next rebuild.
+        let catch_up: Vec<(RecordId, Vec<f32>)> =
+            if index_restored && data.index.len().await != data.records.len() {
+                let ids = data.records.ids();
+                match data.index.missing_ids(ids.iter()).await {
+                    Some(missing) if !missing.is_empty() => {
+                        warn!(
+                            "Table '{}': {} record(s) in the row files were not in the restored \
+                         index; indexing them now",
+                            name,
+                            missing.len()
+                        );
+                        data.vectors_for_ids(&missing)
+                    }
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
         let wrapper = data.index.clone();
 
         // The named vector spaces, which nothing restored. The snapshot carries the default
@@ -4364,6 +4421,9 @@ impl IntelligentIndexedStorage {
         // vector at once to cluster it; fed one at a time the lot ends up in its overflow buffer.
         if !to_index.is_empty() {
             wrapper.bulk_build(to_index).await?;
+        }
+        if !catch_up.is_empty() {
+            wrapper.insert_batch(catch_up).await?;
         }
 
         if let Some(collection) = named_collection {

@@ -2423,6 +2423,13 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
         HnswIndex::repair_reachability(self)
     }
 
+    fn contains_id(&self, id: &str) -> Option<bool> {
+        Some(
+            self.idx_of(id)
+                .is_some_and(|idx| !self.nodes.is_deleted(idx)),
+        )
+    }
+
     fn as_hnsw_mut(&mut self) -> Option<&mut HnswIndex> {
         Some(self)
     }

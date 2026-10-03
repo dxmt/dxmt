@@ -97,6 +97,12 @@ pub trait VectorIndex: Send + Sync {
         (0, 0)
     }
 
+    /// Whether this index holds a live entry for `id`; `None` when the index cannot say
+    /// cheaply, in which case a caller reconciling it against the records leaves it alone.
+    fn contains_id(&self, _id: &str) -> Option<bool> {
+        None
+    }
+
     /// Slots the index holds, tombstoned ones included, where [`Self::len`] counts only the
     /// live ones.
     ///
