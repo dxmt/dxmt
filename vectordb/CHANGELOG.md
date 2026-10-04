@@ -31,6 +31,13 @@ release, and the first commit that was ever pushed anywhere.
   disk-backed table kept a second, inline copy of every replayed vector in the records
   file. Replay also no longer appends a replayed vector to the row file again: an entry that
   names its row is indexed from that row, so a restart leaves the file the size it was.
+- **A quantized graph builds 1.8-1.9x faster.** Node-to-node distances during neighbour
+  selection and pruning came from a table of every centroid pair per subspace (6.5 MB at
+  25 dimensions, 50 MB at 768) whose every lookup missed cache; both codes are decoded and
+  compared with one SIMD pass instead, and the fixed node of a pruning loop is decoded once.
+  The exact graph's euclidean distance is resolved once at startup rather than dispatched
+  per call. 200K rows, 16 threads: 25-d storage path 8,669 -> 16,572 rows/s, 100-d
+  4,086 -> 7,237; the 100-d graph alone now matches hnswlib (8,993 against 8,531).
 - **PQ codebook training is k-means with linear seeding** instead of a quadratic one, the
   training sample is capped at 128 points per centroid, and a one-dimension subspace
   assigns by binary search. The low-dimension storage path spent most of its CPU there.

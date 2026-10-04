@@ -759,23 +759,28 @@ pub struct QuantizedStore {
     pq: ProductQuantizer,
     m: usize,
     codes: Vec<u8>,
-    /// `symmetric[sub * k * k + a * k + b]` = squared distance between centroids `a` and `b`
-    /// of subspace `sub`. Rebuilt from the codebooks on load rather than stored: 192
-    /// subspaces make it 50 MB, and it is a pure function of `pq`.
+    /// The codebooks as one array, `flat[(sub * k + c) * d ..][..d]` = centroid `c` of
+    /// subspace `sub`: what a code decodes through. Rebuilt from `pq` on load. The
+    /// node-to-node distance used to come from a table of every centroid pair per subspace
+    /// (`sub * k * k + a * k + b`): 6.5 MB at 25 dimensions and 50 MB at 768, so every one
+    /// of its gathers missed L2, and it was 36% of a 25-d build's CPU. Decoding both codes
+    /// (gathers into this array, 25 KB at 25-d) and taking a plain squared distance is the
+    /// same number from cache-resident data.
     #[serde(skip)]
-    symmetric: Vec<f32>,
+    flat: Vec<f32>,
     /// `sub * k` per subspace, as `i32` lanes for the gather path.
     #[serde(skip)]
     adc_bases: Vec<i32>,
-    /// `sub * k * k` per subspace, likewise.
-    #[serde(skip)]
-    sym_bases: Vec<i32>,
 }
 
 /// Sum of `table[bases[sub] + code[sub]]` over subspaces: the ADC score of one code.
 type AdcFn = fn(&[f32], &[u8], &[i32]) -> f32;
-/// Sum of `table[bases[sub] + a[sub] * k + b[sub]]` over subspaces: a symmetric distance.
-type SymFn = fn(&[f32], &[u8], &[u8], &[i32], usize) -> f32;
+
+thread_local! {
+    /// Two decoded vectors, for a node-to-node distance on a quantized graph.
+    static DECODED: std::cell::RefCell<(Vec<f32>, Vec<f32>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
 
 /// Eight independent partial sums. The obvious loop is one dependent chain of float adds --
 /// 192 of them at four cycles each, about 250 ns per candidate before a single cache miss --
@@ -795,24 +800,6 @@ fn adc_scalar(table: &[f32], code: &[u8], bases: &[i32]) -> f32 {
     for (i, &c) in chunks.remainder().iter().enumerate() {
         let sub = code.len() - chunks.remainder().len() + i;
         total += table[(bases[sub] + c as i32) as usize];
-    }
-    total
-}
-
-#[allow(clippy::needless_range_loop)] // the lane index is the unroll
-fn sym_scalar(table: &[f32], a: &[u8], b: &[u8], bases: &[i32], k: usize) -> f32 {
-    let mut acc = [0.0f32; 8];
-    let n = a.len();
-    let full = n - n % 8;
-    for sub in (0..full).step_by(8) {
-        for lane in 0..8 {
-            let s = sub + lane;
-            acc[lane] += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
-        }
-    }
-    let mut total = acc.iter().sum::<f32>();
-    for s in full..n {
-        total += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
     }
     total
 }
@@ -844,33 +831,6 @@ unsafe fn adc_avx2(table: &[f32], code: &[u8], bases: &[i32]) -> f32 {
     total
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sym_avx2(table: &[f32], a: &[u8], b: &[u8], bases: &[i32], k: usize) -> f32 {
-    use std::arch::x86_64::*;
-    let mut acc = _mm256_setzero_ps();
-    let kv = _mm256_set1_epi32(k as i32);
-    let full = a.len() - a.len() % 8;
-    let mut sub = 0;
-    while sub < full {
-        let av = _mm256_cvtepu8_epi32(_mm_loadl_epi64(a.as_ptr().add(sub) as *const __m128i));
-        let bv = _mm256_cvtepu8_epi32(_mm_loadl_epi64(b.as_ptr().add(sub) as *const __m128i));
-        let idx = _mm256_add_epi32(
-            _mm256_add_epi32(_mm256_mullo_epi32(av, kv), bv),
-            _mm256_loadu_si256(bases.as_ptr().add(sub) as *const __m256i),
-        );
-        acc = _mm256_add_ps(acc, _mm256_i32gather_ps::<4>(table.as_ptr(), idx));
-        sub += 8;
-    }
-    let mut lanes = [0.0f32; 8];
-    _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
-    let mut total = lanes.iter().sum::<f32>();
-    for s in full..a.len() {
-        total += table[(bases[s] as usize) + a[s] as usize * k + b[s] as usize];
-    }
-    total
-}
-
 /// Resolved once, like `simd_distance::dot_product`: the feature check is off the hot path.
 fn adc_fn() -> AdcFn {
     static F: std::sync::OnceLock<AdcFn> = std::sync::OnceLock::new();
@@ -885,19 +845,6 @@ fn adc_fn() -> AdcFn {
     })
 }
 
-fn sym_fn() -> SymFn {
-    static F: std::sync::OnceLock<SymFn> = std::sync::OnceLock::new();
-    *F.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
-                return |t, a, b, bases, k| unsafe { sym_avx2(t, a, b, bases, k) };
-            }
-        }
-        sym_scalar
-    })
-}
-
 impl QuantizedStore {
     fn from_quantizer(pq: ProductQuantizer) -> Self {
         let m = pq.num_subvectors;
@@ -905,33 +852,60 @@ impl QuantizedStore {
             pq,
             m,
             codes: Vec::new(),
-            symmetric: Vec::new(),
+            flat: Vec::new(),
             adc_bases: Vec::new(),
-            sym_bases: Vec::new(),
         };
-        store.rebuild_symmetric();
+        store.rebuild_tables();
         store
     }
 
-    fn rebuild_symmetric(&mut self) {
+    fn rebuild_tables(&mut self) {
         let k = self.pq.num_centroids;
-        let mut table = vec![0.0f32; self.m * k * k];
-        for (sub, codebook) in self.pq.codebooks.iter().enumerate() {
-            for a in 0..k {
-                for b in (a + 1)..k {
-                    let d: f32 = codebook[a]
-                        .iter()
-                        .zip(&codebook[b])
-                        .map(|(x, y)| (x - y) * (x - y))
-                        .sum();
-                    table[sub * k * k + a * k + b] = d;
-                    table[sub * k * k + b * k + a] = d;
+        let d = self.pq.subvector_dim;
+        let mut flat = Vec::with_capacity(self.m * k * d);
+        for codebook in &self.pq.codebooks {
+            for centroid in codebook {
+                flat.extend_from_slice(centroid);
+            }
+        }
+        self.flat = flat;
+        self.adc_bases = (0..self.m).map(|sub| (sub * k) as i32).collect();
+    }
+
+    /// The vector a node's code stands for, written into `out` (`dim` long).
+    #[inline]
+    fn decode_into(&self, idx: usize, out: &mut [f32]) {
+        let k = self.pq.num_centroids;
+        let d = self.pq.subvector_dim;
+        let code = self.code(idx);
+        // A subspace is one dimension below 64 and two below 256 (`default_subvectors`), and
+        // a `copy_from_slice` of four or eight bytes is a call to memcpy per subspace -- at
+        // 25 dimensions that was most of the decode. Index directly for the narrow cases.
+        match d {
+            1 => {
+                for (sub, &c) in code.iter().enumerate() {
+                    out[sub] = self.flat[sub * k + c as usize];
+                }
+            }
+            2 => {
+                for (sub, &c) in code.iter().enumerate() {
+                    let at = (sub * k + c as usize) * 2;
+                    out[sub * 2] = self.flat[at];
+                    out[sub * 2 + 1] = self.flat[at + 1];
+                }
+            }
+            _ => {
+                for (sub, &c) in code.iter().enumerate() {
+                    let at = (sub * k + c as usize) * d;
+                    out[sub * d..(sub + 1) * d].copy_from_slice(&self.flat[at..at + d]);
                 }
             }
         }
-        self.symmetric = table;
-        self.adc_bases = (0..self.m).map(|sub| (sub * k) as i32).collect();
-        self.sym_bases = (0..self.m).map(|sub| (sub * k * k) as i32).collect();
+    }
+
+    #[inline]
+    fn dim(&self) -> usize {
+        self.m * self.pq.subvector_dim
     }
 
     #[inline]
@@ -961,16 +935,19 @@ impl QuantizedStore {
             .codes
     }
 
-    /// Squared distance between two nodes, summed over subspaces from the centroid table.
+    /// Squared distance between two nodes: both codes decoded, then one SIMD pass.
     #[inline]
     fn node_distance(&self, a: usize, b: usize) -> f32 {
-        sym_fn()(
-            &self.symmetric,
-            self.code(a),
-            self.code(b),
-            &self.sym_bases,
-            self.pq.num_centroids,
-        )
+        let dim = self.dim();
+        DECODED.with(|cell| {
+            let mut bufs = cell.borrow_mut();
+            let (va, vb) = &mut *bufs;
+            va.resize(dim, 0.0);
+            vb.resize(dim, 0.0);
+            self.decode_into(a, va);
+            self.decode_into(b, vb);
+            crate::search::simd_distance::squared_euclidean(va, vb)
+        })
     }
 
     #[inline]
@@ -979,9 +956,7 @@ impl QuantizedStore {
     }
 
     fn resident_bytes(&self) -> usize {
-        self.codes.len()
-            + self.pq.memory_usage()
-            + self.symmetric.len() * std::mem::size_of::<f32>()
+        self.codes.len() + self.pq.memory_usage() + self.flat.len() * std::mem::size_of::<f32>()
     }
 }
 
@@ -1106,7 +1081,7 @@ impl HnswIndex {
             }
         }
         if let Some(store) = &mut index.quantized {
-            store.rebuild_symmetric();
+            store.rebuild_tables();
         }
         index
     }
@@ -1188,11 +1163,40 @@ impl HnswIndex {
         }
     }
 
+    /// Run `f` with a distance function from node `a`: on a quantized graph `a` is decoded
+    /// once for the whole call rather than once per distance. Every pruning loop is one node
+    /// against its links, which is the shape this is for.
+    #[inline]
+    fn with_distances_from<R>(
+        &self,
+        a: usize,
+        f: impl FnOnce(&mut dyn FnMut(usize) -> f32) -> R,
+    ) -> R {
+        match &self.quantized {
+            None => {
+                let va = self.nodes.vector(a);
+                let mut dist = |b: usize| self.calculate_distance(va, self.nodes.vector(b));
+                f(&mut dist)
+            }
+            Some(q) => {
+                let dim = q.dim();
+                let mut va = vec![0.0f32; dim];
+                let mut vb = vec![0.0f32; dim];
+                q.decode_into(a, &mut va);
+                let mut dist = |b: usize| {
+                    q.decode_into(b, &mut vb);
+                    crate::search::simd_distance::squared_euclidean(&va, &vb)
+                };
+                f(&mut dist)
+            }
+        }
+    }
+
     /// Restore what serialisation skips (the centroid table); `load` does this itself, a
     /// wrapper that deserialises this graph inside its own struct has to call it.
     pub fn after_load(&mut self) {
         if let Some(store) = &mut self.quantized {
-            store.rebuild_symmetric();
+            store.rebuild_tables();
         }
     }
 
@@ -1284,10 +1288,20 @@ impl HnswIndex {
     fn calculate_distance(&self, a: &[f32], b: &[f32]) -> f32 {
         // Cosine inputs are unit length by construction (see `prepare`), so the similarity is the
         // dot product and the distance is one minus it.
-        if matches!(self.distance_metric, DistanceMetric::Cosine) {
-            return 1.0 - crate::search::simd_distance::dot_product(a, b);
+        match self.distance_metric {
+            DistanceMetric::Cosine => {
+                return 1.0 - crate::search::simd_distance::dot_product(a, b);
+            }
+            // Resolved once, like the dot product: the trait path below re-runs the CPU
+            // feature check and two dispatch levels on every call.
+            DistanceMetric::Euclidean => {
+                return crate::search::simd_distance::euclidean_distance(a, b);
+            }
+            DistanceMetric::Dot => {
+                return -crate::search::simd_distance::dot_product(a, b);
+            }
+            DistanceMetric::Manhattan => {}
         }
-        // ✅ Use AVX-512/AVX2/SSE optimized SIMD distance calculation via trait
         self.distance_metric
             .calculate_simd(a, b)
             .unwrap_or_else(|_| {
@@ -1372,15 +1386,36 @@ impl HnswIndex {
     /// `candidates` must be sorted nearest-first, which is what `search_layer` returns.
     fn select_neighbors_heuristic(&self, candidates: &[(usize, f32)], m: usize) -> Vec<usize> {
         let mut selected: Vec<usize> = Vec::with_capacity(m);
+        // On a quantized graph each candidate is decoded once and the kept set is held
+        // decoded, so a candidate-against-kept comparison is one SIMD pass and no gather.
+        let Some(store) = &self.quantized else {
+            for &(idx, dist_to_base) in candidates {
+                if selected.len() >= m {
+                    break;
+                }
+                let crowded = selected
+                    .iter()
+                    .any(|&kept| self.node_distance(idx, kept) < dist_to_base);
+                if !crowded {
+                    selected.push(idx);
+                }
+            }
+            return selected;
+        };
+        let dim = store.dim();
+        let mut kept: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut candidate = vec![0.0f32; dim];
         for &(idx, dist_to_base) in candidates {
             if selected.len() >= m {
                 break;
             }
-            let crowded = selected
-                .iter()
-                .any(|&kept| self.node_distance(idx, kept) < dist_to_base);
+            store.decode_into(idx, &mut candidate);
+            let crowded = kept.chunks_exact(dim).any(|k| {
+                crate::search::simd_distance::squared_euclidean(&candidate, k) < dist_to_base
+            });
             if !crowded {
                 selected.push(idx);
+                kept.extend_from_slice(&candidate);
             }
         }
         selected
@@ -2157,20 +2192,21 @@ impl HnswIndex {
             .map(|&i| {
                 let mut links: Vec<u32> = Vec::with_capacity(MAX_M0_SLOTS);
                 self.nodes.copy_links(i, 0, &mut links);
-                let bar = if links.len() < m {
-                    f32::INFINITY
-                } else {
-                    links
-                        .iter()
-                        .map(|&l| self.node_distance(i, l as usize))
-                        .fold(0.0f32, f32::max)
-                };
-                let mut d: Vec<(usize, f32)> = idxs
-                    .iter()
-                    .filter(|&&j| j != i)
-                    .map(|&j| (j, self.node_distance(i, j)))
-                    .filter(|&(_, dist)| dist < bar)
-                    .collect();
+                let mut d: Vec<(usize, f32)> = self.with_distances_from(i, |dist| {
+                    let bar = if links.len() < m {
+                        f32::INFINITY
+                    } else {
+                        links
+                            .iter()
+                            .map(|&l| dist(l as usize))
+                            .fold(0.0f32, f32::max)
+                    };
+                    idxs.iter()
+                        .filter(|&&j| j != i)
+                        .map(|&j| (j, dist(j)))
+                        .filter(|&(_, d)| d < bar)
+                        .collect()
+                });
                 d.sort_by(|a, b| a.1.total_cmp(&b.1));
                 d.truncate(m);
                 d.into_iter().map(|(j, _)| j).collect()
@@ -2437,13 +2473,16 @@ impl HnswIndex {
             for &n in links.as_slice() {
                 self.prefetch(n as usize);
             }
-            let mut neighbors_with_dist: Vec<(usize, f32)> = links
-                .as_slice()
-                .iter()
-                .map(|&n| n as usize)
-                .chain(std::iter::once(new_idx))
-                .map(|n_idx| (n_idx, self.node_distance(neighbor_idx, n_idx)))
-                .collect();
+            let mut neighbors_with_dist: Vec<(usize, f32)> =
+                self.with_distances_from(neighbor_idx, |dist| {
+                    links
+                        .as_slice()
+                        .iter()
+                        .map(|&n| n as usize)
+                        .chain(std::iter::once(new_idx))
+                        .map(|n_idx| (n_idx, dist(n_idx)))
+                        .collect()
+                });
             neighbors_with_dist.sort_by(|a, b| a.1.total_cmp(&b.1));
             let kept: Vec<u32> = self
                 .select_neighbors_heuristic(&neighbors_with_dist, max_neighbors)
@@ -3264,18 +3303,10 @@ mod adc_kernel_tests {
             let table: Vec<f32> = (0..m * k)
                 .map(|_| (xorshift(&mut st) >> 40) as f32 / 1e6)
                 .collect();
-            let sym: Vec<f32> = (0..m * k * k)
-                .map(|_| (xorshift(&mut st) >> 44) as f32 / 1e5)
-                .collect();
             let a: Vec<u8> = (0..m).map(|_| xorshift(&mut st) as u8).collect();
-            let b: Vec<u8> = (0..m).map(|_| xorshift(&mut st) as u8).collect();
             let adc_bases: Vec<i32> = (0..m).map(|sub| (sub * k) as i32).collect();
-            let sym_bases: Vec<i32> = (0..m).map(|sub| (sub * k * k) as i32).collect();
 
             let plain: f32 = (0..m).map(|sub| table[sub * k + a[sub] as usize]).sum();
-            let plain_sym: f32 = (0..m)
-                .map(|sub| sym[sub * k * k + a[sub] as usize * k + b[sub] as usize])
-                .sum();
             for (name, got) in [
                 ("scalar", adc_scalar(&table, &a, &adc_bases)),
                 ("dispatched", adc_fn()(&table, &a, &adc_bases)),
@@ -3283,15 +3314,6 @@ mod adc_kernel_tests {
                 assert!(
                     (got - plain).abs() <= 1e-3 * plain.abs().max(1.0),
                     "adc {name} m={m}: {got} vs {plain}"
-                );
-            }
-            for (name, got) in [
-                ("scalar", sym_scalar(&sym, &a, &b, &sym_bases, k)),
-                ("dispatched", sym_fn()(&sym, &a, &b, &sym_bases, k)),
-            ] {
-                assert!(
-                    (got - plain_sym).abs() <= 1e-3 * plain_sym.abs().max(1.0),
-                    "sym {name} m={m}: {got} vs {plain_sym}"
                 );
             }
         }
@@ -3544,8 +3566,8 @@ mod quantized_tests {
         let store = back.quantized.as_ref().unwrap();
         assert_eq!(store.codes.len(), 1500 * 16);
         assert!(
-            !store.symmetric.is_empty(),
-            "the centroid table is rebuilt on load, not stored"
+            !store.flat.is_empty(),
+            "the flat codebook is rebuilt on load, not stored"
         );
         for q in corpus.iter().take(20) {
             assert_eq!(

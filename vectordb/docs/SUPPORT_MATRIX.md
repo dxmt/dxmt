@@ -225,6 +225,29 @@ assignment for the one-dimension subspaces a 25-d table uses, the storage path w
 9,133 to 11,979 rows/s against 16,024 for the graph alone; what remains between the two is
 the quantized graph's own distance work.
 
+**That distance work was mostly one table** (later on 2026-10-04). The quantized graph
+scored node against node -- neighbour selection, every prune -- from a table of every
+centroid pair per subspace, 6.5 MB at 25 dimensions and 50 MB at 768, so each of its
+gathers missed L2; it was 36% of a 25-d build's CPU. Both codes are decoded now (into a
+25 KB flat codebook at 25-d) and compared with one SIMD pass, the fixed node of a pruning
+loop is decoded once, and the euclidean distance of the exact graph is resolved once at
+startup instead of re-running the CPU feature check and two dispatch levels per call.
+200K rows of uniform noise, 16 threads, rows/s, same harness, hnswlib measured alone on
+the same box between runs:
+
+| 200K rows, rows/s | 25-d graph alone | 25-d storage, quantized | 25-d storage, exact | 100-d graph alone | 100-d storage, quantized | 100-d storage, exact |
+| --- | --- | --- | --- | --- | --- | --- |
+| before (`8c34dc8`) | 11,898 | 8,669 | 11,207 | 7,438 | 4,086 | — |
+| after | **19,068** | **16,572** | **17,970** | **8,993** | **7,237** | **8,875** |
+| hnswlib 0.8, M=16, ef_construction 200 | 22,427 | — | — | 8,531 | — | — |
+
+Run-to-run spread on this harness is about 10%. At 100 dimensions the graph alone is at
+hnswlib's rate; the quantized storage path is 1.8x what it was and 20% under the exact
+one, which is the walk on codes (ADC) plus the encode. At 25 dimensions the remaining gap
+to hnswlib is in the walk itself (`search_layer`, the heaps, the visited set: 30% of the
+samples) rather than in any distance. The 100K-row figures earlier in this section were
+taken on a smaller table and are not comparable row for row.
+
 **The PQ code is sized by the table's width** (since 2026-10-02; `HnswPqConfig::default_subvectors`).
 It was four dimensions per subspace at every width, the layout measured at 768, and at 25
 dimensions that was a 100-byte vector in a 5-byte code -- the 0.745 in the table above is that

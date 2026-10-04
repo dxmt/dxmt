@@ -113,7 +113,15 @@ async fn where_the_build_spends_its_time() {
             schema_version: 1,
             named_vectors: None,
             hnsw: None,
-            quantization: None,
+            // `DXMT_PROFILE_PQ=0` keeps the table an exact graph, for measuring what the
+            // walk on codes costs the build at a given width.
+            quantization: (std::env::var("DXMT_PROFILE_PQ").as_deref() == Ok("0")).then_some(
+                dxmt_vectordb::types::table::QuantizationParams {
+                    num_subvectors: None,
+                    num_centroids: None,
+                    quantize_at_rows: Some(usize::MAX),
+                },
+            ),
             payload_index: None,
             embedding: None,
         })

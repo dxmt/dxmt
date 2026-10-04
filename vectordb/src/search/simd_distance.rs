@@ -48,6 +48,54 @@ fn resolve_dot_product() -> DotProductFn {
     |a, b| a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+/// Squared euclidean distance, resolved once like [`dot_product`]. The square root the
+/// metric's own path takes is a cost and nothing else when the caller only ranks -- the
+/// quantized graph compares decoded codes with this, thousands of times per insert.
+pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
+    static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
+    DISPATCH.get_or_init(resolve_squared_euclidean)(a, b)
+}
+
+fn resolve_squared_euclidean() -> DotProductFn {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return |a, b| unsafe { squared_euclidean_avx2(a, b) };
+        }
+    }
+    |a, b| a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+}
+
+/// Euclidean distance, resolved once like [`dot_product`]: the metric's `calculate_simd`
+/// path re-runs the feature check and two levels of dispatch on every call, which at 25
+/// dimensions was a third as much time as the arithmetic itself.
+pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
+    static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
+    DISPATCH.get_or_init(resolve_euclidean_distance)(a, b)
+}
+
+fn resolve_euclidean_distance() -> DotProductFn {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            return |a, b| unsafe { euclidean_distance_avx512(a, b) };
+        }
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return |a, b| unsafe { euclidean_distance_avx2(a, b) };
+        }
+        if is_x86_feature_detected!("sse4.1") {
+            return |a, b| unsafe { euclidean_distance_sse(a, b) };
+        }
+    }
+    |a, b| {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt()
+    }
+}
+
 impl SimdDistance for DistanceMetric {
     fn calculate_simd(&self, a: &[f32], b: &[f32]) -> crate::Result<f32> {
         if a.len() != b.len() {
@@ -449,6 +497,12 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
 /// - Pointers must be valid for the entire slice length
 #[target_feature(enable = "avx2,fma")]
 unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
+    squared_euclidean_avx2(a, b).sqrt()
+}
+
+/// The sum of squared differences, before the root `euclidean_distance_avx2` takes.
+#[target_feature(enable = "avx2,fma")]
+unsafe fn squared_euclidean_avx2(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "Input vectors must have equal length");
     let len = a.len();
     let (pa, pb) = (a.as_ptr(), b.as_ptr());
@@ -490,7 +544,7 @@ unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
         result += diff * diff;
         i += 1;
     }
-    result.sqrt()
+    result
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -724,6 +778,34 @@ mod tests {
     /// The unrolled kernels against the scalar definition, at lengths that exercise every
     /// branch: under one 8-lane block, one block, a 32-lane block plus an 8-lane remainder
     /// plus a scalar tail, and the widths tables are built at.
+    #[test]
+    fn euclidean_dispatch_agrees_with_the_metric_path() {
+        for len in [1usize, 3, 25, 100, 768] {
+            let a: Vec<f32> = (0..len).map(|i| (i as f32 * 0.37).sin()).collect();
+            let b: Vec<f32> = (0..len).map(|i| (i as f32 * 0.11).cos()).collect();
+            let via_metric = DistanceMetric::Euclidean.calculate_simd(&a, &b).unwrap();
+            let got = euclidean_distance(&a, &b);
+            assert!(
+                (got - via_metric).abs() <= 1e-5 * via_metric.max(1.0),
+                "len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn squared_euclidean_agrees_with_the_scalar_definition() {
+        for len in [1usize, 3, 7, 8, 25, 31, 32, 65, 100, 768] {
+            let a: Vec<f32> = (0..len).map(|i| (i as f32 * 0.37).sin()).collect();
+            let b: Vec<f32> = (0..len).map(|i| (i as f32 * 0.11).cos()).collect();
+            let plain: f32 = a.iter().zip(&b).map(|(x, y)| (x - y) * (x - y)).sum();
+            let got = squared_euclidean(&a, &b);
+            assert!(
+                (got - plain).abs() <= 1e-4 * plain.max(1.0),
+                "len {len}: {got} vs {plain}"
+            );
+        }
+    }
+
     #[test]
     fn unrolled_kernels_agree_with_the_scalar_definition() {
         for len in [
