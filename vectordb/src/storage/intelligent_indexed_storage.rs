@@ -5545,7 +5545,7 @@ impl IntelligentIndexedStorage {
     /// table. `None` is the ordinary path. Recall calibration is the caller that names one:
     /// it walks the same graph through the same code at a series of budgets, so what it
     /// measures is what a query at that budget would get.
-    async fn search_with_budget(
+    pub async fn search_with_budget(
         &self,
         tablename: &str,
         query: SearchQuery,

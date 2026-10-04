@@ -264,10 +264,32 @@ with four times it. `POST /tables/{t}/recall/calibrate` runs it now at any size;
 -- budget, measured recall, the whole curve with per-budget p50 -- is on the table and in
 `GET /tables/{t}/stats` under `recall` and `ef_search`. Interpolated queries rather than the
 rows themselves because a stored row is a node whose true neighbours are its own edges: on
-128-d noise the rows measured 0.90 where held-out queries got 0.21; the interpolated point
-tracks held-out recall within one or two points on glove-100 and errs low on gist and lastfm
-(hnswlib, same machine). The calibration is derived from the records, so a restart may drop
-it until the next sweep. The same run put hnswlib's build at 13,000 rows/s on 16 threads
+128-d noise the rows measured 0.90 where held-out queries got 0.21. **How well the
+calibration's own queries stand in for a caller's was measured on 2026-10-04**
+(`tests/recall/calibration_transfer_test.rs`, in-process, release build, the full corpora,
+the dataset's test queries against its published `neighbors`, the synthetic sets against the
+exact scan; recall@10):
+
+| corpus, budget | real queries | interp 0.35 (what calibration uses) | midpoint | stored rows |
+| --- | --- | --- | --- | --- |
+| glove-25, ef 128 | 0.9922 | 0.9843 | 0.9713 | 0.9977 |
+| glove-25, ef 512 | 0.9997 | 0.9990 | 0.9990 | 1.0000 |
+| lastfm-64, ef 128 | 0.9790 | 0.9637 | 0.9660 | 0.9707 |
+| lastfm-64, ef 512 | 0.9892 | 0.9930 | 0.9937 | 0.9817 |
+| glove-100, ef 128 | 0.8449 | 0.8207 | 0.7417 | 0.9123 |
+| glove-100, ef 512 | 0.9336 | 0.9240 | 0.9070 | 0.9603 |
+| glove-100, ef 1024 | 0.9606 | 0.9533 | 0.9523 | 0.9770 |
+
+The interpolated query reads 0.7 to 3.5 points *below* the real ones at every budget but
+lastfm's top end (0.4 above, where the real queries' own ceiling is 0.9895 at any budget),
+so a calibrated budget is a floor on what a caller gets; the midpoint is up to 11 points
+too pessimistic and a stored row up to 8 points too optimistic. On glove-100 the
+calibration went from the default 512 to 1024 (its sample 0.916 then 0.952) and real
+queries at 1024 measured 0.9606 at 3.3 ms p50 -- the case it exists for. Two things the
+same table shows: a budget below 128 is not a budget, because the quantized walk already
+fetches the 100-candidate rerank pool (ef 32 and 64 answer identically everywhere); and
+the real-query recall at the default 512 on glove-100 is 0.9336 in-process. The calibration
+is derived from the records, so a restart may drop it until the next sweep. The same run put hnswlib's build at 13,000 rows/s on 16 threads
 against about 4,300 here, which is the ingest gap stated in cores. A table created before
 the PQ change keeps the layout it was built with.
 

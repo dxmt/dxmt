@@ -589,6 +589,10 @@ name = "calibration_test"
 path = "tests/recall/calibration_test.rs"
 
 [[test]]
+name = "calibration_transfer_test"
+path = "tests/recall/calibration_transfer_test.rs"
+
+[[test]]
 name = "rows_ahead_of_log_test"
 path = "tests/durability/rows_ahead_of_log_test.rs"
 

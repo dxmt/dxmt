@@ -16,8 +16,9 @@
 //! 50-query sample landed. A query a caller sends is like the data (an embedding of a
 //! sentence, next to the embeddings of sentences), which is what the calibration samples
 //! and what is held out here. The transfer from calibration to a *different* query
-//! distribution is a property of the corpus, measured in docs/SUPPORT_MATRIX.md on
-//! glove-100 (within one or two points), gist and lastfm (errs low), and not of this test.
+//! distribution is a property of the corpus, measured by `calibration_transfer_test.rs`
+//! on glove-25, glove-100 and lastfm-64 against their published ground truth (the
+//! calibration reads 0.7 to 3.5 points below the real queries), and not of this test.
 
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
