@@ -137,9 +137,14 @@ impl ProductQuantizer {
             training_data.len()
         );
 
-        // Each subspace is an independent k-means, so they train in parallel. The k-means++
-        // seeding below is O(k^2 n) per subspace; sequentially, 96 subspaces x 256 centroids x
-        // 65,536 training vectors did not finish inside ten minutes on one core.
+        // More than `TRAINING_POINTS_PER_CENTROID` points a centroid adds time and not
+        // codebook quality (FAISS caps at 256 a centroid and warns below 39); a caller that
+        // hands over 65,536 rows for 256 centroids trains on a stride through 32,768 of them.
+        let cap = self.num_centroids * Self::TRAINING_POINTS_PER_CENTROID;
+        let stride = training_data.len().div_ceil(cap).max(1);
+        let training_data: Vec<&DenseVector> = training_data.iter().step_by(stride).collect();
+
+        // Each subspace is an independent k-means, so they train in parallel.
         use rayon::prelude::*;
         let subvector_dim = self.subvector_dim;
         self.codebooks = (0..self.num_subvectors)
@@ -165,79 +170,139 @@ impl ProductQuantizer {
         Ok(())
     }
 
-    /// K-means clustering for one subspace
+    /// Training points a centroid gets at most; see `train`.
+    const TRAINING_POINTS_PER_CENTROID: usize = 128;
+    /// Lloyd's stops once fewer than this share of points changed cluster in a round: the
+    /// codebook has settled to within the noise of a different random seed by then.
+    const CONVERGED_SHARE: f64 = 0.001;
+
+    /// K-means clustering for one subspace.
+    ///
+    /// Two things this used to do were measured, on a 200K x 25 load, as 62% of every CPU
+    /// sample the *server* took while the table built -- more than the graph. The k-means++
+    /// seeding recomputed each point's distance to every centroid chosen so far for every
+    /// new centroid, O(k^2 n), where keeping each point's running minimum and updating it
+    /// against the newest centroid alone is O(k n): 128x fewer distances at k = 256. And
+    /// Lloyd's step scored every point against every centroid through a generic
+    /// iterator-chain distance that, for cosine, took two square roots per pair; the norms
+    /// of the points never change and the centroids' change once an iteration. Convergence
+    /// was "every centroid coordinate within 1e-6 of last time", which a 65,536-point
+    /// k-means rarely reaches, so the loop almost always ran all 25 rounds; it stops now when
+    /// no point changes cluster, which is the condition the next round would prove anyway.
+    ///
+    /// The distance is the one `compute_subvector_distance` defines, computed in place, so
+    /// the codebooks this produces are the ones the old loop produced for the same seeds.
     fn kmeans_clustering(
         &self,
         subvectors: &[DenseVector],
         num_iterations: usize,
     ) -> crate::Result<Vec<DenseVector>> {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        use rand::{thread_rng, Rng};
 
         let mut rng = thread_rng();
         let n = subvectors.len();
+        let d = self.subvector_dim;
         let k = self.num_centroids.min(n); // Can't have more centroids than data points
 
-        // Initialize centroids randomly (k-means++)
-        let mut centroids = Vec::with_capacity(k);
+        // Contiguous copies: `n` rows of `d` floats, and the per-row norm for cosine.
+        let flat: Vec<f32> = subvectors.iter().flat_map(|v| v.iter().copied()).collect();
+        let cosine = matches!(self.distance_metric, DistanceMetric::Cosine);
+        let dot_metric = matches!(self.distance_metric, DistanceMetric::Dot);
+        let norms: Vec<f32> = if cosine {
+            (0..n)
+                .map(|i| {
+                    flat[i * d..(i + 1) * d]
+                        .iter()
+                        .map(|x| x * x)
+                        .sum::<f32>()
+                        .sqrt()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // The distance `compute_subvector_distance` defines, with the point's norm supplied.
+        let dist = |p: &[f32], p_norm: f32, c: &[f32], c_norm: f32| -> f32 {
+            if cosine {
+                let mut dot = 0.0f32;
+                for (x, y) in p.iter().zip(c) {
+                    dot += x * y;
+                }
+                1.0 - (dot / (p_norm * c_norm + 1e-8))
+            } else if dot_metric {
+                let mut dot = 0.0f32;
+                for (x, y) in p.iter().zip(c) {
+                    dot += x * y;
+                }
+                -dot
+            } else {
+                let mut sum = 0.0f32;
+                for (x, y) in p.iter().zip(c) {
+                    let diff = x - y;
+                    sum += diff * diff;
+                }
+                sum
+            }
+        };
+        let norm_of = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let point = |i: usize| &flat[i * d..(i + 1) * d];
+        let point_norm = |i: usize| if cosine { norms[i] } else { 0.0 };
 
         // Set when the data runs out of distinct points before `k` is reached; the empty
         // clusters that necessarily follow must then be left alone rather than reseeded.
         let mut saturated = false;
 
-        // First centroid: random data point
-        centroids.push(subvectors.choose(&mut rng).unwrap().clone());
-
-        // k-means++ initialization: choose remaining centroids with probability proportional to distance
+        // k-means++: the first centroid is a random point; each later one is drawn with
+        // probability proportional to the point's distance to its nearest centroid so far.
+        // `min_d` is that nearest distance, updated against the newest centroid only.
+        let mut centroids: Vec<DenseVector> = Vec::with_capacity(k);
+        let first = rng.gen_range(0..n);
+        centroids.push(point(first).to_vec());
+        let mut min_d: Vec<f32> = {
+            let c = point(first);
+            let cn = point_norm(first);
+            (0..n)
+                .map(|i| dist(point(i), point_norm(i), c, cn))
+                .collect()
+        };
         for _ in 1..k {
-            let distances: Vec<f32> = subvectors
-                .iter()
-                .map(|v| {
-                    centroids
-                        .iter()
-                        .map(|c| self.compute_subvector_distance(v, c))
-                        .min_by(|a, b| a.total_cmp(b))
-                        .unwrap()
-                })
-                .collect();
-
-            let sum: f32 = distances.iter().sum();
+            let sum: f32 = min_d.iter().sum();
             if sum == 0.0 {
                 // Every point coincides with a centroid: the data holds fewer distinct
-                // points than `k`, so there is nothing left to seed. Leaving the vector
-                // short is what made a 128-dimension dataset abort the server -- 32
-                // subspaces of 4 dimensions over SIFT's small integers gave one subspace 86
-                // distinct points, and Lloyd's step below indexes `centroids[c_idx]` for
-                // `c_idx` in `0..k`. Pad to `k` so that loop is always in bounds; the
-                // duplicates are inert, since a point assigns to the first centroid it ties
-                // with and the rest stay empty.
+                // points than `k`, so there is nothing left to seed. Pad to `k` so Lloyd's
+                // step below, which indexes `centroids[c_idx]` for `c_idx` in `0..k`, is
+                // always in bounds; the duplicates are inert, since a point assigns to the
+                // first centroid it ties with and the rest stay empty.
                 saturated = true;
                 while centroids.len() < k {
                     centroids.push(subvectors[centroids.len() % n].clone());
                 }
                 break;
             }
-
-            // Choose the next centroid with probability proportional to its distance.
-            //
-            // Compared against `random * sum` rather than normalising the distances to
-            // probabilities and comparing against `random`: a 65,536-term f32 prefix sum of
-            // normalised weights can end at 0.9999 instead of 1, and a draw above that then
-            // selected nothing. The initialisation came out one centroid short, and the
-            // Lloyd step below indexed `centroids[255]` of a 255-long vector -- the 10M
-            // Cohere run died there in the 192-subspace training. If rounding still leaves
-            // the target unreached, the last point is the answer the exact sum would give.
+            // Compared against `random * sum` rather than normalising the weights: a
+            // 65,536-term f32 prefix sum of normalised weights can end at 0.9999 and a draw
+            // above that selected nothing, leaving the seeding one centroid short. If
+            // rounding still leaves the target unreached, the last point is the answer.
             let target = rand::random::<f32>() * sum;
             let mut cumulative = 0.0f32;
-            let mut chosen = subvectors.len() - 1;
-            for (idx, &weight) in distances.iter().enumerate() {
+            let mut chosen = n - 1;
+            for (idx, &weight) in min_d.iter().enumerate() {
                 cumulative += weight;
                 if cumulative >= target {
                     chosen = idx;
                     break;
                 }
             }
-            centroids.push(subvectors[chosen].clone());
+            let c = point(chosen).to_vec();
+            let cn = point_norm(chosen);
+            for (i, slot) in min_d.iter_mut().enumerate() {
+                let dd = dist(point(i), point_norm(i), &c, cn);
+                if dd < *slot {
+                    *slot = dd;
+                }
+            }
+            centroids.push(c);
         }
         // Guaranteed by construction above, both on the normal path and on the padded one.
         // It was a `debug_assert!` and release builds compile those out, so the invariant it
@@ -248,64 +313,100 @@ impl ProductQuantizer {
             "k-means++ must seed exactly k centroids"
         );
 
-        // Lloyd's algorithm iterations
+        // Lloyd's algorithm.
+        let mut assignments = vec![usize::MAX; n];
+        let mut centroid_norms = vec![0.0f32; k];
         for iteration in 0..num_iterations {
-            // Assignment step: assign each vector to nearest centroid
-            let mut assignments = vec![0usize; n];
-            for (idx, subvector) in subvectors.iter().enumerate() {
-                let mut min_dist = f32::INFINITY;
-                let mut best_centroid = 0;
-
-                for (c_idx, centroid) in centroids.iter().enumerate() {
-                    let dist = self.compute_subvector_distance(subvector, centroid);
-                    if dist < min_dist {
-                        min_dist = dist;
-                        best_centroid = c_idx;
+            if cosine {
+                for (c_idx, c) in centroids.iter().enumerate() {
+                    centroid_norms[c_idx] = norm_of(c);
+                }
+            }
+            // Assignment step. A one-dimensional euclidean subspace -- the layout every table
+            // under 64 dimensions gets -- is a sorted number line, and the nearest of 256
+            // centroids is a binary search, not 256 subtractions.
+            let mut moved = 0usize;
+            if d == 1 && !cosine && !dot_metric {
+                let mut order: Vec<(f32, usize)> = centroids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c[0], i))
+                    .collect();
+                order.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let keys: Vec<f32> = order.iter().map(|(v, _)| *v).collect();
+                for i in 0..n {
+                    let x = flat[i];
+                    let pos = keys.partition_point(|&c| c < x);
+                    let best = match (pos.checked_sub(1), keys.get(pos)) {
+                        (Some(lo), Some(&hi)) if (x - keys[lo]).abs() <= (hi - x).abs() => {
+                            order[lo].1
+                        }
+                        (Some(lo), None) => order[lo].1,
+                        (_, Some(_)) => order[pos].1,
+                        (None, None) => 0,
+                    };
+                    if assignments[i] != best {
+                        assignments[i] = best;
+                        moved += 1;
                     }
                 }
-
-                assignments[idx] = best_centroid;
-            }
-
-            // Update step: recompute centroids
-            let mut new_centroids = vec![vec![0.0; self.subvector_dim]; k];
-            let mut counts = vec![0usize; k];
-
-            for (idx, &assignment) in assignments.iter().enumerate() {
-                for (dim, &val) in subvectors[idx].iter().enumerate() {
-                    new_centroids[assignment][dim] += val;
+            } else {
+                for (i, slot) in assignments.iter_mut().enumerate() {
+                    let p = point(i);
+                    let pn = point_norm(i);
+                    let mut best = 0usize;
+                    let mut best_d = f32::INFINITY;
+                    for (c_idx, c) in centroids.iter().enumerate() {
+                        let dd = dist(p, pn, c, centroid_norms[c_idx]);
+                        if dd < best_d {
+                            best_d = dd;
+                            best = c_idx;
+                        }
+                    }
+                    if *slot != best {
+                        *slot = best;
+                        moved += 1;
+                    }
                 }
-                counts[assignment] += 1;
             }
-
-            // Average to get new centroids
-            let mut changed = false;
+            // Update step.
+            let mut sums = vec![0.0f32; k * d];
+            let mut counts = vec![0usize; k];
+            for (i, &a) in assignments.iter().enumerate() {
+                let p = point(i);
+                let acc = &mut sums[a * d..(a + 1) * d];
+                for (s, x) in acc.iter_mut().zip(p) {
+                    *s += x;
+                }
+                counts[a] += 1;
+            }
             for c_idx in 0..k {
                 if counts[c_idx] > 0 {
-                    let count_f = counts[c_idx] as f32;
-                    for v in &mut new_centroids[c_idx] {
-                        *v /= count_f;
+                    let inv = 1.0 / counts[c_idx] as f32;
+                    for (dst, s) in centroids[c_idx]
+                        .iter_mut()
+                        .zip(&sums[c_idx * d..(c_idx + 1) * d])
+                    {
+                        *dst = s * inv;
                     }
-                    if !Self::vectors_equal(&centroids[c_idx], &new_centroids[c_idx]) {
-                        changed = true;
-                    }
-                    centroids[c_idx] = new_centroids[c_idx].clone();
                 } else if !saturated {
-                    // Empty cluster: reinitialize with random point. Worth doing while the
-                    // data has more distinct points than centroids, because it escapes a
-                    // poor seeding.
+                    // Empty cluster: reinitialise with a random point. Worth doing while the
+                    // data has more distinct points than centroids, because it escapes a poor
+                    // seeding; it also means the next round's assignments can change, so
+                    // convergence is not claimed on this round.
                     centroids[c_idx] = subvectors.choose(&mut rng).unwrap().clone();
-                    changed = true;
+                    moved += 1;
                 }
                 // When the data has fewer distinct points than `k`, empty clusters are
-                // unavoidable and reseeding them only churns: every replacement duplicates
-                // a point that already has a centroid, `changed` never settles, and the
-                // loop runs every iteration for nothing. Leave them.
+                // unavoidable and reseeding them only churns. Leave them.
             }
-
-            // Early stopping if converged
-            if !changed && iteration > 5 {
-                tracing::debug!("K-means converged at iteration {}", iteration);
+            if (moved as f64) < (n as f64 * Self::CONVERGED_SHARE).max(1.0) {
+                tracing::debug!(
+                    "K-means converged at iteration {} ({} of {} points moved)",
+                    iteration,
+                    moved,
+                    n
+                );
                 break;
             }
         }
@@ -470,11 +571,6 @@ impl ProductQuantizer {
     }
 
     /// Check if two vectors are approximately equal
-    fn vectors_equal(a: &[f32], b: &[f32]) -> bool {
-        const EPSILON: f32 = 1e-6;
-        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < EPSILON)
-    }
-
     /// Get memory usage in bytes
     pub fn memory_usage(&self) -> usize {
         // Codebooks: num_subvectors × num_centroids × subvector_dim × 4 bytes

@@ -119,6 +119,11 @@ async fn where_the_build_spends_its_time() {
         })
         .await
         .unwrap();
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(499)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .expect("profiler");
     let started = Instant::now();
     for (b, chunk) in vectors.chunks(1_000).enumerate() {
         let batch: Vec<CreateRecordRequest> = chunk
@@ -136,6 +141,23 @@ async fn where_the_build_spends_its_time() {
         storage.insert_records("p", batch).await.unwrap();
     }
     let storage_s = started.elapsed().as_secs_f64();
+    if let Ok(report) = guard.report().build() {
+        let out2 = out.replace(".svg", ".storage.svg");
+        let file = std::fs::File::create(&out2).expect("profile output");
+        report.flamegraph(file).expect("flamegraph");
+        let mut lines = Vec::with_capacity(report.data.len());
+        for (frames, count) in &report.data {
+            let names: Vec<String> = frames
+                .frames
+                .iter()
+                .rev()
+                .flat_map(|frame| frame.iter().rev().map(|sym| sym.name()))
+                .collect();
+            lines.push(format!("{} {}", names.join(";"), count));
+        }
+        std::fs::write(format!("{out2}.folded"), lines.join("\n")).expect("folded output");
+    }
+    drop(guard);
     println!(
         "through storage (no WAL dir): {rows} x {dim} in {storage_s:.1}s = {:.0} rows/s",
         rows as f64 / storage_s
