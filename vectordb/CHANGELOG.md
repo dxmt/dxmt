@@ -17,6 +17,16 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A numeric payload field no longer slows every insert down as the table grows.** The
+  payload index's numeric half folded its unsorted tail into one sorted array every 4,096
+  entries by re-sorting the whole array, so the cost of each fold grew with the table: on
+  the big-ann filtered track (10.8 integer tags a row) the load ran at 2,732 rows/s over
+  the first million rows and 1,000 over the second. It is three levels now (an unsorted
+  tail, a sorted run it is linearly merged into, and the main array that run is merged into
+  once it reaches a 64th of it); the same load holds 4,400 rows/s through two million.
+
 ### Changed
 
 - **The WAL no longer carries a vector the row file already holds.** An insert or update on

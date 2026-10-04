@@ -743,40 +743,97 @@ impl GeoIndex {
 ///
 /// Inserts append to `pending` instead of sorting, because a read takes `&self` and cannot
 /// sort, while `insert_record` takes `&mut self` and can. A query binary-searches `sorted`
-/// and scans `pending`, which the merge below keeps small enough that the scan does not
-/// matter.
+/// and `recent` and scans `pending`, which the merge policy keeps small enough that the
+/// scan does not matter.
+///
+/// Three levels, not two, because of what two cost on a live table. With `pending` folded
+/// straight into `sorted` every 4,096 entries, every fold re-sorted the whole index: at
+/// 10.8 integer tags a row (the big-ann filtered track) that was a fold every 380 rows over
+/// an array heading for 108M entries, and the load went from 2,732 rows/s at the first
+/// million to 1,000 at the second -- quadratic, and headed for a few hundred by the tenth
+/// (2026-10-04). `recent` absorbs `pending` with a linear merge of its own size, and is
+/// itself merged into `sorted` only when it has grown to a 64th of it, so an entry is
+/// copied a bounded number of times at each level rather than once per fold.
 #[derive(Debug, Clone, Default)]
 struct NumericIndex {
     /// Sorted by value. Ties keep insertion order, which nothing depends on.
     sorted: Vec<(OrderedFloat, Ordinal)>,
-    /// Appended since the last merge, unsorted.
+    /// Sorted by value, at most a 64th of `sorted`: what `pending` is folded into.
+    recent: Vec<(OrderedFloat, Ordinal)>,
+    /// Appended since the last fold, unsorted, at most `FOLD_AT` long.
     pending: Vec<(OrderedFloat, Ordinal)>,
-    /// Distinct values across both halves, recomputed at each merge.
+    /// Distinct values in `sorted`, recomputed at each merge into it.
     distinct: usize,
 }
 
 impl NumericIndex {
-    /// Merge when `pending` could make a scan of it cost as much as the binary search saved.
-    /// A flat floor as well as a fraction, so a small index does not merge on every insert.
-    const MERGE_AT: usize = 4_096;
+    /// Fold `pending` into `recent` when a scan of it would cost as much as the binary
+    /// search saved.
+    const FOLD_AT: usize = 4_096;
+    /// Merge `recent` into `sorted` once it is this fraction of it.
+    const MERGE_RATIO: usize = 64;
 
     fn insert(&mut self, value: OrderedFloat, id: Ordinal) {
         self.pending.push((value, id));
-        if self.pending.len() >= Self::MERGE_AT
-            || self.pending.len().saturating_mul(64) > self.sorted.len()
-        {
+        if self.pending.len() >= Self::FOLD_AT {
+            self.fold();
+        }
+    }
+
+    /// Every (value, record) entry across the levels, in no particular order.
+    fn entries(&self) -> impl Iterator<Item = (OrderedFloat, Ordinal)> + '_ {
+        self.sorted
+            .iter()
+            .chain(self.recent.iter())
+            .chain(self.pending.iter())
+            .copied()
+    }
+
+    /// Entries across the levels: one per (value, record), not per distinct value.
+    fn entry_count(&self) -> usize {
+        self.sorted.len() + self.recent.len() + self.pending.len()
+    }
+
+    /// Sort `pending` and merge it into `recent`; then, if `recent` has grown to its share,
+    /// merge that into `sorted`.
+    fn fold(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.pending.sort_unstable_by_key(|(value, _)| *value);
+        let recent = std::mem::take(&mut self.recent);
+        let pending = std::mem::take(&mut self.pending);
+        self.recent = Self::merge_runs(recent, pending);
+        if self.recent.len().saturating_mul(Self::MERGE_RATIO) > self.sorted.len() {
             self.merge();
         }
     }
 
-    /// Every (value, record) entry across both halves, in no particular order.
-    fn entries(&self) -> impl Iterator<Item = (OrderedFloat, Ordinal)> + '_ {
-        self.sorted.iter().chain(self.pending.iter()).copied()
-    }
-
-    /// Entries across both halves: one per (value, record), not per distinct value.
-    fn entry_count(&self) -> usize {
-        self.sorted.len() + self.pending.len()
+    /// Two runs sorted by value into one. Linear, one allocation.
+    fn merge_runs(
+        a: Vec<(OrderedFloat, Ordinal)>,
+        b: Vec<(OrderedFloat, Ordinal)>,
+    ) -> Vec<(OrderedFloat, Ordinal)> {
+        if a.is_empty() {
+            return b;
+        }
+        if b.is_empty() {
+            return a;
+        }
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            if b[j].0 < a[i].0 {
+                out.push(b[j]);
+                j += 1;
+            } else {
+                out.push(a[i]);
+                i += 1;
+            }
+        }
+        out.extend_from_slice(&a[i..]);
+        out.extend_from_slice(&b[j..]);
+        out
     }
 
     /// Append without considering a merge. See [`PayloadIndex::begin_bulk`].
@@ -793,36 +850,40 @@ impl NumericIndex {
             self.pending.swap_remove(at);
             return;
         }
-        // In the sorted half the value locates the run and the id picks the entry out of it.
-        let lo = self.sorted.partition_point(|(v, _)| *v < value);
-        let mut at = lo;
-        while at < self.sorted.len() && self.sorted[at].0 == value {
-            if self.sorted[at].1 == id {
-                self.sorted.remove(at);
-                return;
+        // In a sorted level the value locates the run and the id picks the entry out of it.
+        for level in [&mut self.recent, &mut self.sorted] {
+            let mut at = level.partition_point(|(v, _)| *v < value);
+            while at < level.len() && level[at].0 == value {
+                if level[at].1 == id {
+                    level.remove(at);
+                    return;
+                }
+                at += 1;
             }
-            at += 1;
         }
     }
 
+    /// Fold everything into `sorted`: what `end_bulk` and a full-grown `recent` call.
     fn merge(&mut self) {
-        if self.pending.is_empty() {
+        if !self.pending.is_empty() {
+            self.pending.sort_unstable_by_key(|(value, _)| *value);
+            let recent = std::mem::take(&mut self.recent);
+            let pending = std::mem::take(&mut self.pending);
+            self.recent = Self::merge_runs(recent, pending);
+        }
+        if self.recent.is_empty() {
             return;
         }
-        // Append and re-sort, rather than merging two runs into a fresh buffer. The obvious
-        // linear merge measured **three times slower** on a 10M-row field: it allocates and
-        // copies the whole array every time, where this reuses the buffer and hands pdqsort an
-        // array that is already sorted except for a short tail, which it recognises. The cost
-        // that matters is not one merge but how many, and `insert` is what decides that.
-        self.sorted.append(&mut self.pending);
-        self.sorted.sort_unstable_by_key(|(value, _)| *value);
+        let sorted = std::mem::take(&mut self.sorted);
+        let recent = std::mem::take(&mut self.recent);
+        self.sorted = Self::merge_runs(sorted, recent);
         self.distinct = self.sorted.windows(2).filter(|w| w[0].0 != w[1].0).count()
             + usize::from(!self.sorted.is_empty());
     }
 
     /// Distinct values, exact after a merge and an over-estimate before one.
     fn distinct_count(&self) -> usize {
-        self.distinct + self.pending.len()
+        self.distinct + self.recent.len() + self.pending.len()
     }
 
     /// Whether any value in the bounded range satisfies `matches`, stopping at the first one.
@@ -837,22 +898,32 @@ impl NumericIndex {
         hi: Option<OrderedFloat>,
         matches: impl Fn(OrderedFloat) -> bool,
     ) -> bool {
-        let start = match lo {
-            Some(v) => self.sorted.partition_point(|(k, _)| *k < v),
-            None => 0,
-        };
-        let end = match hi {
-            Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
-            None => self.sorted.len(),
-        };
         // `start > end` when the bounds contradict each other — `n >= 40` with `n <= 5` on the
         // same field. Slicing with them panicked, and `cannot_match_anything`, which every
         // filtered search calls first, folds a field's ranges into exactly these two bounds, so
         // one contradictory filter took the request down. Nothing lies between them.
-        self.sorted[start..end.max(start)]
-            .iter()
-            .any(|(value, _)| matches(*value))
-            || self.pending.iter().any(|(value, _)| matches(*value))
+        [&self.sorted, &self.recent].into_iter().any(|level| {
+            Self::bounded(level, lo, hi)
+                .iter()
+                .any(|(value, _)| matches(*value))
+        }) || self.pending.iter().any(|(value, _)| matches(*value))
+    }
+
+    /// The slice of a sorted level between the bounds; empty when they contradict.
+    fn bounded(
+        level: &[(OrderedFloat, Ordinal)],
+        lo: Option<OrderedFloat>,
+        hi: Option<OrderedFloat>,
+    ) -> &[(OrderedFloat, Ordinal)] {
+        let start = match lo {
+            Some(v) => level.partition_point(|(k, _)| *k < v),
+            None => 0,
+        };
+        let end = match hi {
+            Some(v) => level.partition_point(|(k, _)| *k <= v),
+            None => level.len(),
+        };
+        &level[start..end.max(start)]
     }
 
     /// Every id whose value satisfies `matches`, without visiting values that cannot.
@@ -867,18 +938,12 @@ impl NumericIndex {
         matches: impl Fn(OrderedFloat) -> bool,
         mut visit: impl FnMut(Ordinal),
     ) {
-        let start = match lo {
-            Some(v) => self.sorted.partition_point(|(k, _)| *k < v),
-            None => 0,
-        };
-        let end = match hi {
-            Some(v) => self.sorted.partition_point(|(k, _)| *k <= v),
-            None => self.sorted.len(),
-        };
         // Contradictory bounds are an empty range, not a panic; see `any_matches`.
-        for (value, id) in &self.sorted[start..end.max(start)] {
-            if matches(*value) {
-                visit(*id);
+        for level in [&self.sorted, &self.recent] {
+            for (value, id) in Self::bounded(level, lo, hi) {
+                if matches(*value) {
+                    visit(*id);
+                }
             }
         }
         for (value, id) in &self.pending {
@@ -3702,5 +3767,132 @@ mod cursor {
         );
         assert!(!c.precedes(100, "a"));
         assert!(!c.precedes(101, "z"));
+    }
+}
+
+#[cfg(test)]
+mod numeric_levels {
+    use super::*;
+
+    fn brute(entries: &[(f64, Ordinal)], lo: f64, hi: f64) -> Vec<Ordinal> {
+        let mut v: Vec<Ordinal> = entries
+            .iter()
+            .filter(|(x, _)| *x >= lo && *x <= hi)
+            .map(|(_, id)| *id)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// `lo`/`hi` only bound the sorted levels; `matches` is what decides, and is what
+    /// the unsorted tail is tested with.
+    fn in_range(lo: f64, hi: f64) -> impl Fn(OrderedFloat) -> bool {
+        move |v| {
+            let f: f64 = v.into();
+            f >= lo && f <= hi
+        }
+    }
+
+    fn selected(index: &NumericIndex, lo: f64, hi: f64) -> Vec<Ordinal> {
+        let mut v = Vec::new();
+        index.select(
+            Some(OrderedFloat::from(lo)),
+            Some(OrderedFloat::from(hi)),
+            in_range(lo, hi),
+            |id| v.push(id),
+        );
+        v.sort_unstable();
+        v
+    }
+
+    /// Entries land in all three levels over a long run of inserts, and every query answers
+    /// the same as a scan of everything inserted, whichever level holds the entry. Also the
+    /// shape the live path had the quadratic on: many entries per record, values repeating.
+    #[test]
+    fn three_levels_answer_like_one_sorted_array() {
+        let mut index = NumericIndex::default();
+        let mut all: Vec<(f64, Ordinal)> = Vec::new();
+        let mut st = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        for id in 0..60_000u32 {
+            for _ in 0..(1 + next() % 12) {
+                let value = (next() % 5_000) as f64;
+                index.insert(OrderedFloat::from(value), id as Ordinal);
+                all.push((value, id as Ordinal));
+            }
+        }
+        // `recent` is empty right after a fold that tipped it into `sorted`; keep inserting
+        // until all three levels hold something, so the checks below cross every one.
+        let mut id = 60_000u32;
+        while index.recent.is_empty() || index.pending.is_empty() {
+            let value = (next() % 5_000) as f64;
+            index.insert(OrderedFloat::from(value), id as Ordinal);
+            all.push((value, id as Ordinal));
+            id += 1;
+        }
+        assert!(!index.sorted.is_empty());
+        assert!(index.pending.len() < NumericIndex::FOLD_AT);
+        assert!(
+            index.recent.len() * NumericIndex::MERGE_RATIO
+                <= index.sorted.len() + NumericIndex::FOLD_AT * NumericIndex::MERGE_RATIO
+        );
+        assert_eq!(index.entry_count(), all.len());
+        for (lo, hi) in [
+            (0.0, 0.0),
+            (10.0, 20.0),
+            (4_990.0, 5_000.0),
+            (2_500.0, 2_500.0),
+            (0.0, 5_000.0),
+            (100.0, 50.0),
+        ] {
+            assert_eq!(
+                selected(&index, lo, hi),
+                brute(&all, lo, hi),
+                "range {lo}..={hi}"
+            );
+            assert_eq!(
+                index.any_matches(
+                    Some(OrderedFloat::from(lo)),
+                    Some(OrderedFloat::from(hi)),
+                    in_range(lo, hi)
+                ),
+                !brute(&all, lo, hi).is_empty(),
+                "any in {lo}..={hi}"
+            );
+        }
+
+        // Remove one entry from each level and the answers follow.
+        let from_pending = *index.pending.last().unwrap();
+        let from_recent = index.recent[index.recent.len() / 2];
+        let from_sorted = index.sorted[index.sorted.len() / 3];
+        for (value, id) in [from_pending, from_recent, from_sorted] {
+            index.remove(value, id);
+            let at = all
+                .iter()
+                .position(|(v, i)| OrderedFloat::from(*v) == value && *i == id)
+                .unwrap();
+            all.swap_remove(at);
+            let f: f64 = value.into();
+            assert_eq!(
+                selected(&index, f, f),
+                brute(&all, f, f),
+                "after removing {f}/{id}"
+            );
+        }
+        assert_eq!(index.entry_count(), all.len());
+
+        // A full merge leaves one level and an exact distinct count.
+        index.merge();
+        assert!(index.recent.is_empty() && index.pending.is_empty());
+        let mut distinct: Vec<u64> = all.iter().map(|(v, _)| v.to_bits()).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(index.distinct_count(), distinct.len());
+        assert_eq!(selected(&index, 0.0, 5_000.0), brute(&all, 0.0, 5_000.0));
     }
 }
