@@ -540,6 +540,10 @@ type Owned = (usize, Vec<Record>, Vec<Option<u64>>);
 struct InsertRequest {
     table_name: String,
     records: Vec<CreateRecordRequest>,
+    /// Per record, the row-file row its vector already occupies, when it does: WAL replay
+    /// of an entry that points at a row hands the vector in for indexing and this says not
+    /// to append it again. Empty when nothing is known, which is every live insert.
+    rows_in_file: Vec<Option<u64>>,
     /// The records as inserted and, per record, the row-file row its vector went to
     /// (`None` on a table whose vectors are in memory). The row is what the WAL entry
     /// points at instead of carrying the vector.
@@ -1303,12 +1307,14 @@ async fn process_insert_group(
     let mut senders: Vec<Option<oneshot::Sender<crate::Result<Inserted>>>> =
         Vec::with_capacity(group.len());
     let mut batches: Vec<Vec<CreateRecordRequest>> = Vec::with_capacity(group.len());
+    let mut known_rows: Vec<Vec<Option<u64>>> = Vec::with_capacity(group.len());
     for req in group {
         // The oldest request's wait is the group's wait; the younger ones overlapped it.
         if batches.is_empty() {
             insert_stages::add_duration(insert_stages::QUEUE, req.enqueued_at.elapsed());
         }
         senders.push(Some(req.response_tx));
+        known_rows.push(req.rows_in_file);
         batches.push(req.records);
     }
     let group_rows: usize = batches.iter().map(|b| b.len()).sum();
@@ -1327,20 +1333,35 @@ async fn process_insert_group(
         let mut appended_rows: Vec<Vec<Option<u64>>> = Vec::new();
         let stage = std::time::Instant::now();
         if let Some(file) = &vector_file {
+            // A record whose vector is already in the file (replay of an entry that points
+            // at its row) keeps that row; every other one is appended. Replay used to append
+            // every replayed vector again, so the file grew by the whole replayed tail on
+            // each restart until the sweep punched the duplicates.
+            appended_rows = batches.iter().map(|b| vec![None; b.len()]).collect();
             let mut items: Vec<(&str, &[f32])> = Vec::new();
             let mut slots: Vec<(usize, usize)> = Vec::new();
             for (slot, batch) in batches.iter().enumerate() {
                 for (i, r) in batch.iter().enumerate() {
-                    if r.vector.len() == expected_dim {
-                        items.push((r.id.as_str(), r.vector.as_slice()));
-                        slots.push((slot, i));
+                    if r.vector.len() != expected_dim {
+                        continue;
+                    }
+                    match known_rows
+                        .get(slot)
+                        .and_then(|k| k.get(i).copied().flatten())
+                    {
+                        Some(row) if row < file.rows() => appended_rows[slot][i] = Some(row),
+                        _ => {
+                            items.push((r.id.as_str(), r.vector.as_slice()));
+                            slots.push((slot, i));
+                        }
                     }
                 }
             }
-            let rows = file.append(&items)?;
-            appended_rows = batches.iter().map(|b| vec![None; b.len()]).collect();
-            for ((slot, i), row) in slots.into_iter().zip(rows) {
-                appended_rows[slot][i] = Some(row);
+            if !items.is_empty() {
+                let rows = file.append(&items)?;
+                for ((slot, i), row) in slots.into_iter().zip(rows) {
+                    appended_rows[slot][i] = Some(row);
+                }
             }
         }
         insert_stages::add(insert_stages::ROW_FILE, stage);
@@ -2092,7 +2113,10 @@ impl IntelligentIndexedStorage {
             payload: Some(record.payload.clone()),
             text: None,
         };
-        self.insert_records(table, vec![request]).await?;
+        // An entry that named its row hands the row on, so the processor indexes the vector
+        // without appending it a second time.
+        self.insert_records_with_rows(table, vec![request], vec![row])
+            .await?;
 
         let mut tables = self.write_tables("restore_record_from_wal").await;
         let data = tables
@@ -5321,6 +5345,19 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        self.insert_records_with_rows(tablename, requests, Vec::new())
+            .await
+    }
+
+    /// `insert_records`, with `rows_in_file` saying, per request, which vectors are already
+    /// in the table's row file and at which row. Only WAL replay knows that; a live insert
+    /// passes nothing and every vector is appended.
+    async fn insert_records_with_rows(
+        &self,
+        tablename: &str,
+        requests: Vec<CreateRecordRequest>,
+        rows_in_file: Vec<Option<u64>>,
+    ) -> crate::Result<Vec<Record>> {
         let tablename = &*self.resolve(tablename);
         self.ensure_writable()?;
         self.ensure_memory_headroom()?;
@@ -5354,6 +5391,7 @@ impl IntelligentIndexedStorage {
             .send(InsertRequest {
                 table_name: tablename.to_string(),
                 records: requests,
+                rows_in_file,
                 response_tx,
                 enqueued_at: std::time::Instant::now(),
             })
@@ -11038,6 +11076,7 @@ mod tests {
                         text: None,
                     })
                     .collect(),
+                rows_in_file: Vec::new(),
                 response_tx,
                 enqueued_at: std::time::Instant::now(),
             },

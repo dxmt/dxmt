@@ -192,7 +192,14 @@ async fn the_log_points_at_rows_and_a_restart_reads_them() {
 
     // No snapshot was taken, so everything the restart knows about the index comes from
     // replaying those entries against the row file.
+    let vectors = wal.join("vectors").join("t.f32");
+    let rows_before = std::fs::metadata(&vectors).unwrap().len();
     let storage = open(&wal).await;
+    assert_eq!(
+        std::fs::metadata(&vectors).unwrap().len(),
+        rows_before,
+        "replay indexes the rows the entries point at and appends none"
+    );
     assert_eq!(
         storage.get_table("t").await.unwrap().record_count,
         (ROWS - 1) as u64

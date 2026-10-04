@@ -29,7 +29,8 @@ release, and the first commit that was ever pushed anywhere.
   `DROP TABLE` removed the vector file that the entries after it (the same name created
   again) point into; and a replayed record was re-stored without its row, which on a
   disk-backed table kept a second, inline copy of every replayed vector in the records
-  file.
+  file. Replay also no longer appends a replayed vector to the row file again: an entry that
+  names its row is indexed from that row, so a restart leaves the file the size it was.
 - **PQ codebook training is k-means with linear seeding** instead of a quadratic one, the
   training sample is capped at 128 points per centroid, and a one-dimension subspace
   assigns by binary search. The low-dimension storage path spent most of its CPU there.
