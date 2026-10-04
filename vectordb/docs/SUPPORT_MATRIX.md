@@ -241,6 +241,11 @@ the same box between runs:
 | after | **19,068** | **16,572** | **17,970** | **8,993** | **7,237** | **8,875** |
 | hnswlib 0.8, M=16, ef_construction 200 | 22,427 | — | — | 8,531 | — | — |
 
+On the real corpora (`calibration_transfer_test.rs`, one thread submitting 5,000-row
+batches, so submission-bound and not a throughput harness) the same change took glove-25
+from 11,173 to 13,388 rows/s and glove-100 from 4,781 to 6,876, with recall@10 against
+the published ground truth unchanged at every budget (glove-100 at ef 512: 0.9336 before,
+0.9315 after; at 1024: 0.9606 and 0.9613); lastfm-64, 292K rows, did not move.
 Run-to-run spread on this harness is about 10%. At 100 dimensions the graph alone is at
 hnswlib's rate; the quantized storage path is 1.8x what it was and 20% under the exact
 one, which is the walk on codes (ADC) plus the encode. At 25 dimensions the remaining gap
