@@ -491,6 +491,10 @@ name = "filter_absent_field_test"
 path = "tests/filters/filter_absent_field_test.rs"
 
 [[test]]
+name = "yfcc_filtered_test"
+path = "tests/filters/yfcc_filtered_test.rs"
+
+[[test]]
 name = "filter_agreement_test"
 path = "tests/filters/filter_agreement_test.rs"
 
