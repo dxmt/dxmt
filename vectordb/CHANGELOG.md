@@ -17,6 +17,23 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Changed
+
+- **The WAL no longer carries a vector the row file already holds.** An insert or update on
+  a table with a row file logs the record and the row its vector is at
+  (`UpsertRecordInRowFile`), and replay reads the row. A table whose vectors are in memory,
+  and every table when the log is mirrored to object storage, still log the vector. Logs
+  written by earlier versions replay unchanged; a log written by this version is not
+  readable by an earlier binary. Three replay defects that the copy in the log was hiding
+  are fixed with it: a replayed `CREATE TABLE` wiped the table's row files; a replayed
+  `DROP TABLE` removed the vector file that the entries after it (the same name created
+  again) point into; and a replayed record was re-stored without its row, which on a
+  disk-backed table kept a second, inline copy of every replayed vector in the records
+  file.
+- **PQ codebook training is k-means with linear seeding** instead of a quadratic one, the
+  training sample is capped at 128 points per centroid, and a one-dimension subspace
+  assigns by binary search. The low-dimension storage path spent most of its CPU there.
+
 ## [1.1.0] - 2026-10-03
 
 Every package carries this version. The HTTP API gains fields and routes and loses none;

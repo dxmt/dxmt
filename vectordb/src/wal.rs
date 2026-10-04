@@ -71,6 +71,25 @@ pub enum WalEntry {
         table: String,
         record: crate::types::record::Record,
     },
+    /// A record whose vector is in the table's row file, at `row`, and not in the entry.
+    ///
+    /// With a WAL directory a table's full vectors live in `wal/vectors/<table>.f32`, appended
+    /// and fsynced before the write is logged. Logging the vector again, as `UpsertRecordV2`
+    /// does, wrote every vector to disk twice -- at 960 dimensions the entry was 3.8 KB of
+    /// vector and 100 bytes of record. `record.vector` is empty here; replay reads `row`
+    /// from the row file. The row and not the id is what the entry carries, because rows
+    /// are never reused or renumbered, while the id's row in the record store moves on
+    /// every update and goes away on a delete -- replaying `insert, delete, insert` by id
+    /// would read the wrong row for the first entry and nothing for the last. Written by
+    /// the insert and update paths for a table with a row file; a table whose vectors are
+    /// in memory still writes `UpsertRecordV2`, and so does every table when the log is
+    /// mirrored to object storage, where a node recovering from the bucket has no row file
+    /// to read.
+    UpsertRecordInRowFile {
+        table: String,
+        record: crate::types::record::Record,
+        row: u64,
+    },
 }
 
 /// Write-Ahead Log manager

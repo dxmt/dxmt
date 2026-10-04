@@ -593,6 +593,10 @@ name = "rows_ahead_of_log_test"
 path = "tests/durability/rows_ahead_of_log_test.rs"
 
 [[test]]
+name = "wal_row_reference_test"
+path = "tests/durability/wal_row_reference_test.rs"
+
+[[test]]
 name = "build_profile_test"
 path = "tests/recall/build_profile_test.rs"
 required-features = ["benchmarks"]

@@ -179,8 +179,23 @@ A 1,000 x 960 batch is a 20 MB JSON body that stdlib `json` takes 0.8 s to produ
 server 0.12 s to parse and validate. The SDK's `upload(parallel=N)` with orjson installed is
 the shape that reaches the ceiling. Inside the server, per-stage timers over a 1M load (one
 `info` line per 250 groups) put **graph construction at 81%** of storage time, the WAL at 14%
-(the vector is written to the row file and again, compressed, to the log), the row file at
+(the vector was written to the row file and again, compressed, to the log), the row file at
 3% and the record map at 2%.
+
+**The log no longer carries the vector** (2026-10-04): an entry points at the row-file row
+the vector is already in, and replay reads it. 100,000 x 960 random rows, four clients,
+release build, the same box, before and after:
+
+| | rows/s | `wal.log` | WAL stage, per row |
+| --- | --- | --- | --- |
+| vector in the log | 1,308 | 493 MB (4.9 KB per row) | 158 µs |
+| row reference | 1,354 | 14 MB (141 bytes per row) | 22 µs |
+
+The disk written per row at 960 dimensions is now the 3.8 KB row plus the record, instead of
+twice that; the throughput moved 3.5%, inside the run-to-run spread, because the graph is
+what bounds this path. The vector stays in the log for a table whose vectors are in memory
+and whenever the WAL is mirrored to object storage, where a node recovering from the bucket
+has no row file.
 
 **The graph build itself, measured in-process against hnswlib on the same rows and box**
 (`tests/recall/build_profile_test.rs`, which also writes a flamegraph through an
@@ -202,7 +217,13 @@ already at parity with hnswlib (1,507 against 1,239). At 25 dimensions the graph
 at 9,800 rows/s and the storage path around it at 5,600, so there the per-row cost of the
 record store, map and WAL is the larger share -- that is the next gain for low-dimension
 tables; recall on glove-25 and glove-100 was re-measured after these changes and did not
-move (1.000 and 0.9335 at `normal`).
+move (1.000 and 0.9335 at `normal`). **Measured the next day with the in-process sampler
+(2026-10-04)**: at 25 dimensions 62% of the storage path's CPU was PQ codebook training --
+a quadratic k-means++ seeding and an unconverged Lloyd loop over every row of the sample.
+With linear seeding, a sample capped at 128 points per centroid and a binary-search
+assignment for the one-dimension subspaces a 25-d table uses, the storage path went from
+9,133 to 11,979 rows/s against 16,024 for the graph alone; what remains between the two is
+the quantized graph's own distance work.
 
 **The PQ code is sized by the table's width** (since 2026-10-02; `HnswPqConfig::default_subvectors`).
 It was four dimensions per subspace at every width, the layout measured at 768, and at 25

@@ -470,6 +470,8 @@ struct UpdateArtifacts {
     record: Record,
     /// The vector for the index, which the stored record may no longer carry.
     vector: Vec<f32>,
+    /// The row-file row the vector was appended to, when the table has a row file.
+    vector_row: Option<u64>,
     #[cfg(feature = "text-bm25")]
     full_text_engine: Option<Arc<FullTextSearchEngine>>,
 }
@@ -529,10 +531,19 @@ fn guard_pruned(into: &mut Vec<WalChunkRef>, chunk: &WalChunkRef) {
 }
 
 /// 插入请求（用于 channel-based 架构）
+/// What the insertion processor answers one request with: the records as inserted and,
+/// parallel to them, the row-file row each vector went to.
+type Inserted = (Vec<Record>, Vec<Option<u64>>);
+/// One request's share of a coalesced group: which responder it belongs to, then its answer.
+type Owned = (usize, Vec<Record>, Vec<Option<u64>>);
+
 struct InsertRequest {
     table_name: String,
     records: Vec<CreateRecordRequest>,
-    response_tx: oneshot::Sender<crate::Result<Vec<Record>>>,
+    /// The records as inserted and, per record, the row-file row its vector went to
+    /// (`None` on a table whose vectors are in memory). The row is what the WAL entry
+    /// points at instead of carrying the vector.
+    response_tx: oneshot::Sender<crate::Result<Inserted>>,
     /// When the request entered the channel; the processor charges the gap to `queue`.
     enqueued_at: std::time::Instant,
 }
@@ -789,6 +800,22 @@ pub struct KnnGraph {
     /// is ten kilobytes of JSON floats.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payloads: Option<Vec<Option<String>>>,
+}
+
+/// `record` with every field but the vector: what a WAL entry carries when the vector is
+/// in the row file. A clone-then-clear would copy the vector first.
+fn without_vector(record: &Record) -> Record {
+    Record {
+        id: record.id.clone(),
+        vector: Vec::new(),
+        sparse_vector: record.sparse_vector.clone(),
+        named_vectors: record.named_vectors.clone(),
+        payload: record.payload.clone(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        version: record.version,
+        status: record.status.clone(),
+    }
 }
 
 /// 性能统计
@@ -1273,7 +1300,7 @@ async fn process_insert_group(
 
     // Each request keeps its own responder, so one bad request can be answered and dropped
     // without failing the requests it happened to be merged with.
-    let mut senders: Vec<Option<oneshot::Sender<crate::Result<Vec<Record>>>>> =
+    let mut senders: Vec<Option<oneshot::Sender<crate::Result<Inserted>>>> =
         Vec::with_capacity(group.len());
     let mut batches: Vec<Vec<CreateRecordRequest>> = Vec::with_capacity(group.len());
     for req in group {
@@ -1286,7 +1313,7 @@ async fn process_insert_group(
     }
     let group_rows: usize = batches.iter().map(|b| b.len()).sum();
 
-    let result: crate::Result<Vec<(usize, Vec<Record>)>> = async {
+    let result: crate::Result<Vec<Owned>> = async {
         // Vectors go to the row file before the records become visible, outside the map
         // lock: the append fsyncs, and readers should not wait on a disk write. Rows for a
         // batch that is then rejected below are dead space, reclaimed on rebuild.
@@ -1334,7 +1361,7 @@ async fn process_insert_group(
             let mut to_remove: Vec<RecordId> = Vec::new();
             let mut to_insert: Vec<PendingIndexInsert> = Vec::new();
             // Which slice of the work belongs to which responder.
-            let mut owners: Vec<(usize, Vec<Record>)> = Vec::new();
+            let mut owners: Vec<Owned> = Vec::new();
             let mut new_records_count = 0;
             let mut staged = 0usize;
             let mut to_store: Vec<(Arc<Record>, Option<u64>)> = Vec::new();
@@ -1378,9 +1405,11 @@ async fn process_insert_group(
                 }
 
                 let mut records = Vec::with_capacity(batch.len());
+                let mut rows = Vec::with_capacity(batch.len());
                 for (i, request) in batch.into_iter().enumerate() {
                     let record_id = request.id.clone();
                     let row = appended_rows.get(slot).and_then(|b| b[i]);
+                    rows.push(row);
 
                     // UPSERT: an existing id keeps its created_at and bumps its version, and its
                     // old vector has to leave the index before the new one arrives.
@@ -1462,7 +1491,7 @@ async fn process_insert_group(
                 }
 
                 staged += records.len();
-                owners.push((slot, records));
+                owners.push((slot, records, rows));
             }
 
             // One append (and, on disk, one fsync) for the whole group.
@@ -1568,7 +1597,7 @@ async fn process_insert_group(
                         warn!("Failed to remove old full-text document for {}: {}", id, e);
                     }
                 }
-                for record in owners.iter().flat_map(|(_, records)| records) {
+                for record in owners.iter().flat_map(|(_, records, _)| records) {
                     if let Some(doc) = text_document_for(&table_meta, record) {
                         // Text indexing must not fail an insert that already landed.
                         if let Err(e) = engine.add_document(doc).await {
@@ -1593,9 +1622,9 @@ async fn process_insert_group(
     // 发送响应
     match result {
         Ok(owners) => {
-            for (slot, records) in owners {
+            for (slot, records, rows) in owners {
                 if let Some(tx) = senders[slot].take() {
-                    if tx.send(Ok(records)).is_err() {
+                    if tx.send(Ok((records, rows))).is_err() {
                         error!("Failed to send insert response: insertion result was dropped");
                     }
                 }
@@ -1939,11 +1968,18 @@ impl IntelligentIndexedStorage {
                         records += 1;
                     })
                 }
-                WalEntry::UpsertRecordV2 { table, record } => {
-                    self.restore_record_from_wal(&table, record).await.map(|_| {
+                WalEntry::UpsertRecordV2 { table, record } => self
+                    .restore_record_from_wal(&table, record, None)
+                    .await
+                    .map(|_| {
                         records += 1;
-                    })
-                }
+                    }),
+                WalEntry::UpsertRecordInRowFile { table, record, row } => self
+                    .restore_record_from_wal(&table, record, Some(row))
+                    .await
+                    .map(|_| {
+                        records += 1;
+                    }),
                 WalEntry::AlterTable { table, request } => {
                     self.alter_table(&table, request).await.map(|_| ())
                 }
@@ -1980,7 +2016,15 @@ impl IntelligentIndexedStorage {
     /// Replay one current-format record through the normal index path, then restore metadata
     /// that is not part of a create request. Replay is single-threaded and WAL writes are
     /// suppressed while this runs, so replacing the map value after indexing is deterministic.
-    async fn restore_record_from_wal(&self, table: &str, record: Record) -> crate::Result<()> {
+    ///
+    /// `row` is where the entry says the vector is in the table's row file
+    /// (`UpsertRecordInRowFile`); an entry that carries its vector passes `None`.
+    async fn restore_record_from_wal(
+        &self,
+        table: &str,
+        record: Record,
+        row: Option<u64>,
+    ) -> crate::Result<()> {
         // A mutation is logged after it has been applied and after the table lock is released,
         // so two concurrent updates to the same id can reach the log in the opposite order to
         // the one in which they took effect. Replaying that log blindly would resurrect the
@@ -2003,7 +2047,29 @@ impl IntelligentIndexedStorage {
         // logged anything — so read it back rather than re-index nothing. If it is not there
         // either, the record cannot be indexed and the entry is refused like any other bad one:
         // replay skips it and carries on, instead of corrupting the graph for every entry after.
-        let vector = if record.vector.is_empty() {
+        //
+        // An entry that names its row reads exactly that row, whatever the record store says
+        // the id's row is now: a later update or delete in the same log has moved or dropped
+        // the id, and replay is about to re-apply those in order. The row file is append-only
+        // and rows are never renumbered, so the row the entry was written with is still the
+        // row. (A row the sweep has since punched reads as zeros; the entry after it in the
+        // log is the delete that made it dead.)
+        let vector = if let Some(row) = row {
+            let tables = self.read_tables("restore_record_from_wal").await;
+            let read = tables
+                .get(table)
+                .and_then(|data| data.vector_file.as_ref())
+                .and_then(|file| file.read(row));
+            match read {
+                Some(vector) => vector,
+                None => {
+                    return Err(crate::Error::InvalidVector(format!(
+                        "WAL entry for '{}' points at row {} of a row file that does not hold it",
+                        record.id, row
+                    )))
+                }
+            }
+        } else if record.vector.is_empty() {
             let tables = self.read_tables("restore_record_from_wal").await;
             tables
                 .get(table)
@@ -2032,7 +2098,20 @@ impl IntelligentIndexedStorage {
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        data.records.insert(Arc::new(record.clone()), None)?;
+        // The insert above put the vector in the row file and the row in the store; this
+        // re-store of the record, which exists for the timestamps and version the create
+        // request could not carry, has to keep that row or the record comes back with no
+        // vector at all. It stored `None` here, which was hidden while every entry carried
+        // its vector inline: the store then held a second copy of it per replayed record.
+        let mut record = record;
+        let row = data
+            .vector_file
+            .as_ref()
+            .and_then(|_| data.vector_row(&record.id));
+        if row.is_some() {
+            record.vector = Vec::new();
+        }
+        data.records.insert(Arc::new(record.clone()), row)?;
         // The insert above indexed the record with the time it was *replayed*, because a create
         // request carries no timestamp; the map now holds the one it was written with. A table
         // created by this same replay has its payload index built from the start, so that index
@@ -2952,7 +3031,7 @@ impl IntelligentIndexedStorage {
                     table: name.clone(),
                     record: record.clone(),
                 });
-                self.restore_record_from_wal(&name, record).await?;
+                self.restore_record_from_wal(&name, record, None).await?;
                 imported += 1;
             }
             self.wal_append(entries).await?;
@@ -4494,6 +4573,14 @@ impl IntelligentIndexedStorage {
     ///
     /// 每次调用都 `force_flush`：`write_entry` 默认攒够 256KB 才写文件，攒着的部分
     /// `kill -9` 就没了，而"已经返回成功的写入不能丢"正是 WAL 存在的理由。
+    /// Whether a logged write may point at its row in the vector file instead of carrying
+    /// the vector (`WalEntry::UpsertRecordInRowFile`). Not when the log is mirrored to
+    /// object storage: a node recovering from the bucket alone has no row files, and the
+    /// entry is then the only copy of the vector off the machine.
+    fn log_points_at_rows(&self) -> bool {
+        !self.object_storage_enabled
+    }
+
     async fn wal_append(&self, entries: Vec<WalEntry>) -> crate::Result<()> {
         if self.replaying.load(Ordering::SeqCst) {
             return Ok(());
@@ -5008,8 +5095,15 @@ impl IntelligentIndexedStorage {
             None
         };
 
-        let (vector_file, vector_rows) = self.open_vector_file(&table, log)?;
-        let records = self.open_record_store(&table, log)?;
+        // A create is fresh -- whatever a same-named table left on disk is not this table's
+        // -- when it is a live `CREATE TABLE`, and not when it is one being replayed: the
+        // row files on disk are then this table's, written before the crash, and the log
+        // entries about to be replayed point into the vector file rather than carrying the
+        // vectors. (Replaying with `fresh` wiped the files, and was harmless only while the
+        // log held a copy of every vector.)
+        let fresh = log && !self.replaying.load(Ordering::SeqCst);
+        let (vector_file, vector_rows) = self.open_vector_file(&table, fresh)?;
+        let records = self.open_record_store(&table, fresh)?;
         let table_data = IntelligentTableData {
             table: table.clone(),
             records,
@@ -5266,26 +5360,34 @@ impl IntelligentIndexedStorage {
             .map_err(|e| crate::Error::Internal(format!("Failed to send insert request: {}", e)))?;
 
         // 等待后台处理器响应
-        let inserted = response_rx.await.map_err(|e| {
+        let (inserted, rows) = response_rx.await.map_err(|e| {
             crate::Error::Internal(format!("Insert request was cancelled: {}", e))
         })??;
 
         // 先落内存再记日志，最后才返回给调用方。中间崩掉的话这次写入还没被确认，丢了也符合语义；
         // 反过来先记日志的话，处理器若因维度不符等原因失败，日志里就留下了一条永远重放不成功的
         // 幽灵记录。
-        // Each entry clones the record, vector included -- a third 3 KB allocation per record
-        // on this path, freed as soon as the entry is serialised. It cannot simply be moved:
-        // `inserted` is this function's return value and has 157 call sites. Removing it
-        // means serialising the WAL entry from a borrow (a `WalEntryRef` with the same serde
-        // shape, so replay keeps decoding) -- see the insert-path notes (not distributed) for
-        // what that clone costs and what it would take.
+        // A record whose vector went to the row file is logged as a pointer to that row, not
+        // as the vector again: the row was fsynced before the processor answered, so it is
+        // as durable as the entry about to be written, and at 960 dimensions it is the
+        // difference between 3.9 KB and 100 bytes per record in the log. A table whose
+        // vectors are in memory has no row to point at and logs the vector.
         let stage = std::time::Instant::now();
+        let by_row = self.log_points_at_rows();
         self.wal_append(
             inserted
                 .iter()
-                .map(|r| WalEntry::UpsertRecordV2 {
-                    table: tablename.to_string(),
-                    record: r.clone(),
+                .zip(rows.iter().copied().chain(std::iter::repeat(None)))
+                .map(|(r, row)| match row.filter(|_| by_row) {
+                    Some(row) => WalEntry::UpsertRecordInRowFile {
+                        table: tablename.to_string(),
+                        record: without_vector(r),
+                        row,
+                    },
+                    None => WalEntry::UpsertRecordV2 {
+                        table: tablename.to_string(),
+                        record: r.clone(),
+                    },
                 })
                 .collect(),
         )
@@ -7454,16 +7556,27 @@ impl IntelligentIndexedStorage {
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
             // The row file goes with the table. Best effort: a file that will not delete is
             // orphaned, not a failed drop.
+            //
+            // Not while replaying. A log that drops a table and creates it again under the
+            // same name holds, after the drop, entries that point at rows of the vector
+            // file on disk -- which is the recreated table's file, the one the crash left.
+            // Deleting it here would lose every row the log cannot supply. The records
+            // file does go: the entries carry their records, and the replayed create reads
+            // an empty store rather than one holding the dropped table's rows. The rows
+            // the dropped table's entries appended meanwhile are dead space, reclaimed by
+            // the sweep like any other.
             if let Some(wal_dir) = &self.wal_dir {
-                for f in [
-                    crate::storage::vector_file::VectorFormat::F32,
-                    crate::storage::vector_file::VectorFormat::F16,
-                ] {
-                    let path = Self::vector_file_path_for(wal_dir, name, f);
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(
-                        crate::storage::vector_file::VectorFile::rows_path(&path),
-                    );
+                if !self.replaying.load(Ordering::SeqCst) {
+                    for f in [
+                        crate::storage::vector_file::VectorFormat::F32,
+                        crate::storage::vector_file::VectorFormat::F16,
+                    ] {
+                        let path = Self::vector_file_path_for(wal_dir, name, f);
+                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::remove_file(
+                            crate::storage::vector_file::VectorFile::rows_path(&path),
+                        );
+                    }
                 }
                 let rec = Self::record_file_path(wal_dir, name);
                 let _ = std::fs::remove_file(&rec);
@@ -8754,10 +8867,12 @@ impl IntelligentIndexedStorage {
 
             let index_vector = request.vector.clone();
             let mut updated_vector_row: Option<u64> = None;
+            let mut appended_row: Option<u64> = None;
             let stored_vector = match &table_data.vector_file {
                 Some(file) if request.vector.len() == expected_dim => {
                     // Appended here under the map lock -- updates are rare and single.
                     let row = file.append(&[(record_id.as_str(), request.vector.as_slice())])?[0];
+                    appended_row = Some(row);
                     if table_data.records.is_on_disk() {
                         updated_vector_row = Some(row);
                     } else {
@@ -8825,6 +8940,7 @@ impl IntelligentIndexedStorage {
                 table: table_data.table.clone(),
                 record,
                 vector: index_vector,
+                vector_row: appended_row,
                 #[cfg(feature = "text-bm25")]
                 full_text_engine: table_data.full_text_engine.clone(),
             }
@@ -8913,15 +9029,26 @@ impl IntelligentIndexedStorage {
         // vector, the graph's flat vector array fell one entry behind its nodes, and after any
         // update followed by a crash the server panicked on its way up — every time, since the
         // log does not change. The insert path logs the vector already.
-        let mut logged = artifacts.record.clone();
-        if logged.vector.is_empty() {
-            logged.vector = artifacts.vector.clone();
-        }
-        self.wal_append(vec![WalEntry::UpsertRecordV2 {
-            table: tablename.to_string(),
-            record: logged,
-        }])
-        .await?;
+        // Since then the entry points at the row instead (`UpsertRecordInRowFile`), the same
+        // as an insert; a table without a row file still logs the vector itself.
+        let entry = match artifacts.vector_row.filter(|_| self.log_points_at_rows()) {
+            Some(row) => WalEntry::UpsertRecordInRowFile {
+                table: tablename.to_string(),
+                record: without_vector(&artifacts.record),
+                row,
+            },
+            None => {
+                let mut logged = artifacts.record.clone();
+                if logged.vector.is_empty() {
+                    logged.vector = artifacts.vector.clone();
+                }
+                WalEntry::UpsertRecordV2 {
+                    table: tablename.to_string(),
+                    record: logged,
+                }
+            }
+        };
+        self.wal_append(vec![entry]).await?;
 
         Ok(artifacts.record)
     }
@@ -10895,7 +11022,7 @@ mod tests {
         table: &str,
         ids: &[&str],
         dim: usize,
-    ) -> (InsertRequest, oneshot::Receiver<crate::Result<Vec<Record>>>) {
+    ) -> (InsertRequest, oneshot::Receiver<crate::Result<Inserted>>) {
         let (response_tx, response_rx) = oneshot::channel();
         (
             InsertRequest {
@@ -11031,8 +11158,8 @@ mod tests {
 
         process_insert_group(vec![first, bad, last], &storage.tables).await;
 
-        assert_eq!(first_rx.await?.expect("first request succeeded").len(), 2);
-        assert_eq!(last_rx.await?.expect("last request succeeded").len(), 1);
+        assert_eq!(first_rx.await?.expect("first request succeeded").0.len(), 2);
+        assert_eq!(last_rx.await?.expect("last request succeeded").0.len(), 1);
         assert!(
             matches!(
                 bad_rx.await?,
@@ -11185,9 +11312,9 @@ mod tests {
         process_insert_group(vec![one, two, three], &storage.tables).await;
 
         let ids = |rows: Vec<Record>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
-        assert_eq!(ids(one_rx.await??), vec!["a", "b"]);
-        assert_eq!(ids(two_rx.await??), vec!["c"]);
-        assert_eq!(ids(three_rx.await??), vec!["d", "e", "f"]);
+        assert_eq!(ids(one_rx.await??.0), vec!["a", "b"]);
+        assert_eq!(ids(two_rx.await??.0), vec!["c"]);
+        assert_eq!(ids(three_rx.await??.0), vec!["d", "e", "f"]);
         Ok(())
     }
 }
