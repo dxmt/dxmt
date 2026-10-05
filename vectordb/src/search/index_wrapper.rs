@@ -29,6 +29,8 @@ pub struct IndexWrapper {
     /// else. Nothing else contends for this -- inserts are already serialised by the storage
     /// layer's single insert task, and a rebuild is rare.
     structural: Arc<tokio::sync::Mutex<()>>,
+    /// Bumped by `replace`; see [`Self::generation`].
+    generation: Arc<std::sync::atomic::AtomicU64>,
     /// True while a quantizer is training in a background task, so the next batch does not
     /// start a second one. Training is minutes; batches are milliseconds apart.
     quantizing: Arc<std::sync::atomic::AtomicBool>,
@@ -41,7 +43,22 @@ impl IndexWrapper {
             index: Arc::new(RwLock::new(index)),
             structural: Arc::new(tokio::sync::Mutex::new(())),
             quantizing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Which index this is: bumped by every `replace`, so a map keyed by node positions
+    /// (`storage::node_map`) knows when the positions it holds belong to a graph that is
+    /// gone.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The index, if no writer holds it this instant. For a caller that already holds the
+    /// table map's lock and must not wait here; a writer that holds this one is a rebuild
+    /// about to swap the index, whose positions would be stale anyway.
+    pub fn try_read(&self) -> Option<tokio::sync::RwLockReadGuard<'_, Box<dyn VectorIndex>>> {
+        self.index.try_read().ok()
     }
 
     /// Clone the underlying Arc for sharing between async tasks
@@ -429,6 +446,28 @@ impl IndexWrapper {
         self.index.read().await.scan_ids(query, ids, k)
     }
 
+    /// See `VectorIndex::scan_nodes`.
+    pub async fn scan_nodes(
+        &self,
+        query: &DenseVector,
+        filter: &crate::search::node_filter::NodeFilter,
+        k: usize,
+    ) -> Option<Vec<(RecordId, f32)>> {
+        self.index.read().await.scan_nodes(query, filter, k)
+    }
+
+    /// See `VectorIndex::search_with_gate`.
+    pub async fn search_with_gate(
+        &self,
+        query: &DenseVector,
+        k: usize,
+        ef: usize,
+        gate: &dyn crate::search::node_filter::NodeGate,
+    ) -> Result<Vec<(RecordId, f32)>> {
+        let index = self.index.read().await;
+        index.search_with_gate(query, k, ef, gate).await
+    }
+
     /// See `VectorIndex::wants_rebuild`.
     pub async fn wants_rebuild(&self) -> bool {
         self.index.read().await.wants_rebuild()
@@ -536,6 +575,8 @@ impl IndexWrapper {
         let _structural = self.structural.lock().await;
         let mut index = self.index.write().await;
         *index = new_index;
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// Clear the index - requires write lock
@@ -569,6 +610,7 @@ impl Clone for IndexWrapper {
             // Shared, not reset: a clone of the wrapper is another handle on the same index,
             // and two handles must not each start a training job for it.
             quantizing: Arc::clone(&self.quantizing),
+            generation: Arc::clone(&self.generation),
         }
     }
 }

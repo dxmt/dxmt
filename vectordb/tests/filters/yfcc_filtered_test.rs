@@ -190,57 +190,74 @@ async fn yfcc_filtered_track() {
         .await
         .unwrap(),
     );
-    storage
-        .create_table(TableConfig {
-            name: "t".to_string(),
-            dimension: dim,
-            distance_metric: DistanceMetric::Euclidean,
-            description: None,
-            index_type: None,
-            text_fields: None,
-            enable_full_text_search: false,
-            memory_optimization: None,
-            payload_schema: None,
-            schema_version: 1,
-            named_vectors: None,
-            hnsw: None,
-            quantization: None,
-            payload_index: None,
-            embedding: None,
-        })
+    // A WAL directory that already holds the table (a previous run with DXMT_YFCC_DIR_WAL)
+    // is reopened as it is: the load is the long part, and the snapshot taken after it makes
+    // the reopen seconds rather than minutes.
+    let already = storage
+        .get_table("t")
         .await
-        .unwrap();
-
-    let started = std::time::Instant::now();
-    const BATCH: usize = 5_000;
-    for start in (0..n).step_by(BATCH) {
-        let end = (start + BATCH).min(n);
-        let batch = (start..end)
-            .map(|i| CreateRecordRequest {
-                id: i.to_string(),
-                vector: base[i * dim..(i + 1) * dim]
-                    .iter()
-                    .map(|&b| b as f32)
-                    .collect(),
-                sparse_vector: None,
+        .ok()
+        .map(|t| t.record_count as usize);
+    if already == Some(n) {
+        println!("reopened {n} rows from {}", wal.display());
+    } else {
+        storage
+            .create_table(TableConfig {
+                name: "t".to_string(),
+                dimension: dim,
+                distance_metric: DistanceMetric::Euclidean,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
                 named_vectors: None,
-                payload: Some(serde_json::json!({ "tags": tags[i] })),
-                text: None,
+                hnsw: None,
+                quantization: None,
+                payload_index: None,
+                embedding: None,
             })
-            .collect();
-        storage.insert_records("t", batch).await.unwrap();
-        if start > 0 && start % 1_000_000 == 0 {
-            println!(
-                "  {start} rows, {:.0} rows/s",
-                start as f64 / started.elapsed().as_secs_f64()
-            );
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        const BATCH: usize = 5_000;
+        for start in (0..n).step_by(BATCH) {
+            let end = (start + BATCH).min(n);
+            let batch = (start..end)
+                .map(|i| CreateRecordRequest {
+                    id: i.to_string(),
+                    vector: base[i * dim..(i + 1) * dim]
+                        .iter()
+                        .map(|&b| b as f32)
+                        .collect(),
+                    sparse_vector: None,
+                    named_vectors: None,
+                    payload: Some(serde_json::json!({ "tags": tags[i] })),
+                    text: None,
+                })
+                .collect();
+            storage.insert_records("t", batch).await.unwrap();
+            if start > 0 && start % 1_000_000 == 0 {
+                println!(
+                    "  {start} rows, {:.0} rows/s",
+                    start as f64 / started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        println!(
+            "loaded {n} rows in {:.0}s ({:.0} rows/s)",
+            started.elapsed().as_secs_f64(),
+            n as f64 / started.elapsed().as_secs_f64()
+        );
+        if std::env::var("DXMT_YFCC_DIR_WAL").is_ok() {
+            let t = std::time::Instant::now();
+            storage.snapshot().await.unwrap();
+            println!("snapshot for reopening: {:.0}s", t.elapsed().as_secs_f64());
         }
     }
-    println!(
-        "loaded {n} rows in {:.0}s ({:.0} rows/s)",
-        started.elapsed().as_secs_f64(),
-        n as f64 / started.elapsed().as_secs_f64()
-    );
     let waited = std::time::Instant::now();
     loop {
         let stats = storage.get_table_stats("t").await.unwrap();
@@ -308,6 +325,99 @@ async fn yfcc_filtered_track() {
         println!(
             "exact filtered scan, {qn} queries: p50 {:.1} ms",
             exact_started.elapsed().as_secs_f64() * 1e3 / qn as f64
+        );
+    }
+
+    // Where the time goes at `normal`, by branch and by how many rows the filter matches:
+    // each query's branch is read off the counters, its match count from `count_records`.
+    {
+        let buckets = ["<2K", "2K-10K", "10K-100K", "100K-500K", ">=500K"];
+        let bucket = |m: usize| match m {
+            0..=1_999 => 0,
+            2_000..=9_999 => 1,
+            10_000..=99_999 => 2,
+            100_000..=499_999 => 3,
+            _ => 4,
+        };
+        let names = [
+            "exact_scan",
+            "code_scan",
+            "in_graph",
+            "pre_filter",
+            "post_filter",
+        ];
+        /// Latencies, total matched, total recall, total evaluation ns of one cell.
+        type Cell = (Vec<f64>, usize, f32, u64);
+        let mut cells: std::collections::BTreeMap<(usize, usize), Cell> =
+            std::collections::BTreeMap::new();
+        let start = storage.health_snapshot().await.filter_paths;
+        for q in 0..qn {
+            let f = tag_filter(&qtags[q]);
+            let matched = storage.count_records("t", Some(&f)).await.unwrap();
+            let before = storage.health_snapshot().await.filter_paths;
+            let t = std::time::Instant::now();
+            let got = ids(storage
+                .search("t", query(qvec(q), f, SearchMode::Normal))
+                .await
+                .unwrap());
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            let after = storage.health_snapshot().await.filter_paths;
+            let took = [
+                after.exact_scan - before.exact_scan,
+                after.code_scan - before.code_scan,
+                after.in_graph - before.in_graph,
+                after.pre_filter - before.pre_filter,
+                after.post_filter - before.post_filter,
+            ];
+            let branch = took.iter().position(|&d| d > 0).unwrap_or(names.len());
+            let cell = cells
+                .entry((branch, bucket(matched)))
+                .or_insert((Vec::new(), 0, 0.0, 0));
+            cell.0.push(ms);
+            cell.1 += matched;
+            cell.2 += recall(&got, &truth[q]);
+            cell.3 += after.eval_ns - before.eval_ns;
+        }
+        let end = storage.health_snapshot().await.filter_paths;
+        println!("\n`normal`, by branch and match set (recall@10, p50, p95, mean matched):");
+        println!("| branch | matched | queries | recall | p50 | p95 | mean matched | mean eval |");
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+        for ((branch, b), (mut lat, matched, r, eval_ns)) in cells {
+            lat.sort_by(|a, c| a.partial_cmp(c).unwrap());
+            let n = lat.len();
+            println!(
+                "| {} | {} | {n} | {:.4} | {:.2} ms | {:.2} ms | {} | {:.2} ms |",
+                names.get(branch).copied().unwrap_or("none"),
+                buckets[b],
+                r / n as f32,
+                lat[n / 2],
+                lat[n * 95 / 100],
+                matched / n,
+                eval_ns as f64 / 1e6 / n as f64
+            );
+        }
+        let total_ns = (end.exact_scan_ns
+            + end.code_scan_ns
+            + end.in_graph_ns
+            + end.pre_filter_ns
+            + end.post_filter_ns)
+            - (start.exact_scan_ns
+                + start.code_scan_ns
+                + start.in_graph_ns
+                + start.pre_filter_ns
+                + start.post_filter_ns);
+        println!(
+            "node map misses: {}",
+            end.node_map_misses - start.node_map_misses
+        );
+        println!(
+            "filter evaluation (estimate + id materialisation): {:.1}% of branch time; per branch ms: exact {:.1} code {:.1} in_graph {:.1} pre {:.1} post {:.1}",
+            100.0 * (end.eval_ns - start.eval_ns) as f64 / total_ns.max(1) as f64,
+            (end.exact_scan_ns - start.exact_scan_ns) as f64 / 1e6,
+            (end.code_scan_ns - start.code_scan_ns) as f64 / 1e6,
+            (end.in_graph_ns - start.in_graph_ns) as f64 / 1e6,
+            (end.pre_filter_ns - start.pre_filter_ns) as f64 / 1e6,
+            (end.post_filter_ns - start.post_filter_ns) as f64 / 1e6,
         );
     }
 

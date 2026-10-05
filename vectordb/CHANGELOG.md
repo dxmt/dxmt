@@ -17,6 +17,19 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Changed
+
+- **Filtered search is planned by the real match count and runs on bitmaps.** A filter's
+  matching records are a roaring bitmap of payload ordinals (string postings already were;
+  a number held by 1,024 or more records keeps one too), resolved to graph node positions
+  through a per-table map that is filled once per node rather than per query, and the
+  planner chooses between scoring the matched nodes' codes and walking the graph with the
+  filter gating its results by the measured match count. The previous planner turned
+  every matching id into an owned string and hashed it twice per query, and its in-graph
+  branch was unreachable on the default index. On the big-ann filtered track at 2M rows,
+  `normal` p50 went from 6.4 ms to 1.8 ms with recall unchanged at 1.0; `GET /metrics`
+  now also reports seconds per planner branch (`dxmt_filter_path_seconds_total`).
+
 ### Fixed
 
 - **A numeric payload field no longer slows every insert down as the table grows.** The

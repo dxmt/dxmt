@@ -77,6 +77,47 @@ pub trait VectorIndex: Send + Sync {
         None
     }
 
+    /// Resolve matching record ids to this index's own node positions, once per query, so
+    /// the scan and the filtered walk below test a node by position rather than by hashing
+    /// its id. `None` when the index has no positions to speak of (a brute-force scan); the
+    /// caller then falls back to the id-set paths above.
+    fn node_filter(
+        &self,
+        _ids: &mut dyn Iterator<Item = &str>,
+    ) -> Option<crate::search::node_filter::NodeFilter> {
+        None
+    }
+
+    /// [`Self::scan_ids`] over a node filter.
+    fn scan_nodes(
+        &self,
+        _query: &[f32],
+        _filter: &crate::search::node_filter::NodeFilter,
+        _k: usize,
+    ) -> Option<Vec<(String, f32)>> {
+        None
+    }
+
+    /// [`Self::search_with_filter`] with the filter answered per node position by `gate`.
+    /// Only called on an index whose positions the caller has resolved (`node_filter` or
+    /// `node_id` answered); the default ignores the gate.
+    async fn search_with_gate(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        _gate: &dyn crate::search::node_filter::NodeGate,
+    ) -> crate::Result<Vec<(String, f32)>> {
+        self.search_with_ef_hint(query, k, ef).await
+    }
+
+    /// The record id at node position `idx`, live or tombstoned, for an index that has
+    /// positions (`slot_count` counts them); `None` past the end, or always for an index
+    /// without positions. What lets a caller keep its own map from positions to records.
+    fn node_id(&self, _idx: usize) -> Option<&str> {
+        None
+    }
+
     /// Whether a rebuild would produce a materially different index even though this one
     /// already holds every record -- an HNSW-PQ graph that has not quantized yet, say. The
     /// storage layer's rebuild skips "equivalent" indexes unless this says otherwise.

@@ -17,6 +17,7 @@ pub mod index;
 pub mod index_wrapper; // NEW: Interior mutability wrapper for Arc<dyn VectorIndex>
 #[cfg(feature = "experimental-indexes")]
 pub mod ivf;
+pub mod node_filter;
 pub mod quantization;
 pub mod simd_distance;
 pub mod sparse_index;

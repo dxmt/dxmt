@@ -180,6 +180,26 @@ pub struct FilterPathCounts {
     pub pre_filter: u64,
     /// Selectivity at or above 30%: the same shape, a different amplification.
     pub post_filter: u64,
+    /// Nanoseconds spent in each branch, from the selectivity estimate to its result.
+    #[serde(default)]
+    pub exact_scan_ns: u64,
+    #[serde(default)]
+    pub code_scan_ns: u64,
+    #[serde(default)]
+    pub in_graph_ns: u64,
+    #[serde(default)]
+    pub pre_filter_ns: u64,
+    #[serde(default)]
+    pub post_filter_ns: u64,
+    /// Nanoseconds spent estimating filters and materialising their matching ids, before
+    /// any branch ran; part of every branch's time above.
+    #[serde(default)]
+    pub eval_ns: u64,
+    /// Filtered searches that could not use the node map -- its lock or the index's was
+    /// held -- and fell back to the owned id set. A steady count here is a lock held too
+    /// long somewhere.
+    #[serde(default)]
+    pub node_map_misses: u64,
 }
 
 /// Runtime persistence state exposed to health/readiness endpoints.
@@ -672,6 +692,14 @@ pub struct IntelligentIndexedStorage {
     filter_path_in_graph: AtomicU64,
     filter_path_pre_filter: AtomicU64,
     filter_path_post_filter: AtomicU64,
+    /// Nanoseconds spent answering, per branch, in the order of [`FilterPathCounts`]: from
+    /// the selectivity estimate to the branch's result. A count says which branch a workload
+    /// is on; this says what it costs there.
+    filter_path_ns: [AtomicU64; 5],
+    /// Nanoseconds spent before any branch runs: estimating the filter and materialising the
+    /// matching ids. Measured apart because it is plumbing, not search.
+    filter_eval_ns: AtomicU64,
+    filter_node_map_misses: AtomicU64,
     last_snapshot_error: Arc<StdMutex<Option<String>>>,
 
     /// Alternative names for tables: `alias -> table`.
@@ -771,6 +799,10 @@ struct IntelligentTableData {
     /// The two indexes that are a pure function of the records, and are rebuilt rather than
     /// restored. `None` means "not built yet" -- see [`IntelligentTableData::derived`].
     derived: parking_lot::RwLock<Option<DerivedIndexes>>,
+    /// Payload ordinals against the graph's node positions, filled lazily by filtered
+    /// searches; see `storage::node_map`. Behind its own lock because it is written by the
+    /// first search to meet new nodes while the table map is only read.
+    node_map: Arc<tokio::sync::RwLock<crate::storage::node_map::NodeMap>>,
 
     /// 全文搜索引擎（仅当启用全文搜索时）
     #[cfg(feature = "text-bm25")]
@@ -1863,6 +1895,9 @@ impl IntelligentIndexedStorage {
             filter_path_in_graph: AtomicU64::new(0),
             filter_path_pre_filter: AtomicU64::new(0),
             filter_path_post_filter: AtomicU64::new(0),
+            filter_path_ns: Default::default(),
+            filter_eval_ns: AtomicU64::new(0),
+            filter_node_map_misses: AtomicU64::new(0),
             memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
@@ -5142,6 +5177,7 @@ impl IntelligentIndexedStorage {
             repaired_total: Arc::new(AtomicU64::new(0)),
             // A table being created has no records, so an empty pair is already correct and
             // there is nothing to rebuild. `restore_table` clears this back to `None`.
+            node_map: Default::default(),
             derived: parking_lot::RwLock::new(Some(DerivedIndexes {
                 payload: {
                     let mut payload = crate::storage::payload_index::PayloadIndex::new();
@@ -5612,6 +5648,9 @@ impl IntelligentIndexedStorage {
         // exactly the length of the rebuild — with no single lock holder over one second, because
         // the holders were one second each, back to back. The fix is not to hold a global lock
         // for a search at all — take what the search needs out of the map, then release it.
+        let filter_clock = std::time::Instant::now();
+        let mut filter_branch: Option<usize> = None;
+        let mut filter_eval_ns = 0u64;
         let (
             index,
             metric,
@@ -5620,6 +5659,9 @@ impl IntelligentIndexedStorage {
             cardinality_and_sel,
             precomputed_filter_ids,
             mut exact_scored,
+            node_filter,
+            walk_filter,
+            matched_rows,
         ) = {
             let tables = self.read_tables("search").await;
 
@@ -5681,6 +5723,7 @@ impl IntelligentIndexedStorage {
             let total_records = table_data.records.len();
 
             // Intelligent PRE/POST-FILTERING / IN-GRAPH decision
+            let eval_clock = std::time::Instant::now();
             let cardinality_and_sel = if let Some(ref filter) = query.filter {
                 let cardinality = table_data.derived().payload.estimate_cardinality(filter);
                 let selectivity = if total_records > 0 {
@@ -5696,8 +5739,14 @@ impl IntelligentIndexedStorage {
             // The in-graph filter branch needs the matching ids, and its small-set special case
             // needs those records' vectors. Both are cheap and both need the map, so they happen
             // here rather than forcing the search to hold the lock for them.
-            let mut precomputed_filter_ids = None;
+            let mut precomputed_filter_ids: Option<std::collections::HashSet<RecordId>> = None;
             let mut exact_scored = None;
+            let mut node_filter: Option<crate::search::node_filter::NodeFilter> = None;
+            let mut walk_filter: Option<(
+                Arc<tokio::sync::RwLock<crate::storage::node_map::NodeMap>>,
+                roaring::RoaringBitmap,
+            )> = None;
+            let mut matched_rows: Option<usize> = None;
             if let (Some(filter), Some((cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
@@ -5713,10 +5762,17 @@ impl IntelligentIndexedStorage {
                 // last step -- the fallback is reached after an initial fetch and at least
                 // one escalating refetch, and each of those reranks thousands of candidates
                 // against their stored vectors to discover what this already knows.
-                if table_data.derived().payload.cannot_match_anything(filter) {
+                let derived = table_data.derived();
+                if derived.payload.cannot_match_anything(filter) {
                     exact_scored = Some(Vec::new());
-                } else if *selectivity < 0.05 {
-                    let filter_ids = table_data.derived().payload.get_matching_ids(filter);
+                } else if *selectivity < Self::FILTER_MATERIALISE_BELOW {
+                    // The matching ids, borrowed from the payload index, and their count --
+                    // which is the real selectivity, where `selectivity` above is an estimate
+                    // that treats AND-ed conditions as independent and is off by a lot when
+                    // they are not (co-occurring tags). Every decision below uses the count.
+                    let matched_set = derived.payload.matched_bitmap(filter);
+                    let m = matched_set.len() as usize;
+                    matched_rows = Some(m);
                     // Exact scoring over the candidate set, when the set is small enough that
                     // doing so beats walking the graph. `result_limit * 4` alone made that
                     // threshold depend on the caller's top_k rather than on the work involved:
@@ -5724,11 +5780,10 @@ impl IntelligentIndexedStorage {
                     // that measured 24 ms p50, where scoring 400 vectors takes microseconds and
                     // is exact rather than approximate. The absolute floor is what matters —
                     // a filtered walk visits on the order of `ef * m` nodes anyway.
-                    if cardinality.exp < Self::in_graph_filter_max_ids()
-                        && filter_ids.len() <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX)
-                    {
-                        let mut scored: Vec<(RecordId, f32)> = filter_ids
+                    if m <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX) {
+                        let mut scored: Vec<(RecordId, f32)> = matched_set
                             .iter()
+                            .filter_map(|ordinal| derived.payload.id_at(ordinal))
                             .filter_map(|id| {
                                 table_data.records.get(id).map(|rec| {
                                     // `vector_for`, not `rec.vector`: with the vectors on
@@ -5736,7 +5791,7 @@ impl IntelligentIndexedStorage {
                                     let dist = metric
                                         .calculate(&query.vector, &table_data.vector_for(&rec))
                                         .unwrap_or(f32::MAX);
-                                    (id.clone(), dist)
+                                    (id.to_string(), dist)
                                 })
                             })
                             .collect();
@@ -5750,15 +5805,71 @@ impl IntelligentIndexedStorage {
                         });
                         scored.truncate(result_limit);
                         self.filter_path_exact_scan.fetch_add(1, Ordering::Relaxed);
-                        info!(
-                            "FILTER-EXACT-SCAN: selectivity={:.2}%, candidates={}",
-                            selectivity * 100.0,
-                            filter_ids.len()
+                        filter_branch = Some(0);
+                        debug!(
+                            "FILTER-EXACT-SCAN: selectivity={:.2}%, candidates={m}",
+                            selectivity * 100.0
                         );
                         exact_scored = Some(scored);
+                    } else {
+                        // Cross from payload ordinals to node positions through the table's
+                        // node map, filled here for any node it has not seen (one hash each,
+                        // once per node ever). A small match set becomes a bitmap of nodes to
+                        // score; a large one stays a bitmap of ordinals the walk tests nodes
+                        // against. An index without positions, or one a rebuild is swapping
+                        // this instant, gets the owned id set it always had.
+                        let mut resolved = false;
+                        if m > Self::in_graph_filter_max_ids() {
+                            // Capped off (a test switch): the amplified fetch below, which
+                            // keeps the match set only to drop non-matching candidates.
+                            resolved = true;
+                            precomputed_filter_ids = Some(
+                                matched_set
+                                    .iter()
+                                    .filter_map(|ordinal| derived.payload.id_at(ordinal))
+                                    .map(str::to_string)
+                                    .collect(),
+                            );
+                        } else if let (Some(graph), Ok(mut map)) =
+                            (index.try_read(), table_data.node_map.try_write())
+                        {
+                            let payload = &derived.payload;
+                            if map.fill(index.generation(), &**graph, |id| payload.ordinal_of(id)) {
+                                if m <= Self::code_scan_max(total_records) {
+                                    let mut nodes =
+                                        crate::search::node_filter::NodeFilter::with_capacity(
+                                            map.len(),
+                                        );
+                                    for ordinal in matched_set.iter() {
+                                        if let Some(node) = map.node_of(ordinal) {
+                                            nodes.insert(node);
+                                        }
+                                    }
+                                    node_filter = Some(nodes);
+                                } else {
+                                    walk_filter = Some((
+                                        Arc::clone(&table_data.node_map),
+                                        matched_set.clone(),
+                                    ));
+                                }
+                                resolved = true;
+                            }
+                        }
+                        if !resolved {
+                            self.filter_node_map_misses.fetch_add(1, Ordering::Relaxed);
+                            precomputed_filter_ids = Some(
+                                matched_set
+                                    .iter()
+                                    .filter_map(|ordinal| derived.payload.id_at(ordinal))
+                                    .map(str::to_string)
+                                    .collect(),
+                            );
+                        }
                     }
-                    precomputed_filter_ids = Some(filter_ids);
                 }
+            }
+            if query.filter.is_some() {
+                filter_eval_ns = eval_clock.elapsed().as_nanos() as u64;
             }
 
             (
@@ -5783,6 +5894,9 @@ impl IntelligentIndexedStorage {
                 cardinality_and_sel,
                 precomputed_filter_ids,
                 exact_scored,
+                node_filter,
+                walk_filter,
+                matched_rows,
             )
         };
         let active_index = &index;
@@ -5813,7 +5927,91 @@ impl IntelligentIndexedStorage {
             if let (Some(_), Some((ref cardinality, selectivity))) =
                 (&query.filter, &cardinality_and_sel)
             {
-                if exact_scored.is_none()
+                if let (None, Some(filter)) = (&exact_scored, node_filter.as_ref()) {
+                    // A small match set, resolved to node positions: score every one of
+                    // them from the resident codes -- no walk -- and rerank the best exactly.
+                    let want = active_index
+                        .rerank_candidates(result_limit)
+                        .await
+                        .unwrap_or(result_limit)
+                        .max(result_limit);
+                    match active_index.scan_nodes(&query.vector, filter, want).await {
+                        Some(scanned) => {
+                            self.filter_path_code_scan.fetch_add(1, Ordering::Relaxed);
+                            filter_branch = Some(1);
+                            debug!(
+                                "FILTER-CODE-SCAN: matched={}, kept={}",
+                                filter.len(),
+                                scanned.len()
+                            );
+                            let r = self
+                                .rerank_exact(
+                                    tablename,
+                                    metric,
+                                    &query.vector,
+                                    scanned,
+                                    result_limit,
+                                )
+                                .await?;
+                            exact_scored = Some(r);
+                        }
+                        None => {
+                            // An exact graph has no codes to scan; walk it with the filter.
+                            self.filter_path_in_graph.fetch_add(1, Ordering::Relaxed);
+                            filter_branch = Some(2);
+                            let gate: &dyn crate::search::node_filter::NodeGate = filter;
+                            let r = self
+                                .search_reranked(
+                                    tablename,
+                                    active_index,
+                                    metric,
+                                    &query.vector,
+                                    result_limit,
+                                    ef_hint,
+                                    query.search_mode,
+                                    None,
+                                    None,
+                                    Some(gate),
+                                )
+                                .await?;
+                            exact_scored = Some(r);
+                        }
+                    }
+                }
+                if let (None, Some((map, matched))) = (&exact_scored, walk_filter.as_ref()) {
+                    // A large match set: the walk, with every node it visits tested against
+                    // the matched ordinals through the node map.
+                    self.filter_path_in_graph.fetch_add(1, Ordering::Relaxed);
+                    filter_branch = Some(2);
+                    debug!("FILTER-IN-GRAPH: matched={}, ef={ef_hint}", matched.len());
+                    let map = map.read().await;
+                    let gate = crate::storage::node_map::OrdinalGate { map: &map, matched };
+                    // The walk only runs where the match set is large (above `code_scan_max`, 8% of a
+                    // 2M table, 3.5% of a 10M one), and there the matching nodes are dense enough in
+                    // the graph that a quarter of the budget finds the same neighbours: measured on
+                    // the big-ann filtered track at 2M rows, 234,000 matched, recall@10 1.0000 against
+                    // the exact scan at the full budget, at a half and at a quarter -- 15.6, 9.0 and
+                    // 5.3 ms. The floor keeps the rerank pool full on a small `ef`.
+                    let walk_ef = (ef_hint / 4).max(result_limit * 20);
+                    let r = self
+                        .search_reranked(
+                            tablename,
+                            active_index,
+                            metric,
+                            &query.vector,
+                            result_limit,
+                            walk_ef,
+                            query.search_mode,
+                            None,
+                            None,
+                            Some(&gate),
+                        )
+                        .await?;
+                    exact_scored = Some(r);
+                }
+                if exact_scored.is_some() {
+                    // answered above
+                } else if exact_scored.is_none()
                     && *selectivity < 0.05
                     && precomputed_filter_ids
                         .as_ref()
@@ -5838,6 +6036,7 @@ impl IntelligentIndexedStorage {
                         .max(result_limit);
                     if let Some(scanned) = active_index.scan_ids(&query.vector, &ids, want).await {
                         self.filter_path_code_scan.fetch_add(1, Ordering::Relaxed);
+                        filter_branch = Some(1);
                         info!(
                             "FILTER-CODE-SCAN: selectivity={:.2}%, candidates={}, kept={}",
                             selectivity * 100.0,
@@ -5859,6 +6058,7 @@ impl IntelligentIndexedStorage {
                     let empty = std::collections::HashSet::new();
                     let filter_ids = precomputed_filter_ids.as_ref().unwrap_or(&empty);
                     self.filter_path_in_graph.fetch_add(1, Ordering::Relaxed);
+                    filter_branch = Some(2);
                     info!(
                         "FILTER-IN-GRAPH: selectivity={:.2}%, candidates={}",
                         selectivity * 100.0,
@@ -5893,6 +6093,7 @@ impl IntelligentIndexedStorage {
                                 query.search_mode,
                                 Some(filter_ids),
                                 None,
+                                None,
                             )
                             .await?
                         }
@@ -5911,6 +6112,7 @@ impl IntelligentIndexedStorage {
                         .min(total_records)
                         .max(result_limit * 2);
                     self.filter_path_pre_filter.fetch_add(1, Ordering::Relaxed);
+                    filter_branch = Some(3);
                     info!(
                         "PRE-FILTERING: selectivity={:.2}%, fetch={}",
                         selectivity * 100.0,
@@ -5927,6 +6129,7 @@ impl IntelligentIndexedStorage {
                             query.search_mode,
                             None,
                             precomputed_filter_ids.as_ref(),
+                            None,
                         )
                         .await?;
                     (r, true, fetch)
@@ -5947,6 +6150,7 @@ impl IntelligentIndexedStorage {
                         .min(total_records)
                         .max(result_limit * 3);
                     self.filter_path_post_filter.fetch_add(1, Ordering::Relaxed);
+                    filter_branch = Some(4);
                     info!(
                         "POST-FILTERING: selectivity={:.2}%, fetch={}",
                         selectivity * 100.0,
@@ -5961,6 +6165,7 @@ impl IntelligentIndexedStorage {
                             fetch,
                             ef_hint,
                             query.search_mode,
+                            None,
                             None,
                             None,
                         )
@@ -5980,10 +6185,18 @@ impl IntelligentIndexedStorage {
                         query.search_mode,
                         None,
                         None,
+                        None,
                     )
                     .await?;
                 (r, false, result_limit)
             };
+
+        if let Some(branch) = filter_branch {
+            self.filter_path_ns[branch]
+                .fetch_add(filter_clock.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.filter_eval_ns
+                .fetch_add(filter_eval_ns, Ordering::Relaxed);
+        }
 
         // Phase 3: assemble, and if post-filtering left the caller short, fetch more.
         //
@@ -6076,6 +6289,7 @@ impl IntelligentIndexedStorage {
                     query.search_mode,
                     None,
                     precomputed_filter_ids.as_ref(),
+                    None,
                 )
                 .await?;
             hits = self
@@ -6613,6 +6827,7 @@ impl IntelligentIndexedStorage {
         mode: SearchMode,
         filter_ids: Option<&std::collections::HashSet<String>>,
         keep: Option<&std::collections::HashSet<String>>,
+        gate: Option<&dyn crate::search::node_filter::NodeGate>,
     ) -> crate::Result<Vec<(RecordId, f32)>> {
         // A `k` larger than the index cannot be answered by asking for more: past that point
         // every extra candidate is a slot the walk keeps open and a node the heap carries, and
@@ -6621,9 +6836,10 @@ impl IntelligentIndexedStorage {
         let rows = index.len().await;
         let k = if rows > 0 { k.min(rows) } else { k };
         let Some(candidates) = index.rerank_candidates(k).await else {
-            return match filter_ids {
-                Some(ids) => index.search_with_filter(query, k, ef, ids).await,
-                None => index.search_with_ef_hint(query, k, ef).await,
+            return match (gate, filter_ids) {
+                (Some(gate), _) => index.search_with_gate(query, k, ef, gate).await,
+                (None, Some(ids)) => index.search_with_filter(query, k, ef, ids).await,
+                (None, None) => index.search_with_ef_hint(query, k, ef).await,
             };
         };
         // The mode widens the pool as well as the walk. On a quantized graph the pool is what
@@ -6636,13 +6852,18 @@ impl IntelligentIndexedStorage {
         } else {
             candidates.max(k)
         };
-        let mut approximate = match filter_ids {
-            Some(ids) => {
+        let mut approximate = match (gate, filter_ids) {
+            (Some(gate), _) => {
+                index
+                    .search_with_gate(query, fetch, ef.max(fetch), gate)
+                    .await?
+            }
+            (None, Some(ids)) => {
                 index
                     .search_with_filter(query, fetch, ef.max(fetch), ids)
                     .await?
             }
-            None => {
+            (None, None) => {
                 index
                     .search_with_ef_hint(query, fetch, ef.max(fetch))
                     .await?
@@ -8343,6 +8564,30 @@ impl IntelligentIndexedStorage {
     /// `ef = 128` and `m = 16` would touch regardless.
     const EXACT_FILTER_SCAN_MAX: usize = 2048;
 
+    /// Largest match set scored node by node rather than walked. Scoring costs one code per
+    /// match; a filtered walk visits about `ef / selectivity` nodes to collect `ef` matching
+    /// ones, and a visit costs several times a code score (the heap, the visited set, the
+    /// links). The two cross where `m * c_scan = ef * rows / m * c_visit`, so at
+    /// `m = sqrt(ef * rows * c_visit / c_scan)`: with `ef` 512 and `WALK_VISIT_IN_SCORES`
+    /// scores to a visit, 157,000 on 2M rows and 350,000 on 10M. Clamped so a tiny or a
+    /// huge table still gets a sane answer.
+    fn code_scan_max(rows: usize) -> usize {
+        ((512.0 * rows as f64 * Self::WALK_VISIT_IN_SCORES).sqrt() as usize)
+            .clamp(Self::CODE_SCAN_MAX / 10, Self::CODE_SCAN_MAX * 10)
+    }
+
+    /// What one visit of the filtered walk costs in code scores: every neighbour of a
+    /// visited node is scored to steer the walk, matching or not, so a visit is about the
+    /// node's degree. Measured on the big-ann filtered track at 2M rows: 205,000 matched
+    /// rows walked in 17 ms against 116 ns per scored code, which puts the crossover near
+    /// 170,000 and this constant at 24.
+    const WALK_VISIT_IN_SCORES: f64 = 24.0;
+
+    /// Below this estimated selectivity the filter's matching ids are materialised before
+    /// the branch is chosen, so the choice rests on the real match count and not on the
+    /// estimate; from here up an amplified unfiltered fetch is cheap enough to try first.
+    const FILTER_MATERIALISE_BELOW: f64 = 0.3;
+
     /// Largest matching set scored from the index's resident codes instead of walked. At
     /// a few hundred nanoseconds a code, 100,000 is tens of milliseconds -- past that a
     /// walk with the filter applied in-graph is the cheaper shape.
@@ -8395,7 +8640,14 @@ impl IntelligentIndexedStorage {
     ///
     /// `DXMT_IN_GRAPH_FILTER_MAX_IDS` overrides it, which is how both paths get exercised from
     /// one test.
-    const IN_GRAPH_FILTER_MAX_IDS: usize = 10_000;
+    ///
+    /// Since 2026-10-05 the paragraphs above describe the cost that is gone: the match set
+    /// is a bitmap of ordinals, resolved to node positions through a map kept across
+    /// queries (`storage::node_map`), and the walk tests a node with one lookup. The cap is
+    /// therefore off by default -- every materialised match set takes the scan or the
+    /// walk, priced by `code_scan_max` -- and the variable remains as the switch that sends
+    /// a match set above it to the amplified fetch instead, for tests of that path.
+    const IN_GRAPH_FILTER_MAX_IDS: usize = usize::MAX;
 
     fn in_graph_filter_max_ids() -> usize {
         crate::config::env::var("DXMT_IN_GRAPH_FILTER_MAX_IDS")
@@ -9321,6 +9573,13 @@ impl IntelligentIndexedStorage {
                 in_graph: self.filter_path_in_graph.load(Ordering::Relaxed),
                 pre_filter: self.filter_path_pre_filter.load(Ordering::Relaxed),
                 post_filter: self.filter_path_post_filter.load(Ordering::Relaxed),
+                exact_scan_ns: self.filter_path_ns[0].load(Ordering::Relaxed),
+                code_scan_ns: self.filter_path_ns[1].load(Ordering::Relaxed),
+                in_graph_ns: self.filter_path_ns[2].load(Ordering::Relaxed),
+                pre_filter_ns: self.filter_path_ns[3].load(Ordering::Relaxed),
+                post_filter_ns: self.filter_path_ns[4].load(Ordering::Relaxed),
+                eval_ns: self.filter_eval_ns.load(Ordering::Relaxed),
+                node_map_misses: self.filter_node_map_misses.load(Ordering::Relaxed),
             },
         }
     }

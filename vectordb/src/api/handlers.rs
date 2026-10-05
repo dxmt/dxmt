@@ -2765,6 +2765,29 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
     ] {
         let _ = writeln!(out, "dxmt_filter_path_total{{branch=\"{branch}\"}} {value}");
     }
+    // And what each branch cost: the count says where a workload is, this says what it
+    // pays there. `eval` is the part every branch shares -- estimating the filter and
+    // materialising its matching ids -- reported on its own so plumbing is told apart
+    // from search.
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_filter_path_seconds_total Seconds spent answering filtered searches, by planner branch."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_filter_path_seconds_total counter");
+    for (branch, ns) in [
+        ("exact_scan", storage.filter_paths.exact_scan_ns),
+        ("code_scan", storage.filter_paths.code_scan_ns),
+        ("in_graph", storage.filter_paths.in_graph_ns),
+        ("pre_filter", storage.filter_paths.pre_filter_ns),
+        ("post_filter", storage.filter_paths.post_filter_ns),
+        ("eval", storage.filter_paths.eval_ns),
+    ] {
+        let _ = writeln!(
+            out,
+            "dxmt_filter_path_seconds_total{{branch=\"{branch}\"}} {:.6}",
+            ns as f64 / 1e9
+        );
+    }
 
     let _ = writeln!(
         out,

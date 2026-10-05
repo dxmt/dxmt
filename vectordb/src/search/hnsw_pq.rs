@@ -392,6 +392,36 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         Some(self.hnsw.scan_ids(&query.to_vec(), ids, k))
     }
 
+    fn node_filter(
+        &self,
+        ids: &mut dyn Iterator<Item = &str>,
+    ) -> Option<crate::search::node_filter::NodeFilter> {
+        Some(self.hnsw.node_filter(ids))
+    }
+
+    fn scan_nodes(
+        &self,
+        query: &[f32],
+        filter: &crate::search::node_filter::NodeFilter,
+        k: usize,
+    ) -> Option<Vec<(String, f32)>> {
+        Some(self.hnsw.scan_nodes(&query.to_vec(), filter, k))
+    }
+
+    async fn search_with_gate(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        gate: &dyn crate::search::node_filter::NodeGate,
+    ) -> crate::Result<Vec<(String, f32)>> {
+        self.hnsw.search_with_gate(&query.to_vec(), k, ef, gate)
+    }
+
+    fn node_id(&self, idx: usize) -> Option<&str> {
+        crate::search::index_traits::VectorIndex::node_id(&self.hnsw, idx)
+    }
+
     /// Deliberately not `maybe_quantize`. `IndexWrapper` calls `quantization_job` and
     /// `install_quantizer` around this, so the training happens with no lock held; leaving
     /// the inline path here as well would train twice, the second time for nothing.

@@ -186,6 +186,7 @@ impl PayloadIndex {
         self.bulk = false;
         for field in self.field_indices.values_mut() {
             field.numeric.merge();
+            field.numeric.rebuild_heavy();
             field.geo.merge();
             field.distinct_count = field.value_to_ids.len() + field.numeric.distinct_count();
         }
@@ -601,6 +602,16 @@ impl Postings {
         self.len() == 0
     }
 
+    /// Union into a bitmap: a copy of the bitmap for `Many`, one insert for `One`.
+    fn or_into(&self, out: &mut roaring::RoaringBitmap) {
+        match self {
+            Postings::One(ordinal) => {
+                out.insert(*ordinal);
+            }
+            Postings::Many(many) => *out |= many,
+        }
+    }
+
     fn for_each(&self, mut visit: impl FnMut(Ordinal)) {
         match self {
             Postings::One(ordinal) => visit(*ordinal),
@@ -764,6 +775,15 @@ struct NumericIndex {
     pending: Vec<(OrderedFloat, Ordinal)>,
     /// Distinct values in `sorted`, recomputed at each merge into it.
     distinct: usize,
+    /// The records holding each value that at least `HEAVY_AT` records hold, as a bitmap
+    /// beside the sorted array. A categorical number -- a tag, a category id -- is an
+    /// equality filter's whole cost: the run in the sorted array is found in two binary
+    /// searches, but every one of its entries was then copied into a hash set, and an AND
+    /// of two popular tags built two such sets to intersect them (200,000 inserts for a
+    /// result of a few hundred: the 19 ms p95 of the smallest filtered searches on the
+    /// big-ann filtered track). Popular values are the Zipfian head, a few thousand of
+    /// them at most, so the bitmaps cost little and an equality on one is a lookup.
+    heavy: FastMap<OrderedFloat, roaring::RoaringBitmap>,
 }
 
 impl NumericIndex {
@@ -772,11 +792,97 @@ impl NumericIndex {
     const FOLD_AT: usize = 4_096;
     /// Merge `recent` into `sorted` once it is this fraction of it.
     const MERGE_RATIO: usize = 64;
+    /// A value held by this many records gets a bitmap of them.
+    const HEAVY_AT: usize = 1_024;
 
     fn insert(&mut self, value: OrderedFloat, id: Ordinal) {
         self.pending.push((value, id));
+        if let Some(bitmap) = self.heavy.get_mut(&value) {
+            bitmap.insert(id);
+        } else if self.sorted.len() + self.recent.len() >= Self::HEAVY_AT
+            && self.run_len(value) >= Self::HEAVY_AT
+        {
+            self.promote(value);
+        }
         if self.pending.len() >= Self::FOLD_AT {
             self.fold();
+        }
+    }
+
+    /// How many entries the two sorted levels hold for `value`. `pending` is not counted:
+    /// a scan of it per insert would cost more than promoting a value a few thousand
+    /// entries late.
+    fn run_len(&self, value: OrderedFloat) -> usize {
+        let v = Some(value);
+        Self::bounded(&self.sorted, v, v).len() + Self::bounded(&self.recent, v, v).len()
+    }
+
+    /// Give `value` its bitmap, from every level.
+    fn promote(&mut self, value: OrderedFloat) {
+        let mut bitmap = roaring::RoaringBitmap::new();
+        let v = Some(value);
+        for level in [&self.sorted, &self.recent] {
+            for (_, id) in Self::bounded(level, v, v) {
+                bitmap.insert(*id);
+            }
+        }
+        for (x, id) in &self.pending {
+            if *x == value {
+                bitmap.insert(*id);
+            }
+        }
+        self.heavy.insert(value, bitmap);
+    }
+
+    /// Rebuild the bitmaps from the sorted array: what a bulk load ends with, since `push`
+    /// maintains nothing.
+    fn rebuild_heavy(&mut self) {
+        self.heavy.clear();
+        let mut start = 0;
+        while start < self.sorted.len() {
+            let value = self.sorted[start].0;
+            let mut end = start;
+            while end < self.sorted.len() && self.sorted[end].0 == value {
+                end += 1;
+            }
+            if end - start >= Self::HEAVY_AT {
+                self.heavy.insert(
+                    value,
+                    self.sorted[start..end].iter().map(|(_, id)| *id).collect(),
+                );
+            }
+            start = end;
+        }
+    }
+
+    /// How many entries hold exactly `value`: the bitmap's count when the value has one,
+    /// the lengths of its runs in the sorted levels plus a scan of the tail otherwise. The
+    /// estimator used to walk the run entry by entry -- 10 ms for a value held by every
+    /// row of 2M, on every query naming it, before any search ran.
+    fn count_equal(&self, value: OrderedFloat) -> usize {
+        if let Some(bitmap) = self.heavy.get(&value) {
+            return bitmap.len() as usize;
+        }
+        self.run_len(value) + self.pending.iter().filter(|(x, _)| *x == value).count()
+    }
+
+    /// The records holding exactly `value`, into `out`: the bitmap when the value has one,
+    /// the run in the sorted levels and the tail otherwise.
+    fn equal_into(&self, value: OrderedFloat, out: &mut roaring::RoaringBitmap) {
+        if let Some(bitmap) = self.heavy.get(&value) {
+            *out |= bitmap;
+            return;
+        }
+        let v = Some(value);
+        for level in [&self.sorted, &self.recent] {
+            for (_, id) in Self::bounded(level, v, v) {
+                out.insert(*id);
+            }
+        }
+        for (x, id) in &self.pending {
+            if *x == value {
+                out.insert(*id);
+            }
         }
     }
 
@@ -842,6 +948,12 @@ impl NumericIndex {
     }
 
     fn remove(&mut self, value: OrderedFloat, id: Ordinal) {
+        if let Some(bitmap) = self.heavy.get_mut(&value) {
+            bitmap.remove(id);
+            if (bitmap.len() as usize) < Self::HEAVY_AT / 2 {
+                self.heavy.remove(&value);
+            }
+        }
         if let Some(at) = self
             .pending
             .iter()
@@ -1360,8 +1472,13 @@ impl PayloadIndex {
         new_payload: &serde_json::Value,
         created: i64,
     ) {
+        let before = self.ids.get(record_id);
         self.remove_record(record_id, old_payload);
         self.insert_record(record_id, new_payload, created);
+        debug_assert!(
+            before.is_none() || before == self.ids.get(record_id),
+            "an update keeps the record's ordinal"
+        );
     }
 
     /// 从索引中删除记录
@@ -1693,6 +1810,88 @@ impl PayloadIndex {
         self.ids_of(self.matching_ordinals(filter))
     }
 
+    /// The ids a filter matches, borrowed from the index: what the search planner wants,
+    /// since it resolves them to node positions and never needs them owned. At 100,000
+    /// matches `get_matching_ids` was 100,000 `String` allocations per query.
+    /// The ordinal standing for `id`, while the record is indexed. Stable across an update
+    /// (`update_record` releases the ordinal and the insert that follows takes it back off
+    /// the free list), which is what lets `storage::node_map` resolve a node once.
+    pub fn ordinal_of(&self, id: &str) -> Option<Ordinal> {
+        self.ids.get(id)
+    }
+
+    /// The id behind `ordinal`, while a record holds it.
+    pub fn id_at(&self, ordinal: Ordinal) -> Option<&str> {
+        self.ids.id_of(ordinal)
+    }
+
+    pub fn matching_id_refs(&self, filter: &Filter) -> Vec<&str> {
+        self.matched_bitmap(filter)
+            .iter()
+            .filter_map(|ordinal| self.ids.id_of(ordinal))
+            .collect()
+    }
+
+    /// The ordinals a filter matches, as a bitmap, by whichever path answers it: the
+    /// bitmap one for equalities, the general one otherwise.
+    pub fn matched_bitmap(&self, filter: &Filter) -> roaring::RoaringBitmap {
+        self.matching_bitmap(filter)
+            .unwrap_or_else(|| self.matching_ordinals(filter).into_iter().collect())
+    }
+
+    /// The records a filter matches, as a bitmap, for the common filter: `must` conditions
+    /// only, each an equality or an `In` on a payload field. The postings of a string value
+    /// are a bitmap already and a popular number keeps one (`NumericIndex::heavy`), so
+    /// this is lookups and an intersection, smallest first, with no per-record hashing.
+    /// `None` for any other shape, which takes [`Self::matching_ordinals`]; the two agree
+    /// where both answer, and `matching_bitmap_agrees_with_the_general_path` says so.
+    pub fn matching_bitmap(&self, filter: &Filter) -> Option<roaring::RoaringBitmap> {
+        let must = filter.must.as_deref().unwrap_or(&[]);
+        let other = |c: &Option<Vec<Condition>>| c.as_ref().is_some_and(|v| !v.is_empty());
+        if must.is_empty() || other(&filter.should) || other(&filter.must_not) {
+            return None;
+        }
+        let mut parts: Vec<roaring::RoaringBitmap> = Vec::with_capacity(must.len());
+        for condition in must {
+            if condition.key == "id" {
+                return None;
+            }
+            let values: Vec<&serde_json::Value> = match &condition.operation {
+                FilterOperation::Equal(value) => vec![value],
+                FilterOperation::In(values) => values.iter().collect(),
+                _ => return None,
+            };
+            let mut bitmap = roaring::RoaringBitmap::new();
+            if let Some(field) = self.field_indices.get(&condition.key) {
+                for value in values {
+                    let key = Self::to_value_key(value)?;
+                    match Self::as_ordered(&key) {
+                        Some(number) => field.numeric.equal_into(number, &mut bitmap),
+                        None => {
+                            if let Some(postings) = field.value_to_ids.get(&key) {
+                                postings.or_into(&mut bitmap);
+                            }
+                        }
+                    }
+                }
+            }
+            if bitmap.is_empty() {
+                return Some(bitmap);
+            }
+            parts.push(bitmap);
+        }
+        parts.sort_by_key(roaring::RoaringBitmap::len);
+        let mut parts = parts.into_iter();
+        let mut matched = parts.next()?;
+        for part in parts {
+            matched &= &part;
+            if matched.is_empty() {
+                break;
+            }
+        }
+        Some(matched)
+    }
+
     /// One page of the records a filter matches — newest `created_at` first, ties by id — and
     /// how many match in all.
     ///
@@ -1940,16 +2139,7 @@ impl PayloadIndex {
                     // map. Counting only the map reads every numeric equality as "no such
                     // value", which is a selectivity of zero and the wrong branch downstream.
                     let count = match Self::as_ordered(&value_key) {
-                        Some(number) => {
-                            let mut n = 0usize;
-                            field_index.numeric.select(
-                                Some(number),
-                                Some(number),
-                                |v| v == number,
-                                |_| n += 1,
-                            );
-                            n
-                        }
+                        Some(number) => field_index.numeric.count_equal(number),
                         None => field_index
                             .value_to_ids
                             .get(&value_key)
@@ -1990,12 +2180,7 @@ impl PayloadIndex {
                 for value in values {
                     if let Some(value_key) = Self::to_value_key(value) {
                         match Self::as_ordered(&value_key) {
-                            Some(number) => field_index.numeric.select(
-                                Some(number),
-                                Some(number),
-                                |v| v == number,
-                                |_| total_count += 1,
-                            ),
+                            Some(number) => total_count += field_index.numeric.count_equal(number),
                             None => {
                                 if let Some(ids) = field_index.value_to_ids.get(&value_key) {
                                     total_count += ids.len();
@@ -3767,6 +3952,236 @@ mod cursor {
         );
         assert!(!c.precedes(100, "a"));
         assert!(!c.precedes(101, "z"));
+    }
+}
+
+#[cfg(test)]
+mod bitmap_path {
+    use super::*;
+    use crate::types::record::{Condition, Filter, FilterOperation};
+
+    fn eq(key: &str, value: serde_json::Value) -> Condition {
+        Condition {
+            key: key.to_string(),
+            operation: FilterOperation::Equal(value),
+        }
+    }
+
+    fn must(conditions: Vec<Condition>) -> Filter {
+        Filter {
+            must: Some(conditions),
+            must_not: None,
+            should: None,
+        }
+    }
+
+    fn sorted(set: impl IntoIterator<Item = Ordinal>) -> Vec<Ordinal> {
+        let mut v: Vec<Ordinal> = set.into_iter().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Tags as an integer array per record: a few popular values (over the bitmap
+    /// threshold), many rare ones, and a string field beside them. The bitmap path and
+    /// the general path answer every filter alike, through inserts, removes and a bulk
+    /// rebuild.
+    #[test]
+    fn matching_bitmap_agrees_with_the_general_path() {
+        let mut index = PayloadIndex::new();
+        let mut st = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let payload = |next: &mut dyn FnMut() -> u64| {
+            let mut tags: Vec<i64> = vec![(next() % 3) as i64]; // 0, 1, 2: popular
+            for _ in 0..(next() % 4) {
+                tags.push(100 + (next() % 5_000) as i64); // rare
+            }
+            serde_json::json!({ "tags": tags, "lang": if next().is_multiple_of(2) { "en" } else { "de" } })
+        };
+        let mut payloads = Vec::new();
+        for i in 0..6_000u32 {
+            let p = payload(&mut next);
+            index.insert_record(&format!("r{i}"), &p, 0);
+            payloads.push(p);
+        }
+        let popular = &index.field_indices["tags"].numeric.heavy;
+        assert!(
+            popular.contains_key(&OrderedFloat::from(0.0))
+                && !popular.contains_key(&OrderedFloat::from(100.0)),
+            "popular tags get a bitmap, rare ones do not: {:?}",
+            popular.keys().collect::<Vec<_>>()
+        );
+
+        let filters = [
+            must(vec![eq("tags", serde_json::json!(1))]),
+            must(vec![eq("tags", serde_json::json!(104))]),
+            must(vec![
+                eq("tags", serde_json::json!(1)),
+                eq("tags", serde_json::json!(2)),
+            ]),
+            must(vec![
+                eq("tags", serde_json::json!(0)),
+                eq("lang", serde_json::json!("en")),
+            ]),
+            must(vec![eq("tags", serde_json::json!(99_999))]),
+            must(vec![Condition {
+                key: "tags".to_string(),
+                operation: FilterOperation::In(vec![serde_json::json!(0), serde_json::json!(101)]),
+            }]),
+            must(vec![eq("nope", serde_json::json!(1))]),
+        ];
+        let check = |index: &PayloadIndex, when: &str| {
+            for (i, f) in filters.iter().enumerate() {
+                let fast = index
+                    .matching_bitmap(f)
+                    .expect("an equality filter has a bitmap");
+                assert_eq!(
+                    sorted(fast.iter()),
+                    sorted(index.matching_ordinals(f)),
+                    "{when}: filter {i}"
+                );
+            }
+        };
+        check(&index, "after inserts");
+
+        for i in (0..6_000u32).step_by(7) {
+            index.remove_record(&format!("r{i}"), &payloads[i as usize]);
+        }
+        check(&index, "after removes");
+
+        // A bulk load keeps no bitmaps until it ends; then it has the same ones.
+        let mut bulk = PayloadIndex::new();
+        bulk.begin_bulk(6_000);
+        for (i, p) in payloads.iter().enumerate() {
+            bulk.insert_record(&format!("r{i}"), p, 0);
+        }
+        bulk.end_bulk();
+        check(&bulk, "after a bulk load");
+        assert!(bulk.field_indices["tags"]
+            .numeric
+            .heavy
+            .contains_key(&OrderedFloat::from(2.0)));
+
+        // Shapes the bitmap path leaves to the general one.
+        let shapes = [
+            Filter {
+                must: None,
+                must_not: Some(vec![eq("lang", serde_json::json!("en"))]),
+                should: None,
+            },
+            Filter {
+                must: Some(vec![Condition {
+                    key: "tags".to_string(),
+                    operation: FilterOperation::GreaterThan(serde_json::json!(1)),
+                }]),
+                must_not: None,
+                should: None,
+            },
+        ];
+        for f in &shapes {
+            assert!(index.matching_bitmap(f).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod eval_cost {
+    use super::*;
+    use crate::types::record::{Condition, Filter, FilterOperation};
+
+    /// Where a filtered search's evaluation time goes on a corpus shaped like the big-ann
+    /// filtered track: 2M records, ~9 Zipfian integer tags each. Prints, does not assert.
+    ///
+    ///   cargo test --release --lib eval_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn where_evaluation_spends_its_time() {
+        let mut index = PayloadIndex::new();
+        let mut st = 0x1234_5678_9ABC_DEF1_u64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let n = 2_000_000u32;
+        index.begin_bulk(n as usize);
+        for i in 0..n {
+            let k = 6 + (next() % 7) as usize;
+            let tags: Vec<i64> = (0..k)
+                .map(|_| {
+                    // Zipf-ish over 200K tags: rank = u^(-1/0.9) scaled.
+                    let u = (next() % 1_000_000) as f64 / 1_000_000.0 + 1e-9;
+                    (u.powf(-1.1) as i64).min(200_000)
+                })
+                .collect();
+            index.insert_record(&i.to_string(), &serde_json::json!({ "tags": tags }), 0);
+        }
+        index.end_bulk();
+        let eq = |v: i64| Condition {
+            key: "tags".to_string(),
+            operation: FilterOperation::Equal(serde_json::json!(v)),
+        };
+        let heavy = index.field_indices["tags"].numeric.heavy.len();
+        println!("{n} records, {heavy} heavy tag values");
+        for (name, filter) in [
+            (
+                "one popular tag",
+                Filter {
+                    must: Some(vec![eq(1)]),
+                    must_not: None,
+                    should: None,
+                },
+            ),
+            (
+                "one rare tag",
+                Filter {
+                    must: Some(vec![eq(150_000)]),
+                    must_not: None,
+                    should: None,
+                },
+            ),
+            (
+                "two popular tags",
+                Filter {
+                    must: Some(vec![eq(1), eq(2)]),
+                    must_not: None,
+                    should: None,
+                },
+            ),
+            (
+                "popular and rare",
+                Filter {
+                    must: Some(vec![eq(1), eq(150_000)]),
+                    must_not: None,
+                    should: None,
+                },
+            ),
+        ] {
+            let t = std::time::Instant::now();
+            let est = index.estimate_cardinality(&filter);
+            let t_est = t.elapsed();
+            let t = std::time::Instant::now();
+            let empty = index.cannot_match_anything(&filter);
+            let t_empty = t.elapsed();
+            let t = std::time::Instant::now();
+            let bm = index.matched_bitmap(&filter);
+            let t_bm = t.elapsed();
+            let t = std::time::Instant::now();
+            let refs = index.matching_id_refs(&filter).len();
+            let t_refs = t.elapsed();
+            let t = std::time::Instant::now();
+            let general = index.matching_ordinals(&filter);
+            let t_general = t.elapsed();
+            println!(
+                "{name}: matched {} (est {} / general {}, empty {empty}); estimate {:?}, cannot_match {:?}, bitmap {:?}, id refs ({refs}) {:?}, general path {:?}",
+                bm.len(), est.exp, general.len(), t_est, t_empty, t_bm, t_refs, t_general
+            );
+        }
     }
 }
 

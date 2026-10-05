@@ -1,4 +1,5 @@
 use crate::precomputed_query::PrecomputedQuery;
+use crate::search::node_filter::{NodeFilter, NodeGate};
 use crate::search::quantization::product_quantization::ProductQuantizer;
 use crate::search::simd_distance::SimdDistance;
 use crate::types::{DenseVector, DistanceMetric, RecordId};
@@ -1448,15 +1449,9 @@ impl HnswIndex {
         entry_points: Vec<usize>,
         ef: usize,
         layer: usize,
-        filter_idxs: Option<&HashSet<usize>>,
+        gate: Option<&dyn NodeGate>,
     ) -> Vec<(usize, f32)> {
-        self.search_layer_by(
-            |idx| self.score(scorer, idx),
-            entry_points,
-            ef,
-            layer,
-            filter_idxs,
-        )
+        self.search_layer_by(|idx| self.score(scorer, idx), entry_points, ef, layer, gate)
     }
 
     /// `search_layer` with the distance supplied by the caller, per node index.
@@ -1471,7 +1466,7 @@ impl HnswIndex {
         entry_points: Vec<usize>,
         ef: usize,
         layer: usize,
-        filter_idxs: Option<&HashSet<usize>>,
+        gate: Option<&dyn NodeGate>,
     ) -> Vec<(usize, f32)> {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new(); // Min-heap for exploration
@@ -1493,7 +1488,7 @@ impl HnswIndex {
                 idx,
                 distance: dist,
             });
-            if filter_idxs.is_none_or(|f| f.contains(&idx)) {
+            if gate.is_none_or(|g| g.allows(idx)) {
                 w.push(Result {
                     idx,
                     distance: dist,
@@ -1553,7 +1548,7 @@ impl HnswIndex {
                     }
 
                     // Only add to result window if this node passes the filter
-                    if filter_idxs.is_none_or(|f| f.contains(&neighbor_idx))
+                    if gate.is_none_or(|g| g.allows(neighbor_idx))
                         && (dist < w.peek().map(|r| r.distance).unwrap_or(f32::INFINITY)
                             || w.len() < ef)
                     {
@@ -1588,7 +1583,7 @@ impl HnswIndex {
         entry_points: Vec<usize>,
         ef: usize,
         layer: usize,
-        filter_idxs: Option<&HashSet<usize>>,
+        gate: Option<&dyn NodeGate>,
     ) -> Vec<(usize, f32)> {
         let mut visited = visited::Visited::start(self.nodes.len());
         let mut candidates = BinaryHeap::new();
@@ -1606,7 +1601,7 @@ impl HnswIndex {
                 idx,
                 distance: dist,
             });
-            if filter_idxs.is_none_or(|f| f.contains(&idx)) {
+            if gate.is_none_or(|g| g.allows(idx)) {
                 w.push(Result {
                     idx,
                     distance: dist,
@@ -1645,7 +1640,7 @@ impl HnswIndex {
                 let neighbor_distances: Vec<_> = if candidate_neighbors.len() > 8 {
                     candidate_neighbors
                         .par_iter()
-                        .filter(|&&idx| filter_idxs.is_none_or(|f| f.contains(&idx)))
+                        .filter(|&&idx| gate.is_none_or(|g| g.allows(idx)))
                         .map(|&neighbor_idx| {
                             let dist = self.score(scorer, neighbor_idx);
                             (neighbor_idx, dist)
@@ -1654,7 +1649,7 @@ impl HnswIndex {
                 } else {
                     candidate_neighbors
                         .iter()
-                        .filter(|&&idx| filter_idxs.is_none_or(|f| f.contains(&idx)))
+                        .filter(|&&idx| gate.is_none_or(|g| g.allows(idx)))
                         .map(|&neighbor_idx| {
                             let dist = self.score(scorer, neighbor_idx);
                             (neighbor_idx, dist)
@@ -1683,11 +1678,8 @@ impl HnswIndex {
                 }
 
                 // Also add non-filter-matching candidates for graph traversal (bridges)
-                if filter_idxs.is_some() {
-                    for &idx in candidate_neighbors
-                        .iter()
-                        .filter(|&&i| !filter_idxs.unwrap().contains(&i))
-                    {
+                if let Some(g) = gate {
+                    for &idx in candidate_neighbors.iter().filter(|&&i| !g.allows(i)) {
                         let dist = self.score(scorer, idx);
                         if dist < w.peek().map(|r| r.distance).unwrap_or(f32::INFINITY)
                             || candidates.len() < ef
@@ -1874,12 +1866,93 @@ impl HnswIndex {
 
         // Layer 0: apply Acorn filter
         let ef = ef_override.max(k);
+        let gate: &dyn NodeGate = &filter_idxs;
         let candidates = if self.nodes.len() > 1000 {
-            self.search_layer_parallel(&scorer, curr_nearest, ef, 0, Some(&filter_idxs))
+            self.search_layer_parallel(&scorer, curr_nearest, ef, 0, Some(gate))
         } else {
-            self.search_layer(&scorer, curr_nearest, ef, 0, Some(&filter_idxs))
+            self.search_layer(&scorer, curr_nearest, ef, 0, Some(gate))
         };
 
+        Ok(candidates
+            .into_iter()
+            .take(k)
+            .map(|(idx, dist)| (self.nodes.id(idx).to_string(), dist))
+            .collect())
+    }
+
+    /// The node positions of `ids`, as a bitmap: one hash per id, no allocation per id.
+    /// Ids the graph does not hold, and deleted nodes, are left out.
+    pub fn node_filter<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> NodeFilter {
+        let mut filter = NodeFilter::with_capacity(self.nodes.len());
+        for id in ids {
+            if let Some(idx) = self.idx_of(id) {
+                if !self.nodes.is_deleted(idx) {
+                    filter.insert(idx);
+                }
+            }
+        }
+        filter
+    }
+
+    /// [`Self::scan_ids`] over a node filter: score every set position, best `k` first.
+    pub fn scan_nodes(
+        &self,
+        query: &DenseVector,
+        filter: &NodeFilter,
+        k: usize,
+    ) -> Vec<(RecordId, f32)> {
+        let query = self.prepare(query.clone());
+        let scorer = self.scorer(&query);
+        let mut heap: BinaryHeap<Result> = BinaryHeap::with_capacity(k + 1);
+        let mut it = filter.iter().peekable();
+        while let Some(idx) = it.next() {
+            if let Some(&next) = it.peek() {
+                self.prefetch(next);
+            }
+            if idx >= self.nodes.len() || self.nodes.is_deleted(idx) {
+                continue;
+            }
+            let distance = self.score(&scorer, idx);
+            if heap.len() < k {
+                heap.push(Result { idx, distance });
+            } else if heap.peek().is_some_and(|w| distance < w.distance) {
+                heap.pop();
+                heap.push(Result { idx, distance });
+            }
+        }
+        let mut out: Vec<(RecordId, f32)> = heap
+            .into_iter()
+            .map(|r| (self.nodes.id(r.idx).to_string(), r.distance))
+            .collect();
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    /// [`Self::search_with_filter`] with the filter answered per node position by `gate`.
+    pub fn search_with_gate(
+        &self,
+        query: &DenseVector,
+        k: usize,
+        ef_override: usize,
+        gate: &dyn NodeGate,
+    ) -> crate::Result<Vec<(RecordId, f32)>> {
+        if self.entry_point.is_none() {
+            return Ok(Vec::new());
+        }
+        let query = &self.prepare(query.clone());
+        let scorer = self.scorer(query);
+        let entry = self.entry_point.unwrap();
+        let entry_level = self.nodes.level(entry);
+        let mut curr_nearest = vec![entry];
+        for lc in (1..=entry_level).rev() {
+            curr_nearest = self.search_layer_closest(&scorer, curr_nearest, lc);
+        }
+        let ef = ef_override.max(k);
+        // The serial walk, the one every unfiltered search takes. `search_layer_parallel`
+        // spawns a rayon batch per visited node and scores every non-matching neighbour as
+        // well; on 2M rows with a filter matching 10% it answered in 360 ms where the
+        // amplified unfiltered fetch took 8 -- it was never on a path anything measured.
+        let candidates = self.search_layer(&scorer, curr_nearest, ef, 0, Some(gate));
         Ok(candidates
             .into_iter()
             .take(k)
@@ -2715,6 +2788,20 @@ impl crate::search::index_traits::VectorIndex for HnswIndex {
     /// old one deleted and appends a new one.
     fn slot_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    fn node_id(&self, idx: usize) -> Option<&str> {
+        (idx < self.nodes.len()).then(|| self.nodes.id(idx))
+    }
+
+    async fn search_with_gate(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        gate: &dyn NodeGate,
+    ) -> crate::Result<Vec<(String, f32)>> {
+        HnswIndex::search_with_gate(self, &query.to_vec(), k, ef, gate)
     }
 
     fn snapshot_to(&self, path: &std::path::Path) -> crate::Result<bool> {

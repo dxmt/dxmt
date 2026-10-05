@@ -6,6 +6,7 @@ pub mod index_selector;
 pub mod intelligent_indexed_storage;
 pub mod memory;
 pub(crate) mod memory_guard;
+pub mod node_map;
 pub mod object;
 pub mod payload_index;
 pub mod punch;
