@@ -29,6 +29,13 @@ release, and the first commit that was ever pushed anywhere.
   reports `fast_scan`. `quantization.fast_scan: false` at creation leaves the codes out,
   for a table that is never filtered or a server whose cores are all spoken for.
 
+- **The payload index is built in the background after a restart, on every core.** It was
+  built on the first filtered query, one row at a time: 33 s on a 10M-row table, paid by
+  whichever caller came first. The server now warms each table's payload and sparse indexes
+  and its node map as soon as recovery is done, decoding rows in parallel under short read
+  locks and installing the result only if no write reached the table meanwhile; the lazy
+  build remains for a table that was written to first, and decodes in parallel too.
+
 ### Changed
 
 - **Filtered search is planned by the real match count and runs on bitmaps.** A filter's

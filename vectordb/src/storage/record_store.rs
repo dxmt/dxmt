@@ -546,6 +546,38 @@ impl RowStore {
     /// and this has already paid for it: without this, rebuilding the payload index and then
     /// listing records scanned the whole table **twice**, once for each, for 8 s apiece at 10M
     /// rows. A caller that never lists still never scans — it just no longer scans twice.
+    /// Rows `from..to` decoded on every core, one slot per row. The decode is what a scan of
+    /// the table costs -- 10M rows of 150 bytes were 10 s of MessagePack on one thread -- and
+    /// each row is independent: the file is mapped and `read` copies a slice out.
+    pub fn decode_range(&self, from: u32, to: u32) -> Vec<Option<Arc<Record>>> {
+        use rayon::prelude::*;
+        let to = to.min(self.ids.rows() as u32);
+        if from >= to {
+            return Vec::new();
+        }
+        (from..to)
+            .into_par_iter()
+            .map(|row| {
+                if self.tombstone[row as usize] {
+                    return None;
+                }
+                self.file
+                    .read(row)
+                    .and_then(|bytes| rmp_serde::from_slice::<Record>(&bytes).ok())
+                    .map(Arc::new)
+            })
+            .collect()
+    }
+
+    /// Publish the `created_at` column from a full scan's rows, if nothing has yet and the
+    /// scan covered every row the table has now.
+    pub fn publish_created(&self, created: Vec<i64>) {
+        let mut slot = self.created.write();
+        if slot.is_none() && created.len() == self.ids.rows() {
+            *slot = Some(created);
+        }
+    }
+
     pub fn for_each(&self, mut f: impl FnMut(Arc<Record>)) {
         let mut timestamps = self
             .created
@@ -831,6 +863,31 @@ impl RecordStore {
         match self {
             RecordStore::Memory(m) => m.len(),
             RecordStore::Disk(s) => s.len(),
+        }
+    }
+
+    /// Rows the disk store has written, live or not; `None` for the in-memory map, which
+    /// has no row order to speak of.
+    pub fn row_count(&self) -> Option<u32> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.ids.rows() as u32),
+        }
+    }
+
+    /// Rows `from..to` of the disk store decoded in parallel, one slot per row: `None`
+    /// for a tombstone or a row that will not decode. `None` for the in-memory map.
+    pub fn decode_range(&self, from: u32, to: u32) -> Option<Vec<Option<Arc<Record>>>> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.decode_range(from, to)),
+        }
+    }
+
+    /// See [`RowStore::publish_created`]; nothing for the in-memory map.
+    pub fn publish_created(&self, created: Vec<i64>) {
+        if let RecordStore::Disk(s) = self {
+            s.publish_created(created);
         }
     }
 

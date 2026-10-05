@@ -978,7 +978,13 @@ impl NumericIndex {
     /// Fold everything into `sorted`: what `end_bulk` and a full-grown `recent` call.
     fn merge(&mut self) {
         if !self.pending.is_empty() {
-            self.pending.sort_unstable_by_key(|(value, _)| *value);
+            // A bulk load ends with every entry in `pending` -- 108M of them for 10M rows of
+            // ten tags -- so this sort is the bulk build's second-largest cost after the
+            // decode, and it parallelises.
+            {
+                use rayon::prelude::*;
+                self.pending.par_sort_unstable_by_key(|(value, _)| *value);
+            }
             let recent = std::mem::take(&mut self.recent);
             let pending = std::mem::take(&mut self.pending);
             self.recent = Self::merge_runs(recent, pending);

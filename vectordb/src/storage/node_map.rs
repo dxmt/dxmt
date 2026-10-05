@@ -38,12 +38,27 @@ impl NodeMap {
         index: &dyn VectorIndex,
         ordinal_of: impl Fn(&str) -> Option<u32>,
     ) -> bool {
+        self.fill_up_to(generation, index, ordinal_of, usize::MAX)
+    }
+
+    /// [`Self::fill`], resolving at most `at_most` new nodes: what a background warm-up
+    /// uses so it can release the table lock between slices. Returns `false` only when the
+    /// index has no positions; a partial fill returns `true` and `len()` says how far it got.
+    pub fn fill_up_to(
+        &mut self,
+        generation: u64,
+        index: &dyn VectorIndex,
+        ordinal_of: impl Fn(&str) -> Option<u32>,
+        at_most: usize,
+    ) -> bool {
         if self.generation != generation {
             self.node_to_ordinal.clear();
             self.ordinal_to_node.clear();
             self.generation = generation;
         }
-        let slots = index.slot_count();
+        let slots = index
+            .slot_count()
+            .min(self.node_to_ordinal.len().saturating_add(at_most));
         for idx in self.node_to_ordinal.len()..slots {
             let Some(id) = index.node_id(idx) else {
                 return false;

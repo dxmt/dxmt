@@ -622,6 +622,7 @@ pub async fn create_app_with_storage(
     spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
     spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
     spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+    IntelligentIndexedStorage::spawn_derived_warmup(storage.clone());
     spawn_row_reclamation(storage.clone(), row_compaction_interval_from_env());
     spawn_stall_detector(stall_threshold_from_env());
 

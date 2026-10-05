@@ -150,6 +150,12 @@ fn recall(got: &[String], truth: &[String]) -> f32 {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn yfcc_filtered_track() {
+    if std::env::var("DXMT_YFCC_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("dxmt_vectordb=info")
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let dir = std::path::PathBuf::from(std::env::var("DXMT_YFCC_DIR").expect("DXMT_YFCC_DIR"));
     let limit = env("DXMT_YFCC_ROWS");
     let nq = env("DXMT_YFCC_QUERIES").unwrap_or(1_000);
@@ -274,6 +280,14 @@ async fn yfcc_filtered_track() {
         "quantized after a further {:.0}s",
         waited.elapsed().as_secs_f64()
     );
+    if std::env::var("DXMT_YFCC_WARM").as_deref() == Ok("1") {
+        let t = std::time::Instant::now();
+        let warmed = storage.warm_derived("t").await.unwrap();
+        println!(
+            "warm_derived: {warmed} in {:.1}s",
+            t.elapsed().as_secs_f64()
+        );
+    }
     if std::env::var("DXMT_YFCC_FAST_SCAN").as_deref() == Ok("1") {
         let t = std::time::Instant::now();
         let built = storage.ensure_fast_scan("t").await.unwrap();
@@ -295,18 +309,19 @@ async fn yfcc_filtered_track() {
         r.hits.into_iter().map(|h| h.id).collect()
     };
 
-    // Truth per query: published for the full set, the exact scan otherwise. The first
-    // filtered query also builds the payload index, which is timed on its own.
+    // The product's cold start: a `normal` filtered query, which builds the payload index
+    // if the warm-up has not, and reads a rerank pool of rows -- not the exact scan below,
+    // which reads the whole row file and measures page cache, not the index.
     let t0 = std::time::Instant::now();
     let _ = storage
         .search(
             "t",
-            query(qvec(0), tag_filter(&qtags[0]), SearchMode::Exact),
+            query(qvec(0), tag_filter(&qtags[0]), SearchMode::Normal),
         )
         .await
         .unwrap();
     println!(
-        "first filtered query (payload index build): {:.1}s",
+        "first filtered query at normal (payload index build if not warmed): {:.2}s",
         t0.elapsed().as_secs_f64()
     );
     let mut truth: Vec<Vec<String>> = Vec::with_capacity(qn);
