@@ -1,4 +1,8 @@
 use tracing::info;
+/// `IndexAlgorithm::HnswPQ::fast_scan` for a table written before the field existed.
+fn fast_scan_default() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IndexAlgorithm {
@@ -19,6 +23,12 @@ pub enum IndexAlgorithm {
         /// exact, which is the only way to say "do not quantize this one".
         #[serde(default)]
         quantize_at_rows: Option<usize>,
+        /// Whether the quantized graph also keeps the 4-bit block-scan codes
+        /// (`quantization::fast_scan`), which make a large filtered match set a flat scan
+        /// at the price of about the 8-bit code's bytes again and of CPU under load. On
+        /// by default; `quantization.fast_scan: false` at creation turns it off.
+        #[serde(default = "fast_scan_default")]
+        fast_scan: bool,
     },
     QuantizedIVF {
         nlist: usize,
@@ -373,6 +383,7 @@ impl IntelligentIndexSelector {
                     num_centroids: 256,
                     enable_reranking: false,
                     quantize_at_rows: None,
+                    fast_scan: true,
                 },
                 confidence: 0.90,
                 expected_performance: ExpectedPerformance {
@@ -454,6 +465,7 @@ mod adopt_tests {
             num_centroids: 256,
             enable_reranking: false,
             quantize_at_rows: None,
+            fast_scan: true,
         };
         assert!(
             !current.adopt_query_time_params(&want),

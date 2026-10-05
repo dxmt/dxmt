@@ -143,6 +143,7 @@ impl From<IndexAlgorithmV1> for crate::storage::index_selector::IndexAlgorithm {
                 num_subvectors,
                 num_centroids,
                 enable_reranking,
+                fast_scan: true,
                 // Not stated, so the index's own default (65,536) -- the threshold every
                 // table written before this field had.
                 quantize_at_rows: None,

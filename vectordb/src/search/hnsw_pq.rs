@@ -25,6 +25,15 @@ pub struct HnswPqIndex {
     config: HnswPqConfig,
     distance_metric: DistanceMetric,
     dimension: usize,
+    /// Whether quantizing also builds the block-scan sidecar. Not part of the file layout
+    /// (the layout predates it): a loaded index reads `true`, and the table's own setting
+    /// decides again at the next quantization or `ensure_fast_scan`.
+    #[serde(skip, default = "fast_scan_on")]
+    fast_scan_enabled: bool,
+}
+
+fn fast_scan_on() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +149,12 @@ impl Default for HnswPqConfig {
 }
 
 impl HnswPqIndex {
+    /// Whether quantizing builds the block-scan sidecar (`quantization.fast_scan`).
+    pub fn with_fast_scan(mut self, enabled: bool) -> Self {
+        self.fast_scan_enabled = enabled;
+        self
+    }
+
     /// Where the fast-scan codes live beside an index file: `t0.idx` -> `t0.fs`.
     fn sidecar_path(path: &std::path::Path) -> std::path::PathBuf {
         path.with_extension("fs")
@@ -167,6 +182,7 @@ impl HnswPqIndex {
             config.num_subvectors = HnswPqConfig::default_subvectors(dimension);
         }
         Ok(Self {
+            fast_scan_enabled: true,
             hnsw: HnswIndex::new(distance_metric, Some(config.hnsw_config.clone())),
             config,
             distance_metric,
@@ -216,14 +232,18 @@ impl HnswPqIndex {
             DistanceMetric::Euclidean,
         )?;
         pq.train(&prepared, 25)?;
-        let fast = crate::search::quantization::fast_scan::FastScan::train(
-            self.dimension,
-            DistanceMetric::Euclidean,
-            &prepared,
-            25,
-        )
-        .map_err(|e| tracing::warn!("fast-scan codebooks not trained: {e}"))
-        .ok();
+        let fast = if self.fast_scan_enabled {
+            crate::search::quantization::fast_scan::FastScan::train(
+                self.dimension,
+                DistanceMetric::Euclidean,
+                &prepared,
+                25,
+            )
+            .map_err(|e| tracing::warn!("fast-scan codebooks not trained: {e}"))
+            .ok()
+        } else {
+            None
+        };
         self.hnsw.quantize(pq, fast)
     }
 
@@ -492,7 +512,9 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
             pq,
             // The graph scores prepared vectors by squared euclidean distance whatever the
             // table's metric, and so does the sidecar.
-            fast_scan: Some((self.dimension, DistanceMetric::Euclidean)),
+            fast_scan: self
+                .fast_scan_enabled
+                .then_some((self.dimension, DistanceMetric::Euclidean)),
         })
     }
 
@@ -891,6 +913,28 @@ mod tests {
         assert!(!bare.has_fast_scan());
         assert_eq!(bare.scan_nodes(query, &every_other, 50).unwrap().len(), 50);
         assert!(!bare.has_fast_scan());
+    }
+
+    /// `quantization.fast_scan: false`: the graph quantizes without the sidecar and the
+    /// dense-filter scan takes the 8-bit codes.
+    #[tokio::test]
+    async fn a_table_can_decline_the_fast_scan_codes() {
+        let mut index = HnswPqIndex::new(64, DistanceMetric::Cosine, Some(small_config()))
+            .unwrap()
+            .with_fast_scan(false);
+        let data = corpus(1_500, 64, 0x5EED_5EED_0000_0001);
+        index.bulk_build(data.clone()).await.unwrap();
+        assert!(index.is_quantized() && !index.has_fast_scan());
+        let mut all = crate::search::node_filter::NodeFilter::with_capacity(index.slot_count());
+        for idx in 0..index.slot_count() {
+            all.insert(idx);
+        }
+        assert_eq!(index.scan_nodes(&data[0].1, &all, 10).unwrap().len(), 10);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pq.idx");
+        use crate::search::index_traits::SerializableIndex;
+        index.save(&path).unwrap();
+        assert!(!path.with_extension("fs").exists());
     }
 
     #[test]

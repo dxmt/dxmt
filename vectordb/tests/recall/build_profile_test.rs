@@ -120,6 +120,7 @@ async fn where_the_build_spends_its_time() {
                     num_subvectors: None,
                     num_centroids: None,
                     quantize_at_rows: Some(usize::MAX),
+                    fast_scan: None,
                 },
             ),
             payload_index: None,

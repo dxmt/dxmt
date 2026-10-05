@@ -320,6 +320,12 @@ pub struct QuantizationParams {
     /// is an exact HNSW graph, so this is also how to say "never quantize this table": set it
     /// higher than the table will ever grow.
     pub quantize_at_rows: Option<usize>,
+    /// Keep the 4-bit block-scan codes beside the 8-bit ones (default true). They cost about
+    /// the 8-bit code's bytes again and make a filtered search over a large match set a flat
+    /// scan; turn them off for a table that is never filtered, or for a server whose cores
+    /// are all spoken for -- the scan is parallel and buys latency with CPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_scan: Option<bool>,
 }
 
 /// How this table turns text into a vector, so a caller can write and search with text.

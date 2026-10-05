@@ -26,7 +26,8 @@ release, and the first commit that was ever pushed anywhere.
   track at 10M rows the 100K-500K match band went from 27 ms to 17 ms p50 (p95 44 to 23) at
   `normal`, recall unchanged, and the 16-thread throughput cost 9%. Tables quantized before this get the codes from
   `ensure_fast_scan` (built from the row file; 45 s at 10M); `GET /tables/{t}/stats`
-  reports `fast_scan`.
+  reports `fast_scan`. `quantization.fast_scan: false` at creation leaves the codes out,
+  for a table that is never filtered or a server whose cores are all spoken for.
 
 ### Changed
 

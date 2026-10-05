@@ -476,6 +476,17 @@ def _(table):
         info = get(f"/tables/{name}").json()["data"]["table"]
         assert info["quantization"]["quantize_at_rows"] == 10_000_000, info["quantization"]
         assert info["quantization"]["num_subvectors"] == 2, info["quantization"]
+        assert "fast_scan" not in info["quantization"] or info["quantization"]["fast_scan"] is None
+    finally:
+        delete(f"/tables/{name}")
+    # `fast_scan: false` is kept on the table and leaves the block-scan codes out.
+    name = f"probe_nofs_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4, "quantization": {"fast_scan": False}})
+    try:
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["quantization"]["fast_scan"] is False, info["quantization"]
+        stats = get(f"/tables/{name}/stats").json()["data"]
+        assert stats.get("fast_scan") is False, stats
         post(f"/tables/{name}/records", {"records": [
             {"id": "a", "vector": [1.0, 0.0, 0.0, 0.0]}]})
         assert stats_of(name)["quantized"] is False

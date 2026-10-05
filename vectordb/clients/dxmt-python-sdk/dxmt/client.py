@@ -370,8 +370,10 @@ class DXMTClient:
                 decide the graph and cannot be recovered afterwards -- searching harder does
                 not add edges the build never made -- and they are per table because one
                 server holds a small lookup table beside a large corpus.
-            quantization: `num_subvectors`, `num_centroids`, `quantize_at_rows`. Setting
-                `quantize_at_rows` above the table's eventual size keeps it exact.
+            quantization: `num_subvectors`, `num_centroids`, `quantize_at_rows`,
+                `fast_scan`. Setting `quantize_at_rows` above the table's eventual size
+                keeps it exact; `fast_scan: False` leaves out the 4-bit block-scan codes
+                that speed up filtered search over large match sets (default on).
             payload_index: Which payload fields to index for filtering: `{"only": [...]}` or
                 `{"except": [...]}`. Every field is indexed by default, which is what makes a
                 filter fast without declaring anything; a field nobody filters on pays memory

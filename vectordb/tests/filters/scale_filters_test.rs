@@ -155,6 +155,7 @@ fn table(dimension: usize) -> TableConfig {
                 num_subvectors: None,
                 num_centroids: None,
                 quantize_at_rows: Some(usize::MAX),
+                fast_scan: None,
             },
         ),
         payload_index: None,

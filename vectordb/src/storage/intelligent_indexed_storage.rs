@@ -3311,6 +3311,7 @@ impl IntelligentIndexedStorage {
                 num_subvectors,
                 num_centroids,
                 quantize_at_rows,
+                fast_scan,
                 ..
             } => {
                 if let Some(v) = graph_m {
@@ -3331,6 +3332,9 @@ impl IntelligentIndexedStorage {
                     }
                     if let Some(v) = q.quantize_at_rows {
                         *quantize_at_rows = Some(v);
+                    }
+                    if let Some(v) = q.fast_scan {
+                        *fast_scan = v;
                     }
                 }
             }
@@ -3583,6 +3587,7 @@ impl IntelligentIndexedStorage {
                 num_centroids: 256,
                 enable_reranking: true,
                 quantize_at_rows: None,
+                fast_scan: true,
             }),
             other => {
                 warn!("DXMT_INDEX_ALGORITHM={other} is not hnsw or hnsw-pq; ignoring it");
@@ -8057,6 +8062,12 @@ impl IntelligentIndexedStorage {
             let data = tables
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            if let IndexAlgorithm::HnswPQ {
+                fast_scan: false, ..
+            } = data.selected_algorithm
+            {
+                return Ok(false);
+            }
             (
                 data.index.clone_arc(),
                 data.table.distance_metric,
@@ -8874,6 +8885,7 @@ impl IntelligentIndexedStorage {
             num_centroids: 256,
             enable_reranking: true,
             quantize_at_rows: None,
+            fast_scan: true,
         };
         // Measured, not estimated: 1M x 768 Cohere, records and vectors on disk, HNSW-PQ192
         // with a 500-candidate rerank (docs/architecture/disk-index.md §3–4).
@@ -8945,6 +8957,7 @@ impl IntelligentIndexedStorage {
                 num_centroids,
                 enable_reranking,
                 quantize_at_rows,
+                fast_scan,
             } => {
                 use crate::search::hnsw::HnswConfig;
                 use crate::search::hnsw_pq::{HnswPqConfig, HnswPqIndex};
@@ -8965,11 +8978,10 @@ impl IntelligentIndexedStorage {
                     ..HnswPqConfig::default()
                 };
 
-                Ok(Box::new(HnswPqIndex::new(
-                    dimension,
-                    distance_metric,
-                    Some(config),
-                )?))
+                Ok(Box::new(
+                    HnswPqIndex::new(dimension, distance_metric, Some(config))?
+                        .with_fast_scan(*fast_scan),
+                ))
             }
 
             // These three have no implementation behind them. They used to fall through to

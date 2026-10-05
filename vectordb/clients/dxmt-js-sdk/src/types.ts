@@ -184,6 +184,9 @@ export interface QuantizationParams {
   /** Rows at which the index trains codebooks and switches to codes. Set it above the table's
    * eventual size to keep the table exact. */
   quantize_at_rows?: number;
+  /** Keep the 4-bit block-scan codes beside the 8-bit ones (default true): faster filtered
+   * search over large match sets, for about the code's bytes again and CPU under load. */
+  fast_scan?: boolean;
 }
 
 /**
