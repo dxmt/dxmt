@@ -2,6 +2,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// What an index hands out to be trained outside its lock: a sample of its vectors, the
+/// quantizer to fit to it, and -- when the index wants the fast-scan sidecar -- the
+/// dimension and metric to fit 16-centroid codebooks for as well.
+pub struct QuantizationJob {
+    pub sample: Vec<crate::types::vector::DenseVector>,
+    pub pq: crate::search::quantization::product_quantization::ProductQuantizer,
+    pub fast_scan: Option<(usize, crate::types::vector::DistanceMetric)>,
+}
+
 #[async_trait]
 pub trait VectorIndex: Send + Sync {
     async fn add(&mut self, id: String, vector: Vec<f32>) -> crate::Result<()>;
@@ -189,16 +198,12 @@ pub trait VectorIndex: Send + Sync {
     /// `StreamingPerformanceCase`, which inserts and searches at the same time: search p99
     /// 47.7 s and 200+ insertions backed up, against a table that answers in milliseconds
     /// either side of the stall.
-    fn quantization_job(
-        &self,
-    ) -> Option<(
-        Vec<crate::types::vector::DenseVector>,
-        crate::search::quantization::product_quantization::ProductQuantizer,
-    )> {
+    fn quantization_job(&self) -> Option<QuantizationJob> {
         None
     }
 
-    /// Adopt a quantizer trained by [`Self::quantization_job`]'s output.
+    /// Adopt a quantizer trained by [`Self::quantization_job`]'s output, and the fast-scan
+    /// codebooks trained beside it when the job asked for them.
     ///
     /// Must be a no-op if the index quantized itself in the meantime: the sample was taken
     /// under a read lock that was then released, so two callers can arrive here with two
@@ -206,8 +211,15 @@ pub trait VectorIndex: Send + Sync {
     fn install_quantizer(
         &mut self,
         _pq: crate::search::quantization::product_quantization::ProductQuantizer,
+        _fast: Option<crate::search::quantization::fast_scan::FastScan>,
     ) -> crate::Result<()> {
         Ok(())
+    }
+
+    /// Whether `scan_nodes` has the block-scan codes (`quantization::fast_scan`), which
+    /// make a large match set a flat cost rather than one per matched code.
+    fn has_fast_scan(&self) -> bool {
+        false
     }
 
     fn as_hnsw_mut(&mut self) -> Option<&mut crate::search::hnsw::HnswIndex> {

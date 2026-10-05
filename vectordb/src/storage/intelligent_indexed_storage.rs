@@ -5780,7 +5780,16 @@ impl IntelligentIndexedStorage {
                     // that measured 24 ms p50, where scoring 400 vectors takes microseconds and
                     // is exact rather than approximate. The absolute floor is what matters —
                     // a filtered walk visits on the order of `ef * m` nodes anyway.
-                    if m <= (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX) {
+                    // With the vectors on disk a row read is a page fault when the file is
+                    // not in cache -- 653 rows took 91 ms a query on a 7.7 GB file at 10M --
+                    // so there the direct scan stops at about the rerank pool, which the code
+                    // scan reads anyway; in memory it is cheap up to the old ceiling.
+                    let exact_up_to = if table_data.vector_file.is_some() {
+                        (result_limit * 4).max(Self::EXACT_FILTER_SCAN_ON_DISK)
+                    } else {
+                        (result_limit * 4).max(Self::EXACT_FILTER_SCAN_MAX)
+                    };
+                    if m <= exact_up_to {
                         let mut scored: Vec<(RecordId, f32)> = matched_set
                             .iter()
                             .filter_map(|ordinal| derived.payload.id_at(ordinal))
@@ -5830,29 +5839,50 @@ impl IntelligentIndexedStorage {
                                     .map(str::to_string)
                                     .collect(),
                             );
-                        } else if let (Some(graph), Ok(mut map)) =
-                            (index.try_read(), table_data.node_map.try_write())
-                        {
-                            let payload = &derived.payload;
-                            if map.fill(index.generation(), &**graph, |id| payload.ordinal_of(id)) {
-                                if m <= Self::code_scan_max(total_records) {
-                                    let mut nodes =
-                                        crate::search::node_filter::NodeFilter::with_capacity(
-                                            map.len(),
-                                        );
-                                    for ordinal in matched_set.iter() {
-                                        if let Some(node) = map.node_of(ordinal) {
-                                            nodes.insert(node);
-                                        }
-                                    }
-                                    node_filter = Some(nodes);
-                                } else {
-                                    walk_filter = Some((
-                                        Arc::clone(&table_data.node_map),
-                                        matched_set.clone(),
-                                    ));
+                        } else if let Some(graph) = index.try_read() {
+                            // Readers share the map; the write lock is taken only when a fill
+                            // is due (new nodes, or a rebuilt graph). Taking it every time
+                            // made each query wait on every walk in flight, and the 16-thread
+                            // pass on 10M rows ran at 6 QPS against 84 for one thread.
+                            let generation = index.generation();
+                            let slots = graph.slot_count();
+                            let due = table_data
+                                .node_map
+                                .try_read()
+                                .map(|m| m.len() < slots || !m.is_for(generation))
+                                .unwrap_or(true);
+                            if due {
+                                if let Ok(mut map) = table_data.node_map.try_write() {
+                                    let payload = &derived.payload;
+                                    map.fill(generation, &**graph, |id| payload.ordinal_of(id));
                                 }
-                                resolved = true;
+                            }
+                            if let Ok(map) = table_data.node_map.try_read() {
+                                if map.is_for(generation) && map.len() >= slots && slots > 0 {
+                                    // Measured on YFCC-10M with the block-scan codes: above
+                                    // this line the walk is still the cheaper answer (14.7 ms
+                                    // at a million matches against a 20 ms scan of every
+                                    // block), so the scan keeps its ceiling and the codes
+                                    // only change what the scan costs under it.
+                                    if m <= Self::code_scan_max(total_records) {
+                                        let mut nodes =
+                                            crate::search::node_filter::NodeFilter::with_capacity(
+                                                map.len(),
+                                            );
+                                        for ordinal in matched_set.iter() {
+                                            if let Some(node) = map.node_of(ordinal) {
+                                                nodes.insert(node);
+                                            }
+                                        }
+                                        node_filter = Some(nodes);
+                                    } else {
+                                        walk_filter = Some((
+                                            Arc::clone(&table_data.node_map),
+                                            matched_set.clone(),
+                                        ));
+                                    }
+                                    resolved = true;
+                                }
                             }
                         }
                         if !resolved {
@@ -8012,6 +8042,157 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
+    /// Give a quantized table the block-scan codes (`quantization::fast_scan`) when it has
+    /// none -- a table quantized before they existed, or whose sidecar was lost. The
+    /// vectors come from the row file, node by node, and the codebooks are fitted to a
+    /// stride sample of them; the index is only written to install the finished codes.
+    /// `Ok(true)` when built, `Ok(false)` when there was nothing to do or the graph grew
+    /// under the build (it is retried by the next call).
+    pub async fn ensure_fast_scan(&self, tablename: &str) -> crate::Result<bool> {
+        use crate::search::quantization::fast_scan::FastScan;
+        let tablename = &*self.resolve(tablename);
+        self.ensure_resident(tablename).await?;
+        let (index, metric, dim) = {
+            let tables = self.read_tables("ensure_fast_scan").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            (
+                data.index.clone_arc(),
+                data.table.distance_metric,
+                data.table.dimension,
+            )
+        };
+        let slots = {
+            let guard = index.read().await;
+            let Some(graph) = guard.as_hnsw() else {
+                return Ok(false);
+            };
+            if !graph.is_quantized() || graph.has_fast_scan() {
+                return Ok(false);
+            }
+            guard.slot_count()
+        };
+        if slots == 0 || FastScan::subvector_dim_for(dim).is_none() {
+            return Ok(false);
+        }
+        // The sample: up to 65,536 rows at a stride.
+        const SAMPLE: usize = 65_536;
+        let stride = (slots / SAMPLE).max(1);
+        let mut sample: Vec<Vec<f32>> = Vec::with_capacity(SAMPLE);
+        let mut at = 0;
+        while at < slots && sample.len() < SAMPLE {
+            let to = (at + 4_096).min(slots);
+            let rows = self
+                .fast_scan_rows(tablename, &index, metric, at, to)
+                .await?;
+            for v in rows.into_iter().step_by(stride).flatten() {
+                sample.push(v);
+                if sample.len() >= SAMPLE {
+                    break;
+                }
+            }
+            at = to;
+        }
+        if sample.len() < 1_024 {
+            return Ok(false);
+        }
+        let started = std::time::Instant::now();
+        let mut fast = tokio::task::block_in_place(|| {
+            FastScan::train(dim, DistanceMetric::Euclidean, &sample, 25)
+        })?;
+        let zero = vec![0u8; fast.subspaces()];
+        let mut from = 0;
+        while from < slots {
+            let to = (from + 65_536).min(slots);
+            let rows = self
+                .fast_scan_rows(tablename, &index, metric, from, to)
+                .await?;
+            let codes: Vec<Vec<u8>> = tokio::task::block_in_place(|| {
+                use rayon::prelude::*;
+                rows.par_iter()
+                    .map(|v| match v {
+                        Some(v) => fast.encode(v).unwrap_or_else(|_| zero.clone()),
+                        None => zero.clone(),
+                    })
+                    .collect()
+            });
+            for code in &codes {
+                fast.push_code(code);
+            }
+            from = to;
+        }
+        let mut guard = index.write().await;
+        if guard.slot_count() != fast.len() {
+            info!(
+                "fast-scan for '{tablename}': the graph grew from {} to {} nodes during the build; not installed",
+                fast.len(),
+                guard.slot_count()
+            );
+            return Ok(false);
+        }
+        let Some(graph) = guard.as_hnsw_mut() else {
+            return Ok(false);
+        };
+        if graph.has_fast_scan() {
+            return Ok(false);
+        }
+        graph.set_fast_scan(Some(fast));
+        info!(
+            "fast-scan for '{tablename}': {} codes built from the row file in {:.1}s",
+            slots,
+            started.elapsed().as_secs_f64()
+        );
+        Ok(true)
+    }
+
+    /// The metric-prepared vectors of node positions `from..to`, in position order, from
+    /// the row file; `None` for a tombstoned node or a row that is gone.
+    async fn fast_scan_rows(
+        &self,
+        tablename: &str,
+        index: &Arc<tokio::sync::RwLock<Box<dyn crate::search::index_traits::VectorIndex>>>,
+        metric: DistanceMetric,
+        from: usize,
+        to: usize,
+    ) -> crate::Result<Vec<Option<Vec<f32>>>> {
+        let (ids, deleted): (Vec<RecordId>, Vec<bool>) = {
+            let guard = index.read().await;
+            let graph = guard
+                .as_hnsw()
+                .ok_or_else(|| crate::Error::Internal("index changed under the build".into()))?;
+            (
+                (from..to)
+                    .map(|idx| graph.node_id(idx).to_string())
+                    .collect(),
+                (from..to).map(|idx| graph.is_deleted(idx)).collect(),
+            )
+        };
+        let tables = self.read_tables("ensure_fast_scan").await;
+        let data = tables
+            .get(tablename)
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let found: HashMap<RecordId, Vec<f32>> = data.vectors_for_ids(&ids).into_iter().collect();
+        Ok(ids
+            .iter()
+            .zip(deleted)
+            .map(|(id, gone)| {
+                if gone {
+                    return None;
+                }
+                let mut v = found.get(id).cloned()?;
+                // Metric-prepared, as the graph holds them: unit length under cosine.
+                if matches!(metric, DistanceMetric::Cosine) {
+                    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        v.iter_mut().for_each(|x| *x /= norm);
+                    }
+                }
+                Some(v)
+            })
+            .collect())
+    }
+
     /// Rebuild the vector index from scratch using all persisted records.
     ///
     /// This is the recovery path after `drop_index`, a server restart, or any
@@ -8372,6 +8553,7 @@ impl IntelligentIndexedStorage {
         // changes when it crosses: a table that answered exactly yesterday answers
         // approximately today, and nothing said so.
         let quantized = data.index.is_quantized().await;
+        let fast_scan = data.index.has_fast_scan().await;
         let index_record_count = data.index.len().await;
         let dimension = data.table.dimension;
         let record_count = data.records.len();
@@ -8429,6 +8611,7 @@ impl IntelligentIndexedStorage {
             "dimension": dimension,
             "index_type": data.table.index_type.to_string(),
             "quantized": quantized,
+            "fast_scan": fast_scan,
             "index_size_bytes": index_stats.index_size_bytes,
             "memory_usage_bytes": record_bytes + vector_row_bytes + index_stats.index_size_bytes,
             "disk_usage_bytes": disk_bytes,
@@ -8563,6 +8746,8 @@ impl IntelligentIndexedStorage {
     /// exact. 2048 keeps the direct path bounded at roughly the number of nodes a walk with
     /// `ef = 128` and `m = 16` would touch regardless.
     const EXACT_FILTER_SCAN_MAX: usize = 2048;
+    /// The same ceiling when the vectors are in a row file: about one rerank pool of rows.
+    const EXACT_FILTER_SCAN_ON_DISK: usize = 128;
 
     /// Largest match set scored node by node rather than walked. Scoring costs one code per
     /// match; a filtered walk visits about `ef / selectivity` nodes to collect `ef` matching

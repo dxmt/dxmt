@@ -683,6 +683,9 @@ fn report_phases(nodes: usize) {
 const PARALLEL_PLAN_MAX_SHARE: usize = 16;
 /// Nodes the graph needs before any batch is planned in parallel.
 const PARALLEL_PLAN_SEED: usize = 1_024;
+/// `scan_nodes` takes the block scan once the match set is this dense (one position in
+/// `FAST_SCAN_FROM_ONE_IN`).
+const FAST_SCAN_FROM_ONE_IN: usize = 64;
 /// Below this many records the rayon fan-out costs more than the serial loop.
 const PARALLEL_PLAN_MIN_BATCH: usize = 16;
 /// How many records a bulk build hands to `insert_batch` at a time.
@@ -742,6 +745,10 @@ pub struct HnswIndex {
     /// Present once the graph traverses on PQ codes instead of full vectors; see
     /// [`QuantizedStore`]. Files written without it stay readable as "hnsw-v2".
     quantized: Option<QuantizedStore>,
+    /// The 4-bit block-scan codes beside the 8-bit ones, from the same quantization step;
+    /// persisted as a sidecar by `HnswPqIndex`, never in this struct's own layout.
+    #[serde(skip)]
+    fast: Option<crate::search::quantization::fast_scan::FastScan>,
 }
 
 /// The graph's vectors as PQ codes, once [`HnswIndex::quantize`] has run.
@@ -1019,6 +1026,7 @@ impl HnswIndex {
             id_overflow: HashMap::new(),
             entry_point: None,
             quantized: None,
+            fast: None,
         }
     }
 
@@ -1072,6 +1080,7 @@ impl HnswIndex {
             nodes,
             id_to_idx: Default::default(),
             id_overflow: HashMap::new(),
+            fast: None,
             entry_point,
             quantized,
         };
@@ -1227,7 +1236,11 @@ impl HnswIndex {
     /// The graph itself is untouched -- links chosen with exact distances stay -- and every
     /// later insert plans with ADC against the codes. A graph built on approximate distances
     /// from the start measured no worse (DISK_INDEX.md section 2.5).
-    pub fn quantize(&mut self, pq: ProductQuantizer) -> crate::Result<()> {
+    pub fn quantize(
+        &mut self,
+        pq: ProductQuantizer,
+        fast: Option<crate::search::quantization::fast_scan::FastScan>,
+    ) -> crate::Result<()> {
         if self.quantized.is_some() {
             return Err(crate::Error::InvalidInput(
                 "HNSW graph is already quantized".to_string(),
@@ -1243,9 +1256,36 @@ impl HnswIndex {
         for code in codes {
             store.codes.extend_from_slice(&code);
         }
+        // The block-scan codes, likewise, before the vectors go.
+        if let Some(mut fast) = fast {
+            let codes: Vec<Vec<u8>> = (0..self.nodes.len())
+                .into_par_iter()
+                .map(|idx| fast.encode(self.nodes.vector(idx)))
+                .collect::<crate::Result<_>>()?;
+            for code in &codes {
+                fast.push_code(code);
+            }
+            self.fast = Some(fast);
+        }
         self.nodes.drop_vectors();
         self.quantized = Some(store);
         Ok(())
+    }
+
+    /// The block-scan codes, when the graph has them.
+    pub fn fast_scan(&self) -> Option<&crate::search::quantization::fast_scan::FastScan> {
+        self.fast.as_ref()
+    }
+
+    pub fn set_fast_scan(
+        &mut self,
+        fast: Option<crate::search::quantization::fast_scan::FastScan>,
+    ) {
+        self.fast = fast;
+    }
+
+    pub fn has_fast_scan(&self) -> bool {
+        self.fast.is_some()
     }
 
     /// Bytes the graph holds beyond its vectors: links, plus codes and tables once quantized.
@@ -1257,6 +1297,7 @@ impl HnswIndex {
                 .as_ref()
                 .map(|q| q.resident_bytes())
                 .unwrap_or(0)
+            + self.fast.as_ref().map(|f| f.code_bytes()).unwrap_or(0)
     }
 
     /// Put a vector into the form this index scores in.
@@ -1902,6 +1943,23 @@ impl HnswIndex {
         k: usize,
     ) -> Vec<(RecordId, f32)> {
         let query = self.prepare(query.clone());
+        // Dense enough for the block scan: from one position in 64, most blocks hold a
+        // match and the per-block kernel beats one gather-ADC per matched code; below it
+        // the scattered codes are cheaper one at a time.
+        if let Some(fast) = &self.fast {
+            if filter.len().saturating_mul(FAST_SCAN_FROM_ONE_IN) >= self.nodes.len() {
+                let lut = fast.lut(&query);
+                // Twice the pool: the 4-bit codes rank a little less sharply than the
+                // 8-bit ones (recall@10 0.9976 against 1.0 on YFCC-10M at one pool), the
+                // scan's cost does not depend on `k`, and the rerank reads the extra rows.
+                return fast
+                    .scan(&lut, Some(filter), k * 2)
+                    .into_iter()
+                    .filter(|(idx, _)| !self.nodes.is_deleted(*idx))
+                    .map(|(idx, dist)| (self.nodes.id(idx).to_string(), dist))
+                    .collect();
+            }
+        }
         let scorer = self.scorer(&query);
         let mut heap: BinaryHeap<Result> = BinaryHeap::with_capacity(k + 1);
         let mut it = filter.iter().peekable();
@@ -1979,6 +2037,11 @@ impl HnswIndex {
     /// The record stored at a node index, as returned by [`Self::search_by_score`].
     pub fn node_id(&self, idx: usize) -> &str {
         self.nodes.id(idx)
+    }
+
+    /// Whether node `idx` is a tombstone.
+    pub fn is_deleted(&self, idx: usize) -> bool {
+        self.nodes.is_deleted(idx)
     }
 
     /// Score the nodes of `ids` against `query` -- no walk -- and return the best `k`
@@ -2356,6 +2419,10 @@ impl HnswIndex {
         match (code, &mut self.quantized) {
             (Some(code), Some(store)) => {
                 store.codes.extend_from_slice(&code);
+                if let Some(fast) = &mut self.fast {
+                    fast.push(&vector)
+                        .expect("vector was dimension-checked before reaching the graph");
+                }
                 let idx = self.nodes.push(&id, None, level, &links);
                 self.register_id(&id, idx);
                 idx
@@ -2380,6 +2447,10 @@ impl HnswIndex {
                 store
                     .push(&vector)
                     .expect("vector was dimension-checked before reaching the graph");
+                if let Some(fast) = &mut self.fast {
+                    fast.push(&vector)
+                        .expect("vector was dimension-checked before reaching the graph");
+                }
                 self.nodes.push(id, None, level, links)
             }
         };
@@ -3560,7 +3631,7 @@ mod quantized_tests {
         let exact = recall(&index, &corpus, &queries, 64, 10);
         assert!(exact > 0.9, "exact walk recall {exact}");
 
-        index.quantize(trained_pq(&corpus)).unwrap();
+        index.quantize(trained_pq(&corpus), None).unwrap();
         assert!(index.is_quantized());
         assert!(
             index.nodes.vectors_dropped(),
@@ -3589,7 +3660,7 @@ mod quantized_tests {
     fn inserts_after_quantizing_are_found() {
         let mut corpus = unit_vectors(3000, 0x2545F4914F6CDD1D);
         let mut index = build(&corpus);
-        index.quantize(trained_pq(&corpus)).unwrap();
+        index.quantize(trained_pq(&corpus), None).unwrap();
 
         let more = unit_vectors(500, 0xA0761D6478BD642F);
         let items: Vec<(RecordId, DenseVector)> = more
@@ -3641,7 +3712,7 @@ mod quantized_tests {
         assert_eq!(plain_back.nodes.len(), 1500);
 
         let mut quantized = build(&corpus);
-        quantized.quantize(trained_pq(&corpus)).unwrap();
+        quantized.quantize(trained_pq(&corpus), None).unwrap();
         let q_path = dir.path().join("quantized.idx");
         quantized.save(&q_path).unwrap();
         assert_eq!(

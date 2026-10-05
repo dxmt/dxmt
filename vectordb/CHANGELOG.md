@@ -17,6 +17,17 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **Fast-scan codes for filtered search.** A quantized table keeps 4-bit PQ codes in
+  blocks of 32 beside its 8-bit ones (same bytes per vector; a sidecar `.fs` file next to
+  the index), and a filter matching more than one row in 64 is scored from them 32 codes
+  at a time -- 4.6 ns a code against 69 for the 8-bit gather. On the big-ann filtered
+  track at 10M rows the 100K-500K match band went from 27 ms to 17 ms p50 (p95 44 to 23) at
+  `normal`, recall unchanged, and the 16-thread throughput cost 9%. Tables quantized before this get the codes from
+  `ensure_fast_scan` (built from the row file; 45 s at 10M); `GET /tables/{t}/stats`
+  reports `fast_scan`.
+
 ### Changed
 
 - **Filtered search is planned by the real match count and runs on bitmaps.** A filter's

@@ -79,6 +79,11 @@ impl NodeMap {
         }
     }
 
+    /// Whether the map's positions belong to the index of `generation`.
+    pub fn is_for(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
     /// Nodes known to the map.
     pub fn len(&self) -> usize {
         self.node_to_ordinal.len()

@@ -640,7 +640,7 @@ fn stage_hnsw(
                 panic!("quantize_at needs the pq stage's model");
             };
             let t = Instant::now();
-            index.quantize(pq.clone()).unwrap();
+            index.quantize(pq.clone(), None).unwrap();
             quantized_during_build = true;
             println!(
                 "quantized the graph at {start} rows in {:.1}s; the remaining {} rows build on codes",
@@ -718,7 +718,7 @@ fn stage_hnsw(
         };
         let t = Instant::now();
         if !quantized_during_build {
-            index.quantize(pq.clone()).unwrap();
+            index.quantize(pq.clone(), None).unwrap();
         }
         println!(
             "quantized the graph in {:.1}s; graph accounts for {:.0} B/vector {}",

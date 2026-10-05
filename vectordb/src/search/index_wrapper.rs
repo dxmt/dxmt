@@ -275,7 +275,12 @@ impl IndexWrapper {
         index: &Arc<RwLock<Box<dyn VectorIndex>>>,
         structural: &Arc<tokio::sync::Mutex<()>>,
     ) -> Result<()> {
-        let Some((sample, mut pq)) = index.read().await.quantization_job() else {
+        let Some(crate::search::index_traits::QuantizationJob {
+            sample,
+            mut pq,
+            fast_scan,
+        }) = index.read().await.quantization_job()
+        else {
             return Ok(());
         };
         let started = std::time::Instant::now();
@@ -297,21 +302,32 @@ impl IndexWrapper {
         let threads = std::thread::available_parallelism()
             .map(|n| (n.get() / 2).max(1))
             .unwrap_or(1);
-        let pq = tokio::task::spawn_blocking(move || {
+        let (pq, fast) = tokio::task::spawn_blocking(move || {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .thread_name(|i| format!("pq-train-{i}"))
                 .build()
                 .map_err(|e| crate::Error::Internal(format!("PQ training pool: {e}")))?;
             pool.install(|| pq.train(&sample, 25))?;
-            Ok::<_, crate::Error>(pq)
+            // The fast-scan codebooks on the same sample: 16 centroids a subspace, a few
+            // seconds beside the minute above. A width with no layout is simply skipped.
+            let fast = fast_scan.and_then(|(dim, metric)| {
+                pool.install(|| {
+                    crate::search::quantization::fast_scan::FastScan::train(
+                        dim, metric, &sample, 25,
+                    )
+                })
+                .map_err(|e| tracing::warn!("fast-scan codebooks not trained: {e}"))
+                .ok()
+            });
+            Ok::<_, crate::Error>((pq, fast))
         })
         .await
         .map_err(|e| crate::Error::Internal(format!("PQ training task failed: {e}")))??;
         let trained = started.elapsed();
         let installing = std::time::Instant::now();
         let _structural = structural.lock().await;
-        index.write().await.install_quantizer(pq)?;
+        index.write().await.install_quantizer(pq, fast)?;
         tracing::info!(
             "HNSW-PQ: quantizer trained in {:.1}s in the background, installed in {:.1}s",
             trained.as_secs_f64(),
@@ -444,6 +460,11 @@ impl IndexWrapper {
         k: usize,
     ) -> Option<Vec<(RecordId, f32)>> {
         self.index.read().await.scan_ids(query, ids, k)
+    }
+
+    /// See `VectorIndex::has_fast_scan`.
+    pub async fn has_fast_scan(&self) -> bool {
+        self.index.read().await.has_fast_scan()
     }
 
     /// See `VectorIndex::scan_nodes`.

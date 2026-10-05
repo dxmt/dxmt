@@ -140,6 +140,11 @@ impl Default for HnswPqConfig {
 }
 
 impl HnswPqIndex {
+    /// Where the fast-scan codes live beside an index file: `t0.idx` -> `t0.fs`.
+    fn sidecar_path(path: &std::path::Path) -> std::path::PathBuf {
+        path.with_extension("fs")
+    }
+
     /// Fewest training vectors per centroid. k-means over 256 centroids fitted to 300 points
     /// describes those points, not the distribution; at 16 apiece the default 256-centroid
     /// codebook wants 4,096 vectors.
@@ -211,7 +216,15 @@ impl HnswPqIndex {
             DistanceMetric::Euclidean,
         )?;
         pq.train(&prepared, 25)?;
-        self.hnsw.quantize(pq)
+        let fast = crate::search::quantization::fast_scan::FastScan::train(
+            self.dimension,
+            DistanceMetric::Euclidean,
+            &prepared,
+            25,
+        )
+        .map_err(|e| tracing::warn!("fast-scan codebooks not trained: {e}"))
+        .ok();
+        self.hnsw.quantize(pq, fast)
     }
 
     fn prepare(&self, mut v: DenseVector) -> DenseVector {
@@ -451,12 +464,7 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
         HnswPqIndex::wants_quantizing(self)
     }
 
-    fn quantization_job(
-        &self,
-    ) -> Option<(
-        Vec<DenseVector>,
-        crate::search::quantization::product_quantization::ProductQuantizer,
-    )> {
+    fn quantization_job(&self) -> Option<crate::search::index_traits::QuantizationJob> {
         if !self.wants_quantizing() {
             return None;
         }
@@ -479,19 +487,30 @@ impl crate::search::index_traits::VectorIndex for HnswPqIndex {
             self.config.num_subvectors,
             sample.len()
         );
-        Some((sample, pq))
+        Some(crate::search::index_traits::QuantizationJob {
+            sample,
+            pq,
+            // The graph scores prepared vectors by squared euclidean distance whatever the
+            // table's metric, and so does the sidecar.
+            fast_scan: Some((self.dimension, DistanceMetric::Euclidean)),
+        })
     }
 
     fn install_quantizer(
         &mut self,
         pq: crate::search::quantization::product_quantization::ProductQuantizer,
+        fast: Option<crate::search::quantization::fast_scan::FastScan>,
     ) -> crate::Result<()> {
         // Someone else got there while this quantizer was training. Theirs is as good as
         // this one -- both were fitted to a stride sample of the same graph -- so drop this.
         if self.hnsw.is_quantized() {
             return Ok(());
         }
-        self.hnsw.quantize(pq)
+        self.hnsw.quantize(pq, fast)
+    }
+
+    fn has_fast_scan(&self) -> bool {
+        self.hnsw.has_fast_scan()
     }
 
     fn wants_rebuild(&self) -> bool {
@@ -529,12 +548,52 @@ impl crate::search::index_traits::SerializableIndex for HnswPqIndex {
     fn save(&self, path: &std::path::Path) -> crate::Result<()> {
         // "hnsw-pq-v2": the previous layout carried a code map and optional originals
         // beside the graph; this one is the graph with the codes inside it.
-        crate::search::index_persistence::write_index(path, "hnsw-pq-v2", self)
+        crate::search::index_persistence::write_index(path, "hnsw-pq-v2", self)?;
+        // The fast-scan codes go in a sidecar rather than into the graph's own layout: a
+        // graph written before they existed stays readable, and a binary from before this
+        // ignores the extra file. Removed when there are none, so a graph re-quantized
+        // without them does not reopen with a stale sidecar.
+        let sidecar = Self::sidecar_path(path);
+        match self.hnsw.fast_scan() {
+            Some(fast) => {
+                crate::search::index_persistence::write_index(&sidecar, "fast-scan-v1", fast)?
+            }
+            None => {
+                let _ = std::fs::remove_file(&sidecar);
+            }
+        }
+        Ok(())
     }
 
     fn load(path: &std::path::Path) -> crate::Result<Self> {
         let mut index: Self = crate::search::index_persistence::read_index(path, "hnsw-pq-v2")?;
         index.hnsw.after_load();
+        let sidecar = Self::sidecar_path(path);
+        if sidecar.exists() {
+            match crate::search::index_persistence::read_index::<
+                crate::search::quantization::fast_scan::FastScan,
+            >(&sidecar, "fast-scan-v1")
+            {
+                Ok(mut fast) => {
+                    fast.after_load();
+                    let slots = crate::search::index_traits::VectorIndex::slot_count(&index.hnsw);
+                    if fast.len() == slots {
+                        index.hnsw.set_fast_scan(Some(fast));
+                    } else {
+                        tracing::warn!(
+                            "fast-scan sidecar {} holds {} codes for a graph of {} nodes; ignored",
+                            sidecar.display(),
+                            fast.len(),
+                            slots
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "fast-scan sidecar {} unreadable, continuing without it: {e}",
+                    sidecar.display()
+                ),
+            }
+        }
         Ok(index)
     }
 
@@ -754,6 +813,84 @@ mod tests {
                 back.search_with_ef_hint(v, 10, 64).await.unwrap()
             );
         }
+    }
+
+    /// Quantizing leaves the block-scan codes beside the 8-bit ones; a dense filter is
+    /// answered from them, their candidates overlap the 8-bit scan's, and the sidecar file
+    /// comes back with the index.
+    #[tokio::test]
+    async fn the_fast_scan_sidecar_is_built_used_and_saved() {
+        use crate::search::index_traits::SerializableIndex;
+        use crate::search::node_filter::NodeFilter;
+        let mut index = HnswPqIndex::new(64, DistanceMetric::Cosine, Some(small_config())).unwrap();
+        let data = corpus(3_000, 64, 0x0BAD_CAFE_F00D_0001);
+        index.bulk_build(data.clone()).await.unwrap();
+        assert!(index.is_quantized());
+        assert!(
+            index.has_fast_scan(),
+            "quantizing trains the sidecar as well"
+        );
+
+        // Everything allowed: dense enough for the block scan. The exact top-10 by the
+        // table's metric should sit inside the block scan's top-50.
+        let slots = index.slot_count();
+        let mut every_other = NodeFilter::with_capacity(slots);
+        for idx in 0..slots {
+            every_other.insert(idx);
+        }
+        let query = &data[7].1;
+        let fast = index.scan_nodes(query, &every_other, 50).unwrap();
+        assert_eq!(fast.len(), 100, "the block scan hands back twice the pool");
+        let cosine = |a: &[f32], b: &[f32]| {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            1.0 - dot / (na * nb)
+        };
+        let mut exact: Vec<(f32, &str)> = data
+            .iter()
+            .map(|(id, v)| (cosine(v, query), id.as_str()))
+            .collect();
+        exact.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let in_pool = exact
+            .iter()
+            .take(10)
+            .filter(|(_, id)| fast.iter().any(|(f, _)| f == id))
+            .count();
+        assert!(
+            in_pool >= 8,
+            "block scan's top-100 holds {in_pool} of the exact top-10"
+        );
+        // A mask keeps the scan to the allowed positions.
+        let mut first = NodeFilter::with_capacity(slots);
+        for idx in 0..100 {
+            first.insert(idx);
+        }
+        let masked = index.scan_nodes(query, &first, 20).unwrap();
+        let allowed: std::collections::HashSet<&str> =
+            (0..100).map(|idx| index.hnsw.node_id(idx)).collect();
+        assert!(masked.iter().all(|(id, _)| allowed.contains(id.as_str())));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pq.idx");
+        index.save(&path).unwrap();
+        assert!(
+            path.with_extension("fs").exists(),
+            "the sidecar is written beside the index"
+        );
+        let back = HnswPqIndex::load(&path).unwrap();
+        assert!(back.has_fast_scan());
+        assert_eq!(
+            back.scan_nodes(query, &every_other, 50).unwrap(),
+            fast,
+            "the reopened sidecar answers as the saved one did"
+        );
+        // Without the sidecar the index still loads, on the 8-bit path alone.
+        std::fs::remove_file(path.with_extension("fs")).unwrap();
+        let bare = HnswPqIndex::load(&path).unwrap();
+        assert!(!bare.has_fast_scan());
+        assert_eq!(bare.scan_nodes(query, &every_other, 50).unwrap().len(), 50);
+        assert!(!bare.has_fast_scan());
     }
 
     #[test]

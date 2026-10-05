@@ -274,6 +274,16 @@ async fn yfcc_filtered_track() {
         "quantized after a further {:.0}s",
         waited.elapsed().as_secs_f64()
     );
+    if std::env::var("DXMT_YFCC_FAST_SCAN").as_deref() == Ok("1") {
+        let t = std::time::Instant::now();
+        let built = storage.ensure_fast_scan("t").await.unwrap();
+        let stats = storage.get_table_stats("t").await.unwrap();
+        println!(
+            "fast-scan: built {built} in {:.1}s; stats say {:?}",
+            t.elapsed().as_secs_f64(),
+            find_key(&stats, "fast_scan")
+        );
+    }
 
     let qvec = |q: usize| -> Vec<f32> {
         qvecs[q * dim..(q + 1) * dim]

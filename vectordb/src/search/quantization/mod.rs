@@ -4,6 +4,7 @@
 pub mod binary;
 #[cfg(feature = "experimental-indexes")]
 pub mod enhanced_pq;
+pub mod fast_scan;
 #[cfg(feature = "experimental-indexes")]
 pub mod hybrid;
 #[cfg(feature = "experimental-indexes")]

@@ -60,6 +60,18 @@ impl NodeFilter {
             .is_some_and(|w| w & (1u64 << (idx % 64)) != 0)
     }
 
+    /// The 32 positions from `start` (a multiple of 32) as a mask, bit `i` for `start + i`.
+    /// Zero past the end. What a block scan tests before it loads a block.
+    #[inline]
+    pub fn mask32(&self, start: usize) -> u32 {
+        debug_assert!(start.is_multiple_of(32));
+        match self.bits.get(start / 64) {
+            Some(word) if start.is_multiple_of(64) => *word as u32,
+            Some(word) => (*word >> 32) as u32,
+            None => 0,
+        }
+    }
+
     /// How many positions are set.
     pub fn len(&self) -> usize {
         self.len
@@ -109,5 +121,10 @@ mod tests {
         );
         assert!(f.contains(1_000) && !f.contains(999) && !f.contains(100_000));
         assert!(f.allows(63) && !f.allows(62));
+        assert_eq!(f.mask32(0), (1 << 0) | (1 << 7));
+        assert_eq!(f.mask32(32), 1 << 31);
+        assert_eq!(f.mask32(64), 1 | 2);
+        assert_eq!(f.mask32(96), 1 << 3);
+        assert_eq!(f.mask32(1_024), 0);
     }
 }
