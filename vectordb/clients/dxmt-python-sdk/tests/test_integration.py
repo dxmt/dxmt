@@ -717,10 +717,21 @@ class TestEveryRouteTheClientWraps:
         try:
             client.full_text_search(wrapped_table, "anything", k=3)
         except DXMTError as exc:
-            assert "FEATURE_DISABLED" in str(exc)
-            with pytest.raises(DXMTError, match="FEATURE_DISABLED"):
-                client.hybrid_search(wrapped_table, vector=_unit(0), text="x", k=3)
-        # A build with text-bm25 answers both; there is nothing to refuse.
+            # Two refusals look alike from here and mean different things. A build without
+            # text-bm25 says FEATURE_DISABLED, and then hybrid-with-text must refuse too
+            # rather than run the dense half alone. A build *with* it (the default since
+            # 1.1.0) says FULL_TEXT_NOT_ENABLED, because this table declared no text
+            # fields -- the feature is there, the table did not ask for it. This test
+            # asserted the first and failed on every default build.
+            if "FEATURE_DISABLED" in str(exc):
+                with pytest.raises(DXMTError, match="FEATURE_DISABLED"):
+                    client.hybrid_search(wrapped_table, vector=_unit(0), text="x", k=3)
+            else:
+                assert "FULL_TEXT_NOT_ENABLED" in str(exc), str(exc)
+                with pytest.raises(DXMTError, match="FULL_TEXT_NOT_ENABLED"):
+                    client.hybrid_search(wrapped_table, vector=_unit(0), text="x", k=3)
+        # A build with text-bm25 and a table with text fields answers both; there is
+        # nothing to refuse.
 
     def test_upload_batches_and_delete_by_filter_remove_what_they_match(self, client: Client, wrapped_table: str) -> None:
         client.upload(wrapped_table, [{"id": f"u{i}", "vector": _unit(i), "payload": {"g": "u"}} for i in range(250)], batch_size=100)

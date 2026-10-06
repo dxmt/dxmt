@@ -2558,6 +2558,32 @@ pub async fn hybrid_search_combined(
             .into_response();
     }
 
+    // The same rule as the feature check above, one level down: a table that declared no
+    // text fields has no text index, and a hybrid query with `text` against it used to run
+    // the dense half and return it shaped like a fusion. `/search/text` refuses such a
+    // table with FULL_TEXT_NOT_ENABLED; so does this.
+    if request.text.is_some() {
+        match state.storage.get_table(&table_name).await {
+            Ok(table) if !table.enable_full_text_search => {
+                return ApiResponse::error(ApiError::new(
+                    "FULL_TEXT_NOT_ENABLED",
+                    "Full-text search is not enabled for this table, so the text half of a \
+                     hybrid query cannot be answered. Declare `text_fields` at creation, or \
+                     send the vector alone.",
+                ))
+                .into_response();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return ApiResponse::error(ApiError::new(
+                    "TABLE_NOT_FOUND",
+                    &format!("Table '{}' not found: {}", table_name, e),
+                ))
+                .into_response();
+            }
+        }
+    }
+
     // Perform hybrid search using the storage layer
     match state.storage.hybrid_search(&table_name, request).await {
         Ok(result) => {
