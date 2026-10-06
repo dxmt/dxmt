@@ -45,6 +45,16 @@ dependencies = [
 fast = [
     "orjson>=3.9.0",
 ]
+# What the files in examples/ import beyond the SDK. Each example that needs one of these
+# exits 77 with the install command when it is missing (examples/environment.py), so a plain
+# install runs the others; `pip install -e '.[examples]'` runs them all. The OpenAI ones also
+# need OPENAI_API_KEY.
+examples = [
+    "numpy>=1.24",
+    "sentence-transformers>=2.2",
+    "openai>=1.0",
+    "langgraph>=0.2",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",

@@ -23,6 +23,7 @@ Note:
 import os
 from typing import List, Dict, Any, Optional
 from dxmt import Client
+from environment import skip
 from common_utils import create_test_client, setup_test_table, print_section
 
 # Optional: OpenAI for embeddings and chat
@@ -314,14 +315,10 @@ def main():
 
     # Check prerequisites
     if not HAS_OPENAI:
-        print("❌ This example requires OpenAI. Install with: pip install openai")
-        print("   And set OPENAI_API_KEY environment variable")
-        return
+        skip("the openai package is not installed: pip install openai")
 
     if not os.getenv("OPENAI_API_KEY"):
-        print("❌ OPENAI_API_KEY environment variable not set")
-        print("   Set it with: export OPENAI_API_KEY='your-key-here'")
-        return
+        skip("OPENAI_API_KEY is not set: export OPENAI_API_KEY=...")
 
     if not HAS_SENTENCE_TRANSFORMERS:
         print("⚠️  sentence-transformers not installed. Using OpenAI embeddings.")

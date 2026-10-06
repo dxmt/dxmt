@@ -257,6 +257,17 @@ jobs:
             pytest -q tests/test_integration.py
         working-directory: vectordb/clients/dxmt-python-sdk
 
+      # Every example, run as a user runs it, judged by its exit status (0 pass, 77 skip,
+      # anything else fail). numpy is installed because it is cheap and three examples need
+      # it; torch, sentence-transformers and openai are not, so the examples that need them
+      # skip here with their reason, and the ones that need only the SDK must pass. Nothing
+      # ran the examples before this, and one had never worked since it entered the tree.
+      - name: Python SDK examples
+        run: |
+          python -m pip install numpy
+          DXMT_TEST_HOST=127.0.0.1 DXMT_TEST_PORT=19999 pytest -q -rs tests/test_examples.py
+        working-directory: vectordb/clients/dxmt-python-sdk
+
       # The LangGraph store implements BaseStore over DXMT, and nothing ran it: `langgraph` is
       # not a dependency of this SDK, so `importorskip` skipped the whole file everywhere --
       # including here -- and seven of its tests had been failing for some time behind that

@@ -12,7 +12,13 @@ Run:
 """
 
 import os
-import numpy as np
+
+from environment import skip
+
+try:
+    import numpy as np
+except ImportError:
+    skip("numpy is not installed: pip install numpy")
 from typing import List, Tuple
 
 # Check dependencies
@@ -218,14 +224,14 @@ def main():
     if openai_results and st_results:
         compare_results(openai_results, st_results)
     else:
-        print("\n⚠️  无法完成对比（缺少必要的库或配置）")
-        print("\n安装方法:")
+        missing = []
         if not OPENAI_AVAILABLE:
-            print("  pip install openai")
+            missing.append("pip install openai")
+        elif not os.environ.get("OPENAI_API_KEY"):
+            missing.append("export OPENAI_API_KEY=...")
         if not ST_AVAILABLE:
-            print("  pip install sentence-transformers")
-        if OPENAI_AVAILABLE and not os.environ.get("OPENAI_API_KEY"):
-            print("  export OPENAI_API_KEY='your-api-key'")
+            missing.append("pip install sentence-transformers")
+        skip("无法完成对比，需要: " + "; ".join(missing))
 
     print("\n" + "=" * 80)
     print("测试完成！")

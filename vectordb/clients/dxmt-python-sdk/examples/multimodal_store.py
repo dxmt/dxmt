@@ -24,6 +24,7 @@ import hashlib
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -198,7 +199,7 @@ def main() -> None:
     print("  DXMT Multimodal Store")
     print("=" * 70)
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # 1. Setup and ingest

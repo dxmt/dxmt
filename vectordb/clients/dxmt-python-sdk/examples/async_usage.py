@@ -6,13 +6,14 @@ This example demonstrates async operations for high-performance applications.
 import asyncio
 
 from dxmt import Client
+from environment import client_kwargs
 
 
 async def main() -> None:
     """Run async usage example."""
     # Create client
     print("Connecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table (async)

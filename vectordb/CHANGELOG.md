@@ -28,6 +28,17 @@ release, and the first commit that was ever pushed anywhere.
   The Python and JavaScript clients take `rerank=` on `create_table` and on every search
   method. Nothing existing changes shape.
 
+### Fixed
+
+- **The Python SDK's examples say when they did not run.** `memory_optimization_demo.py`
+  called `batch_insert`, which the client does not have, and caught the error in all three
+  scenarios; it is rewritten to report the index each setting builds, without the recall and
+  memory figures it printed and nobody had measured. An example missing a library or a key now
+  exits 77 naming it (it printed a line and exited 0), and the handlers that turned a failed
+  full-text, hybrid or filtered search into a printed warning are gone. Every example reads
+  `DXMT_HOST`/`DXMT_PORT`/`DXMT_API_KEY`; `pip install 'dxmt[examples]'` installs what they
+  import; `tests/test_examples.py` runs all of them against a live server, and CI runs it.
+
 ## [1.2.0] - 2026-10-06
 
 Every package carries this version. The HTTP API gains one request field

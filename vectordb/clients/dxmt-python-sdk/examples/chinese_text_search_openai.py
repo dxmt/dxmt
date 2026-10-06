@@ -27,6 +27,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 from dxmt import Client
+from environment import client_kwargs, skip
 
 
 def create_chinese_articles() -> List[Dict[str, Any]]:
@@ -218,15 +219,11 @@ def main() -> None:
 
     # Check dependencies
     if not OPENAI_AVAILABLE:
-        print("\n❌ 错误: 未安装 openai")
-        print("   安装命令: pip install openai")
-        return
+        skip("未安装 openai: pip install openai")
 
     # Check API key
     if not os.environ.get("OPENAI_API_KEY"):
-        print("\n❌ 错误: 未设置 OPENAI_API_KEY 环境变量")
-        print("   设置方法: export OPENAI_API_KEY='your-api-key'")
-        return
+        skip("未设置 OPENAI_API_KEY 环境变量: export OPENAI_API_KEY=...")
 
     # Initialize OpenAI embedder
     print("\n初始化 OpenAI embedding 模型...")
@@ -237,7 +234,7 @@ def main() -> None:
 
     # Create client
     print("\n连接 DXMT 服务器...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table with full-text search enabled
@@ -299,19 +296,16 @@ def main() -> None:
         text_query = "向量数据库"
         print(f"\n使用 Jieba 分词进行中文全文检索...")
 
-        try:
-            results = client.full_text_search(
-                table_name="chinese_articles_openai",
-                text_query=text_query,
-                limit=3,
-            )
+        results = client.full_text_search(
+            table_name="chinese_articles_openai",
+            text_query=text_query,
+            limit=3,
+        )
 
-            if results:
-                print_chinese_results(text_query, results, records_map, "全文检索结果")
-            else:
-                print(f"\n未找到包含 '{text_query}' 的文章")
-        except Exception as e:
-            print(f"\n⚠️  全文检索功能可能未启用: {e}")
+        if results:
+            print_chinese_results(text_query, results, records_map, "全文检索结果")
+        else:
+            print(f"\n未找到包含 '{text_query}' 的文章")
 
         # ================================================================
         # Example 2: Semantic Search (Vector Only)
@@ -345,30 +339,27 @@ def main() -> None:
 
         print(f"\n混合搜索结合全文检索和语义相似度...")
 
-        try:
-            # Try different alpha values
-            alphas = [0.3, 0.5, 0.7]
+        # Try different alpha values
+        alphas = [0.3, 0.5, 0.7]
 
-            for alpha in alphas:
-                print(f"\n{'─' * 80}")
-                print(f"Alpha = {alpha} ({'偏重文本' if alpha < 0.5 else '偏重向量' if alpha > 0.5 else '平衡'})")
-                print(f"{'─' * 80}")
+        for alpha in alphas:
+            print(f"\n{'─' * 80}")
+            print(f"Alpha = {alpha} ({'偏重文本' if alpha < 0.5 else '偏重向量' if alpha > 0.5 else '平衡'})")
+            print(f"{'─' * 80}")
 
-                results = client.hybrid_search(
-                    table_name="chinese_articles_openai",
-                    vector=hybrid_query_embedding,
-                    text_query=hybrid_query_text,
-                    alpha=alpha,
-                    limit=3,
-                )
+            results = client.hybrid_search(
+                table_name="chinese_articles_openai",
+                vector=hybrid_query_embedding,
+                text_query=hybrid_query_text,
+                alpha=alpha,
+                limit=3,
+            )
 
-                for i, result in enumerate(results, 1):
-                    doc = records_map.get(result["id"])
-                    if doc and "payload_json" in doc:
-                        payload = json.loads(doc["payload_json"])
-                        print(f"{i}. {payload['title']} (分数: {result.get('score', 0):.4f})")
-        except Exception as e:
-            print(f"\n⚠️  混合搜索功能可能未启用: {e}")
+            for i, result in enumerate(results, 1):
+                doc = records_map.get(result["id"])
+                if doc and "payload_json" in doc:
+                    payload = json.loads(doc["payload_json"])
+                    print(f"{i}. {payload['title']} (分数: {result.get('score', 0):.4f})")
 
         # ================================================================
         # Example 4: Different Query Styles (Testing Abbreviations)

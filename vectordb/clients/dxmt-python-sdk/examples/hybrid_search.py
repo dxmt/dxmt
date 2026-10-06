@@ -4,6 +4,7 @@ This example demonstrates combining vector similarity search with full-text sear
 """
 
 from dxmt import Client
+from environment import client_kwargs
 from dxmt.exceptions import DXMTSearchError
 
 
@@ -11,7 +12,7 @@ def main() -> None:
     """Run hybrid search example."""
     # Create client
     print("Connecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     # Create table with full-text search enabled
     print("\nCreating table with full-text search...")

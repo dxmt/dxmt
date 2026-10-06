@@ -483,6 +483,10 @@ def main():
     except Exception as e:
         print(f"Error during cleanup: {e}")
 
+    # Per-file and per-batch errors are counted rather than raised, so one bad file does not
+    # stop a load -- but a demo that counted any must not exit 0.
+    if loader.stats["total_errors"]:
+        raise SystemExit(f"{loader.stats['total_errors']} records failed to load; see the errors above")
     print("\n✓ Data loader demo complete!")
 
 

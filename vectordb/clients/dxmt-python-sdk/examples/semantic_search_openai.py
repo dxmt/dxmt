@@ -29,6 +29,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 from dxmt import Client
+from environment import client_kwargs, skip
 
 
 class OpenAIEmbedder:
@@ -216,15 +217,10 @@ def main() -> None:
 
     # Check dependencies
     if not OPENAI_AVAILABLE:
-        print("\n❌ Error: openai package not installed")
-        print("   Install with: pip install openai")
-        return
+        skip("the openai package is not installed: pip install openai")
 
     if not os.environ.get("OPENAI_API_KEY"):
-        print("\n❌ Error: OPENAI_API_KEY not set")
-        print("   Set with: export OPENAI_API_KEY='your-api-key'")
-        print("   Get key from: https://platform.openai.com/api-keys")
-        return
+        skip("OPENAI_API_KEY is not set: export OPENAI_API_KEY=... (https://platform.openai.com/api-keys)")
 
     # Initialize OpenAI embedder
     print("\nInitializing OpenAI embedder (text-embedding-3-small)...")
@@ -234,7 +230,7 @@ def main() -> None:
 
     # Create client
     print("\nConnecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table

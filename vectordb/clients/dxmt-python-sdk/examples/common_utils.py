@@ -7,21 +7,27 @@ Shared functions used across multiple example scripts to reduce code duplication
 import time
 from typing import List, Dict, Any, Optional
 from dxmt import Client
+from environment import client_kwargs
 
 
-def create_test_client(host: str = "localhost", port: int = 9999) -> Client:
+def create_test_client(host: Optional[str] = None, port: Optional[int] = None) -> Client:
     """
     Create and return a DXMT client with standard configuration.
 
     Args:
-        host: Server hostname (default: localhost)
-        port: Server port (default: 9999)
+        host: Server hostname (default: `DXMT_HOST`, else localhost)
+        port: Server port (default: `DXMT_PORT`, else 9999)
 
     Returns:
         Configured Client instance
     """
-    client = Client(host=host, port=port)
-    print(f"✓ Connected to DXMT server at {host}:{port}")
+    kwargs = client_kwargs()
+    if host is not None:
+        kwargs["host"] = host
+    if port is not None:
+        kwargs["port"] = port
+    client = Client(**kwargs)
+    print(f"✓ Connected to DXMT server at {kwargs['host']}:{kwargs['port']}")
     return client
 
 

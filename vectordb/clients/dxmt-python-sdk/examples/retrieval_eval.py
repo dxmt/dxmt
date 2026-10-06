@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 
 try:
     from sentence_transformers import SentenceTransformer as _ST
@@ -172,7 +173,7 @@ TABLE = "eval_docs"
 
 class RetrievalEvaluator:
     def __init__(self) -> None:
-        self.client = Client(host="localhost", port=9999)
+        self.client = Client(**client_kwargs())
 
     def _setup(self) -> None:
         try:

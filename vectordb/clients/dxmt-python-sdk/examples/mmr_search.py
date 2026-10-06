@@ -13,7 +13,13 @@ Use cases:
 
 import random
 from typing import List, Dict, Any
-import numpy as np
+from environment import skip
+
+try:
+    import numpy as np
+except ImportError:
+    skip("numpy is not installed: pip install numpy")
+
 from dxmt import Client
 from common_utils import (
     create_test_client,

@@ -29,12 +29,15 @@ import re
 from typing_extensions import TypedDict
 
 from dxmt import Client
-from dxmt.langgraph_store import DXMTLangGraphStore
+from environment import client_kwargs, skip
 
 try:
+    # The store module imports langgraph's base classes, so it has to be inside the guard too:
+    # outside it, a missing langgraph was an ImportError traceback before the message below.
+    from dxmt.langgraph_store import DXMTLangGraphStore
     from langgraph.graph import END, START, StateGraph
-except ImportError:  # pragma: no cover - the example is the error message
-    raise SystemExit("this example needs langgraph: pip install langgraph")
+except ImportError:
+    skip("langgraph is not installed: pip install langgraph")
 
 HOST = os.environ.get("DXMT_HOST", "localhost")
 PORT = int(os.environ.get("DXMT_PORT", "9999"))
@@ -71,7 +74,7 @@ class State(TypedDict):
 
 def main() -> None:
     store = DXMTLangGraphStore(
-        Client(host=HOST, port=PORT),
+        Client(**client_kwargs()),
         embedding_dims=DIMS,
         embed_fn=embed,
         default_index_fields=["text"],

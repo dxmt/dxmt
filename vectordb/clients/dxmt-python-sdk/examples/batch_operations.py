@@ -18,6 +18,7 @@ import random
 from typing import List, Dict, Any
 
 from dxmt import Client
+from environment import client_kwargs
 
 
 def generate_records(start_id: int, count: int, dimension: int = 128) -> List[Dict[str, Any]]:
@@ -76,7 +77,7 @@ def main() -> None:
 
     # Create client
     print("\nConnecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     dimension = 128
     table_name = "batch_demo"
@@ -202,11 +203,8 @@ def main() -> None:
         print(f"✅ Deleted {len(ids_to_delete)} records in {duration:.4f}s")
 
         # Verify deletion
-        try:
-            remaining = client.get_records(table_name=table_name, ids=[f"doc{i}" for i in range(501, 511)])
-            print(f"   Verified: {len(remaining)} records still exist (doc501-doc510)")
-        except Exception as e:
-            print(f"   Note: {e}")
+        remaining = client.get_records(table_name=table_name, ids=[f"doc{i}" for i in range(501, 511)])
+        print(f"   Verified: {len(remaining)} records still exist (doc501-doc510)")
 
         # ================================================================
         # Example 5: Batch Search
@@ -276,6 +274,9 @@ def main() -> None:
             print(f"   - Implement exponential backoff retry logic")
             print(f"   - Consider table recreation for fresh state")
             print(f"   - Monitor server resources (memory, CPU)")
+            # The retry loop above is the point of this section, but a batch that failed
+            # after every retry is still a failure, and the run must say so in its exit code.
+            raise RuntimeError(f"{failed_count} of 3 update batches failed after retries")
 
         # ================================================================
         # Performance Summary

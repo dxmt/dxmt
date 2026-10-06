@@ -15,6 +15,7 @@ import json
 from typing import List, Dict, Any
 
 from dxmt import Client
+from environment import client_kwargs
 
 
 def create_product_records() -> List[Dict[str, Any]]:
@@ -160,7 +161,7 @@ def main() -> None:
 
     # Create client
     print("\nConnecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table
