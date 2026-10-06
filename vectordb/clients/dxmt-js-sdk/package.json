@@ -1,6 +1,6 @@
 {
   "name": "dxmt-js-sdk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Official JavaScript/TypeScript SDK for DXMT VectorDB - A lightweight, horizontally scalable vector database",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

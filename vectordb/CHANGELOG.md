@@ -17,6 +17,17 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-06
+
+Every package carries this version. The HTTP API gains one request field
+(`quantization.fast_scan`), one stats field (`fast_scan`) and one metric family
+(`dxmt_filter_path_seconds_total`), and loses nothing. **One compatibility note:** a WAL
+written by 1.2 holds entries (`UpsertRecordInRowFile`) that a 1.1 binary cannot read, so
+take a snapshot (`POST /snapshot`) before downgrading; a 1.2 binary reads every earlier log
+and index file, and the new `.fs` sidecar beside an index is ignored by older binaries.
+The filtered-search planner, the WAL's row references and the background warm-up are two
+to three days old and measured on one machine; `docs/SUPPORT_MATRIX.md` carries the numbers.
+
 ### Added
 
 - **Fast-scan codes for filtered search.** A quantized table keeps 4-bit PQ codes in
@@ -51,6 +62,10 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A hybrid query with `text` against a table that declared no text fields is refused**
+  (`FULL_TEXT_NOT_ENABLED`, as `/search/text` already did) instead of running the dense half
+  and returning it shaped like a fusion. The Python SDK's live suite had asserted this and
+  failed on every default build since `text-bm25` became default in 1.1.0.
 - **A numeric payload field no longer slows every insert down as the table grows.** The
   payload index's numeric half folded its unsorted tail into one sorted array every 4,096
   entries by re-sorting the whole array, so the cost of each fold grew with the table: on

@@ -192,7 +192,7 @@ pip install dxmt-python-sdk
 curl http://localhost:9999/health
 
 # Expected response:
-# {"status":"ok","version":"1.1.0"}
+# {"status":"ok","version":"1.2.0"}
 ```
 
 ---
@@ -1319,7 +1319,7 @@ aws s3 sync s3://dxmt-bucket s3://dxmt-backup
 
 ### Q: Is DXMT production-ready?
 
-**A:** Yes, DXMT v1.1.0 with AutoGen integration is production-ready.
+**A:** Yes, DXMT v1.2.0 with AutoGen integration is production-ready.
 
 ### Q: How do I scale DXMT?
 
@@ -1327,7 +1327,7 @@ aws s3 sync s3://dxmt-bucket s3://dxmt-backup
 
 ### Q: Does DXMT support embeddings?
 
-**A:** DXMT can auto-embed text if configured with an embedding model. External embedding support is coming in v1.2.0.
+**A:** DXMT can auto-embed text if configured with an embedding model. Records and searches may also carry a caller-computed vector instead of `text`; there is no separate external-embedding mode to wait for.
 
 ### Q: Can I migrate from ChromaDB to DXMT?
 
