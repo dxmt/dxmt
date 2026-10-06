@@ -1,3 +1,4 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { afterAll, describe, expect, it } from 'vitest';
 import { DXMTClient } from '../src/client';
 
@@ -242,6 +243,71 @@ suite('every method the other suites do not reach', () => {
       await client.exportTable(tableName, `${root}/${tableName}.dxmt`);
       await client.importTable(`${root}/${tableName}.dxmt`, { name: imported });
       expect(await client.count(imported)).toBe(4);
+    }
+  });
+  it('reranks a page through the table\'s provider', async () => {
+    // The server calls the table's provider, so the test runs one: it embeds with a hashed bag
+    // of words (so a `text` query works) and reranks by a score table the test fills in.
+    const scores = new Map<string, number>();
+    const bagOfWords = (text: string) => {
+      const v = [0, 0, 0, 0];
+      for (const word of text.toLowerCase().split(/\s+/).filter(Boolean)) {
+        let sum = 0;
+        for (const ch of word) sum += ch.charCodeAt(0);
+        v[sum % 4] += 1;
+      }
+      const norm = Math.hypot(...v);
+      return norm ? v.map((x) => x / norm) : [1, 0, 0, 0];
+    };
+    const provider = createServer((req: IncomingMessage, res: ServerResponse) => {
+      let raw = '';
+      req.on('data', (chunk) => (raw += chunk));
+      req.on('end', () => {
+        const body = JSON.parse(raw || '{}');
+        let out: unknown;
+        if (req.url?.endsWith('/embeddings')) {
+          out = { data: (body.input as string[]).map((t, index) => ({ index, embedding: bagOfWords(t) })) };
+        } else {
+          const docs = (body.documents as string[]) ?? [];
+          const scored = docs
+            .map((d, index) => ({ index, relevance_score: scores.get(d) ?? 0 }))
+            .sort((a, b) => b.relevance_score - a.relevance_score || a.index - b.index)
+            .slice(0, body.top_n ?? docs.length);
+          out = { results: scored };
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(out));
+      });
+    });
+    await new Promise<void>((resolve) => provider.listen(0, '127.0.0.1', resolve));
+    const address = provider.address();
+    const base = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
+    const name = `js_rerank_${Date.now()}`;
+    try {
+      await client.createTable({
+        name,
+        dimension: 4,
+        embedding: { model: 'bag-of-words', base_url: base, api_key_env: 'DXMT_TEST_KEY_UNSET' },
+        rerank: { model: 'by-table', base_url: base, api_key_env: 'DXMT_TEST_KEY_UNSET' },
+      });
+      const texts = [0, 1, 2, 3, 4].map((i) => `document number ${i} about widgets`);
+      await client.insertRecords({
+        table_name: name,
+        records: texts.map((text, i) => ({ id: `r${i}`, text })),
+      });
+      const plain = (await client.search({ table_name: name, text: 'widgets', k: 5 })).map((h) => h.id);
+      expect(plain).toHaveLength(5);
+      plain.forEach((id, rank) => scores.set(texts[Number(id.slice(1))], rank));
+      const hits = await client.search({ table_name: name, text: 'widgets', k: 5, rerank: {} });
+      expect(hits.map((h) => h.id)).toEqual([...plain].reverse());
+      expect(hits.map((h) => h.rerank_score)).toEqual([4, 3, 2, 1, 0]);
+      expect(hits.every((h) => typeof h.score === 'number')).toBe(true);
+      await expect(
+        client.search({ table_name: name, vector: [1, 0, 0, 0], k: 2, rerank: {} })
+      ).rejects.toThrow(/text/);
+    } finally {
+      await client.deleteTable(name).catch(() => undefined);
+      await new Promise<void>((resolve) => provider.close(() => resolve()));
     }
   });
 });

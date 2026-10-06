@@ -173,6 +173,7 @@ impl StorageAwareExecutor {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         self.storage
             .create_table(config)
@@ -452,6 +453,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
                 recall_target: None,
                 recall: None,
             })
@@ -478,6 +480,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
                 recall_target: None,
                 recall: None,
             })

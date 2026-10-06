@@ -51,6 +51,9 @@ pub struct Table {
     /// vectors, which is what every table did before this existed.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// A cross-encoder provider a search may rerank its page with; see [`RerankConfig`].
+    #[serde(default)]
+    pub rerank: Option<RerankConfig>,
     /// recall@10 this table's `normal` search mode should reach, measured against the
     /// table's own exact scan. Unset means the server's default (`DXMT_RECALL_TARGET`,
     /// 0.95); `0` turns calibration off for this table.
@@ -261,6 +264,9 @@ pub struct TableAlterRequest {
     /// which is a real thing that happens and which otherwise needs the table recreated.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// A cross-encoder provider a search may rerank its page with; see [`RerankConfig`].
+    #[serde(default)]
+    pub rerank: Option<RerankConfig>,
     /// Set this table's recall target (see [`Table::recall_target`]); `0` turns calibration
     /// off. Any previous calibration is discarded and the next sweep measures against the
     /// new target.
@@ -326,6 +332,60 @@ pub struct QuantizationParams {
     /// are all spoken for -- the scan is parallel and buys latency with CPU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_scan: Option<bool>,
+}
+
+/// Which wire shape the rerank provider speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RerankFormat {
+    /// `POST {base_url}/rerank` with `{model, query, documents, top_n}`, answered by
+    /// `{results: [{index, relevance_score}]}`: Cohere's v2 API, Jina, Voyage, and most
+    /// hosted rerankers.
+    #[default]
+    Cohere,
+    /// `POST {base_url}/rerank` with `{query, texts}`, answered by `[{index, score}]`:
+    /// HuggingFace text-embeddings-inference serving a cross-encoder.
+    Tei,
+}
+
+/// How this table re-scores a candidate page with a cross-encoder, when a search asks.
+///
+/// The server has no model of its own, as with `embedding`; it calls a provider with the
+/// query and each candidate's text and reorders the page by what comes back. A search opts
+/// in per request (`rerank` on `/search`, `/search/text`, `/search/hybrid`) and the table
+/// says where the model is. The key is never in the table: `api_key_env` names a variable of
+/// the server process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RerankConfig {
+    /// Model name, passed to the provider verbatim (`rerank-v3.5`, `jina-reranker-v2-base-multilingual`,
+    /// `BAAI/bge-reranker-v2-m3`, …).
+    pub model: String,
+    /// Base URL of the provider, without the trailing `/rerank`.
+    pub base_url: String,
+    /// Wire shape; defaults to `cohere`.
+    #[serde(default)]
+    pub format: RerankFormat,
+    /// Environment variable holding the API key. Defaults to `RERANK_API_KEY`; a provider
+    /// that needs no key is served by naming a variable that is unset.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// The payload field holding each record's text. Defaults to the table's embedding
+    /// field, else `text`.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// Candidates fetched and sent to the provider when a request does not say. Defaults to
+    /// five times the page.
+    #[serde(default)]
+    pub top_n: Option<usize>,
+}
+
+impl RerankConfig {
+    pub fn api_key_env(&self) -> &str {
+        self.api_key_env.as_deref().unwrap_or("RERANK_API_KEY")
+    }
 }
 
 /// How this table turns text into a vector, so a caller can write and search with text.
@@ -549,6 +609,9 @@ pub struct TableConfig {
     /// Model to embed text with, so records and queries may carry text instead of a vector.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// A cross-encoder provider a search may rerank its page with; see [`RerankConfig`].
+    #[serde(default)]
+    pub rerank: Option<RerankConfig>,
 }
 
 fn default_schema_version() -> u64 {
@@ -616,6 +679,7 @@ impl Table {
             quantization: config.quantization,
             payload_index: config.payload_index,
             embedding: config.embedding,
+            rerank: config.rerank,
             recall_target: None,
             recall: None,
         })
@@ -641,6 +705,9 @@ impl Table {
         }
         if let Some(embedding) = &req.embedding {
             updated.embedding = Some(embedding.clone());
+        }
+        if let Some(rerank) = &req.rerank {
+            updated.rerank = Some(rerank.clone());
         }
         if let Some(target) = req.recall_target {
             updated.recall_target = Some(target);
@@ -791,6 +858,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table = Table::new(config)?;
@@ -819,6 +887,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table = Table::new(config)?;
@@ -851,6 +920,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table = Table::new(config_enabled)?;
@@ -873,6 +943,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table2 = Table::new(config_disabled)?;
@@ -895,6 +966,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table3 = Table::new(config_default)?;

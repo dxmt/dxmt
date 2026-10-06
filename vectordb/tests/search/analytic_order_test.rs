@@ -155,6 +155,7 @@ fn table(name: &str) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 

@@ -135,6 +135,7 @@ async fn a_table_built_in_parallel_batches_finds_what_an_exact_scan_finds() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

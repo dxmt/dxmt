@@ -213,6 +213,38 @@ export interface EmbeddingConfig {
 }
 
 /**
+ * A rerank provider the server calls when a search asks for `rerank`.
+ *
+ * The server has no model of its own: it sends the query text and each candidate's text to
+ * `base_url` + `/rerank` and returns the page in the provider's order, each hit carrying
+ * `rerank_score`. The API key lives in the server's environment, never in this object.
+ */
+export interface RerankConfig {
+  /** Passed to the provider verbatim, e.g. `rerank-v3.5` or `BAAI/bge-reranker-v2-m3`. */
+  model: string;
+  /** API root, without the trailing `/rerank`. */
+  base_url: string;
+  /** Wire shape: `cohere` (Cohere v2, Jina, Voyage; the default) or `tei` (text-embeddings-inference). */
+  format?: 'cohere' | 'tei';
+  /** Environment variable on the server holding the key. Default `RERANK_API_KEY`. */
+  api_key_env?: string;
+  /** Payload field holding each record's text. Default: the embedding field, else `text`. */
+  field?: string;
+  /** Candidates fetched and scored when a search names no `top_n`. Default: five times the page. */
+  top_n?: number;
+}
+
+/**
+ * Ask the table's rerank provider to re-score a page. `{}` takes the defaults.
+ */
+export interface RerankRequest {
+  /** Candidates to fetch and score. Default: the table's `rerank.top_n`, else five times the page. */
+  top_n?: number;
+  /** Payload field holding each candidate's text. Default: the table's `rerank.field`. */
+  field?: string;
+}
+
+/**
  * Table configuration for creating tables.
  */
 export interface TableConfig {
@@ -239,6 +271,8 @@ export interface TableConfig {
   quantization?: QuantizationParams;
   /** The model this table embeds text with. Without it, the caller sends vectors. */
   embedding?: EmbeddingConfig;
+  /** A cross-encoder a search may rerank its page with; see {@link RerankConfig}. */
+  rerank?: RerankConfig;
 }
 
 /**
@@ -307,6 +341,9 @@ export interface SearchParams {
    * 0.0 ignores the query. Only fetched candidates can contribute diversity, so `fetch_k` is
    * the cost. Done server-side, over the vectors the index already holds. */
   mmr?: { lambda_mult?: number; fetch_k?: number };
+  /** Re-score the page with the table's rerank provider. Needs `text` and a table created
+   * with `rerank`; the request fails rather than returning the page unranked. */
+  rerank?: RerankRequest;
   /** Drop hits scoring below this. Scores are similarities, so it is a floor: higher is nearer. */
   score_threshold?: number;
   /** Return only these payload keys instead of the whole payload. */
@@ -321,6 +358,8 @@ export interface SearchResult {
   score: number;
   vector?: Vector;
   metadata?: Metadata;
+  /** The rerank provider's relevance score, when the page was reranked; higher is better. */
+  rerank_score?: number;
 }
 
 /**
@@ -331,6 +370,8 @@ export interface FullTextSearchParams {
   query: string;
   k?: number;
   filter?: Filter;
+  /** Re-score the BM25 page with the table's rerank provider against `query`. */
+  rerank?: RerankRequest;
 }
 
 /**
@@ -352,6 +393,8 @@ export interface HybridSearchParams {
   vector_weight?: number;
   /** Which fusion to use. Defaults to the server's `dbsf`, or to `weighted_sum` with a weight. */
   fusion_method?: 'dbsf' | 'weighted_sum' | 'reciprocal_rank_fusion';
+  /** Re-score the fused page with the table's rerank provider against `text_query`. */
+  rerank?: RerankRequest;
 }
 
 /**

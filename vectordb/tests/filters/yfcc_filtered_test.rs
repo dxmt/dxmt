@@ -224,6 +224,7 @@ async fn yfcc_filtered_track() {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await
             .unwrap();

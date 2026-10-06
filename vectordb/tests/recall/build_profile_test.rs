@@ -125,6 +125,7 @@ async fn where_the_build_spends_its_time() {
             ),
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

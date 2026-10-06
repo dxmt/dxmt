@@ -61,6 +61,7 @@ fn table(name: &str, embedding: Option<EmbeddingConfig>) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding,
+        rerank: None,
     }
 }
 
@@ -679,6 +680,7 @@ async fn the_endpoint_can_move_but_the_model_cannot() {
             "moved",
             dxmt_vectordb::types::table::TableAlterRequest {
                 embedding: Some(repointed),
+                rerank: None,
                 ..Default::default()
             },
         )
@@ -709,6 +711,7 @@ async fn the_endpoint_can_move_but_the_model_cannot() {
             "moved",
             dxmt_vectordb::types::table::TableAlterRequest {
                 embedding: Some(other_model),
+                rerank: None,
                 ..Default::default()
             },
         )
@@ -742,6 +745,7 @@ async fn a_loaded_table_cannot_be_given_a_model_after_the_fact() {
             "late",
             dxmt_vectordb::types::table::TableAlterRequest {
                 embedding: Some(config(&base)),
+                rerank: None,
                 ..Default::default()
             },
         )
@@ -756,6 +760,7 @@ async fn a_loaded_table_cannot_be_given_a_model_after_the_fact() {
             "fresh",
             dxmt_vectordb::types::table::TableAlterRequest {
                 embedding: Some(config(&base)),
+                rerank: None,
                 ..Default::default()
             },
         )

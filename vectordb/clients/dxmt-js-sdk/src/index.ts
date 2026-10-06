@@ -85,6 +85,8 @@ export type {
   DistanceMetric,
   IndexType,
   HnswParams,
+  RerankConfig,
+  RerankRequest,
   QuantizationParams,
   PayloadIndexPolicy,
   SearchGroup,

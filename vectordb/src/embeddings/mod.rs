@@ -8,5 +8,9 @@
 //! `embeddings` feature, each opening with `#![allow(dead_code)]`) moved to
 //! `planning/src/embeddings-legacy/` on 2026-09-27. Nothing called them.
 
+/// The rerank provider client, behind the same feature: it is the same HTTP client and the
+/// same key-in-the-environment contract.
+#[cfg(feature = "server-embedding")]
+pub mod rerank;
 #[cfg(feature = "server-embedding")]
 pub mod service;

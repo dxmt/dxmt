@@ -17,6 +17,17 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **Reranking.** A table may name a cross-encoder provider -- `rerank` on `POST /tables` and
+  `PATCH /tables/{t}`: `model`, `base_url`, `format` (`cohere` or `tei`), `api_key_env`,
+  `field`, `top_n` -- and `/search`, `/search/text` and `/search/hybrid` take
+  `rerank: {top_n?, field?}` to have the page re-scored by it. Each hit gains `rerank_score`;
+  `score` stays. A request with no query text, or against a table with no provider, is a 400;
+  a provider that will not answer fails the request rather than returning the page unranked.
+  The Python and JavaScript clients take `rerank=` on `create_table` and on every search
+  method. Nothing existing changes shape.
+
 ## [1.2.0] - 2026-10-06
 
 Every package carries this version. The HTTP API gains one request field

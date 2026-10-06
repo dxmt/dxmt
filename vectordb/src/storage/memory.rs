@@ -287,6 +287,7 @@ impl MemoryStorage {
                 } else {
                     None
                 },
+                rerank_score: None,
             };
             results.push(hit);
         }
@@ -514,6 +515,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         }
     }
 

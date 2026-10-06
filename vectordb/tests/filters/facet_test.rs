@@ -51,6 +51,7 @@ fn table(name: &str, payload_index: Option<PayloadIndexPolicy>) -> TableConfig {
         quantization: None,
         payload_index,
         embedding: None,
+        rerank: None,
     }
 }
 

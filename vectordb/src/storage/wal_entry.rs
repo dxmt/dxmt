@@ -7,6 +7,11 @@ use crate::types::vector::RecordId;
 use serde::{Deserialize, Serialize};
 
 /// WAL operation types
+// `CreateTable` carries the whole `TableConfig` (embedding and rerank configs included) and is
+// written once per table; a record entry is written per row. Boxing the large variant would
+// change nothing on disk (serde sees through a `Box`) and buy nothing in memory, since an entry
+// is serialized the moment it is built.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WalOperation {
     /// Create a new table
@@ -126,6 +131,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             },
         };
 

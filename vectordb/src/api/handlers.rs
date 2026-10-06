@@ -118,6 +118,12 @@ pub struct CreateTableRequest {
     /// server process.
     #[serde(default)]
     pub embedding: Option<crate::types::table::EmbeddingConfig>,
+    /// A cross-encoder a search may rerank its page with: `model`, `base_url`, and optionally
+    /// `format` (`cohere`, the default, or `tei`), `api_key_env`, `field`, `top_n`. A search
+    /// opts in with `rerank: {}`; without this, that search is refused. The key is read from
+    /// the server's environment, never from this body.
+    #[serde(default)]
+    pub rerank: Option<crate::types::table::RerankConfig>,
 }
 
 /// 批量插入记录的请求
@@ -486,6 +492,7 @@ pub async fn create_table(
         quantization: request.quantization,
         payload_index: request.payload_index,
         embedding: request.embedding,
+        rerank: request.rerank,
     };
 
     match state.storage.create_table(config).await {

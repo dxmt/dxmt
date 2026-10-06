@@ -754,6 +754,7 @@ impl<S: Storage + 'static> McpServer<S> {
             quantization: None,
             payload_index: None,
             embedding,
+            rerank: None,
         };
 
         let created = self.storage.create_table(table_config).await?;

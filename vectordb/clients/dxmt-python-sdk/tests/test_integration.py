@@ -776,3 +776,83 @@ class TestEveryRouteTheClientWraps:
             except Exception:
                 pass
             await a.aclose()
+
+
+# --------------------------------------------------------------------------------------------
+# Reranking, live. The server calls the table's provider, so the test is one: a loopback HTTP
+# server on a thread that embeds (a hashed bag of words, so `text` queries work) and reranks by
+# a score table the test fills in. The client's part is the `rerank` field and `rerank_score`
+# on the way back; the server's part is covered in the crate and in tests/api.
+# --------------------------------------------------------------------------------------------
+
+
+def _bag_of_words(text: str) -> list[float]:
+    v = [0.0] * 4
+    for word in text.lower().split():
+        v[sum(map(ord, word)) % 4] += 1.0
+    norm = sum(x * x for x in v) ** 0.5
+    return [x / norm for x in v] if norm else [1.0, 0.0, 0.0, 0.0]
+
+
+@pytest.fixture(scope="module")
+def rerank_provider():
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        scores: dict[str, float] = {}
+
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if self.path.endswith("/embeddings"):
+                out = {"data": [{"index": i, "embedding": _bag_of_words(t)} for i, t in enumerate(body["input"])]}
+            else:
+                docs = body.get("documents") or []
+                scored = sorted(((i, Handler.scores.get(d, 0.0)) for i, d in enumerate(docs)), key=lambda p: (-p[1], p[0]))
+                out = {"results": [{"index": i, "relevance_score": s} for i, s in scored[: body.get("top_n") or len(scored)]]}
+            payload = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/v1", Handler
+    server.shutdown()
+
+
+class TestRerank:
+    def test_a_search_is_reranked_by_the_tables_provider(self, client: Client, rerank_provider) -> None:
+        from dxmt.exceptions import DXMTError
+
+        base, handler = rerank_provider
+        name = f"rerank_{random.randint(1000, 9999)}"
+        client.create_table(
+            name,
+            dimension=4,
+            embedding={"model": "bag-of-words", "base_url": base, "api_key_env": "DXMT_TEST_KEY_UNSET"},
+            rerank={"model": "by-table", "base_url": base, "api_key_env": "DXMT_TEST_KEY_UNSET"},
+        )
+        try:
+            texts = [f"document number {i} about widgets" for i in range(5)]
+            client.insert_records(name, [{"id": f"r{i}", "text": t} for i, t in enumerate(texts)])
+            plain = [h["id"] for h in client.search(name, text="widgets", k=5)]
+            assert len(plain) == 5, plain
+            # The provider prefers the plain order reversed, and the page says so.
+            handler.scores = {texts[int(h[1:])]: float(rank) for rank, h in enumerate(plain)}
+            hits = client.search(name, text="widgets", k=5, rerank={})
+            assert [h["id"] for h in hits] == plain[::-1], (plain, [h["id"] for h in hits])
+            assert [h["rerank_score"] for h in hits] == [4.0, 3.0, 2.0, 1.0, 0.0]
+            assert all("score" in h for h in hits)
+            # A vector-only search has no text to rerank against and is refused, not unranked.
+            with pytest.raises(DXMTError, match="text"):
+                client.search(name, vector=_unit(0), k=2, rerank={})
+        finally:
+            client.delete_table(name)

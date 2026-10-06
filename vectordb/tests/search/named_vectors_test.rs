@@ -67,6 +67,7 @@ async fn test_named_vectors_independent_search() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -181,6 +182,7 @@ async fn test_named_vectors_fallback_to_default() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -271,6 +273,7 @@ async fn a_named_space_is_scored_with_its_own_metric() {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await
             .unwrap();
@@ -304,6 +307,7 @@ async fn a_named_space_is_scored_with_its_own_metric() {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await
             .unwrap();

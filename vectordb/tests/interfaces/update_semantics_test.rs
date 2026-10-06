@@ -42,6 +42,7 @@ async fn table_with_one_record(wal: Option<std::path::PathBuf>) -> IntelligentIn
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

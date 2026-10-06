@@ -1109,6 +1109,7 @@ export class DXMTClient {
           // computed — so a deep offset costs what the whole prefix costs. `scroll` stays flat.
           ...(params.offset ? { offset: params.offset } : {}),
           ...(params.mmr === undefined ? {} : { mmr: params.mmr }),
+          ...(params.rerank === undefined ? {} : { rerank: params.rerank }),
         }
       );
 
@@ -1154,6 +1155,7 @@ export class DXMTClient {
           query: params.query,
           limit: params.k || 10,
           filter: params.filter,
+          ...(params.rerank === undefined ? {} : { rerank: params.rerank }),
         }
       );
 
@@ -1213,6 +1215,7 @@ export class DXMTClient {
               ? {}
               : { fusion_method: 'weighted_sum' as const }
             : { fusion_method: params.fusion_method }),
+          ...(params.rerank === undefined ? {} : { rerank: params.rerank }),
         }
       );
 

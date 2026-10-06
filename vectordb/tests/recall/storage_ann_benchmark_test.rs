@@ -143,6 +143,7 @@ async fn test_storage_ann_10k_recall_and_latency() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -282,6 +283,7 @@ async fn test_search_effort_is_live() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

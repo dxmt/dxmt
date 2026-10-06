@@ -353,6 +353,7 @@ class DXMTClient:
         quantization: Optional[dict[str, int]] = None,
         payload_index: Optional[dict[str, list[str]]] = None,
         embedding: Optional[dict[str, Any]] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Create a new table (collection).
 
@@ -425,6 +426,11 @@ class DXMTClient:
         # not in here -- `api_key_env` names an environment variable of the *server*.
         if embedding is not None:
             payload["embedding"] = embedding
+        if rerank is not None:
+            # A cross-encoder the server calls when a search asks for `rerank=...`:
+            # `{"model": ..., "base_url": ..., "format": "cohere" | "tei", "api_key_env": ...}`.
+            # The key is read from the server's environment, never sent from here.
+            payload["rerank"] = rerank
         try:
             response = self._client.post("/tables", json=payload)
             response.raise_for_status()
@@ -450,6 +456,7 @@ class DXMTClient:
         quantization: Optional[dict[str, int]] = None,
         payload_index: Optional[dict[str, list[str]]] = None,
         embedding: Optional[dict[str, Any]] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Async create a new table. See `create_table` for what each argument does."""
         payload = {
@@ -477,6 +484,11 @@ class DXMTClient:
         # not in here -- `api_key_env` names an environment variable of the *server*.
         if embedding is not None:
             payload["embedding"] = embedding
+        if rerank is not None:
+            # A cross-encoder the server calls when a search asks for `rerank=...`:
+            # `{"model": ..., "base_url": ..., "format": "cohere" | "tei", "api_key_env": ...}`.
+            # The key is read from the server's environment, never sent from here.
+            payload["rerank"] = rerank
         try:
             response = await self.async_client.post("/tables", json=payload)
             response.raise_for_status()
@@ -1648,6 +1660,7 @@ class DXMTClient:
         offset: int = 0,
         mmr: Optional[dict[str, Any]] = None,
         text: Optional[str] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Vector similarity search.
 
@@ -1724,6 +1737,11 @@ class DXMTClient:
             # query. Only candidates that were fetched can contribute diversity, so `fetch_k`
             # is what it costs.
             payload["mmr"] = mmr
+        if rerank is not None:
+            # Re-score the page with the table's rerank provider: `{}` for the defaults,
+            # `{"top_n": 50, "field": "body"}` to size the pool or name the text field. Needs
+            # `text`, and a table created with `rerank=...`; each hit gains `rerank_score`.
+            payload["rerank"] = rerank
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search",
@@ -1752,6 +1770,7 @@ class DXMTClient:
         offset: int = 0,
         mmr: Optional[dict[str, Any]] = None,
         text: Optional[str] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async vector similarity search.
 
@@ -1803,6 +1822,11 @@ class DXMTClient:
             payload["offset"] = offset
         if mmr is not None:
             payload["mmr"] = mmr
+        if rerank is not None:
+            # Re-score the page with the table's rerank provider: `{}` for the defaults,
+            # `{"top_n": 50, "field": "body"}` to size the pool or name the text field. Needs
+            # `text`, and a table created with `rerank=...`; each hit gains `rerank_score`.
+            payload["rerank"] = rerank
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search",
@@ -1856,6 +1880,7 @@ class DXMTClient:
         k: Optional[int] = None,
         limit: Optional[int] = None,  # Alias for k
         filter: Optional[Filter] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Hybrid search (vector + text).
 
@@ -1898,6 +1923,9 @@ class DXMTClient:
             "filter": convert_simple_filter_to_dxmt(filter),
             **fusion,
         }
+        if rerank is not None:
+            # The fused page, re-scored by the table's rerank provider against `text`.
+            payload["rerank"] = rerank
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search/hybrid",
@@ -1924,6 +1952,7 @@ class DXMTClient:
         k: Optional[int] = None,
         limit: Optional[int] = None,  # Alias for k
         filter: Optional[Filter] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async hybrid search.
 
@@ -1963,6 +1992,9 @@ class DXMTClient:
             "filter": convert_simple_filter_to_dxmt(filter),
             **fusion,
         }
+        if rerank is not None:
+            # The fused page, re-scored by the table's rerank provider against `text`.
+            payload["rerank"] = rerank
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search/hybrid",
@@ -1987,6 +2019,7 @@ class DXMTClient:
         fields: Optional[list[str]] = None,
         highlight: bool = False,
         filter: Optional[Filter] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Full-text search.
 
@@ -2030,6 +2063,9 @@ class DXMTClient:
             # `search` and `hybrid_search` and reached the server unconverted here.
             "filter": convert_simple_filter_to_dxmt(filter),
         }
+        if rerank is not None:
+            # The BM25 page, re-scored by the table's rerank provider against `query`.
+            payload["rerank"] = rerank
         try:
             response = self._client.post(
                 f"/tables/{_seg(table_name)}/search/text",
@@ -2107,6 +2143,7 @@ class DXMTClient:
         fields: Optional[list[str]] = None,
         highlight: bool = False,
         filter: Optional[Filter] = None,
+        rerank: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async full-text search.
 
@@ -2146,6 +2183,9 @@ class DXMTClient:
             # `search` and `hybrid_search` and reached the server unconverted here.
             "filter": convert_simple_filter_to_dxmt(filter),
         }
+        if rerank is not None:
+            # The BM25 page, re-scored by the table's rerank provider against `query`.
+            payload["rerank"] = rerank
         try:
             response = await self.async_client.post(
                 f"/tables/{_seg(table_name)}/search/text",

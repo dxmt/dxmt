@@ -160,6 +160,7 @@ async fn build(tmp: &TempDir, vs: &[Vec<f32>]) -> IntelligentIndexedStorage {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

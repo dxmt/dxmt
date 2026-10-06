@@ -65,6 +65,7 @@ async fn test_basic_insert_and_search() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let storage = create_test_storage(10).await;
@@ -142,6 +143,7 @@ async fn test_memory_tier_performance() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let storage = create_test_storage(512).await;
@@ -234,6 +236,7 @@ async fn test_data_persistence() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let storage = create_test_storage(10).await;

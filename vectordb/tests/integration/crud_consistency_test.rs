@@ -59,6 +59,7 @@ mod crud_consistency_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -89,6 +90,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let result = storage.full_text_search("test_insert", text_search).await.expect("Search failed");
@@ -124,6 +126,7 @@ mod crud_consistency_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -167,6 +170,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let old_result = storage.full_text_search("test_update", old_search).await.expect("Search failed");
@@ -181,6 +185,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let new_result = storage.full_text_search("test_update", new_search).await.expect("Search failed");
@@ -216,6 +221,7 @@ mod crud_consistency_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -256,6 +262,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let before_result = storage.full_text_search("test_delete", before_search).await.expect("Search failed");
@@ -274,6 +281,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let after_result = storage.full_text_search("test_delete", after_search).await.expect("Search failed");
@@ -309,6 +317,7 @@ mod crud_consistency_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -336,6 +345,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
         let result1 = storage.full_text_search("test_crud", read1).await.expect("READ 1 failed");
         assert_eq!(result1.total, 1, "Should find doc after INSERT");
@@ -363,6 +373,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
         let result2 = storage.full_text_search("test_crud", read2).await.expect("READ 2 failed");
         assert_eq!(result2.total, 0, "Should NOT find old term after UPDATE");
@@ -376,6 +387,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
         let result3 = storage.full_text_search("test_crud", read3).await.expect("READ 3 failed");
         assert_eq!(result3.total, 1, "Should find new term after UPDATE");
@@ -393,6 +405,7 @@ mod crud_consistency_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
         let result4 = storage.full_text_search("test_crud", read4).await.expect("READ 4 failed");
         assert_eq!(result4.total, 0, "Should NOT find doc after DELETE");

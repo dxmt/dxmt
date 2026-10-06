@@ -47,6 +47,7 @@ fn table(name: &str, metric: DistanceMetric, dimension: usize) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 

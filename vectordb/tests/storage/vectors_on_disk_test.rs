@@ -124,6 +124,7 @@ async fn a_table_with_vectors_on_disk_searches_serves_and_restarts() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

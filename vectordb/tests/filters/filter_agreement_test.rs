@@ -279,6 +279,7 @@ async fn loaded(wal: Option<std::path::PathBuf>) -> IntelligentIndexedStorage {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

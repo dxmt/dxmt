@@ -62,6 +62,7 @@ async fn test_create_table_basic() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let result = state.storage.create_table(table_config).await;
@@ -98,6 +99,7 @@ async fn test_create_table_duplicate() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     state.storage.create_table(table_config.clone()).await.unwrap();
@@ -126,6 +128,7 @@ async fn test_insert_records_basic() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -179,6 +182,7 @@ async fn test_insert_records_wrong_dimension() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -219,6 +223,7 @@ async fn test_search_basic() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -304,6 +309,7 @@ async fn test_delete_record() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -370,6 +376,7 @@ async fn test_update_record() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 
@@ -443,6 +450,7 @@ async fn test_list_tables() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         state.storage.create_table(table_config).await.unwrap();
     }
@@ -481,6 +489,7 @@ async fn test_large_batch_insert() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     state.storage.create_table(table_config).await.unwrap();
 

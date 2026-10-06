@@ -134,6 +134,7 @@ async fn a_table_with_half_precision_vectors_searches_serves_and_restarts() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

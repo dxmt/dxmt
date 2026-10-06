@@ -39,7 +39,7 @@ const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 
 /// One `reqwest::Client` for the process: the connection pool and the TLS session cache live
 /// on the client, so building one per call would mean a fresh handshake per batch.
-fn http() -> &'static reqwest::Client {
+pub(crate) fn http() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

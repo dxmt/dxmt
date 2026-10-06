@@ -64,6 +64,7 @@ fn table_cfg(name: &str, dim: usize, metric: DistanceMetric) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 
@@ -1113,6 +1114,7 @@ async fn test_hybrid_search_orders_like_plain_search() {
                         filter: None,
                         with_payload: false,
                         with_vector: false,
+                        rerank: None,
                     },
                 )
                 .await
@@ -1458,6 +1460,7 @@ async fn test_tied_scores_are_cut_by_id() {
                         filter: None,
                         with_payload: false,
                         with_vector: false,
+                        rerank: None,
                     },
                 )
                 .await

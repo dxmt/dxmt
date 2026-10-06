@@ -431,6 +431,10 @@ name = "server_embedding_test"
 path = "tests/interfaces/server_embedding_test.rs"
 
 [[test]]
+name = "rerank_test"
+path = "tests/interfaces/rerank_test.rs"
+
+[[test]]
 name = "table_alias_test"
 path = "tests/interfaces/table_alias_test.rs"
 
