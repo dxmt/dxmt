@@ -17,17 +17,14 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-10-07
+## [1.3.2] - 2026-10-07
 
-A build, CI and documentation release ahead of the repository going public; nothing changes
-for a default build, on the wire or on disk. Every package carries this version.
+The pre-publication pass: the Docker images, the README and the CI toolchain. Nothing changes
+for a default build, on the wire or on disk. Every package carries this version. 1.3.1 was
+tagged before these changes were merged, so they ship here rather than in it.
 
 ### Fixed
 
-- **1.3.0 did not compile with `--features api-grpc` or without `text-bm25`.** The reranker
-  added a field to the protobuf `SearchHit` literal that the generated type does not have,
-  and left the inner half of the split full-text search without its `text-bm25` gate. The
-  default build, and every SDK, were unaffected.
 - **The Docker images build.** `docker/Dockerfile` and `Dockerfile.multiarch` cached
   dependencies by building against placeholder sources that stubbed two of the crate's five
   binaries, so cargo refused the manifest and `make docker-build` and docker-compose failed.
@@ -36,6 +33,46 @@ for a default build, on the wire or on disk. Every package carries this version.
 - **The README's request examples work as written.** Every `curl -d` example lacked
   `Content-Type: application/json`, which the server requires; the Quick Start now also
   creates, fills and searches a table rather than stopping at `/health`.
+  `examples/filter_example.md` and `examples/nginx-jwt.conf` route the paths the server
+  serves.
+- **The `config::layout` permission tests pass under root.** They checked that a read-only
+  directory is refused, which root's writes ignore -- containers, and the Dockerfile's `test`
+  stage. They now ask the directory whether its bits bind the process and return early when
+  they do not.
+
+### Changed
+
+- **The Rust toolchain is pinned to 1.99.0** (`vectordb/rust-toolchain.toml` and every
+  workflow step) instead of whatever `stable` was that day, so a new Rust release can no
+  longer turn CI red on code nobody changed -- which is how 1.0.0 to 1.3.0 came to be
+  released on a red CI. Moving to a newer Rust is a commit of its own.
+- **Documentation brought up to date with 1.1 to 1.3:** the default build (full-text search,
+  Swagger and the console are on), index selection (HNSW-PQ at every size), the background
+  index warm-up after a restart, the downgrade notes, and seven configuration variables that
+  were read but undocumented. `DXMT_COMPRESSION` and `DXMT_WORKER_THREADS` are documented as
+  what they are: parsed and unused. `SECURITY.md` describes the optional API key and the
+  current release line.
+
+### Removed
+
+- About thirty one-off and dead scripts from `scripts/`, `docs/autogen_integration.md` (for
+  a module that does not exist), an unused `static/swagger-ui.html`, an internal progress
+  report, and references to files that are not in the repository.
+
+## [1.3.1] - 2026-10-07
+
+A build fix for 1.3.0; nothing changes for a default build, on the wire or on disk.
+
+### Fixed
+
+- **1.3.0 did not compile with `--features api-grpc` or without `text-bm25`.** The reranker
+  added a field to the protobuf `SearchHit` literal that the generated type does not have,
+  and left the inner half of the split full-text search without its `text-bm25` gate. The
+  default build, and every SDK, were unaffected.
+- **Clean under Rust 1.99's clippy.** CI installs the newest stable on every run, and 1.99
+  (2026-09-28) added two lints the tree failed: `double_must_use`, raised on code
+  `async_trait` and tonic generate (allowed on those items), and `chunks_exact` with a
+  constant size (now `as_chunks`).
 - **`langchain-dxmt` could not be installed next to the current SDK.** It required
   `dxmt-python-sdk>=0.1.0,<1.0.0` while the SDK has been 1.x since 1.0.0, so `pip install`
   failed to resolve wherever the current SDK was present. Both adapters now require
@@ -47,28 +84,9 @@ for a default build, on the wire or on disk. Every package carries this version.
   the SDK live suites, the web console, the full-text API tests -- was skipped. 1.0.0 to
   1.3.0 were released on that red. Once clippy passed, those jobs ran for the first time in
   weeks and failed: they installed `pytest httpx` but the OpenAPI checks import `jsonschema`
-  (now `tests/api/requirements.txt`), and the LangChain step hit the dependency above. All
-  seven CI jobs now pass, for the first time since 1.0.0.
-
-### Changed
-
-- **The Rust toolchain is pinned to 1.99.0** (`vectordb/rust-toolchain.toml` and every
-  workflow step). CI used to install whatever `stable` was that day, and 1.99 (2026-09-28)
-  added two clippy lints the tree failed -- `double_must_use`, raised on code `async_trait`
-  and tonic generate (now allowed on those items), and `chunks_exact` with a constant size
-  (now `as_chunks`). A new Rust release can no longer turn CI red on code nobody changed;
-  moving to one is a commit of its own.
-- **Documentation brought up to date with 1.1, 1.2 and 1.3:** the default build (full-text
-  search, Swagger and the console are on), index selection (HNSW-PQ at every size), the
-  background index warm-up after a restart, the downgrade notes, and seven configuration
-  variables that were read but undocumented. `DXMT_COMPRESSION` and `DXMT_WORKER_THREADS`
-  are documented as what they are: parsed and unused.
-
-### Removed
-
-- About thirty one-off and dead scripts from `scripts/`, `docs/autogen_integration.md` (for
-  a module that does not exist) and an unused `static/swagger-ui.html`.
-  `examples/nginx-jwt.conf` now routes the paths the server serves.
+  (now `tests/api/requirements.txt`), and the LangChain step hit the dependency above. Both
+  are fixed here, and the run on the commit before this release is the first fully green one
+  since 1.0.0.
 
 ## [1.3.0] - 2026-10-07
 
