@@ -797,17 +797,17 @@ thread_local! {
 #[allow(clippy::needless_range_loop)] // the lane index is the unroll
 fn adc_scalar(table: &[f32], code: &[u8], bases: &[i32]) -> f32 {
     let mut acc = [0.0f32; 8];
-    let mut chunks = code.chunks_exact(8);
-    let mut base_chunks = bases.chunks_exact(8);
-    for (c, b) in (&mut chunks).zip(&mut base_chunks) {
+    let (chunks, rest) = code.as_chunks::<8>();
+    let (base_chunks, _) = bases.as_chunks::<8>();
+    for (c, b) in chunks.iter().zip(base_chunks) {
         for lane in 0..8 {
             acc[lane] += table[(b[lane] + c[lane] as i32) as usize];
         }
     }
     let mut total = acc.iter().sum::<f32>();
-    for (i, &c) in chunks.remainder().iter().enumerate() {
-        let sub = code.len() - chunks.remainder().len() + i;
-        total += table[(bases[sub] + c as i32) as usize];
+    let full = code.len() - rest.len();
+    for (i, &c) in rest.iter().enumerate() {
+        total += table[(bases[full + i] + c as i32) as usize];
     }
     total
 }

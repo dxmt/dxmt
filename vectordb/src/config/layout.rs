@@ -425,6 +425,23 @@ mod tests {
         );
     }
 
+    /// Whether this process is stopped by a directory's permission bits at all. Root is not:
+    /// a 0o555 directory takes new entries anyway, so a test of what happens when it refuses
+    /// one has nothing to observe there (as in a container's default user, or the Dockerfile's
+    /// `test` stage). Asked of the directory rather than inferred from the uid, so it also
+    /// covers CAP_DAC_OVERRIDE and filesystems that ignore the bits.
+    fn permissions_bind(readonly: &Path) -> bool {
+        let probe = readonly.join(".probe");
+        match std::fs::File::create(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                eprintln!("permission bits are not enforced for this process; nothing to test");
+                false
+            }
+            Err(_) => true,
+        }
+    }
+
     /// Two distinct failures, and the message has to tell them apart.
     ///
     /// `create_dir_all` failing and a directory that exists but will not take a file are
@@ -438,6 +455,9 @@ mod tests {
         let readonly = outer.path().join("readonly");
         std::fs::create_dir(&readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if !permissions_bind(&readonly) {
+            return;
+        }
 
         // Cannot be created: the store would go under a directory that takes no new entries.
         let error = layout(&[("DXMT_ROOT_DIR", &readonly.display().to_string())])
@@ -476,6 +496,9 @@ mod tests {
         let readonly = root.path().join("readonly");
         std::fs::create_dir(&readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if !permissions_bind(&readonly) {
+            return;
+        }
 
         let error = layout(&[
             ("DXMT_ROOT_DIR", &root.path().display().to_string()),

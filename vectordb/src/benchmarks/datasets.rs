@@ -461,10 +461,8 @@ pub fn load_fvecs(path: &Path) -> IoResult<Vec<Vec<f32>>> {
         file.read_exact(&mut buf)?;
 
         let mut vec = Vec::with_capacity(dim);
-        for chunk in buf.chunks_exact(4) {
-            let mut arr = [0u8; 4];
-            arr.copy_from_slice(chunk);
-            vec.push(f32::from_le_bytes(arr));
+        for chunk in buf.as_chunks::<4>().0 {
+            vec.push(f32::from_le_bytes(*chunk));
         }
         result.push(vec);
     }

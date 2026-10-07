@@ -94,8 +94,10 @@ fn read_f32(path: &str) -> Vec<f32> {
         }
         out.extend(
             buf[..got - got % 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c)),
         );
     }
     out
@@ -104,8 +106,10 @@ fn read_f32(path: &str) -> Vec<f32> {
 fn read_i64(path: &str) -> Vec<i64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
     bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
         .collect()
 }
 
@@ -128,7 +132,9 @@ fn load(dir: &str, n: usize, nq: usize) -> Data {
 
     let test = read_f32(&format!("{dir}/test.f32"));
     let mut queries: Vec<Vec<f32>> = test
-        .chunks_exact(DIM)
+        .as_chunks::<DIM>()
+        .0
+        .iter()
         .take(nq)
         .map(|q| q.to_vec())
         .collect();
@@ -301,7 +307,7 @@ fn build_pq(d: &Data, m: usize) -> (ProductQuantizer, PqCodes) {
         .map(|rows| {
             let mut buf = Vec::with_capacity(DIM);
             let mut out = Vec::with_capacity(rows.len() / DIM * m);
-            for row in rows.chunks_exact(DIM) {
+            for row in rows.as_chunks::<DIM>().0 {
                 buf.clear();
                 buf.extend_from_slice(row);
                 out.extend(pq.encode(&buf).unwrap().codes);

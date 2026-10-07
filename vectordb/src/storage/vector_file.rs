@@ -206,8 +206,10 @@ fn decode_f16_into(bytes: &[u8], out: &mut Vec<f32>) {
     }
     out.extend(
         bytes
-            .chunks_exact(2)
-            .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]))),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f16_bits_to_f32(u16::from_le_bytes(*c))),
     );
 }
 
@@ -829,8 +831,10 @@ impl VectorFile {
         match self.format {
             VectorFormat::F32 => out.extend(
                 bytes
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c)),
             ),
             VectorFormat::F16 => decode_f16_into(bytes, out),
         }
