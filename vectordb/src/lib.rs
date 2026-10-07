@@ -13,8 +13,8 @@ pub mod utils;
 
 // Turning text into a vector, server-side. The rest of what used to be here -- four
 // overlapping provider abstractions, an ONNX multimodal path returning placeholder vectors,
-// and a GPU distance calculator whose feature did not compile -- moved to `planning/src/` on
-// 2026-09-27. None of it was reachable and none of it was built by CI.
+// and a GPU distance calculator whose feature did not compile -- was taken out of
+// the crate on 2026-09-27. None of it was reachable and none of it was built by CI.
 #[cfg(feature = "server-embedding")]
 pub mod embeddings;
 

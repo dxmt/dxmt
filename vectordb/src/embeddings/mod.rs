@@ -5,8 +5,8 @@
 //!
 //! The four overlapping provider abstractions that used to sit beside it (`EmbeddingFunction`,
 //! `EmbeddingProvider`, `EmbeddingClient`, `AutoEmbedding` — 2,400 lines behind a non-default
-//! `embeddings` feature, each opening with `#![allow(dead_code)]`) moved to
-//! `planning/src/embeddings-legacy/` on 2026-09-27. Nothing called them.
+//! `embeddings` feature, each opening with `#![allow(dead_code)]`) were taken out of the crate
+//! on 2026-09-27. Nothing called them.
 
 #[cfg(feature = "server-embedding")]
 pub mod service;

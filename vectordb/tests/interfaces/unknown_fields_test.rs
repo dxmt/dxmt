@@ -302,7 +302,7 @@ fn no_handler_takes_a_typed_body_through_plain_json() {
     // Every file under `src/api/`, not a named list. The list was `["handlers.rs",
     // "multimodal.rs"]`, which is the same shape of mistake this test exists to catch: a guard
     // that names a subset stops guarding the moment the subset stops being the whole set. It
-    // also broke outright when `multimodal.rs` moved to `planning/` — a source-scanning test
+    // also broke outright when `multimodal.rs` was taken out of the crate — a source-scanning test
     // should not carry a path that a `git mv` can invalidate.
     for path in walk(&format!("{}/src/api", env!("CARGO_MANIFEST_DIR"))) {
         let file = path

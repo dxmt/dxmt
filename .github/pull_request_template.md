@@ -32,6 +32,6 @@ Anything that would be hard to see from the diff: a test that fails without the 
 invariant you are relying on, a path you deliberately did not change.
 -->
 
-- [ ] If this adds a route or changes a path an SDK calls, `tests/api_contract_test.rs` knows about it
+- [ ] If this adds a route or changes a path an SDK calls, `tests/interfaces/api_contract_test.rs` knows about it
 - [ ] If this changes behaviour the README describes, the README changed too
 - [ ] Anything under `src/` or `examples/` that this adds is reachable from a binary or a build

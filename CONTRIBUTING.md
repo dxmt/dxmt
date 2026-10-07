@@ -25,7 +25,7 @@ cd vectordb && cargo build
 | `vectordb/clients/llama-index-vector-stores-dxmt/` | LlamaIndex vector store |
 
 Each client package is independently packaged, with its own tests and dependency manifest, so a
-change to the Rust HTTP API means updating them separately. `vectordb/tests/api_contract_test.rs`
+change to the Rust HTTP API means updating them separately. `vectordb/tests/interfaces/api_contract_test.rs`
 is the link between them: it lists every method/path pair the SDKs issue and fails if the router
 stops serving one. Add to its `CONTRACTS` when an SDK starts calling something new.
 
@@ -43,11 +43,12 @@ Two things worth knowing:
 
 - `cargo fmt` is not idempotent on this tree. If `fmt-check` still complains after you ran
   `cargo fmt`, run it again.
-- The default feature set is deliberately the minimal supported surface: `tokio-runtime` +
-  `basic-storage`. Full-text search, Swagger, GraphQL, WebSocket and S3 are opt-in. A default
-  build has no full-text search and returns an explicit configuration error for `--swagger`,
-  `--graphql` and `--websocket`. If your change touches code behind a feature flag, build it
-  with that flag — CI has a job that does, because conditional compilation rots unseen.
+- The default feature set is the supported single-node surface: storage, BM25 full-text
+  search (`text-bm25`), server-side embedding, the Swagger UI and the web console. GraphQL,
+  WebSocket, gRPC and S3 are opt-in, and a default build returns an explicit configuration
+  error for `--graphql` and `--websocket`. If your change touches code behind a feature flag,
+  build it with that flag — CI has a job that does, because conditional compilation rots
+  unseen.
 
 ## The test layers
 

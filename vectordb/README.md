@@ -356,7 +356,7 @@ DXMT_COMPRESSION=zstd         # zstd | lz4 | none
 `DXMT_STORAGE_TYPE` is gone as of 2026-09-27. It was parsed into config and selected nothing —
 the server constructs `IntelligentIndexedStorage` unconditionally — and a documented variable
 that reads as a backend switch is worse than no variable. The 832-line `StorageFactory` it
-would have driven had no caller either; it is in `planning/`.
+would have driven had no caller either, and was removed with it.
 
 ### Where the data goes
 
@@ -442,7 +442,7 @@ word and cannot find anything shorter than it.
 That is the whole list. Until 2026-09-27 it also advertised `gpu`, `cluster`, `multimodal`,
 `embeddings`, `python`, `metrics` and `hf-datasets`: of those, two did not compile, three
 gated no code at all, and `metrics` was never a feature of this crate. They are removed, and
-the code behind them is in `planning/src/`.
+so is the code behind them.
 
 `embeddings` is **not** what lets you send text — that is `server-embedding`, which is on by
 default. `embeddings` compiles a directory of provider clients that no route reaches.
@@ -694,7 +694,7 @@ experimental, and what a feature has to have before it moves between the two.
 - **Nothing in `src/` is a stub you can reach by accident any more.** Multimodal (placeholder
   embeddings pending `ort` 2.0), the GPU/SIMD acceleration modules, the PyO3 bindings, the
   cluster and consensus scaffolding, and `embeddings/legacy.rs` — four overlapping provider
-  abstractions nothing called — moved to `planning/src/` on 2026-09-27, 11,668 lines, with
+  abstractions nothing called — were taken out of the crate on 2026-09-27, 11,668 lines, with
   their cargo features. The embedding path that does run is `src/embeddings/service.rs`; see
   "Sending text instead of vectors".
 - **The graph is built inside the write request.** There is no compaction or optimizer stage

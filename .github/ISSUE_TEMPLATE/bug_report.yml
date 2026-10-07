@@ -9,8 +9,8 @@ body:
         they go: privately, through a GitHub security advisory.
 
         Most confusing behaviour reported so far has turned out to be a feature that was not
-        compiled in. The default build is deliberately minimal: no full-text search, no Swagger,
-        no GraphQL, no WebSocket, no S3. The two fields below about your build are the ones that
+        compiled in. A default build has full-text search, Swagger and the web console, but no
+        GraphQL, WebSocket, gRPC or S3. The two fields below about your build are the ones that
         most often answer the question, so please fill them in even if they seem irrelevant.
 
   - type: textarea
@@ -68,7 +68,7 @@ body:
     attributes:
       label: Storage configuration
       description: >
-        Any `DB_*` environment variables you set — `DXMT_WAL_DIR`, `DXMT_RECORD_STORE`,
+        Any `DXMT_*` environment variables you set — `DXMT_WAL_DIR`, `DXMT_RECORD_STORE`,
         `DXMT_VECTOR_STORE`, object storage settings. "None" is a useful answer; it means
         everything is in memory and nothing is durable.
       placeholder: None
