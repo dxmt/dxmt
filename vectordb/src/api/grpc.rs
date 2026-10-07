@@ -382,7 +382,6 @@ impl VectorDb for GrpcService {
                     score: hit.score,
                     payload_json: hit.payload.as_ref().map(payload_json).unwrap_or_default(),
                     vector: hit.vector.unwrap_or_default(),
-                    rerank_score: None,
                 })
                 .collect(),
             total: result.total as u32,

@@ -7491,6 +7491,7 @@ impl IntelligentIndexedStorage {
     }
 
     /// `full_text_search` without the rerank step.
+    #[cfg(feature = "text-bm25")]
     async fn full_text_unranked(
         &self,
         tablename: &str,
