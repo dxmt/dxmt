@@ -17,6 +17,28 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Docker images build.** `docker/Dockerfile` and `Dockerfile.multiarch` cached
+  dependencies by building against placeholder sources that stubbed two of the crate's five
+  binaries, so cargo refused the manifest and `make docker-build` and docker-compose failed.
+  Both now build the real crate, include the web console's bundle (a container served none),
+  and build on the same Debian release they run on.
+- **The README's request examples work as written.** Every `curl -d` example lacked
+  `Content-Type: application/json`, which the server requires; the Quick Start now also
+  creates, fills and searches a table rather than stopping at `/health`.
+
+### Changed
+
+- Documentation brought up to date with 1.1 and 1.2: the default build (full-text search,
+  Swagger and the console are on), index selection (HNSW-PQ at every size), the background
+  index warm-up after a restart, the 1.2 → 1.1 downgrade note, and seven configuration
+  variables that were read but undocumented. `DXMT_COMPRESSION` and `DXMT_WORKER_THREADS` are
+  documented as what they are: parsed and unused.
+- About thirty one-off and dead scripts removed from `scripts/`, along with
+  `docs/autogen_integration.md` (for a module that does not exist) and an unused
+  `static/swagger-ui.html`. `examples/nginx-jwt.conf` routes the paths the server serves.
+
 ## [1.2.0] - 2026-10-06
 
 Every package carries this version. The HTTP API gains one request field
