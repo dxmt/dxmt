@@ -17,7 +17,35 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
-## [1.3.0] - 2026-10-07
+## [1.3.1] - 2026-10-07
+
+A build fix for 1.3.0; nothing changes for a default build, on the wire or on disk.
+
+### Fixed
+
+- **1.3.0 did not compile with `--features api-grpc` or without `text-bm25`.** The reranker
+  added a field to the protobuf `SearchHit` literal that the generated type does not have,
+  and left the inner half of the split full-text search without its `text-bm25` gate. The
+  default build, and every SDK, were unaffected.
+- **Clean under Rust 1.99's clippy.** CI installs the newest stable on every run, and 1.99
+  (2026-09-28) added two lints the tree failed: `double_must_use`, raised on code
+  `async_trait` and tonic generate (allowed on those items), and `chunks_exact` with a
+  constant size (now `as_chunks`).
+- **`langchain-dxmt` could not be installed next to the current SDK.** It required
+  `dxmt-python-sdk>=0.1.0,<1.0.0` while the SDK has been 1.x since 1.0.0, so `pip install`
+  failed to resolve wherever the current SDK was present. Both adapters now require
+  `>=1.3.0,<2.0.0`. Three of its test files also failed to collect, importing a helper by a
+  path pytest does not put on `sys.path`; with that fixed, 122 tests run where only the unit
+  tests had.
+- **CI runs the tests again.** Its clippy step had failed on every push to main since 1.0.0,
+  under each new stable's lints, and every job that depends on it -- the integration tests,
+  the SDK live suites, the web console, the full-text API tests -- was skipped. 1.0.0 to
+  1.3.0 were released on that red. Once clippy passed, those jobs ran for the first time in
+  weeks and failed: they installed `pytest httpx` but the OpenAPI checks import `jsonschema`
+  (now `tests/api/requirements.txt`), and the LangChain step hit the dependency above. Both
+  are fixed here, and the run on the commit before this release is the first fully green one
+  since 1.0.0.
+
 
 Every package carries this version. The HTTP API gains `rerank` on `POST /tables`,
 `PATCH /tables/{t}` and the three search routes, and `rerank_score` on a hit; nothing existing
