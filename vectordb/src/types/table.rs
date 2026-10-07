@@ -264,14 +264,19 @@ pub struct TableAlterRequest {
     /// which is a real thing that happens and which otherwise needs the table recreated.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
-    /// A cross-encoder provider a search may rerank its page with; see [`RerankConfig`].
-    #[serde(default)]
-    pub rerank: Option<RerankConfig>,
     /// Set this table's recall target (see [`Table::recall_target`]); `0` turns calibration
     /// off. Any previous calibration is discarded and the next sweep measures against the
     /// new target.
     #[serde(default)]
     pub recall_target: Option<f64>,
+    /// A cross-encoder provider a search may rerank its page with; see [`RerankConfig`].
+    ///
+    /// **Last, and new fields go after it.** This struct is logged in `AlterTable` WAL entries,
+    /// which `rmp_serde::to_vec` writes as an array: a field's position is its identity there.
+    /// Inserted before `recall_target`, it made a 1.2 log's recall target decode as a rerank
+    /// config and the replay fail. `alter_request_logged_by_1_2_replays` pins the order.
+    #[serde(default)]
+    pub rerank: Option<RerankConfig>,
 }
 
 /// Named vector space configuration (multi-vector support)
@@ -839,6 +844,60 @@ pub struct TableWithCount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `PATCH /tables` logged by 1.2 must replay on this binary. The WAL encodes the request
+    /// as a MessagePack array, so the frozen struct below is 1.2's field order, and the live
+    /// type has to read it field for field -- the case that broke was a recall target landing
+    /// in a field added in the middle.
+    #[test]
+    fn alter_request_logged_by_1_2_replays() {
+        #[derive(Serialize)]
+        struct AlterRequestV1_2 {
+            description: Option<String>,
+            memory_optimization: Option<bool>,
+            enable_full_text_search: Option<bool>,
+            add_fields: Vec<FieldDef>,
+            drop_fields: Vec<String>,
+            payload_index: Option<PayloadIndexPolicy>,
+            embedding: Option<EmbeddingConfig>,
+            recall_target: Option<f64>,
+        }
+        let logged = rmp_serde::to_vec(&AlterRequestV1_2 {
+            description: Some("before".into()),
+            memory_optimization: None,
+            enable_full_text_search: Some(true),
+            add_fields: Vec::new(),
+            drop_fields: vec!["old".into()],
+            payload_index: None,
+            embedding: None,
+            recall_target: Some(0.97),
+        })
+        .unwrap();
+        let replayed: TableAlterRequest = rmp_serde::from_slice(&logged)
+            .expect("a 1.2 AlterTable entry must decode as the current request");
+        assert_eq!(replayed.recall_target, Some(0.97));
+        assert_eq!(replayed.description.as_deref(), Some("before"));
+        assert_eq!(replayed.drop_fields, vec!["old".to_string()]);
+        assert!(replayed.rerank.is_none());
+
+        // And the new field survives its own round trip in the array form.
+        let now = TableAlterRequest {
+            recall_target: Some(0.9),
+            rerank: Some(RerankConfig {
+                model: "m".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                format: RerankFormat::Tei,
+                api_key_env: None,
+                field: None,
+                top_n: Some(20),
+            }),
+            ..Default::default()
+        };
+        let back: TableAlterRequest =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&now).unwrap()).unwrap();
+        assert_eq!(back.recall_target, Some(0.9));
+        assert_eq!(back.rerank, now.rerank);
+    }
 
     #[test]
     fn test_table_creation() -> crate::Result<()> {
