@@ -83,6 +83,12 @@ class Server:
             raise SystemExit(f"{method} {path} -> {e.code} {e.read()[:300]}")
 
 
+def _anonymous(info):
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    return info
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("label", help="e.g. 0.2.0 — the directory name under tests/compat/fixtures")
@@ -186,7 +192,8 @@ def main():
 
     os.makedirs(out)
     with tarfile.open(os.path.join(out, "data.tar.gz"), "w:gz") as tar:
-        tar.add(wal, arcname="wal")
+        # No local user or group in the archive: it is published.
+        tar.add(wal, arcname="wal", filter=_anonymous)
 
     # created_at is the server's; read it from a copy, since opening the data can rewrite it.
     copy = tempfile.mkdtemp(prefix="dxmt_compat_read_")

@@ -758,7 +758,7 @@ struct IntelligentTableData {
     ///
     /// `Arc` 是为了快照:它要的是某个时刻的一致视图,于是在读锁里把每条记录拷出来,
     /// 而 10M 条 × 9.5 KB 就是 90 GB 的临时拷贝叠在 90 GB 常驻之上 —— 实测在 125 GB 的机器上
-    /// 被内核杀掉(design doc §34.3)。记录从不原地修改、只整体替换,所以引用计数就够,
+    /// 被内核杀掉。记录从不原地修改、只整体替换,所以引用计数就够,
     /// 一次快照的拷贝从每条 9.5 KB 降到 8 字节。
     /// Where the records live: the map, or a row file on disk (`DXMT_RECORD_STORE=disk`,
     /// phase 3 of docs/architecture/disk-index.md). Same interface either way; `get` decodes from
@@ -2741,7 +2741,7 @@ impl IntelligentIndexedStorage {
 
     /// 把一份自洽的备份写到 `dest`。
     ///
-    /// W7 给 WAL 加了截断之后，快照就成了它所覆盖那段数据的**唯一副本**——`snapshot/` 目录
+    /// WAL 会在快照校验通过后截断，所以快照是它所覆盖那段数据的**唯一副本**——`snapshot/` 目录
     /// 从缓存变成了必须备份的数据。这个方法产出的目录包含恢复所需的全部内容。
     ///
     /// 先强制快照再拷贝，顺序不能反：快照会把内存里尚未落盘的写入固定下来，并把日志压到

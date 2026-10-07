@@ -11,9 +11,8 @@ too short to provide complete context. The "Context Enrichment Window" pattern:
 This dramatically improves answer quality when the relevant information spans
 chunk boundaries, without requiring re-chunking or late chunking.
 
-Reference:
-    reference/examples/vectordb-recipes/examples/
-        Advanced_RAG_Context_Enrichment_Window/
+Pattern from the "Advanced_RAG_Context_Enrichment_Window" recipe in LanceDB's
+vectordb-recipes (https://github.com/lancedb/vectordb-recipes), reimplemented against DXMT.
 
 Modes:
     No LLM (default)  — returns the enriched context window directly.

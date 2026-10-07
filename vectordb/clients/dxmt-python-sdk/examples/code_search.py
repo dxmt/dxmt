@@ -4,8 +4,8 @@ Index a corpus of code snippets (with language, type, and module metadata)
 then search semantically. Payload filters let you narrow results to a specific
 language, snippet type (function/class/test), or module.
 
-Reference:
-    reference/examples/vectordb-recipes/examples/Code-Documentation-QA-Bot/
+Pattern from the "Code-Documentation-QA-Bot" recipe in LanceDB's vectordb-recipes
+(https://github.com/lancedb/vectordb-recipes), reimplemented against DXMT.
 
 This example is self-contained: no external APIs required.
 sentence-transformers is used if available; otherwise synthetic vectors.

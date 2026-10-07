@@ -353,7 +353,7 @@ fn the_api_is_not_compressed_because_that_is_a_separate_decision() {
 /// The console is served without being asked for, and `--no-dashboard` takes it away.
 ///
 /// It used to be the other way round -- `--dashboard` to get it -- and the test here asserted
-/// that the runtime gate was real, because CLAUDE.md records a period when all three optional
+/// that the runtime gate was real, because there was a period when all three optional
 /// interfaces were compiled in and unreachable behind a hardcoded `false`. The gate is still
 /// real; the default moved. Both directions are asserted, because a default that cannot be
 /// turned off is the same defect with the sign flipped.

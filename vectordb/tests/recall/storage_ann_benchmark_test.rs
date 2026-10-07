@@ -231,7 +231,7 @@ async fn test_storage_ann_10k_recall_and_latency() {
     // Larger or higher-dimensional overrides do not all clear it today — 10K x 768 measures
     // 0.900 and 50K x 128 measures 0.886 with the default `ef_search` of 128, on random unit
     // vectors, which is the hardest synthetic distribution there is. That is a real gap and is
-    // tracked in ROADMAP §7 W9; the assertion is left strict so it stays visible rather than
+    // not yet closed; the assertion is left strict so it stays visible rather than
     // being tuned down to whatever the engine currently does.
     assert!(
         recall >= 0.90,

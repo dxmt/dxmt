@@ -10,7 +10,8 @@ This technique dramatically improves recall for complex factual queries because
 the embedding of a relevant-style answer is closer to the stored document
 embeddings than the embedding of the short question itself.
 
-Reference: reference/examples/vectordb-recipes/examples/Advance-RAG-with-HyDE/
+Pattern from the "Advance-RAG-with-HyDE" recipe in LanceDB's vectordb-recipes
+(https://github.com/lancedb/vectordb-recipes), reimplemented against DXMT.
 
 Modes:
     No LLM (default)   — "hypothetical doc" is a rule-based expansion of the query.
