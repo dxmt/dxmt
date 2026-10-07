@@ -46,7 +46,8 @@ standalone tests.
 
 ## Quick Start
 
-Requires a recent stable Rust toolchain.
+Requires [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml` (1.99.0), and
+rustup installs it the first time you run `cargo` in `vectordb/`.
 
 ```bash
 # Build

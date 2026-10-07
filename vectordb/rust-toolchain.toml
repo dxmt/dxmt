@@ -1,0 +1,11 @@
+# The toolchain CI builds with, and the one rustup picks for anything run from vectordb/.
+#
+# CI used to install whatever `stable` was that day. Each Rust release adds clippy lints,
+# and with `clippy -D warnings` as the first step every new one failed the gate on code
+# nobody had touched -- 1.99 (2026-09-28) did that with 63 errors -- and every job behind
+# that step, the test suites included, was skipped. Moving to a newer Rust is a change of
+# its own: bump the version here and in .github/workflows/*.yml together, and fix what the
+# new lints find in the same commit.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
