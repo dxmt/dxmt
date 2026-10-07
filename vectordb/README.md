@@ -612,9 +612,15 @@ restart:
 | 20,000 | 47 ms | 1.0 ms | 0.7 ms | 1.2 ms | 0.4 ms |
 | 120,000 | 353 ms | 8.4 ms | 1.0 ms | 2.3 ms | 0.5 ms |
 
-**The first filtered query is the one that is not like the others.** It rebuilds the payload
-index by reading every record, because that index is derived from them and is not persisted.
-At 10M rows on the machine above that is 23 s, down from 40 s, with the server's peak memory
+**The first filtered query is the one that is not like the others** — or was, until 1.2.0.
+The payload index is derived from the records and is not persisted, so a restart has to read
+every record to build it again. The "first filtered query" columns above are that build, paid
+by whichever caller filtered first. Since 1.2.0 the server builds it in the background as
+soon as recovery is done, decoding rows on every core under short read locks (26.8 s for the
+payload index and 3.1 s for the node map on a 10M-row table), so a filtered query waits for
+it only if it arrives before the warm-up finishes, or if a write reached the table first —
+then it pays the same build itself.
+At 10M rows on the machine above the build is 23 s, down from 40 s, with the server's peak memory
 7.1 GB rather than 8.7 GB: a value's records are held inline when there is one and in a roaring
 bitmap when there are many, instead of a hash set per distinct value, and each record id is
 stored once instead of twice. What is left is mostly decoding ten million records from disk and
@@ -624,9 +630,9 @@ Every filtered page after it is chosen by the index, which keeps each record's `
 beside it, so only the records on the page are looked up: 0.2 s at 10M for a filter matching
 2.5M rows, where it was 2.9 s when each match was turned into an id and hashed back to a row.
 
-At a hundred thousand rows none of this is visible. At ten million the first filtered query is
-still most of half a minute, and a server that restarts often and filters immediately will feel
-it.
+At a hundred thousand rows none of this is visible. At ten million the build is still most of
+half a minute; it now runs in the background, but a server that restarts often and filters the
+moment it is up will still catch it before it is done.
 
 ## Known Limitations
 
@@ -666,12 +672,13 @@ experimental, and what a feature has to have before it moves between the two.
 - **`POST /api/v1/tables/{name}/records/list` omits vectors unless asked.** Pass
   `"with_vector": true` for them. The default is off because a page of 100 rows at 768
   dimensions is over a megabyte of JSON floats, and responses are not compressed.
-- **The first filtered query on a restored table rebuilds the index it filters with.** The
-  payload index is derived from the records and is not written anywhere, so a restart has to
-  build it again — and it is built on demand rather than at startup, so a server that never
-  filters never pays for it. That first query is proportional to the table: 187 ms at 100,000
-  rows, 23 s at 10M. Every query after it is proportional to what matches. See the numbers
-  above.
+- **The payload and sparse indexes are rebuilt after every restart.** They are derived from
+  the records and not written anywhere. Since 1.2.0 the server builds them in the background
+  once recovery is done (26.8 s at 10M rows, on every core), so the cost is CPU after startup
+  rather than a slow first query — unless a filtered or sparse query arrives before the
+  build finishes, or a write reaches the table first, in which case that query builds the
+  index itself: 187 ms at 100,000 rows, 23 s at 10M. Every query after it is proportional to
+  what matches. See the numbers above.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures
   are logged without failing an already durable local write. Multi-process coordination and full
