@@ -1,0 +1,8 @@
+# What tests/api, tests/stateful and tests/compat import beyond the standard library.
+# CI installs from this file in every job that runs scripts/api_tests.sh; a dependency added
+# to the suite goes here, or it is a ModuleNotFoundError in CI and nowhere else. jsonschema
+# was added to tests/api/helpers/openapi.py while the jobs that run it were being skipped,
+# and the first run that reached them failed all three on it.
+pytest>=7.4
+httpx>=0.25
+jsonschema>=4.17
