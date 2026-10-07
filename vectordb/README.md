@@ -64,6 +64,35 @@ curl http://localhost:9999/health
 curl -f http://localhost:9999/ready
 ```
 
+Create a table, put three vectors in it, and search — with a payload filter on the last one:
+
+```bash
+curl -X POST localhost:9999/api/v1/tables \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "quickstart", "dimension": 4, "distance_metric": "cosine"}'
+
+curl -X POST localhost:9999/api/v1/tables/quickstart/records \
+  -H 'Content-Type: application/json' \
+  -d '{"records": [
+        {"id": "a", "vector": [0.1, 0.2, 0.3, 0.4], "payload": {"topic": "rust"}},
+        {"id": "b", "vector": [0.4, 0.3, 0.2, 0.1], "payload": {"topic": "go"}},
+        {"id": "c", "vector": [0.1, 0.2, 0.3, 0.5], "payload": {"topic": "rust"}}]}'
+
+curl -X POST localhost:9999/api/v1/tables/quickstart/search \
+  -H 'Content-Type: application/json' \
+  -d '{"vector": [0.1, 0.2, 0.3, 0.4], "top_k": 2}'
+# {"success":true,"data":{"hits":[{"id":"a","score":1.0,...},{"id":"c","score":0.994,...}],...}}
+
+curl -X POST localhost:9999/api/v1/tables/quickstart/search \
+  -H 'Content-Type: application/json' \
+  -d '{"vector": [0.1, 0.2, 0.3, 0.4], "top_k": 2,
+       "filter": {"must": [{"key": "topic", "operation": {"type": "Equal", "value": "go"}}]}}'
+```
+
+Every request body is JSON and needs the `Content-Type: application/json` header; without it
+the server answers `400 INVALID_INPUT`. The client SDKs (see [Client SDKs](#client-sdks)) set it
+for you.
+
 Two things are served without asking, because a database you cannot look at and whose API you
 cannot read is harder to evaluate than one you can:
 
@@ -107,6 +136,7 @@ timestamps and counters reset on restart; the WAL and snapshot manifest remain a
 
 ```bash
 curl -X POST localhost:9999/api/v1/tables/docs/facets \
+  -H 'Content-Type: application/json' \
   -d '{"key": "topic", "limit": 20}'
 ```
 
@@ -162,13 +192,16 @@ export OPENAI_API_KEY=...            # read by the server; never sent in a reque
 # text-embedding-3-small, 1024 for bge-m3, 384 for all-MiniLM-L6-v2 -- the number
 # whose cost, when you get it wrong, is a table that accepts no writes.
 curl -X POST localhost:9999/api/v1/tables \
+  -H 'Content-Type: application/json' \
   -d '{"name": "docs", "embedding": {"model": "text-embedding-3-small"}}'
 
 curl -X POST localhost:9999/api/v1/tables/docs/records \
+  -H 'Content-Type: application/json' \
   -d '{"records": [{"id": "1", "text": "rust borrows memory instead of collecting it"},
                    {"id": "2", "text": "go collects garbage instead of borrowing"}]}'
 
 curl -X POST localhost:9999/api/v1/tables/docs/search \
+  -H 'Content-Type: application/json' \
   -d '{"text": "memory management", "top_k": 5}'
 ```
 
@@ -551,8 +584,8 @@ you have. `search_mode: "exact"` scores every live row and skips the index entir
 run the same query twice and measure the difference on your own data:
 
 ```bash
-curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 10, "search_mode": "exact"}'
-curl -s localhost:9999/api/v1/tables/mine/search -d '{"vector": [...], "top_k": 10}'
+curl -s localhost:9999/api/v1/tables/mine/search -H 'Content-Type: application/json' -d '{"vector": [...], "top_k": 10, "search_mode": "exact"}'
+curl -s localhost:9999/api/v1/tables/mine/search -H 'Content-Type: application/json' -d '{"vector": [...], "top_k": 10}'
 # recall@10 = |overlap| / 10
 ```
 

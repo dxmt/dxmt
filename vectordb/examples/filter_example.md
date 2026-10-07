@@ -24,50 +24,11 @@ Filters support three logical operators:
 8. **StartsWith**: Prefix match
 9. **EndsWith**: Suffix match
 
-## Simple API Example
-
-```bash
-# Search with filter
-curl -X POST http://localhost:9999/collections/documents/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "machine learning",
-    "limit": 10,
-    "filter": {
-      "must": [
-        {
-          "key": "category",
-          "operation": {
-            "type": "Equal",
-            "value": "technology"
-          }
-        },
-        {
-          "key": "year",
-          "operation": {
-            "type": "GreaterThanOrEqual",
-            "value": 2020
-          }
-        }
-      ],
-      "must_not": [
-        {
-          "key": "status",
-          "operation": {
-            "type": "Equal",
-            "value": "archived"
-          }
-        }
-      ]
-    }
-  }'
-```
-
-## Standard API Example
+## API Example
 
 ```bash
 # Search with range filter
-curl -X POST http://localhost:9999/tables/products/search \
+curl -X POST http://localhost:9999/api/v1/tables/products/search \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, 0.2, ...],
@@ -200,7 +161,7 @@ if use_pre_filtering {
 
 ```bash
 # Create table
-curl -X POST http://localhost:9999/tables \
+curl -X POST http://localhost:9999/api/v1/tables \
   -H "Content-Type: application/json" \
   -d '{
     "name": "test_filters",
@@ -209,7 +170,7 @@ curl -X POST http://localhost:9999/tables \
   }'
 
 # Insert test data
-curl -X POST http://localhost:9999/tables/test_filters/records \
+curl -X POST http://localhost:9999/api/v1/tables/test_filters/records \
   -H "Content-Type: application/json" \
   -d '{
     "records": [
@@ -226,7 +187,7 @@ curl -X POST http://localhost:9999/tables/test_filters/records \
   }'
 
 # Test Equal filter
-curl -X POST http://localhost:9999/tables/test_filters/search \
+curl -X POST http://localhost:9999/api/v1/tables/test_filters/search \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, ...],
@@ -242,7 +203,7 @@ curl -X POST http://localhost:9999/tables/test_filters/search \
   }'
 
 # Test Range filter
-curl -X POST http://localhost:9999/tables/test_filters/search \
+curl -X POST http://localhost:9999/api/v1/tables/test_filters/search \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, ...],
@@ -264,7 +225,7 @@ curl -X POST http://localhost:9999/tables/test_filters/search \
 2. **Accurate Estimation**: Statistics-based cardinality estimation
 3. **Cost Efficiency**: Reduced over-fetching and computation
 4. **Better Recall**: Dynamic fetch limit adjustment
-5. **API Consistency**: Works across Simple API, Standard API, and MCP
+5. **API Consistency**: Works across the REST API, gRPC and MCP
 
 ## Limitations and Future Work
 
