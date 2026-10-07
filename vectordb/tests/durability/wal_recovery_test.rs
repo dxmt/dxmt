@@ -1216,7 +1216,7 @@ async fn a_backup_directory_is_enough_to_restore_from() {
         );
     }
 
-    // Destroy the original. Since W7 compacts the WAL after a snapshot, the backup is the only
+    // Destroy the original. Since the WAL is compacted after a snapshot, the backup is the only
     // copy of everything it covers — if it is not self-contained, nothing else can save this.
     std::fs::remove_dir_all(&wal_dir).unwrap();
 
@@ -2574,7 +2574,7 @@ async fn a_dropped_table_stays_dropped_across_a_restart() {
 
 /// The snapshot carries the graph, and a restart reads it back rather than rebuilding it.
 ///
-/// This exists because `CLAUDE.md` claimed for months that "HNSW and HNSW-PQ have no save/load,
+/// This exists because the project's own notes claimed for months that "HNSW and HNSW-PQ have no save/load,
 /// so a restart means a full index rebuild" while `tests/index_persistence_test.rs` sat in the
 /// tree proving the round trip. What neither the doc nor that file covered was the part an
 /// operator cares about: that the *server's* restore path uses it. Measured on 100,000 rows at

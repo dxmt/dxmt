@@ -189,8 +189,7 @@ async fn main() -> Result<()> {
                     {
                         return Err(dxmt_vectordb::Error::InvalidConfig(
                             "Cluster mode is configured, but this build has no cluster mode: \
-                             the coordination code is in `planning/src/cluster/` and nothing \
-                             mounts it"
+                             DXMT VectorDB is a single-node server"
                                 .to_string(),
                         ));
                     }

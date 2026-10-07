@@ -35,7 +35,7 @@ except ImportError:
     sys.exit("this example needs httpx:  pip install httpx")
 
 BASE = os.environ.get("DXMT_URL", "http://localhost:9999").rstrip("/") + "/api/v1"
-DATASET_DIR = Path(os.environ.get("DXMT_DATASET_DIR", "/mnt/nvme/vectordb_bench/dataset"))
+DATASET_DIR = Path(os.environ.get("DXMT_DATASET_DIR", "/tmp/vectordb_bench/dataset"))
 DATASET = os.environ.get("DXMT_DATASET", "cohere/cohere_small_100k")
 ROWS = int(os.environ.get("DXMT_ROWS", "100000"))
 QUERIES = int(os.environ.get("DXMT_QUERIES", "200"))

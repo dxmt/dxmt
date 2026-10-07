@@ -44,8 +44,8 @@ This project follows the [Contributor Covenant Code of Conduct](https://www.cont
 
 ```bash
 # Fork the repository on GitHub, then clone your fork
-git clone https://github.com/YOUR_USERNAME/vectordb.git
-cd vectordb/clients/langchain-dxmt
+git clone https://github.com/YOUR_USERNAME/dxmt.git
+cd dxmt/vectordb/clients/langchain-dxmt
 
 # Add upstream remote
 git remote add upstream https://github.com/dxmt/dxmt.git

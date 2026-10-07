@@ -1,7 +1,7 @@
 //! Turning text into a vector, on the server, through an OpenAI-compatible `/embeddings` API.
 //!
 //! This is the only file in `src/embeddings/` that a request reaches. The rest of the directory
-//! is four overlapping provider abstractions that nothing calls; see the note in `CLAUDE.md`.
+//! is four overlapping provider abstractions that nothing calls.
 //!
 //! **Why one provider shape and not a trait with five implementations.** Every embedding service
 //! worth pointing at speaks `POST {base}/embeddings` with `{"model": …, "input": [...]}` —

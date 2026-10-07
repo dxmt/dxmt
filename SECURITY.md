@@ -26,9 +26,7 @@ documented HTTP routes. Reports against that are in scope.
 
 **Out of scope**, because they are not claimed to work and the README says so:
 
-- cluster and consensus code, which is scaffolding with no supported deployment
 - object-storage mirroring, which is experimental
-- the multimodal modules, which return placeholder vectors
 - indexes the support matrix lists as not selectable
 - anything reached only by building with a non-default feature flag that the README marks
   experimental
@@ -40,10 +38,12 @@ If you are unsure which side of that line something falls on, report it and we w
 Two properties of the current release shape are worth stating plainly, because they are design
 decisions rather than vulnerabilities:
 
-- **The server has no authentication or authorization of its own.** Anyone who can reach the
-  port can read and write every table, and can trigger administrative operations such as
-  snapshots and backups. Run it on a private network or behind a proxy that authenticates —
-  `vectordb/examples/nginx-jwt.conf` is a sample of the latter.
+- **Authentication is one optional shared key, and there is no authorization.** Without
+  `DXMT_API_KEY`, anyone who can reach the port can read and write every table and trigger
+  administrative operations such as snapshots and backups. With it, every caller holding the
+  key can do all of that; there are no users, roles or per-table permissions. Run it on a
+  private network or behind a proxy that authenticates — `vectordb/examples/nginx-jwt.conf` is
+  a sample of the latter.
 - **Payload data is stored and returned as given.** There is no encryption at rest; the write-
   ahead log, snapshots and row files hold plaintext vectors and payloads.
 - **The web console and the API reference are served by default, and both are read-only; the
@@ -56,13 +56,13 @@ decisions rather than vulnerabilities:
   the port on a private interface or behind an authenticating proxy — which is the advice for
   the data routes too, since those were never optional.
 
-Reports that the server is unauthenticated are not treated as vulnerabilities. Reports that a
+Reports that the server is unauthenticated when no key is set, or that a key holder can do
+everything, are not treated as vulnerabilities. Reports that a
 route bypasses a boundary the documentation does claim — a filter that returns records it
 should exclude, a path that escapes the configured data directory, a payload that can crash or
 hang the process — are.
 
 ## Supported versions
 
-Pre-1.0 and in alpha: only the `main` branch is supported. Fixes land there. There is no
-backport policy yet, and the `v0.2.0-*` tags in this repository are measurement checkpoints,
-not releases.
+Only the latest release and the `main` branch are supported; fixes land on `main` and ship in
+the next release. There is no backport policy yet.

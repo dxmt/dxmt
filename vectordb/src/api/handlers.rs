@@ -1659,7 +1659,7 @@ pub async fn search_groups(
 /// corpus, not 1.0. **`exact` scores every live row**, which is the only way to find out what
 /// recall your index is actually giving you on your own data: run the same query twice and
 /// compare. It costs a full pass over the table's vectors and is refused above
-/// `DXMT_EXACT_SCAN_MAX` rows (default 1,000,000); a filter narrows what it has to read.
+/// `DXMT_EXACT_SCAN_MAX` rows (default 10,000,000); a filter narrows what it has to read.
 ///
 /// `POST /api/v1/tables/{table_name}/batch_search` is an alias for this route and answers
 /// identically; it does not batch anything.

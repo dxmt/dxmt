@@ -76,7 +76,7 @@ It is marked `slow`, so `-m "not slow"` skips it; CI runs it, because a recall g
 only exists on a developer's machine guards nothing.
 
 Recall is measured against a brute-force answer the test computes in plain Python — CI installs
-`pytest httpx` and nothing else. It is a tripwire for wrong neighbours, not a measure of
+`tests/api/requirements.txt` (pytest, httpx, jsonschema) and nothing else. It is a tripwire for wrong neighbours, not a measure of
 quantization quality: at 2,000 rows the HNSW-PQ graph is still exact
 (`DEFAULT_QUANTIZE_AT_ROWS` is 65,536), so recall sits near 1.0 and the threshold is 0.95.
 Raising it to 0.99 would make it grade the graph's parameters instead. Quantization quality is

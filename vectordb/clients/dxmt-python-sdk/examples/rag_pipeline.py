@@ -7,7 +7,8 @@ End-to-end Retrieval-Augmented Generation without any cloud dependency:
     4. Retrieve top-k chunks for a query
     5. Assemble a grounded prompt (LLM call is optional / stubbed)
 
-Reference: reference/examples/vectordb-recipes/tutorials/Local-RAG-from-Scratch/rag.py
+Pattern from the "Local-RAG-from-Scratch" tutorial in LanceDB's vectordb-recipes
+(https://github.com/lancedb/vectordb-recipes), reimplemented against DXMT.
 
 Usage:
     python rag_pipeline.py                    # synthetic embeddings, no LLM

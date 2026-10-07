@@ -14,8 +14,8 @@ echo ""
 echo "1. 检查 vectordbbench 命令..."
 if ! command -v vectordbbench &> /dev/null; then
     echo "❌ vectordbbench 命令未找到"
-    echo "The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout."
-    echo "安装: pip install -e \"$DXMT_VECTORDBBENCH\""
+    echo "The DXMT client is not part of upstream VectorDBBench; it is in benches/vectordbbench-client/. Install it into a VectorDBBench virtualenv with benches/vectordbbench-client/install.sh <venv>, or set DXMT_VECTORDBBENCH to a VectorDBBench checkout that already carries it."
+    echo "Install: pip install vectordb-bench && benches/vectordbbench-client/install.sh <venv>"
     exit 1
 fi
 echo "✅ vectordbbench 命令可用"

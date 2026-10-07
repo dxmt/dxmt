@@ -362,12 +362,12 @@ server-embedding = ["reqwest"]
 # `embeddings`, `gpu` and `simd` were here, and `multimodal` and `python` below. They gated
 # about 9,300 lines that no route reached and no CI job compiled -- and of which `gpu` and
 # `python` did not compile at all, which is how long a feature nobody builds can stay broken.
-# All of it moved to `planning/src/` on 2026-09-27; `planning/README.md` says what each would
-# take to become real. `server-embedding` above is the live path and stays.
+# All of it was taken out of the crate on 2026-09-27. `server-embedding` above is the live
+# path and stays.
 #
 # `cluster`, `consensus`, `hybrid-search` and `hf-datasets` went the same day for a related
 # reason: they gated nothing. `cluster` had not compiled since `api/server_with_cluster.rs`
-# moved to `planning/`, `consensus` was an empty feature enabling an absent module, and
+# was taken out, `consensus` was an empty feature enabling an absent module, and
 # `hybrid-search`/`hf-datasets` appeared in no `cfg` anywhere in the tree -- `hybrid-search`
 # in particular reads as the feature flag for `/search/hybrid`, which is `text-bm25`.
 # Was an empty feature: `--features jemalloc` compiled and changed nothing. Now it swaps

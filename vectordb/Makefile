@@ -30,7 +30,7 @@ help:
 	@echo "  test-integ   - Run integration tests"
 	@echo "  test-recovery  - WAL recovery tests"
 	@echo "  test-contract  - The SDK/router contract test"
-	@echo "  test-api     - The HTTP functional suite in both storage modes (needs python3+pytest+httpx)"
+	@echo "  test-api     - The HTTP functional suite in both storage modes (pip install -r tests/api/requirements.txt)"
 	@echo "  test-api-quick - Same, skipping the property suite"
 	@echo "  examples     - Run examples/, naming every one it could not run and why"
 	@echo "  examples-list - What would run and what would not, without running it"
@@ -133,7 +133,7 @@ test-contract:
 	@cargo test --test api_contract_test
 
 # The HTTP surface, against a server this starts itself -- once with records and vectors in
-# memory and once with them in row files. Needs python3 with pytest and httpx; deliberately
+# memory and once with them in row files. Needs python3 and tests/api/requirements.txt; deliberately
 # NOT part of `verify`, which stays pure cargo so it runs on a checkout with no Python, and
 # because CI runs this in `sdk-live` where the server and the interpreter already live.
 test-api:
@@ -183,9 +183,9 @@ dashboard-clean:
 verify-live: verify test-api
 	@echo "All checks passed, including the live API suite."
 
-# `filter_performance_bench` declares `required-features = ["text-bm25"]`, and text-bm25
-# left the default set. Without naming it here, cargo silently skips the only bench target
-# and this recipe exits 0 having measured nothing.
+# `filter_performance_bench` declares `required-features = ["text-bm25"]`. text-bm25 is a
+# default feature again, but naming it here keeps the recipe measuring something if it ever
+# leaves the default set: cargo would otherwise skip the only bench target and exit 0.
 bench:
 	@echo "Running benchmarks..."
 	@cargo bench --features text-bm25

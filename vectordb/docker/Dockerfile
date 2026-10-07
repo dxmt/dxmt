@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # DXMT VectorDB - 通用多阶段 Docker 构建
 # 支持多平台: linux/amd64, linux/arm64
@@ -7,8 +8,11 @@
 # -----------------------------------------------------------------------------
 # 第一阶段：基础构建环境
 # -----------------------------------------------------------------------------
-ARG RUST_VERSION=latest
-FROM rust:${RUST_VERSION} AS base-builder
+# Pinned to bookworm, the same Debian the runtime stage is: `rust:latest` follows Debian's
+# newest release, and a binary linked against a newer glibc than the runtime image's does not
+# start.
+ARG RUST_VERSION=1
+FROM rust:${RUST_VERSION}-bookworm AS base-builder
 
 # Install only dependencies needed by the default single-node build. Optional LMDB/RocksDB,
 # CUDA and ONNX integrations are built in dedicated images/jobs rather than silently ignored.
@@ -46,47 +50,42 @@ ENV CC=clang \
     RUST_BACKTRACE=1
 
 # -----------------------------------------------------------------------------
-# 第二阶段：依赖缓存
+# Stage 2: the web console's bundle
 # -----------------------------------------------------------------------------
-FROM base-builder AS dependency-builder
+# `api-dashboard` is a default feature and embeds `dashboard/dist/` at compile time. Without
+# this stage the image's binary had no bundle and served no console.
+FROM node:22-bookworm-slim AS dashboard-builder
+
+WORKDIR /dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
+
+# -----------------------------------------------------------------------------
+# Stage 3: the server
+# -----------------------------------------------------------------------------
+# This used to cache dependencies by building against placeholder sources first. The
+# placeholders stubbed two of the five `[[bin]]` targets and none of the `[[test]]` or
+# `[[example]]` ones, so cargo refused the manifest and `make docker-build` failed. BuildKit
+# cache mounts keep the registry and `target/` between builds instead, with no copy of the
+# manifest's target list to fall out of date.
+FROM base-builder AS final-builder
 
 WORKDIR /build
 
-# 复制 Cargo 文件和 benches（避免清单解析错误）
-COPY Cargo.toml Cargo.lock ./
-COPY benches ./benches
-
-# 创建占位源文件以缓存依赖
-# 需要为 Cargo.toml 中定义的所有二进制创建占位符
-RUN mkdir -p src/bin && \
-    echo "fn main() { println!(\"placeholder\"); }" > src/main.rs && \
-    echo "pub fn lib() {}" > src/lib.rs && \
-    echo "fn main() {}" > src/bin/vectordb.rs && \
-    echo "fn main() {}" > src/bin/benchmark.rs
-
-# 构建依赖（缓存层）
-RUN cargo build --release && \
-    rm -rf src
-
-# -----------------------------------------------------------------------------
-# 第三阶段：最终构建
-# -----------------------------------------------------------------------------
-FROM dependency-builder AS final-builder
-
-WORKDIR /build
-
-# 复制源代码
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY benches ./benches
 COPY tests ./tests
 COPY examples ./examples
+COPY proto ./proto
+COPY --from=dashboard-builder /dashboard/dist ./dashboard/dist
 
-# 清理并重新构建
-RUN touch src/main.rs src/lib.rs && \
-    cargo build --release
-
-# 优化二进制文件
-RUN strip target/release/vectordb && \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --bin vectordb && \
+    strip target/release/vectordb && \
     cp target/release/vectordb /usr/local/bin/vectordb
 
 # -----------------------------------------------------------------------------
@@ -181,8 +180,7 @@ RUN cargo test --release
 # 构建说明
 # -----------------------------------------------------------------------------
 # 生产镜像构建:
-#   docker build -t dxmt/vectordb:latest .
-#   docker build -t dxmt/vectordb:v0.2.0 .
+#   docker build -f docker/Dockerfile -t dxmt/vectordb:latest .
 #
 # 开发镜像构建:
 #   docker build --target development -t dxmt/vectordb:dev .

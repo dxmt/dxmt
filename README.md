@@ -3,11 +3,11 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 A vector database written in Rust: HNSW, HNSW-PQ and product quantization with runtime SIMD
-dispatch, hybrid retrieval, and a query language behind a REST API. Full-text search, GraphQL,
-WebSocket and S3 are opt-in build features — a default build is the minimal supported
-single-node server and nothing more.
+dispatch, BM25 full-text and hybrid retrieval, and a query language behind a REST API, with a
+web console and an OpenAPI reference served by default. GraphQL, WebSocket, gRPC and S3 are
+opt-in build features. It is a single-node server.
 
-> **Status: 1.0.** A write-ahead log plus periodic snapshots is the durability story —
+> **Status: 1.3**, under the compatibility promise 1.0 made. A write-ahead log plus periodic snapshots is the durability story —
 > `kill -9` and restart preserves your tables. Records and full vectors live in row files
 > beside the log; what stays resident is the graph, the quantization codes and the id map,
 > about 0.45 KB per 768-dimension row measured at 100 million.
