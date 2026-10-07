@@ -4,13 +4,25 @@
 # 针对Docker Hub自动构建优化
 # =============================================================================
 
-ARG RUST_VERSION=latest
-ARG DEBIAN_VERSION=trixie
+# Builder and runtime on the same Debian release, so the binary's glibc is the runtime's.
+ARG RUST_VERSION=1
+ARG DEBIAN_VERSION=bookworm
+
+# -----------------------------------------------------------------------------
+# The web console's bundle; platform-independent, so built on the build platform.
+# -----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM node:22-${DEBIAN_VERSION}-slim AS dashboard-builder
+
+WORKDIR /dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
 
 # -----------------------------------------------------------------------------
 # 第一阶段：构建环境
 # -----------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION} AS builder
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
 
 # 构建参数
 ARG TARGETPLATFORM
@@ -62,38 +74,26 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
 # 工作目录
 WORKDIR /build
 
-# 复制依赖文件（利用Docker缓存）
-COPY Cargo.toml Cargo.lock ./
-
-# 创建虚拟源文件来预构建依赖（更完整的占位符）
-# 需要为 Cargo.toml 中定义的所有二进制创建占位符
-RUN mkdir -p src/bin && \
-    echo "fn main() { println!(\"placeholder\"); }" > src/main.rs && \
-    echo "pub fn lib() {}" > src/lib.rs && \
-    echo "fn main() {}" > src/bin/vectordb.rs && \
-    echo "fn main() {}" > src/bin/benchmark.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# 复制实际源代码
+# The whole crate, not placeholders: the placeholder stage stubbed two of the five `[[bin]]`
+# targets and none of the `[[test]]` or `[[example]]` ones, so cargo refused the manifest.
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY benches ./benches
 COPY tests ./tests
 COPY examples ./examples
-
-# 清理缓存构建并重新编译
-RUN touch src/main.rs src/lib.rs
+COPY proto ./proto
+COPY --from=dashboard-builder /dashboard/dist ./dashboard/dist
 
 # 根据架构设置目标和构建
-# 注意：不使用 --bin 标志，让 Cargo 构建所有目标（包括库）
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc && \
         export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ && \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
-        cargo build --release --target aarch64-unknown-linux-gnu && \
+        cargo build --release --bin vectordb --target aarch64-unknown-linux-gnu && \
         strip target/aarch64-unknown-linux-gnu/release/vectordb && \
         cp target/aarch64-unknown-linux-gnu/release/vectordb /build/vectordb; \
     else \
-        cargo build --release && \
+        cargo build --release --bin vectordb && \
         strip target/release/vectordb && \
         cp target/release/vectordb /build/vectordb; \
     fi
