@@ -254,6 +254,37 @@ impl SearchMode {
     }
 }
 
+/// Ask the table's rerank provider (`RerankConfig`) to re-score this page.
+///
+/// The search fetches `top_n` candidates the ordinary way, sends the query text and each
+/// candidate's text to the provider, and returns the page in the provider's order with
+/// `rerank_score` on every hit; the original `score` stays. A request with no query text
+/// (a vector-only search) is refused rather than silently left unranked, as is one against a
+/// table with no `rerank` config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RerankRequest {
+    /// Candidates to fetch and score; defaults to the table's `rerank.top_n`, else five
+    /// times the page.
+    #[serde(default)]
+    pub top_n: Option<usize>,
+    /// Payload field holding each candidate's text; defaults to the table's `rerank.field`.
+    #[serde(default)]
+    pub field: Option<String>,
+}
+
+impl RerankRequest {
+    /// Candidates to fetch for a page of `page`, with the table's default behind it. Never
+    /// fewer than the page plus the offset: a page cannot be cut from fewer than that.
+    pub fn pool(&self, table_default: Option<usize>, page: usize, offset: usize) -> usize {
+        self.top_n
+            .or(table_default)
+            .unwrap_or(page.saturating_mul(5))
+            .max(page.saturating_add(offset))
+    }
+}
+
 /// 搜索查询
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
@@ -317,6 +348,9 @@ pub struct SearchQuery {
     /// together. This needs nothing: the vectors say it.
     #[serde(default)]
     pub mmr: Option<MmrParams>,
+    /// Re-score the page with the table's rerank provider; see [`RerankRequest`]. Needs `text`.
+    #[serde(default)]
+    pub rerank: Option<RerankRequest>,
     /// Skip this many hits before the page starts.
     ///
     /// Page two of a search, which otherwise meant asking for `2 * top_k` and throwing half of
@@ -379,6 +413,9 @@ pub struct FullTextSearchRequest {
     pub fuzzy: Option<FuzzyConfig>,
     /// 过滤条件
     pub filter: Option<Filter>,
+    /// Re-score the page with the table's rerank provider; see [`RerankRequest`].
+    #[serde(default)]
+    pub rerank: Option<RerankRequest>,
 }
 
 /// 模糊搜索配置
@@ -416,6 +453,9 @@ pub struct FullTextSearchHit {
     pub payload: Option<Payload>,
     /// 高亮的片段（如果启用了高亮）
     pub highlights: Option<Vec<String>>,
+    /// The provider's relevance score, when the page was reranked; higher is better.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 /// 混合搜索融合方法
@@ -467,6 +507,9 @@ pub struct HybridSearchRequest {
     /// 是否返回vector
     #[serde(default)]
     pub with_vector: bool,
+    /// Re-score the fused page with the table's rerank provider; see [`RerankRequest`]. Needs `text`.
+    #[serde(default)]
+    pub rerank: Option<RerankRequest>,
 }
 
 fn default_vector_weight() -> f32 {
@@ -550,6 +593,10 @@ pub struct SearchHit {
     pub score: f32,
     pub payload: Option<Payload>,
     pub vector: Option<DenseVector>,
+    /// The provider's relevance score, when the page was reranked; higher is better. Absent on
+    /// a hit the provider was not asked about (no text in the rerank field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 /// One group of hits from `POST /tables/{t}/search/groups`.
@@ -1160,6 +1207,7 @@ impl Default for SearchQuery {
             score_threshold: None,
             offset: 0,
             mmr: None,
+            rerank: None,
             text: None,
         }
     }

@@ -52,6 +52,7 @@ pub fn create_simple_table_config(name: &str, dimension: usize) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 
@@ -79,6 +80,7 @@ pub fn create_fts_table_config(name: &str, dimension: usize) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 

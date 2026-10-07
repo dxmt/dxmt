@@ -1,242 +1,92 @@
-"""Memory Optimization Configuration Demo
+"""memory_optimization: what the per-table setting changes, as the server reports it.
 
-Demonstrates how to use the memory_optimization configuration
-to control memory usage vs accuracy tradeoff.
+`memory_optimization` decides which index family a new table gets. On, the server picks the
+compressed one (`hnsw_pq`, product-quantized codes beside the graph); off, it picks the plain
+graph (`hnsw`). Unset, the table follows the server's `DXMT_MEMORY_OPTIMIZATION`, which is on
+unless set to `false`.
 
-This example shows:
-1. Using global configuration (default)
-2. Overriding to high-accuracy mode
-3. Explicit memory optimization
-4. Mixed configurations in one database
+This demo creates one table each way, loads the same vectors into all three, and prints what
+the server says it built. It deliberately prints no recall or memory figures: those depend on
+the data and on the table's size (below 65,536 rows an `hnsw_pq` table still searches an exact
+graph), and a number quoted here would be a number nobody measured on your data. To measure
+recall on your own table, use `POST /tables/{t}/recall/calibrate`; `docs/SUPPORT_MATRIX.md`
+has the measured figures for the public datasets.
+
+Run a server first (`cargo run -- serve` in `vectordb/`), then `python memory_optimization_demo.py`.
 """
 
-from dxmt import DXMTClient
-import numpy as np
+import random
 import time
 
+from dxmt import DXMTClient
+from environment import client_kwargs
 
-def main():
-    # Connect to DXMT server
-    client = DXMTClient(host="localhost", port=9999)
+DIMENSION = 128
+ROWS = 1_000
 
-    print("=" * 60)
-    print("DXMT Memory Optimization Configuration Demo")
-    print("=" * 60)
-    print()
+# (table name, memory_optimization as sent, what the comment says it means)
+TABLES = [
+    ("memopt_default", None, "unset: follows DXMT_MEMORY_OPTIMIZATION (on by default)"),
+    ("memopt_off", False, "off: the plain graph"),
+    ("memopt_on", True, "on: the compressed index"),
+]
 
-    # ========================================
-    # Scenario 1: Using Global Configuration
-    # ========================================
-    print("📋 Scenario 1: Using Global Configuration")
-    print("   DXMT_MEMORY_OPTIMIZATION=true (default)")
-    print()
 
-    # Create table without specifying memory_optimization
-    # Will use global config (default: true)
-    try:
-        client.create_table(
-            name="recommendations",
-            dimension=768,
-            distance_metric="cosine",
-            description="Product recommendations (using global config)"
-        )
-        print("✅ Created 'recommendations' table (memory optimized)")
-    except Exception as e:
-        print(f"   Note: {e}")
+def random_vector(rng: random.Random) -> list[float]:
+    return [rng.uniform(-1.0, 1.0) for _ in range(DIMENSION)]
 
-    print()
 
-    # ========================================
-    # Scenario 2: High-Accuracy Mode
-    # ========================================
-    print("📋 Scenario 2: High-Accuracy Mode")
-    print("   memory_optimization=False (override global)")
-    print()
-
-    # Create table with high accuracy (overrides global config)
-    try:
-        client.create_table(
-            name="face_recognition",
-            dimension=512,
-            distance_metric="cosine",
-            description="Face recognition (high accuracy required)",
-            memory_optimization=False  # Override to high accuracy
-        )
-        print("✅ Created 'face_recognition' table (high accuracy)")
-        print("   ➜ Recall: 95-99%")
-        print("   ➜ Memory: 100% (no compression)")
-    except Exception as e:
-        print(f"   Note: {e}")
-
-    print()
-
-    # ========================================
-    # Scenario 3: Explicit Memory Optimization
-    # ========================================
-    print("📋 Scenario 3: Explicit Memory Optimization")
-    print("   memory_optimization=True (explicit)")
-    print()
-
-    # Create table with explicit memory optimization
-    try:
-        client.create_table(
-            name="content_search",
-            dimension=384,
-            distance_metric="euclidean",
-            description="Content discovery (memory optimized)",
-            memory_optimization=True  # Explicit enable
-        )
-        print("✅ Created 'content_search' table (memory optimized)")
-        print("   ➜ Recall: 87-95%")
-        print("   ➜ Memory: ~10% (90% savings)")
-    except Exception as e:
-        print(f"   Note: {e}")
-
-    print()
-
-    # ========================================
-    # Insert Test Data
-    # ========================================
-    print("📊 Inserting test data...")
-    print()
-
-    tables = [
-        ("recommendations", 768),
-        ("face_recognition", 512),
-        ("content_search", 384)
+def main() -> None:
+    client = DXMTClient(**client_kwargs())
+    rng = random.Random(7)
+    records = [
+        {"id": f"r{i}", "vector": random_vector(rng), "payload": {"n": i}}
+        for i in range(ROWS)
     ]
+    query = random_vector(rng)
 
-    for table_name, dim in tables:
+    print("=" * 64)
+    print("memory_optimization: what each setting builds")
+    print("=" * 64)
+
+    # A previous run that stopped half way leaves these behind; start clean so a create
+    # failure below is a real failure and not "already exists".
+    for name, _, _ in TABLES:
         try:
-            # Generate random vectors
-            vectors = [
-                {
-                    "id": f"{table_name}_{i}",
-                    "vector": np.random.rand(dim).tolist(),
-                    "payload": {
-                        "name": f"Item {i}",
-                        "category": "demo",
-                        "table": table_name
-                    }
-                }
-                for i in range(100)
-            ]
+            client.delete_table(name)
+        except Exception:
+            pass
 
-            # Batch insert
-            start = time.time()
-            result = client.batch_insert(table_name, vectors)
-            elapsed = time.time() - start
+    try:
+        for name, setting, meaning in TABLES:
+            kwargs = {} if setting is None else {"memory_optimization": setting}
+            client.create_table(name=name, dimension=DIMENSION, distance_metric="cosine", **kwargs)
+            client.insert_records(name, records)
 
-            print(f"   ✅ {table_name}: {len(vectors)} vectors in {elapsed:.2f}s")
-        except Exception as e:
-            print(f"   ⚠️  {table_name}: {e}")
+            start = time.perf_counter()
+            hits = client.search(table_name=name, vector=query, k=10)
+            elapsed_ms = (time.perf_counter() - start) * 1000
 
-    print()
+            info = client.get_table(name)
+            table = info.get("table", info)
+            print(f"\n{name}  ({meaning})")
+            print(f"  memory_optimization sent:   {setting}")
+            print(f"  memory_optimization stored: {table.get('memory_optimization')}")
+            print(f"  index the server built:     {table.get('index_type')}")
+            print(f"  records:                    {info.get('record_count')}")
+            print(f"  top-10 search:              {len(hits)} hits in {elapsed_ms:.1f} ms")
+            if len(hits) != 10:
+                raise RuntimeError(f"{name}: expected 10 hits from {ROWS} rows, got {len(hits)}")
 
-    # ========================================
-    # Search Performance Comparison
-    # ========================================
-    print("🔍 Search Performance Comparison")
-    print()
-
-    for table_name, dim in tables:
-        try:
-            # Random query vector
-            query_vector = np.random.rand(dim).tolist()
-
-            # Measure search time
-            start = time.time()
-            results = client.search(
-                table_name=table_name,
-                vector=query_vector,
-                k=10
-            )
-            elapsed = time.time() - start
-
-            # Get table info
-            table_info = client.get_table(table_name)
-
-            print(f"   📊 {table_name}:")
-            print(f"      ├─ Search time: {elapsed*1000:.2f}ms")
-            print(f"      ├─ Results: {len(results)} records")
-            print(f"      └─ Records: {table_info.get('record_count', 0)}")
-        except Exception as e:
-            print(f"   ⚠️  {table_name}: {e}")
-
-    print()
-
-    # ========================================
-    # Configuration Summary
-    # ========================================
-    print("=" * 60)
-    print("📋 Configuration Summary")
-    print("=" * 60)
-    print()
-
-    summary = [
-        {
-            "table": "recommendations",
-            "config": "None (uses global)",
-            "mode": "Memory Optimized",
-            "recall": "87-95%",
-            "memory": "~10%"
-        },
-        {
-            "table": "face_recognition",
-            "config": "False (override)",
-            "mode": "High Accuracy",
-            "recall": "95-99%",
-            "memory": "100%"
-        },
-        {
-            "table": "content_search",
-            "config": "True (explicit)",
-            "mode": "Memory Optimized",
-            "recall": "87-95%",
-            "memory": "~10%"
-        }
-    ]
-
-    for item in summary:
-        print(f"🔹 {item['table']}:")
-        print(f"   ├─ Config: {item['config']}")
-        print(f"   ├─ Mode: {item['mode']}")
-        print(f"   ├─ Recall: {item['recall']}")
-        print(f"   └─ Memory: {item['memory']}")
-        print()
-
-    # ========================================
-    # Best Practices
-    # ========================================
-    print("=" * 60)
-    print("💡 Best Practices")
-    print("=" * 60)
-    print()
-
-    print("Use Memory Optimization (True):")
-    print("  ✅ Recommendation systems")
-    print("  ✅ Content discovery")
-    print("  ✅ Semantic search (general)")
-    print("  ✅ Large-scale datasets")
-    print()
-
-    print("Use High Accuracy Mode (False):")
-    print("  ✅ Face/biometric recognition")
-    print("  ✅ Financial/medical data")
-    print("  ✅ Critical matching")
-    print("  ✅ Small datasets (<10K)")
-    print()
-
-    print("=" * 60)
-    print("✨ Demo Complete!")
-    print("=" * 60)
-
-    # Cleanup (optional)
-    # for table_name, _ in tables:
-    #     try:
-    #         client.delete_table(table_name)
-    #     except:
-    #         pass
+        print("\nWhich to choose: leave it on unless a table is small enough that memory does")
+        print("not matter and you want the plain graph; measure recall on your own data with")
+        print("POST /tables/{t}/recall/calibrate rather than trusting a rule of thumb.")
+    finally:
+        for name, _, _ in TABLES:
+            try:
+                client.delete_table(name)
+            except Exception as e:
+                print(f"cleanup: could not delete {name}: {e}")
 
 
 if __name__ == "__main__":

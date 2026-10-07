@@ -1,6 +1,6 @@
 [package]
 name = "dxmt-vectordb"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 authors = ["DXMT Team"]
 description = "A lightweight single-node vector database written in Rust"
@@ -429,6 +429,10 @@ path = "tests/interfaces/proto_surface_test.rs"
 [[test]]
 name = "server_embedding_test"
 path = "tests/interfaces/server_embedding_test.rs"
+
+[[test]]
+name = "rerank_test"
+path = "tests/interfaces/rerank_test.rs"
 
 [[test]]
 name = "table_alias_test"

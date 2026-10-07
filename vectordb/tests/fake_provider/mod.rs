@@ -15,7 +15,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
 use serde_json::{json, Value};
 
 /// How the provider should behave, so the failure paths are real failures on the wire.
@@ -131,7 +137,82 @@ fn bind(behaviour: Behaviour, dimension: usize) -> (std::net::TcpListener, Strin
 fn router(provider: Provider) -> Router {
     Router::new()
         .route("/embeddings", post(embeddings))
+        .route("/rerank", post(rerank))
         .with_state(provider)
+}
+
+/// How relevant `document` is to `query` in this stand-in reranker: the number of query
+/// words it contains. Public so a test can compute the order it expects.
+pub fn overlap(query: &str, document: &str) -> f32 {
+    let words: Vec<&str> = document.split_whitespace().collect();
+    query
+        .split_whitespace()
+        .filter(|q| words.contains(q))
+        .count() as f32
+}
+
+/// The rerank route in both shapes: Cohere's (`documents`, answered with `results` carrying
+/// `relevance_score`) when the body has `documents`, text-embeddings-inference's (`texts`,
+/// answered with a bare array carrying `score`) when it has `texts`. `Unauthorized` and
+/// `RateLimitOnce` behave as they do for embeddings. `Reversed` answers worst first with
+/// `index` set, which the wire format allows and which a client trusting position gets wrong.
+async fn rerank(State(provider): State<Provider>, Json(body): Json<Value>) -> Response {
+    let call = provider.calls.fetch_add(1, Ordering::SeqCst);
+    match provider.behaviour {
+        Behaviour::Unauthorized => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"message": "invalid api key"})),
+            )
+                .into_response()
+        }
+        Behaviour::RateLimitOnce if call == 0 => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"message": "slow down"})),
+            )
+                .into_response()
+        }
+        _ => {}
+    }
+    let query = body["query"].as_str().unwrap_or_default().to_string();
+    let (docs, tei) = match body.get("documents") {
+        Some(d) => (d.clone(), false),
+        None => (body["texts"].clone(), true),
+    };
+    let docs: Vec<String> = docs
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|d| d.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    provider.seen.lock().unwrap().extend(docs.iter().cloned());
+    let mut scored: Vec<(usize, f32)> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (i, overlap(&query, d)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
+    if let Some(n) = body["top_n"].as_u64() {
+        scored.truncate(n as usize);
+    }
+    if provider.behaviour == Behaviour::Reversed {
+        scored.reverse();
+    }
+    let body = if tei {
+        json!(scored
+            .iter()
+            .map(|(i, s)| json!({"index": i, "score": s}))
+            .collect::<Vec<_>>())
+    } else {
+        json!({"results": scored
+            .iter()
+            .map(|(i, s)| json!({"index": i, "relevance_score": s}))
+            .collect::<Vec<_>>()})
+    };
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// Start it on the caller's runtime. For `#[tokio::test]`.

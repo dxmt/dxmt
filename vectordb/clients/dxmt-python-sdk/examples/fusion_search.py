@@ -141,18 +141,14 @@ def filtered_fusion(
     # Execute searches with different filters
     all_results = []
     for i, filter_cond in enumerate(filters):
-        try:
-            results = client.search(
-                table_name=table_name,
-                vector=query_vector,
-                k=k,
-                filter=filter_cond
-            )
-            all_results.append(results)
-            print(f"  Filter {i+1}: Found {len(results)} results")
-        except Exception as e:
-            print(f"  Filter {i+1}: Error - {e}")
-            all_results.append([])
+        results = client.search(
+            table_name=table_name,
+            vector=query_vector,
+            k=k,
+            filter=filter_cond
+        )
+        all_results.append(results)
+        print(f"  Filter {i+1}: Found {len(results)} results")
 
     # Fuse results
     fused = reciprocal_rank_fusion(all_results, k=rrf_k)
@@ -186,25 +182,15 @@ def hybrid_fusion(
     # Execute hybrid searches with different weights
     all_results = []
     for i, weight in enumerate(weights):
-        try:
-            results = client.hybrid_search(
-                table_name=table_name,
-                vector=query_vector,
-                text=query_text,
-                k=k,
-                vector_weight=weight
-            )
-            all_results.append(results)
-            print(f"  Weight {weight}: Found {len(results)} results")
-        except Exception as e:
-            print(f"  Weight {weight}: Error - {e}")
-            # Fallback to vector search
-            results = client.search(
-                table_name=table_name,
-                vector=query_vector,
-                k=k
-            )
-            all_results.append(results)
+        results = client.hybrid_search(
+            table_name=table_name,
+            vector=query_vector,
+            text=query_text,
+            k=k,
+            vector_weight=weight
+        )
+        all_results.append(results)
+        print(f"  Weight {weight}: Found {len(results)} results")
 
     # Fuse results
     fused = reciprocal_rank_fusion(all_results, k=rrf_k)
@@ -286,21 +272,18 @@ def main():
     print("Combining results from hybrid searches with different vector weights...")
     weights = [0.3, 0.5, 0.7, 0.9]  # Different vector/text balances
 
-    try:
-        fused_results = hybrid_fusion(
-            client, table_name, query_vector1,
-            query_text="technology science data",
-            weights=weights, k=10, rrf_k=60
-        )
+    fused_results = hybrid_fusion(
+        client, table_name, query_vector1,
+        query_text="technology science data",
+        weights=weights, k=10, rrf_k=60
+    )
 
-        print(f"\n✓ Fused {len(fused_results)} unique documents")
-        print("\nTop 5 results by RRF score:")
-        for i, result in enumerate(fused_results[:5], 1):
-            print(f"{i}. ID: {result['id']}, "
-                  f"RRF Score: {result['rrf_score']:.4f}, "
-                  f"Appeared in: {result['appeared_in']}/4 weights")
-    except Exception as e:
-        print(f"Hybrid fusion not available: {e}")
+    print(f"\n✓ Fused {len(fused_results)} unique documents")
+    print("\nTop 5 results by RRF score:")
+    for i, result in enumerate(fused_results[:5], 1):
+        print(f"{i}. ID: {result['id']}, "
+              f"RRF Score: {result['rrf_score']:.4f}, "
+              f"Appeared in: {result['appeared_in']}/4 weights")
 
     # ==========================================================================
     # Example 4: Comparison with Single Query

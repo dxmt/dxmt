@@ -33,6 +33,7 @@ import textwrap
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 from common_utils import embed, EMBED_DIM
 
 try:
@@ -283,7 +284,7 @@ def main() -> None:
     chunks = chunk_document(DOCUMENT)
     print(f"\n[chunking] document → {len(chunks)} chunks (sentence-boundary, 4 sentences/chunk, 1-sentence overlap)")
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     try:
         setup_and_index(client, chunks)
 

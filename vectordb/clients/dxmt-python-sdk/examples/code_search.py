@@ -24,6 +24,7 @@ import textwrap
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 from common_utils import embed, EMBED_DIM
 
 
@@ -283,7 +284,7 @@ def main() -> None:
     print(f"  Corpus: {len(CORPUS)} snippets across Python / Rust / TypeScript")
     print("=" * 70)
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     try:
         setup_and_index(client)
 

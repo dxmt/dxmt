@@ -20,7 +20,13 @@ import json
 import random
 from typing import List, Dict, Any
 from collections import Counter
-import numpy as np
+
+from environment import skip
+
+try:
+    import numpy as np
+except ImportError:
+    skip("numpy is not installed: pip install numpy")
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -29,6 +35,7 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 from dxmt import Client
+from environment import client_kwargs
 
 
 def create_movie_catalog() -> List[Dict[str, Any]]:
@@ -598,9 +605,7 @@ def main() -> None:
 
     # Check dependencies
     if not SENTENCE_TRANSFORMERS_AVAILABLE:
-        print("\n❌ Error: sentence-transformers not installed")
-        print("   Install with: pip install sentence-transformers")
-        return
+        skip("sentence-transformers is not installed: pip install sentence-transformers")
 
     # Load embedding model
     print("\nLoading embedding model (all-MiniLM-L6-v2)...")
@@ -610,7 +615,7 @@ def main() -> None:
 
     # Create client
     print("\nConnecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table

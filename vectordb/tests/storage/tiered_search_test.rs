@@ -37,6 +37,7 @@ fn create_test_table_config(name: &str) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 

@@ -9,13 +9,14 @@ This example demonstrates:
 """
 
 from dxmt import Client, DXMTTableError
+from environment import client_kwargs
 
 
 def main() -> None:
     """Run basic usage example."""
     # Create client
     print("Connecting to DXMT server...")
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
 
     try:
         # Create table (with error handling for existing table)

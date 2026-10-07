@@ -105,6 +105,7 @@ async fn a_quantized_table_answers_with_exact_order() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

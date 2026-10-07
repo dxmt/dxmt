@@ -126,6 +126,7 @@ use crate::config::StorageConfig;
 use crate::search::sparse_index::SparseIndex;
 use crate::search::{IndexCollection, IndexWrapper};
 use crate::storage::object::TieredStorage;
+use crate::types::vector::Payload;
 use crate::types::{
     record::{CreateRecordRequest, Record, SearchHit, SearchMode, SearchQuery, SearchResult},
     record::{
@@ -1777,6 +1778,18 @@ fn index_type_of(algorithm: &IndexAlgorithm) -> crate::types::table::IndexType {
     }
 }
 
+/// A reranked search, settled before the fetch: the provider, the query text, the payload
+/// field the candidates' text is in, how many to fetch, and which page of the reranked order
+/// the caller gets.
+struct RerankPlan {
+    config: crate::types::table::RerankConfig,
+    query: String,
+    field: String,
+    pool: usize,
+    page: usize,
+    offset: usize,
+}
+
 impl IntelligentIndexedStorage {
     /// 创建新的智能索引存储实例（**不持久化**）。
     ///
@@ -2048,6 +2061,7 @@ impl IntelligentIndexedStorage {
                         quantization: None,
                         payload_index: None,
                         embedding: None,
+                        rerank: None,
                     };
                     self.create_table(config).await.map(|_| {
                         tables += 1;
@@ -3126,6 +3140,7 @@ impl IntelligentIndexedStorage {
             // `create_table` only probes the model when the dimension is zero, and an imported
             // table always has one, so this makes no provider call.
             embedding: meta.table.embedding.clone(),
+            rerank: meta.table.rerank.clone(),
         };
         self.create_table(config).await?;
 
@@ -4412,6 +4427,7 @@ impl IntelligentIndexedStorage {
             // that skipped the snapshot stayed green. No provider call: this path goes through
             // `create_table_inner`, which never probes the model.
             embedding: meta.table.embedding.clone(),
+            rerank: meta.table.rerank.clone(),
         };
         // Not `create_table`: this container is being rebuilt from a snapshot that already
         // describes it, so re-logging the creation would grow the WAL on every restart.
@@ -5646,6 +5662,192 @@ impl IntelligentIndexedStorage {
         ef_override: Option<usize>,
     ) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
+        let plan = self
+            .rerank_plan(
+                tablename,
+                query.rerank.as_ref(),
+                query.text.as_deref(),
+                Self::page_size(&query),
+                query.offset,
+                "/search",
+            )
+            .await?;
+        let Some(plan) = plan else {
+            return self.search_unranked(tablename, query, ef_override).await;
+        };
+        let start = std::time::Instant::now();
+        let want_payload = query.with_payload;
+        // The pool is fetched as one page from offset zero and the caller's page is cut out
+        // of the reranked order, so that page 2 is "the next ten by the provider's score" and
+        // not "the provider's order of a different ten".
+        let mut inner = query;
+        inner.rerank = None;
+        inner.offset = 0;
+        inner.limit = plan.pool;
+        inner.top_k = plan.pool;
+        inner.with_payload = true;
+        let fetched = self.search_unranked(tablename, inner, ef_override).await?;
+        let mut hits = Self::rerank_hits(
+            &plan,
+            fetched.hits,
+            |h| h.payload.as_ref(),
+            |h, s| h.rerank_score = Some(s),
+        )
+        .await?;
+        if !want_payload {
+            for hit in &mut hits {
+                hit.payload = None;
+            }
+        }
+        Ok(SearchResult {
+            total: hits.len(),
+            hits,
+            tookms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// What a reranked search settles before anything is fetched.
+    ///
+    /// `None` when the request did not ask. Otherwise every reason the rerank could not
+    /// happen is an error here, before the fetch: a search that quietly skipped the rerank
+    /// would hand back a page that looks reranked and is not.
+    async fn rerank_plan(
+        &self,
+        tablename: &str,
+        request: Option<&crate::types::record::RerankRequest>,
+        text: Option<&str>,
+        page: usize,
+        offset: usize,
+        route: &str,
+    ) -> crate::Result<Option<RerankPlan>> {
+        let Some(request) = request else {
+            return Ok(None);
+        };
+        let text = text
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                crate::Error::InvalidInput(format!(
+                "`rerank` scores candidates against the query's text, and this {route} request \
+                 has none. Send `text` (the table embeds it), or drop `rerank`."
+            ))
+            })?;
+        self.ensure_resident(tablename).await?;
+        let table = self
+            .read_tables("rerank_plan")
+            .await
+            .get(tablename)
+            .map(|data| data.table.clone())
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+        let config = table.rerank.clone().ok_or_else(|| {
+            crate::Error::InvalidInput(format!(
+                "table '{tablename}' has no rerank provider. Create it with a \"rerank\" config, \
+                 or add one with PATCH /tables/{tablename}."
+            ))
+        })?;
+        let field = request
+            .field
+            .clone()
+            .or_else(|| config.field.clone())
+            .or_else(|| table.embedding.as_ref().map(|e| e.field().to_string()))
+            .unwrap_or_else(|| "text".to_string());
+        let pool = request.pool(config.top_n, page, offset);
+        Ok(Some(RerankPlan {
+            config,
+            query: text.to_string(),
+            field,
+            pool,
+            page,
+            offset,
+        }))
+    }
+
+    /// Reorder `hits` by the provider's score and cut the caller's page out of the result.
+    ///
+    /// A hit with no text in the rerank field is not sent -- a provider given an empty string
+    /// either refuses the call or scores it arbitrarily -- and trails the scored hits in its
+    /// original order with no `rerank_score`. The provider is asked for `page + offset`
+    /// results, the most that can be shown, rather than the whole pool.
+    async fn rerank_hits<H>(
+        plan: &RerankPlan,
+        hits: Vec<H>,
+        payload_of: impl Fn(&H) -> Option<&Payload>,
+        set_score: impl Fn(&mut H, f32),
+    ) -> crate::Result<Vec<H>> {
+        let mut documents: Vec<String> = Vec::with_capacity(hits.len());
+        let mut hit_of_document: Vec<usize> = Vec::with_capacity(hits.len());
+        for (i, hit) in hits.iter().enumerate() {
+            let text = payload_of(hit)
+                .and_then(|p| p.get(&plan.field))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            if let Some(text) = text {
+                documents.push(text.to_string());
+                hit_of_document.push(i);
+            }
+        }
+        let want = plan.page.saturating_add(plan.offset);
+        let scored = Self::rerank_call(
+            &plan.config,
+            &plan.query,
+            &documents,
+            want.min(documents.len()),
+        )
+        .await?;
+        let mut order: Vec<(usize, Option<f32>)> = scored
+            .into_iter()
+            .map(|(d, score)| (hit_of_document[d], Some(score)))
+            .collect();
+        let mut placed = vec![false; hits.len()];
+        for (i, _) in &order {
+            placed[*i] = true;
+        }
+        order.extend((0..hits.len()).filter(|i| !placed[*i]).map(|i| (i, None)));
+        let mut slots: Vec<Option<H>> = hits.into_iter().map(Some).collect();
+        let mut page = Vec::with_capacity(plan.page);
+        for (i, score) in order.into_iter().skip(plan.offset).take(plan.page) {
+            let Some(mut hit) = slots[i].take() else {
+                continue;
+            };
+            if let Some(score) = score {
+                set_score(&mut hit, score);
+            }
+            page.push(hit);
+        }
+        Ok(page)
+    }
+
+    /// Call the table's rerank provider, or say which build cannot. The `cfg` is here and
+    /// nowhere else, as for [`Self::embed`].
+    async fn rerank_call(
+        config: &crate::types::table::RerankConfig,
+        query: &str,
+        documents: &[String],
+        top_n: usize,
+    ) -> crate::Result<Vec<(usize, f32)>> {
+        #[cfg(feature = "server-embedding")]
+        {
+            crate::embeddings::rerank::rerank(config, query, documents, top_n).await
+        }
+        #[cfg(not(feature = "server-embedding"))]
+        {
+            let _ = (config, query, documents, top_n);
+            Err(crate::Error::NotImplemented(
+                "this build has no rerank support: rebuild with --features server-embedding, \
+                 or drop `rerank` from the request"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// `search_with_budget` without the rerank step.
+    async fn search_unranked(
+        &self,
+        tablename: &str,
+        query: SearchQuery,
+        ef_override: Option<usize>,
+    ) -> crate::Result<SearchResult> {
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
         let query = self.embed_query(tablename, query).await?;
@@ -7205,6 +7407,7 @@ impl IntelligentIndexedStorage {
                     score: similarity_score,
                     payload,
                     vector,
+                    rerank_score: None,
                 })
             })
             // The offset is dropped here rather than before scoring: `score_threshold` and the
@@ -7254,6 +7457,45 @@ impl IntelligentIndexedStorage {
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
         let tablename = &*self.resolve(tablename);
+        let plan = self
+            .rerank_plan(
+                tablename,
+                request.rerank.as_ref(),
+                Some(&request.query),
+                request.limit,
+                request.offset,
+                "/search/text",
+            )
+            .await?;
+        let Some(plan) = plan else {
+            return self.full_text_unranked(tablename, request).await;
+        };
+        let start = std::time::Instant::now();
+        let mut inner = request;
+        inner.rerank = None;
+        inner.offset = 0;
+        inner.limit = plan.pool;
+        let fetched = self.full_text_unranked(tablename, inner).await?;
+        let hits = Self::rerank_hits(
+            &plan,
+            fetched.hits,
+            |h| h.payload.as_ref(),
+            |h, s| h.rerank_score = Some(s),
+        )
+        .await?;
+        Ok(FullTextSearchResult {
+            total: hits.len(),
+            hits,
+            took_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// `full_text_search` without the rerank step.
+    async fn full_text_unranked(
+        &self,
+        tablename: &str,
+        request: FullTextSearchRequest,
+    ) -> crate::Result<FullTextSearchResult> {
         Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
         // The engine is behind an Arc, so take it out of the map and drop the guard rather than
@@ -7345,6 +7587,7 @@ impl IntelligentIndexedStorage {
                     } else {
                         None
                     },
+                    rerank_score: None,
                 })
             })
             .take(request.limit) // 过滤后只保留limit个
@@ -7555,6 +7798,51 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
+        let plan = self
+            .rerank_plan(
+                tablename,
+                request.rerank.as_ref(),
+                request.text.as_deref(),
+                request.limit,
+                0,
+                "/search/hybrid",
+            )
+            .await?;
+        let Some(plan) = plan else {
+            return self.hybrid_unranked(tablename, request).await;
+        };
+        let start = std::time::Instant::now();
+        let want_payload = request.with_payload;
+        let mut inner = request;
+        inner.rerank = None;
+        inner.limit = plan.pool;
+        inner.with_payload = true;
+        let fetched = self.hybrid_unranked(tablename, inner).await?;
+        let mut hits = Self::rerank_hits(
+            &plan,
+            fetched.hits,
+            |h| h.payload.as_ref(),
+            |h, s| h.rerank_score = Some(s),
+        )
+        .await?;
+        if !want_payload {
+            for hit in &mut hits {
+                hit.payload = None;
+            }
+        }
+        Ok(SearchResult {
+            total: hits.len(),
+            hits,
+            tookms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// `hybrid_search` without the rerank step.
+    async fn hybrid_unranked(
+        &self,
+        tablename: &str,
+        request: HybridSearchRequest,
+    ) -> crate::Result<SearchResult> {
         Self::check_filter(request.filter.as_ref())?;
         let start_time = std::time::Instant::now();
 
@@ -7763,6 +8051,7 @@ impl IntelligentIndexedStorage {
                     score,
                     payload,
                     vector,
+                    rerank_score: None,
                 }
             })
             .collect();
@@ -8701,6 +8990,7 @@ impl IntelligentIndexedStorage {
                 // so nothing is re-embedded while branching; the model matters for what is
                 // written to the branch afterwards.
                 embedding: src.table.embedding.clone(),
+                rerank: src.table.rerank.clone(),
             };
 
             let records: Vec<CreateRecordRequest> = src
@@ -10224,6 +10514,14 @@ impl IntelligentIndexedStorage {
         const MAX_GROUP_CANDIDATES: usize = 10_000;
 
         let start = std::time::Instant::now();
+        if query.rerank.is_some() {
+            // `SearchGroupsRequest` flattens `SearchQuery`, so the field arrives here. Nothing
+            // below reranks, and a field that is accepted and ignored is the failure
+            // `tests/api/test_request_fields.py` exists for.
+            return Err(crate::Error::InvalidInput(
+                "`rerank` is not supported on /search/groups; rerank a plain search".to_string(),
+            ));
+        }
         if group_by.is_empty() {
             return Err(crate::Error::InvalidInput(
                 "group_by must name a payload field".to_string(),
@@ -10444,6 +10742,7 @@ impl IntelligentIndexedStorage {
                     score,
                     payload,
                     vector,
+                    rerank_score: None,
                 }
             })
             .collect();
@@ -10944,6 +11243,7 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
             schema_version: snap.table.schema_version,
             named_vectors: None,
             embedding: None,
+            rerank: None,
         };
         // Drop existing table if present (best-effort)
         let _ = self.delete_table(table_name).await;
@@ -11059,6 +11359,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         config.name = "ladder".to_string();
         storage.create_table(config).await?;
@@ -11152,6 +11453,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         // Below 5,000 rows the selector answers BruteForce, which has no ef_search to adopt
         // and would make this test vacuous. The size-based selector, explicitly: the
@@ -11242,6 +11544,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table = storage.create_table(table_config).await?;
@@ -11286,6 +11589,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             };
 
             let table = storage.create_table(table_config).await?;
@@ -11335,6 +11639,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         storage.create_table(table_config).await?;
 
@@ -11466,6 +11771,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         storage.create_table(table_config).await?;
 
@@ -11563,6 +11869,7 @@ mod tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         storage.create_table(table_config).await?;
 
@@ -11664,6 +11971,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await?;
         let record = |id: String, vector: Vec<f32>| CreateRecordRequest {
@@ -11855,6 +12163,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await?;
 
@@ -11930,6 +12239,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await?;
         let request = |id: &str, vector: Vec<f32>| CreateRecordRequest {
@@ -12010,6 +12320,7 @@ mod tests {
                 quantization: None,
                 payload_index: None,
                 embedding: None,
+                rerank: None,
             })
             .await?;
 

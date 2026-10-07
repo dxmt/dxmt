@@ -1430,6 +1430,248 @@ def _(table):
     assert "embedding model" in r.text, r.text[:200]
 
 
+# ---- rerank -------------------------------------------------------------------------------
+#
+# The server has no reranker of its own; it calls the table's provider. So these probes run
+# one: a loopback HTTP server on a thread, speaking the OpenAI `/embeddings` shape (a hashed
+# bag of words, four wide, so `/search` can take `text`) and the Cohere `/rerank` shape, scoring
+# each document by a table the probe fills in. That is what makes each probe a discriminator:
+# the probe reads the plain order first, tells the provider to prefer the reverse, and checks
+# that the reranked page is the reverse. A field nothing read could not produce that.
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+
+def _bag_of_words(text):
+    v = [0.0] * 4
+    for word in text.lower().split():
+        v[sum(map(ord, word)) % 4] += 1.0
+    norm = sum(x * x for x in v) ** 0.5 or 1.0
+    return [x / norm for x in v] if norm > 1.0 else [1.0, 0.0, 0.0, 0.0]
+
+
+class _Provider(BaseHTTPRequestHandler):
+    #: document text -> score the rerank route answers with; unknown text scores 0.
+    scores = {}
+    #: (path, body) of every call, so a probe can check what was sent.
+    calls = []
+
+    def do_POST(self):  # noqa: N802 -- the stdlib's name
+        n = int(self.headers.get("content-length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        type(self).calls.append((self.path, body))
+        if self.path.endswith("/embeddings"):
+            out = {"data": [{"index": i, "embedding": _bag_of_words(t)}
+                            for i, t in enumerate(body["input"])],
+                   "model": body.get("model"), "usage": {}}
+        elif self.path.endswith("/rerank"):
+            docs = body.get("documents") or body.get("texts") or []
+            scored = sorted(((i, float(type(self).scores.get(d, 0.0))) for i, d in enumerate(docs)),
+                            key=lambda p: (-p[1], p[0]))
+            if body.get("top_n") is not None:
+                scored = scored[: int(body["top_n"])]
+            if "documents" in body:
+                out = {"results": [{"index": i, "relevance_score": s} for i, s in scored]}
+            else:
+                out = [{"index": i, "score": s} for i, s in scored]
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        payload = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_):
+        pass
+
+
+_provider_url = None
+
+
+def provider_url():
+    """Start the provider once per process, on a daemon thread, and return its API root."""
+    global _provider_url
+    if _provider_url is None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Provider)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        _provider_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    return _provider_url
+
+
+def _content(i):
+    return f"document number {i} about widgets"
+
+
+def rerank_table(name, rerank=True, full_text=False):
+    """A table of five records whose text is in payload `content`, embedding by the provider.
+
+    `rerank=False` leaves the provider off the table, for the probes that add it afterwards or
+    check the refusal. The key variables are named so that nothing in this environment is sent.
+    """
+    body = {"name": name, "dimension": 4, "distance_metric": "cosine",
+            "embedding": {"model": "bag-of-words", "base_url": provider_url(),
+                          "field": "content", "api_key_env": "DXMT_PROBE_KEY_UNSET"}}
+    if rerank:
+        body["rerank"] = {"model": "by-table", "base_url": provider_url(),
+                          "api_key_env": "DXMT_PROBE_KEY_UNSET"}
+    if full_text:
+        body["enable_full_text_search"] = True
+        body["text_fields"] = [{"name": "content", "source": {"metadata_field": "content"},
+                                "weight": 1.0}]
+    post("/tables", body)
+    post(f"/tables/{name}/records", {"records": [
+        {"id": f"r{i}", "vector": VECTORS[i], "payload": {"content": _content(i)}}
+        for i in range(5)]})
+
+
+def prefer_reverse_of(hit_ids):
+    """Tell the provider to score the given order back to front, 0 for the first id."""
+    _Provider.scores = {_content(int(h[1:])): float(rank) for rank, h in enumerate(hit_ids)}
+
+
+def hits_of(response):
+    return response.json()["data"]["hits"]
+
+
+@probe("CreateTableRequest", "rerank")
+def _(table):
+    name = f"{table}_rr_create"
+    rerank_table(name)
+    try:
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["rerank"]["model"] == "by-table", info
+        assert info["rerank"]["format"] == "cohere", info
+        # And it is live, not merely stored: a search that asks is answered by the provider.
+        plain = ids(post(f"/tables/{name}/search", {"text": "widgets", "top_k": 5, "limit": 5}))
+        assert len(plain) == 5, plain
+        prefer_reverse_of(plain)
+        hits = hits_of(post(f"/tables/{name}/search",
+                            {"text": "widgets", "top_k": 5, "limit": 5, "rerank": {}}))
+        assert [h["id"] for h in hits] == plain[::-1], (plain, [h["id"] for h in hits])
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+    # A table created without one refuses a search that asks, naming the field.
+    name = f"{table}_rr_none"
+    rerank_table(name, rerank=False)
+    try:
+        r = post(f"/tables/{name}/search", {"text": "widgets", "top_k": 2, "rerank": {}},
+                 expect_ok=False)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+        assert "rerank" in r.text, r.text[:200]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("TableAlterRequest", "rerank")
+def _(table):
+    name = f"{table}_rr_alter"
+    rerank_table(name, rerank=False)
+    try:
+        body = {"text": "widgets", "top_k": 5, "limit": 5, "rerank": {}}
+        assert post(f"/tables/{name}/search", body, expect_ok=False).status_code == 400
+        assert alter(name, rerank={"model": "added-later", "base_url": provider_url(),
+                                   "api_key_env": "DXMT_PROBE_KEY_UNSET"}).json()["success"] is True
+        info = get(f"/tables/{name}").json()["data"]["table"]
+        assert info["rerank"]["model"] == "added-later", info
+        plain = ids(post(f"/tables/{name}/search", {"text": "widgets", "top_k": 5, "limit": 5}))
+        prefer_reverse_of(plain)
+        assert ids(post(f"/tables/{name}/search", body)) == plain[::-1]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("SearchQuery", "rerank")
+def _(table):
+    name = f"{table}_rr_search"
+    rerank_table(name)
+    try:
+        plain = ids(post(f"/tables/{name}/search", {"text": "widgets", "top_k": 5, "limit": 5}))
+        assert len(plain) == 5, plain
+        prefer_reverse_of(plain)
+        hits = hits_of(post(f"/tables/{name}/search",
+                            {"text": "widgets", "top_k": 5, "limit": 5, "rerank": {}}))
+        assert [h["id"] for h in hits] == plain[::-1], (plain, [h["id"] for h in hits])
+        assert [h["rerank_score"] for h in hits] == [4.0, 3.0, 2.0, 1.0, 0.0], hits
+        assert all("score" in h for h in hits), "the dense score stays on the hit"
+        # `top_n` is the pool. With a pool of two only the dense top two are candidates, and
+        # the provider prefers the second of them.
+        narrow = ids(post(f"/tables/{name}/search",
+                          {"text": "widgets", "top_k": 1, "limit": 1, "rerank": {"top_n": 2}}))
+        assert narrow == [plain[1]], (narrow, plain)
+        sent = _Provider.calls[-1][1]["documents"]
+        assert len(sent) == 2, sent
+        # `field` names the payload key the text is read from; a key no record has leaves the
+        # provider with nothing to score, and the page comes back unscored rather than failing.
+        hits = hits_of(post(f"/tables/{name}/search",
+                            {"text": "widgets", "top_k": 2, "limit": 2,
+                             "rerank": {"field": "nowhere"}}))
+        assert all("rerank_score" not in h for h in hits), hits
+        # No query text, nothing to rerank against: refused, not silently unranked.
+        r = post(f"/tables/{name}/search", {"vector": QUERY, "top_k": 2, "rerank": {}},
+                 expect_ok=False)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+        assert "text" in r.text, r.text[:200]
+        # Grouped search flattens the query and does not rerank; it says so.
+        r = post(f"/tables/{name}/search/groups",
+                 {"text": "widgets", "group_by": "content", "rerank": {}}, expect_ok=False)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("FullTextSearchRequest", "rerank")
+def _(table):
+    name = f"{table}_rr_text"
+    rerank_table(name, full_text=True)
+    try:
+        plain = [h["id"] for h in hits_of(needs_text(
+            post(f"/tables/{name}/search/text", {"query": "widgets", "limit": 5}, expect_ok=False)))]
+        assert len(plain) == 5, plain
+        prefer_reverse_of(plain)
+        hits = hits_of(post(f"/tables/{name}/search/text",
+                            {"query": "widgets", "limit": 5, "rerank": {}}))
+        assert [h["id"] for h in hits] == plain[::-1], (plain, [h["id"] for h in hits])
+        assert hits[0]["rerank_score"] == 4.0, hits[0]
+        # `offset` pages through the reranked order.
+        second = [h["id"] for h in hits_of(post(
+            f"/tables/{name}/search/text",
+            {"query": "widgets", "limit": 2, "offset": 2, "rerank": {"top_n": 5}}))]
+        assert second == plain[::-1][2:4], (second, plain)
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
+@probe("HybridSearchRequest", "rerank")
+def _(table):
+    name = f"{table}_rr_hybrid"
+    rerank_table(name, full_text=True)
+    try:
+        body = {"vector": QUERY, "text": "widgets", "limit": 5}
+        plain = [h["id"] for h in hits_of(needs_text(
+            post(f"/tables/{name}/search/hybrid", body, expect_ok=False)))]
+        assert len(plain) == 5, plain
+        prefer_reverse_of(plain)
+        hits = hits_of(post(f"/tables/{name}/search/hybrid", {**body, "rerank": {}}))
+        assert [h["id"] for h in hits] == plain[::-1], (plain, [h["id"] for h in hits])
+        assert hits[0]["rerank_score"] == 4.0, hits[0]
+        # The fused page is what is reranked, and `with_payload: false` is honoured after the
+        # rerank read the payload for its text.
+        hits = hits_of(post(f"/tables/{name}/search/hybrid",
+                            {**body, "rerank": {}, "with_payload": False}))
+        assert all(h.get("payload") is None for h in hits), hits
+        # Without `text` there is nothing to rerank against.
+        r = post(f"/tables/{name}/search/hybrid", {"vector": QUERY, "limit": 2, "rerank": {}},
+                 expect_ok=False)
+        assert r.status_code == 400, (r.status_code, r.text[:200])
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
 def test_a_record_carrying_text_into_a_table_with_no_model_says_so(table):
     """Not a `@probe`: that registry covers the fields of a top-level request body, and a
     record is nested inside `BatchInsertRequest.records`, so `CreateRecordRequest` never

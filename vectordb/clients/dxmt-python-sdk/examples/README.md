@@ -23,15 +23,20 @@ cargo run --release -- serve
 ### 2. Install Dependencies
 
 ```bash
-# Basic dependencies
+# The SDK alone runs the examples that need nothing else
 pip install dxmt
 
-# For semantic search examples
-pip install sentence-transformers
+# Everything the examples import: numpy, sentence-transformers, openai, langgraph
+pip install 'dxmt[examples]'        # or, in this checkout: pip install -e '.[examples]'
 
 # For LangChain integration
 pip install langchain-dxmt langchain-openai langchain-core
 ```
+
+An example that needs a library or a key you do not have says which one and exits with status
+77 ("skipped"), rather than printing a warning and exiting 0 as if it had worked. Any other
+non-zero status is a real failure. `tests/test_examples.py` runs every example against a live
+server on that basis.
 
 ### 3. Run Your First Example
 
@@ -448,11 +453,9 @@ Side-by-side comparison of embedding models:
 - Recommendations for your use case
 
 ```bash
-# With OpenAI API key
+# Needs both models: an OpenAI key and sentence-transformers. Without either it
+# says which and exits 77, because a comparison with one side missing is not one.
 export OPENAI_API_KEY='your-api-key'
-python3 compare_embeddings.py
-
-# Or without (tests only SentenceTransformer)
 python3 compare_embeddings.py
 ```
 
@@ -490,11 +493,30 @@ python3 incremental_updates.py
 
 ---
 
+## 🧩 More Examples
+
+Each runs the same way (`python3 <file>`). The ones marked *ST* use sentence-transformers when
+it is installed and fall back to synthetic vectors when it is not, saying so; *OpenAI* ones use
+an LLM when `OPENAI_API_KEY` is set and a template otherwise.
+
+| File | What it shows |
+| --- | --- |
+| [agent_memory.py](agent_memory.py) | Conversation history stored as vectors and recalled per turn (ST, OpenAI) |
+| [anomaly_detection.py](anomaly_detection.py) | Outliers by distance to their k nearest neighbours (ST) |
+| [code_search.py](code_search.py) | Semantic search over code snippets with language and kind filters (ST) |
+| [contextual_rag.py](contextual_rag.py) | RAG that widens each hit to its neighbouring chunks before answering (ST, OpenAI) |
+| [hyde_search.py](hyde_search.py) | HyDE: search with a hypothetical answer's embedding instead of the question's (ST, OpenAI) |
+| [langgraph_memory.py](langgraph_memory.py) | A LangGraph agent whose long-term store is DXMT (needs langgraph) |
+| [memory_optimization_demo.py](memory_optimization_demo.py) | Which index each `memory_optimization` setting builds, as the server reports it |
+| [multimodal_store.py](multimodal_store.py) | Image and video descriptions in one table, searched by text (ST) |
+| [rag_pipeline.py](rag_pipeline.py) | A local retrieval-augmented generation loop over a small corpus (ST, OpenAI) |
+| [retrieval_eval.py](retrieval_eval.py) | Recall and ranking measured against a labelled query set (ST) |
+
 ## 📦 Prerequisites
 
 ### Required
 
-- **DXMT Server:** Running on `localhost:9999` (or configure host/port)
+- **DXMT Server:** Running on `localhost:9999`, or wherever `DXMT_HOST`/`DXMT_PORT` say
 - **Python:** 3.8 or higher
 - **dxmt SDK:** `pip install dxmt`
 
@@ -561,10 +583,12 @@ python3 semantic_search.py
 
 ### Server Configuration
 
-If your DXMT server is not on `localhost:9999`, modify the client initialization:
+Every example reads the server's address from the environment (`environment.py`), so none
+needs editing:
 
-```python
-client = Client(host="your-host", port=your-port)
+```bash
+DXMT_HOST=10.0.0.5 DXMT_PORT=19999 python3 basic_usage.py
+DXMT_API_KEY=... python3 basic_usage.py     # a server started with DXMT_API_KEY
 ```
 
 ### Troubleshooting
@@ -572,8 +596,8 @@ client = Client(host="your-host", port=your-port)
 **Issue:** `Connection refused`
 - **Solution:** Ensure DXMT server is running: `cargo run -- serve`
 
-**Issue:** `ModuleNotFoundError: No module named 'sentence_transformers'`
-- **Solution:** Install dependencies: `pip install sentence-transformers`
+**Issue:** `SKIPPED: ... is not installed` (exit status 77)
+- **Solution:** Install what it names, or all of them: `pip install 'dxmt[examples]'`
 
 **Issue:** `DXMTTableError: Table already exists`
 - **Solution:** Examples auto-cleanup, but if interrupted, manually delete: `client.delete_table("table_name")`

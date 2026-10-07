@@ -81,6 +81,7 @@ fn test_table_config_memory_optimization_none() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     assert_eq!(
@@ -108,6 +109,7 @@ fn test_table_config_memory_optimization_true() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     assert_eq!(
@@ -136,6 +138,7 @@ fn test_table_config_memory_optimization_false() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     assert_eq!(
@@ -172,6 +175,7 @@ fn test_config_hierarchy_table_overrides_global() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     // 验证配置层级：表级配置应覆盖全局配置
@@ -214,6 +218,7 @@ fn test_config_hierarchy_uses_global_when_none() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     // 验证配置层级：应使用全局配置
@@ -255,6 +260,7 @@ fn test_mixed_table_configurations() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     // 表2：显式设置为 false（高精度）
@@ -274,6 +280,7 @@ fn test_mixed_table_configurations() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     // 表3：显式设置为 true（内存优化）
@@ -293,6 +300,7 @@ fn test_mixed_table_configurations() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     // 验证配置决策

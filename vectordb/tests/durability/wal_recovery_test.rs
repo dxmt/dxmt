@@ -67,6 +67,7 @@ fn table(name: &str, dimension: usize, metric: DistanceMetric) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 
@@ -317,6 +318,7 @@ async fn assert_upserted_secondary_indexes(storage: &IntelligentIndexedStorage) 
                 filter: None,
                 with_payload: false,
                 with_vector: false,
+                rerank: None,
             },
         )
         .await
@@ -341,6 +343,7 @@ async fn assert_upserted_secondary_indexes(storage: &IntelligentIndexedStorage) 
                 filter: None,
                 with_payload: false,
                 with_vector: false,
+                rerank: None,
             },
         )
         .await
@@ -496,6 +499,7 @@ async fn table_alterations_survive_a_restart() {
                     drop_fields: Vec::new(),
                     payload_index: None,
                     embedding: None,
+                    rerank: None,
                     recall_target: None,
                 },
             )

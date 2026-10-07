@@ -27,6 +27,7 @@ import textwrap
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 
 try:
     from sentence_transformers import SentenceTransformer as _ST
@@ -178,7 +179,7 @@ class RAGPipeline:
     def __init__(self, use_openai: bool = False) -> None:
         self.use_openai = use_openai and _HAS_OPENAI and bool(os.getenv("OPENAI_API_KEY"))
         self.dim = OPENAI_EMBED_DIM if self.use_openai else EMBED_DIM
-        self.client = Client(host="localhost", port=9999)
+        self.client = Client(**client_kwargs())
 
         if use_openai and not self.use_openai:
             print("[warn] --openai requested but openai not installed or OPENAI_API_KEY not set")

@@ -31,6 +31,7 @@ import textwrap
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 from common_utils import embed, EMBED_DIM
 
 try:
@@ -340,7 +341,7 @@ def main() -> None:
         print("         Similarity gains reflect the hand-crafted expansions, not HyDE.")
         print("         Run with --openai and OPENAI_API_KEY for the genuine algorithm.\n")
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     try:
         setup_table(client)
         index_corpus(client)

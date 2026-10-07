@@ -159,6 +159,7 @@ async fn calibration_transfer_on_a_real_corpus() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

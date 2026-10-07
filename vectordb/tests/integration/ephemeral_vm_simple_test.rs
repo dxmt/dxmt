@@ -63,6 +63,7 @@ async fn test_basic_state_recreation() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let vectors = create_test_vectors(50, 32);
@@ -171,6 +172,7 @@ async fn test_fast_data_loading() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let vectors = create_test_vectors(1000, 128);
@@ -245,6 +247,7 @@ async fn test_index_consistency_after_rebuild() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
 
     let vectors = create_test_vectors(200, 64);

@@ -104,6 +104,7 @@ async fn test_e2e_recall_small_dataset() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -251,6 +252,7 @@ async fn test_e2e_delete_removes_from_search() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(table_cfg).await.unwrap();
 
@@ -326,6 +328,7 @@ async fn test_upsert_increments_version() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -416,6 +419,7 @@ async fn test_update_record_preserves_vector_when_not_provided() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -499,6 +503,7 @@ async fn test_search_with_payload_filter() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();
@@ -598,6 +603,7 @@ async fn test_filtered_search_recall_high_selectivity() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .unwrap();

@@ -30,7 +30,7 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Changed
 
-- Documentation brought up to date with 1.1 and 1.2: the default build (full-text search,
+- Documentation brought up to date with 1.1, 1.2 and 1.3: the default build (full-text search,
   Swagger and the console are on), index selection (HNSW-PQ at every size), the background
   index warm-up after a restart, the 1.2 → 1.1 downgrade note, and seven configuration
   variables that were read but undocumented. `DXMT_COMPRESSION` and `DXMT_WORKER_THREADS` are
@@ -38,6 +38,40 @@ release, and the first commit that was ever pushed anywhere.
 - About thirty one-off and dead scripts removed from `scripts/`, along with
   `docs/autogen_integration.md` (for a module that does not exist) and an unused
   `static/swagger-ui.html`. `examples/nginx-jwt.conf` routes the paths the server serves.
+
+## [1.3.0] - 2026-10-07
+
+Every package carries this version. The HTTP API gains `rerank` on `POST /tables`,
+`PATCH /tables/{t}` and the three search routes, and `rerank_score` on a hit; nothing existing
+changes shape. **Upgrading reads everything 1.2 wrote; downgrading does not.** The WAL logs
+a table's config and every `PATCH` as a MessagePack array, which now has one more element, so
+a 1.2 binary refuses a log in which 1.3 created or altered any table, `rerank` set or not:
+take a snapshot (`POST /snapshot`) before going back, as for 1.1. Found while preparing this
+release, not after it: `rerank` had first been added in the middle of the alter request, where
+a 1.2 log's `recall_target` would have decoded into it and stopped the replay;
+`alter_request_logged_by_1_2_replays` pins the order.
+
+### Added
+
+- **Reranking.** A table may name a cross-encoder provider -- `rerank` on `POST /tables` and
+  `PATCH /tables/{t}`: `model`, `base_url`, `format` (`cohere` or `tei`), `api_key_env`,
+  `field`, `top_n` -- and `/search`, `/search/text` and `/search/hybrid` take
+  `rerank: {top_n?, field?}` to have the page re-scored by it. Each hit gains `rerank_score`;
+  `score` stays. A request with no query text, or against a table with no provider, is a 400;
+  a provider that will not answer fails the request rather than returning the page unranked.
+  The Python and JavaScript clients take `rerank=` on `create_table` and on every search
+  method. Nothing existing changes shape.
+
+### Fixed
+
+- **The Python SDK's examples say when they did not run.** `memory_optimization_demo.py`
+  called `batch_insert`, which the client does not have, and caught the error in all three
+  scenarios; it is rewritten to report the index each setting builds, without the recall and
+  memory figures it printed and nobody had measured. An example missing a library or a key now
+  exits 77 naming it (it printed a line and exited 0), and the handlers that turned a failed
+  full-text, hybrid or filtered search into a printed warning are gone. Every example reads
+  `DXMT_HOST`/`DXMT_PORT`/`DXMT_API_KEY`; `pip install 'dxmt[examples]'` installs what they
+  import; `tests/test_examples.py` runs all of them against a live server, and CI runs it.
 
 ## [1.2.0] - 2026-10-06
 

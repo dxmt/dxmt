@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 from common_utils import embed, EMBED_DIM
 
 
@@ -181,7 +182,7 @@ def main() -> None:
     print(f"  k (neighbours): {args.k}")
     print("=" * 70)
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     try:
         # Setup
         try:

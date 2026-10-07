@@ -7,7 +7,7 @@ Swagger and a read-only console served by default. GraphQL, WebSocket, gRPC and 
 build features — see [Feature flags](#feature-flags) — so a default build is the supported
 single-node server and nothing more.
 
-> **Status: 1.2**, under the compatibility promise 1.0 made. Durability is a write-ahead log,
+> **Status: 1.3**, under the compatibility promise 1.0 made. Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
 > Records and full vectors are **not** held in memory: with a WAL directory, which is the
 > default, they live in row files beside it (`wal/records/<table>.rec`,

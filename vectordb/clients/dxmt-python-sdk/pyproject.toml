@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dxmt-python-sdk"
-version = "1.2.0"
+version = "1.3.0"
 description = "Official Python SDK for DXMT VectorDB"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,6 +44,16 @@ dependencies = [
 # works without this; it just encodes bodies faster with it.
 fast = [
     "orjson>=3.9.0",
+]
+# What the files in examples/ import beyond the SDK. Each example that needs one of these
+# exits 77 with the install command when it is missing (examples/environment.py), so a plain
+# install runs the others; `pip install -e '.[examples]'` runs them all. The OpenAI ones also
+# need OPENAI_API_KEY.
+examples = [
+    "numpy>=1.24",
+    "sentence-transformers>=2.2",
+    "openai>=1.0",
+    "langgraph>=0.2",
 ]
 dev = [
     "pytest>=7.4.0",

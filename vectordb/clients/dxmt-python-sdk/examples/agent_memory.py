@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dxmt import Client
+from environment import client_kwargs
 from common_utils import embed, EMBED_DIM
 
 try:
@@ -313,7 +314,7 @@ def run_demo(use_openai: bool) -> None:
     print(f"  Scoring: α={ALPHA:.2f} × semantic + {1-ALPHA:.2f} × recency")
     print("=" * 70)
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     store = AgentMemoryStore(client)
 
     try:
@@ -380,7 +381,7 @@ def run_repl(use_openai: bool) -> None:
     print("  Commands: /recall <query>  /list  /consolidate  /quit")
     print("=" * 70)
 
-    client = Client(host="localhost", port=9999)
+    client = Client(**client_kwargs())
     store = AgentMemoryStore(client)
 
     try:

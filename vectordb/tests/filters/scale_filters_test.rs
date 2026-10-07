@@ -160,6 +160,7 @@ fn table(dimension: usize) -> TableConfig {
         ),
         payload_index: None,
         embedding: None,
+        rerank: None,
     }
 }
 

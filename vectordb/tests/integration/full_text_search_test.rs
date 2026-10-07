@@ -58,6 +58,7 @@ mod full_text_search_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         let table = storage.create_table(table_config).await.expect("Failed to create table");
@@ -96,6 +97,7 @@ mod full_text_search_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -148,6 +150,7 @@ mod full_text_search_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
 
         let result = storage.full_text_search("test_search", search_request).await.expect("Search failed");
@@ -191,6 +194,7 @@ mod full_text_search_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -246,6 +250,7 @@ mod full_text_search_tests {
             with_payload: true,
             with_vector: false,
             sparse_vector: None,
+            rerank: None,
         };
 
         let result = storage.hybrid_search("test_hybrid", hybrid_request).await.expect("Hybrid search failed");
@@ -288,6 +293,7 @@ mod full_text_search_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
 
         storage.create_table(table_config).await.expect("Failed to create table");
@@ -340,6 +346,7 @@ mod full_text_search_tests {
                 must_not: None,
                 should: None,
             }),
+            rerank: None,
         };
 
         let result = storage.full_text_search("test_filter", search_request).await.expect("Search failed");
@@ -377,6 +384,7 @@ mod full_text_search_tests {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         };
         storage.create_table(table_config).await.expect("create table");
         let texts = [
@@ -409,6 +417,7 @@ mod full_text_search_tests {
             highlight: false,
             fuzzy: None,
             filter: None,
+            rerank: None,
         };
         let mut ids: Vec<String> = storage
             .full_text_search(table, request)

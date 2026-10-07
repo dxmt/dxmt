@@ -7,7 +7,7 @@ dispatch, BM25 full-text and hybrid retrieval, and a query language behind a RES
 web console and an OpenAPI reference served by default. GraphQL, WebSocket, gRPC and S3 are
 opt-in build features. It is a single-node server.
 
-> **Status: 1.0.** A write-ahead log plus periodic snapshots is the durability story —
+> **Status: 1.3**, under the compatibility promise 1.0 made. A write-ahead log plus periodic snapshots is the durability story —
 > `kill -9` and restart preserves your tables. Records and full vectors live in row files
 > beside the log; what stays resident is the graph, the quantization codes and the id map,
 > about 0.45 KB per 768-dimension row measured at 100 million.

@@ -37,6 +37,7 @@ async fn create_test_table(
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(config).await?;
 

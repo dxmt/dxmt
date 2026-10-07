@@ -127,6 +127,7 @@ async fn upserts_leave_tombstones_and_the_sweep_rebuilds_them_away() {
             quantization: None,
             payload_index: None,
             embedding: None,
+            rerank: None,
         })
         .await
         .expect("create table");

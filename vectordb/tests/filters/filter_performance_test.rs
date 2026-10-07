@@ -47,6 +47,7 @@ async fn test_pre_filtering_with_highly_selective_filter() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -159,6 +160,7 @@ async fn test_post_filtering_with_low_selective_filter() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(table_config).await.unwrap();
 
@@ -254,6 +256,7 @@ async fn test_filter_with_in_operation() {
         quantization: None,
         payload_index: None,
         embedding: None,
+        rerank: None,
     };
     storage.create_table(table_config).await.unwrap();
 
