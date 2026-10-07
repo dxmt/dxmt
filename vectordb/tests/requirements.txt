@@ -1,8 +1,0 @@
-# What the Python HTTP suites import beyond the standard library: tests/api, tests/stateful
-# and tests/compat, run by scripts/api_tests.sh. CI installs exactly this file, so a new
-# import added to a test belongs here too, or CI fails on it -- which is what happened
-# when the OpenAPI checks started importing jsonschema and the install line still read
-# `pytest httpx`.
-pytest
-httpx
-jsonschema
