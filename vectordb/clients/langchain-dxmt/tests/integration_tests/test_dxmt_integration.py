@@ -23,7 +23,7 @@ from langchain_core.embeddings import Embeddings
 # then skip the whole module again when `OPENAI_API_KEY` was unset, so none of them had ever
 # run -- not here, not in CI. `DXMT_TEST_EMBEDDING=openai` still runs them against a real
 # model. See `tests/local_embedding.py`.
-from local_embedding import embedding_dimension, make_embeddings
+from tests.local_embedding import embedding_dimension, make_embeddings
 
 from langchain_dxmt import DXMTVectorDB, DXMTClient, DXMTError, DXMTConnectionError
 
