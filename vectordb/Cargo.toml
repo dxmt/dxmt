@@ -320,12 +320,6 @@ incremental = true
 tonic-build = { version = "0.11", optional = true }
 protoc-bin-vendored = { version = "3.0", optional = true }
 
-[lints.clippy]
-# Every `#[async_trait]` method trips this from clippy 1.99 on: async-trait 0.1.89 marks the
-# boxed future it returns `#[must_use]`, and the future is already must-use. The attribute is
-# generated, not written here, and the newest async-trait still emits it.
-double_must_use = "allow"
-
 [features]
 # The default build is the supported single-node Alpha surface. Heavy or experimental
 # integrations must be opted into explicitly so a normal build does not require AWS, GraphQL,

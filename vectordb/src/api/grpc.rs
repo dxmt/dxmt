@@ -24,6 +24,9 @@ use crate::types::record::{CreateRecordRequest, SearchQuery};
 use crate::types::table::TableConfig;
 use crate::types::vector::DistanceMetric as InternalMetric;
 
+// The generated server traits use `async_trait`, which trips clippy 1.99's `double_must_use`
+// in code this crate does not write; see the same allow on `VectorIndex`.
+#[allow(unknown_lints, clippy::double_must_use)]
 pub mod proto {
     tonic::include_proto!("dxmt.v1");
 }
