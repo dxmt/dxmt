@@ -16,7 +16,7 @@ import os
 import sys
 import time
 
-# The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout.
+# The DXMT client is not part of upstream VectorDBBench; it is in benches/vectordbbench-client/. Install it into a VectorDBBench virtualenv with benches/vectordbbench-client/install.sh <venv>, or set DXMT_VECTORDBBENCH to a VectorDBBench checkout that already carries it.
 # This used to hardcode reference/VectorDBBench, a directory this repository excludes on
 # purpose, so a clone could never run this script and never said why.
 VECTORDBBENCH = os.environ.get("DXMT_VECTORDBBENCH")
@@ -38,7 +38,7 @@ try:
 except ImportError as e:
     print(f"✗ Import failed: {e}")
     if not VECTORDBBENCH:
-        print("  DXMT_VECTORDBBENCH is unset. " + 'The DXMT client is not part of upstream VectorDBBench and is not in this repository -- it lives in a VectorDBBench fork carrying vectordb_bench/backend/clients/dxmt/. Set DXMT_VECTORDBBENCH to that checkout.')
+        print("  DXMT_VECTORDBBENCH is unset. " + 'The DXMT client is not part of upstream VectorDBBench; it is in benches/vectordbbench-client/. Install it into a VectorDBBench virtualenv with benches/vectordbbench-client/install.sh <venv>, or set DXMT_VECTORDBBENCH to a VectorDBBench checkout that already carries it.')
     sys.exit(1)
 
 

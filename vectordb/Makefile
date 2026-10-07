@@ -183,9 +183,9 @@ dashboard-clean:
 verify-live: verify test-api
 	@echo "All checks passed, including the live API suite."
 
-# `filter_performance_bench` declares `required-features = ["text-bm25"]`, and text-bm25
-# left the default set. Without naming it here, cargo silently skips the only bench target
-# and this recipe exits 0 having measured nothing.
+# `filter_performance_bench` declares `required-features = ["text-bm25"]`. text-bm25 is a
+# default feature again, but naming it here keeps the recipe measuring something if it ever
+# leaves the default set: cargo would otherwise skip the only bench target and exit 0.
 bench:
 	@echo "Running benchmarks..."
 	@cargo bench --features text-bm25

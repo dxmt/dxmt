@@ -36,6 +36,7 @@ import argparse
 import importlib.util
 import os
 import pathlib
+import re
 import signal
 import socket
 import subprocess
@@ -229,6 +230,13 @@ def check_sdk_is_ours(env):
     return where
 
 
+def default_features():
+    """The `default` list in Cargo.toml, which every build has unless told otherwise."""
+    text = (ROOT / "Cargo.toml").read_text()
+    m = re.search(r"^default\s*=\s*\[([^\]]*)\]", text, re.M)
+    return set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
+
+
 def start_server(features, wal, port):
     env = dict(
         os.environ,
@@ -271,7 +279,11 @@ def main():
     load_dotenv()
     provider = resolve_provider()
 
-    features = {f.strip() for f in args.features.replace(" ", ",").split(",") if f.strip()}
+    # A server built with no `--features` still has the default ones; reading them from the
+    # manifest keeps this from skipping, say, the full-text example on a default build.
+    features = default_features() | {
+        f.strip() for f in args.features.replace(" ", ",").split(",") if f.strip()
+    }
     plan = [e for e in CATALOGUE if not args.only or args.only in e.name]
     if not plan:
         sys.exit(f"no example matches {args.only!r}")

@@ -158,9 +158,9 @@ in this repository; the four SDKs are Python, JavaScript, LangChain and LlamaInd
 ## Tutorials and other files
 
 `01_getting_started.md`, `02_embeddings.md` and `filter_example.md` are prose walkthroughs and
-cross-reference each other. `vectordbbench_example.sh` shows how to point VectorDBBench at a
-running server. `nginx-jwt.conf` is a sample reverse-proxy configuration; nothing in the repo
-refers to it.
+cross-reference each other. To run VectorDBBench against a server, see
+`benches/vectordbbench-client/`. `nginx-jwt.conf` is a sample authenticating reverse-proxy
+configuration, the one `SECURITY.md` points to.
 
 ## What is not here
 
