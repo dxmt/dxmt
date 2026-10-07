@@ -12,6 +12,11 @@ pub type ObjectStorageResult<T> = Result<T, ObjectStorageError>;
 ///
 /// 提供统一的对象存储操作接口，支持不同的存储后端
 #[async_trait]
+// `async_trait` marks each generated method `#[must_use]` and returns a boxed future, which
+// is must-use already; clippy 1.99's `double_must_use` fires on every method of the trait.
+// The attribute is the macro's, not ours, and async-trait 0.1.89 is the newest release.
+// `unknown_lints` keeps a toolchain older than 1.99, which has no such lint, quiet.
+#[allow(unknown_lints, clippy::double_must_use)]
 pub trait ObjectStorage: Send + Sync {
     /// 上传对象
     ///
