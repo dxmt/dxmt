@@ -17,6 +17,18 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-07
+
+Every package carries this version. The HTTP API gains `rerank` on `POST /tables`,
+`PATCH /tables/{t}` and the three search routes, and `rerank_score` on a hit; nothing existing
+changes shape. **Upgrading reads everything 1.2 wrote; downgrading does not.** The WAL logs
+a table's config and every `PATCH` as a MessagePack array, which now has one more element, so
+a 1.2 binary refuses a log in which 1.3 created or altered any table, `rerank` set or not:
+take a snapshot (`POST /snapshot`) before going back, as for 1.1. Found while preparing this
+release, not after it: `rerank` had first been added in the middle of the alter request, where
+a 1.2 log's `recall_target` would have decoded into it and stopped the replay;
+`alter_request_logged_by_1_2_replays` pins the order.
+
 ### Added
 
 - **Reranking.** A table may name a cross-encoder provider -- `rerank` on `POST /tables` and

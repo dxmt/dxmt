@@ -192,7 +192,7 @@ pip install dxmt-python-sdk
 curl http://localhost:9999/health
 
 # Expected response:
-# {"status":"ok","version":"1.2.0"}
+# {"status":"ok","version":"1.3.0"}
 ```
 
 ---
@@ -1319,7 +1319,7 @@ aws s3 sync s3://dxmt-bucket s3://dxmt-backup
 
 ### Q: Is DXMT production-ready?
 
-**A:** Yes, DXMT v1.2.0 with AutoGen integration is production-ready.
+**A:** Yes, DXMT v1.3.0 with AutoGen integration is production-ready.
 
 ### Q: How do I scale DXMT?
 
