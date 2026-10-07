@@ -4,7 +4,6 @@
 [![Python Version](https://img.shields.io/pypi/pyversions/langchain-dxmt)](https://pypi.org/project/langchain-dxmt/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/dxmt/vectordb/branch/main/graph/badge.svg)](https://codecov.io/gh/dxmt/vectordb)
 
 Official LangChain integration for DXMT VectorDB - a lightweight single-node vector database written in Rust.
 

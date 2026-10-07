@@ -4,20 +4,20 @@ This directory contains comprehensive examples demonstrating various use cases a
 
 ## 📋 Table of Contents
 
-- [Quick Start](#quick-start)
-- [Basic Examples](#basic-examples)
-- [Advanced Examples](#advanced-examples)
-- [Real-World Applications](#real-world-applications)
-- [Prerequisites](#prerequisites)
-- [Running Examples](#running-examples)
+- [Quick Start](#-quick-start)
+- [Basic Examples](#-basic-examples)
+- [Advanced Examples](#-advanced-examples)
+- [Real-World Applications](#-real-world-applications)
+- [Prerequisites](#-prerequisites)
+- [Running Examples](#-running-examples)
 
 ## 🚀 Quick Start
 
 ### 1. Start DXMT Server
 
 ```bash
-# From the repository root
-cargo run -- serve
+# From vectordb/ in the repository
+cargo run --release -- serve
 ```
 
 ### 2. Install Dependencies

@@ -11,7 +11,7 @@ about 15 million rows, and the target was 100 million. Today the same row costs 
 
 Everything below was measured on this codebase with the benchmark harness in this repository.
 Unless a row says otherwise the corpus is a 768-dimension embedding dataset and the metric is
-`recall@100` — see [Why recall@100](#why-recall100) for why that number and not `recall@10`.
+`recall@100` — see [Why recall@100](#2-why-recall100) for why that number and not `recall@10`.
 
 ---
 

@@ -7,13 +7,15 @@ Swagger and a read-only console served by default. GraphQL, WebSocket, gRPC and 
 build features — see [Feature flags](#feature-flags) — so a default build is the supported
 single-node server and nothing more.
 
-> **Status: 1.0.** Durability is a write-ahead log,
+> **Status: 1.2**, under the compatibility promise 1.0 made. Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
 > Records and full vectors are **not** held in memory: with a WAL directory, which is the
 > default, they live in row files beside it (`wal/records/<table>.rec`,
 > `wal/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident —
 > about 0.45 KB per 768-dimension row, measured at 100 million, against 8.3 KB when
-> everything was in the map. `docs/architecture/disk-index.md` is how that was done and what
+> everything was in the map. That figure predates 1.2, which also keeps 4-bit fast-scan codes
+> for filtered search beside the PQ codes (the same bytes again; `quantization.fast_scan:
+> false` at creation leaves them out). `docs/architecture/disk-index.md` is how that was done and what
 > it cost. (This paragraph said "records are held in memory" from 2026-08-14, when the WAL
 > went on the write path, until 2026-09-27: true when written, and left behind by the two
 > phases that moved the rows to disk.) The log defaults to
@@ -282,10 +284,10 @@ One data model, reached through several protocols, over one storage implementati
 REST /api/v1/*  ·  gRPC  ·  GraphQL  ·  WebSocket  ·  MCP
                         ↓
              IntelligentIndexedStorage
-               ├─ records: in-process HashMap      ← all data lives here
+               ├─ records: row files in ~/.dxmt/store/{records,vectors}
                ├─ store:   ~/.dxmt/store           ← durability; replayed on startup
                ├─ snapshot: ~/.dxmt/store/snapshot ← every 300s, on SIGTERM, after a rebuild
-               └─ index:   HNSW / HNSW-PQ / BruteForce / DiskANN Enhanced
+               └─ index:   HNSW-PQ (default) / HNSW / BruteForce, resident
 ```
 
 When object storage is configured, the write-ahead log and snapshots are also mirrored there. A
@@ -302,18 +304,12 @@ larger than RAM, which table-level eviction cannot do.
 
 This path is still experimental.
 
-Index selection is re-checked on a timer (`DXMT_REINDEX_INTERVAL_SECS`, default 900) and the
-index is rebuilt when a table's size no longer suits the algorithm it has:
-
-| Dataset size | Algorithm         |
-| ------------ | ----------------- |
-| < 5K         | BruteForce        |
-| 5K–100K      | HNSW              |
-| 100K–1M      | HNSW-PQ           |
-| ≥ 1M         | DiskANN Enhanced  |
-
-One caveat: this table applies when `DXMT_MEMORY_OPTIMIZATION=false`; the default (`true`) takes
-a separate path that yields HNSW below 100K and HNSW-PQ above it.
+A new table is HNSW-PQ at every size: an exact HNSW graph until it holds 65,536 vectors,
+after which it quantizes itself in place and searches the codes with an exact rerank — no
+rebuild between the two. `DXMT_MEMORY_OPTIMIZATION=false` restores an older selector that
+picks brute force below 5,000 rows and HNSW above, moving to HNSW-PQ, or to EnhancedDiskANN
+at a million rows and up, only when HNSW would not fit the memory budget. Either way the
+choice is re-checked on a timer (`DXMT_REINDEX_INTERVAL_SECS`, default 900).
 
 The same sweep also rebuilds a table whose graph has accumulated tombstones. An update cannot
 move a node, so it deletes the old slot and appends a new one; a table of constant size under
@@ -335,7 +331,8 @@ the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
 
 ## Configuration
 
-Configuration is read from the environment. Every variable this server reads is `DXMT_*`.
+Configuration is read from the environment. Every variable this server reads is `DXMT_*`,
+except the provider key a table's embedding model names (`api_key_env`, e.g. `OPENAI_API_KEY`).
 The `DB_*` names it used to use are still accepted and warn once at startup — `DB_` is not a
 namespace, it is the word "database", and `DB_HOST` is both this server's bind address and
 what nearly every compose file calls its Postgres. Copy `.env.example` and adjust:
@@ -350,8 +347,22 @@ DXMT_REINDEX_INTERVAL_SECS=900  # re-check index choice against table size; 0 di
 DXMT_ROW_COMPACTION_INTERVAL_SECS=600 # release the disk behind dead row-file rows; 0 disables
 DXMT_PARTITION_THRESHOLD_MB=512 # vector bytes per table above which it partitions
 DXMT_MEMORY_CACHE_SIZE=512    # MB
-DXMT_COMPRESSION=zstd         # zstd | lz4 | none
 ```
+
+Less often needed, and read the same way:
+
+| variable | what it does |
+| --- | --- |
+| `DXMT_GRPC_PORT` | serve gRPC on this port too (same as `--grpc-port`; needs the `api-grpc` build) |
+| `DXMT_RECORD_STORE`, `DXMT_VECTOR_STORE` | `disk` (the default when there is a WAL directory) or `memory` |
+| `DXMT_INDEX_ALGORITHM` | `hnsw-pq` (default) or `hnsw` for new tables |
+| `DXMT_HNSW_EF_CONSTRUCTION` | graph build effort |
+| `DXMT_RECALL_TARGET` | the recall a table calibrates its search budget to (default 0.95) |
+| `DXMT_VECTOR_F16` | `1` keeps new tables' full vectors on disk as fp16 rather than f32 |
+| `DXMT_MIN_FREE_MEMORY_MB` | refuse writes when free memory falls below this |
+
+`DXMT_COMPRESSION` and `DXMT_WORKER_THREADS` are parsed and currently select nothing; the WAL
+and row files are not compressed.
 
 `DXMT_STORAGE_TYPE` is gone as of 2026-09-27. It was parsed into config and selected nothing —
 the server constructs `IntelligentIndexedStorage` unconditionally — and a documented variable
@@ -454,12 +465,15 @@ an air-gapped host:
 
 ```bash
 make dashboard-build                                     # needs Node 20+
-cargo build --release --features api-dashboard
-./target/release/vectordb serve --dashboard              # http://localhost:9999/dashboard
+cargo build --release
+./target/release/vectordb serve                          # http://localhost:9999/dashboard
 ```
 
-Off at both levels by default: not in the default feature set, and not served without
-`--dashboard` even when compiled in. It adds about 1.5 MB to the binary.
+On by default: `api-dashboard` is a default feature, and the console is served whenever its
+bundle was built into the binary. A checkout built without Node still compiles and serves
+everything else, and says the console is missing. `--no-dashboard` turns it off; passing
+`--dashboard` explicitly makes a missing bundle a refusal to start. It adds about 1.5 MB to the
+binary.
 
 **It is read-only, and the server is not.** The console issues only GETs and the search-shaped
 POSTs; the port it is served on still accepts writes, snapshots and backups from anything that
@@ -640,8 +654,8 @@ These are real gaps, not roadmap aspirations. [docs/SUPPORT_MATRIX.md](docs/SUPP
 is the per-subsystem version of this list: what is part of the single-node contract, what is
 experimental, and what a feature has to have before it moves between the two.
 
-- **A backup may only be written inside `DXMT_BACKUP_ROOT`**, which defaults to the WAL
-  directory's parent. `POST /backup` takes the destination from the request body, and this
+- **A backup may only be written inside `DXMT_BACKUP_ROOT`**, which defaults to
+  `$DXMT_ROOT_DIR/backups` (beside the store, when only `DXMT_WAL_DIR` was moved). `POST /backup` takes the destination from the request body, and this
   server has no authentication unless `DXMT_API_KEY` is set — so without a bound, anything that
   can reach the port can name any directory the process can write to and have a copy of the
   database put there. The root is
@@ -651,7 +665,8 @@ experimental, and what a feature has to have before it moves between the two.
   Briefly: The WAL is compacted once a snapshot
   verifies, so the entries below that point exist nowhere else. The snapshot is read back before
   the log is trimmed, and an unreadable snapshot makes the server refuse to start rather than
-  come up empty — but back up `data/wal/snapshot/` like the data it is.
+  come up empty — but back up `snapshot/` under the WAL directory (`~/.dxmt/store/snapshot/`
+  by default) like the data it is.
 - **One fsync per write batch.** Durability is paid for synchronously; there is no group
   commit yet.
 - **A snapshot briefly delays writes**, on every table, while it compacts the log it covers.
@@ -686,8 +701,8 @@ experimental, and what a feature has to have before it moves between the two.
 - **`POST /api/v1/tables/{name}/hybrid_search` is dense-only.** It rejects sparse/text fusion
   with `NOT_IMPLEMENTED` instead of silently discarding query components. For BM25 use
   `/search/text`; for real vector+text fusion use `/search/hybrid`.
-- **`DiskANN`, `ScaNN` and `QuantizedIVF`** fall back to brute force in
-  `create_index_instance`.
+- **`DiskANN`, `ScaNN` and `QuantizedIVF` are not implemented.** A table that asks for one is
+  refused with an error naming the alternative, rather than silently given brute force.
 - **gRPC carries the data path only.** Search, insert and the record routes, plus the table
   lifecycle; hybrid search, full-text search, DXQL, snapshots and backups stay on REST. It is
   off by default and off without `--grpc-port`.
@@ -697,6 +712,9 @@ experimental, and what a feature has to have before it moves between the two.
   abstractions nothing called — were taken out of the crate on 2026-09-27, 11,668 lines, with
   their cargo features. The embedding path that does run is `src/embeddings/service.rs`; see
   "Sending text instead of vectors".
+- **A 1.1 binary cannot read a log written by 1.2.** 1.2 logs a reference to the row a
+  vector is in (`UpsertRecordInRowFile`) instead of the vector. Take a snapshot
+  (`POST /snapshot`) before downgrading; 1.2 reads every earlier log and index file.
 - **The graph is built inside the write request.** There is no compaction or optimizer stage
   behind it: a table finishes ingest already holding its index, which is why a load is not
   followed by a minutes-long build step. The other side of that is contention — with ingest

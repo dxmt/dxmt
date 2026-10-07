@@ -102,19 +102,20 @@ fall back to brute-force search or discard part of a query.
 The supported server path is intentionally narrow:
 
 ```text
-REST / simple API / MCP
+REST / MCP (gRPC, GraphQL, WebSocket opt-in)
               |
               v
   IntelligentIndexedStorage
       |       |       |
-  records   indexes   payload/text indexes
+  row files  indexes   payload/text indexes
       |
       +--> local WAL --> snapshot manifest and segments
                               |
                               +--> optional object storage mirror
 ```
 
-Records and indexes are resident in the process while a table is hot. WAL is the durability
+Records and full vectors live in row files beside the WAL; the graph, the PQ and fast-scan
+codes, the id map and the payload/text indexes are resident while a table is hot. WAL is the durability
 boundary for acknowledged writes. Snapshots reduce replay time and are the only copy of data
 covered by a compacted WAL, so the snapshot directory must be included in backups.
 
