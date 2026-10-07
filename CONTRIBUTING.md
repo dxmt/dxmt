@@ -104,12 +104,19 @@ There is one server mode. `serve --simple`, which served a second data model at
 
 `.github/workflows/ci.yml`, from the repository root with `working-directory: vectordb`:
 
-- **verify** — fmt-check, clippy `--all-targets -D warnings`, `cargo test --lib`, `cargo test --tests`
-- **minimal-core** — compiles the default (minimal) feature set
-- **optional-features** — compiles and tests everything that is opt-in, including the
-  feature-gated test targets that the default build compiles to nothing
+Every job starts at once; none waits for another. The Rust toolchain is pinned in
+`vectordb/rust-toolchain.toml` and in each job, and a new push to a pull request cancels the
+run on its previous head.
+
+- **verify** — fmt-check, clippy `--all-targets -D warnings`, `cargo test --lib`
+- **minimal-core** — compiles the core without the optional features, with and without
+  full-text search
+- **optional-features** — clippy over the opt-in features, then `cargo test --tests` with the
+  test-only features on: this is the integration run for the whole crate, default targets and
+  feature-gated ones together
 - **build** — release build
-- **api-text** — the functional HTTP suite with full-text search built in
+- **functional-full-text** — the functional HTTP suite with full-text search and Swagger built in
+- **dashboard** — builds the web console and checks what the server serves for it
 - **sdk-live** — starts the server binary and runs the Python, JavaScript, Rust, Go, LangChain
   and LlamaIndex packages against it, then again against a server that requires an API key
 
