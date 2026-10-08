@@ -17,6 +17,15 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **A storage fixture written by 1.3.2** (`tests/compat/fixtures/1.3.2/`), which every later
+  build has to open, write to and recover after a crash. The only fixture until now was
+  0.2.0's, so nothing checked that a release could read what 1.x wrote. The generator now also
+  writes a table with the 1.x table settings -- a payload-index policy, fast-scan off, a rerank
+  provider and a recall target -- and alters it after the snapshot, so the log has to replay
+  those fields; the test checks each one, and that a filter on the unindexed field is refused.
+
 ## [1.3.2] - 2026-10-07
 
 The pre-publication pass: the Docker images, the README and the CI toolchain. Nothing changes
