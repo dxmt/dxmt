@@ -17,6 +17,30 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DXMT_HOST` and `DXMT_PORT` set the address `serve` binds.** The README and
+  `.env.example` listed both, and no release read them: `serve` took `--host` and `--port`
+  alone, whose defaults are the same values, so a setting looked like it worked until it was
+  anything but the default. A flag still wins over the variable. `serve` also reads `.env`
+  before the flags are parsed, so `DXMT_GRPC_PORT` there now applies too. The legacy
+  `DB_HOST` and `DB_PORT` are *not* accepted: no release read them either, and they are what
+  a compose file calls its Postgres.
+- **`DXMT_WORKER_THREADS` sizes the runtime.** It was parsed and sized nothing; the runtime
+  always ran one worker per core. `0` is refused at startup.
+- **`.env.example` lists only variables the server reads**, in English, with everything
+  commented out. Copied as it was, it stopped a default build from starting: it set
+  `DXMT_OBJECT_STORAGE_PROVIDER=s3`, which needs the `s3-storage` feature. It also listed
+  eight variables that did nothing (`DXMT_COMPRESSION`, `DXMT_LOG_LEVEL`,
+  `DXMT_LOG_FORMAT`, `DXMT_MAX_CONNECTIONS`, `DXMT_QUERY_TIMEOUT`,
+  `DXMT_DEFAULT_DIMENSION`/`_DISTANCE_METRIC`, `DXMT_MAX_RECORDS_PER_TABLE`). Logging is
+  `RUST_LOG`.
+
+### Removed
+
+- **`DXMT_COMPRESSION`**, and the `compression` field of `config::SsdConfig` it filled. It
+  selected nothing; the WAL and row files are not compressed.
+
 ### Added
 
 - **A storage fixture written by 1.3.2** (`tests/compat/fixtures/1.3.2/`), which every later

@@ -847,7 +847,6 @@ fn storage_config_with_object_store(base: &Path) -> StorageConfig {
             enabled: true,
             cache_dir: base.join("ssd").to_string_lossy().into_owned(),
             max_size_gb: 1,
-            compression: "none".to_string(),
         }),
         object_storage: Some(dxmt_vectordb::config::ObjectStorageConfig {
             provider: "filesystem".to_string(),

@@ -368,8 +368,11 @@ the SDK prefix (`/api/v1/health`, `/api/v1/health/ready`).
 Configuration is read from the environment. Every variable this server reads is `DXMT_*`,
 except the provider key a table's embedding model names (`api_key_env`, e.g. `OPENAI_API_KEY`).
 The `DB_*` names it used to use are still accepted and warn once at startup — `DB_` is not a
-namespace, it is the word "database", and `DB_HOST` is both this server's bind address and
-what nearly every compose file calls its Postgres. Copy `.env.example` and adjust:
+namespace, it is the word "database". `DB_HOST` and `DB_PORT` are the exception: no release
+read them, and they are what nearly every compose file calls its Postgres, so they are ignored.
+`serve` reads a `.env` in the directory it starts in; a variable set in the environment wins
+over it, and a flag (`--host`, `--port`, `--grpc-port`) wins over both. Copy `.env.example`
+and adjust:
 
 ```bash
 DXMT_HOST=0.0.0.0
@@ -388,6 +391,7 @@ Less often needed, and read the same way:
 | variable | what it does |
 | --- | --- |
 | `DXMT_GRPC_PORT` | serve gRPC on this port too (same as `--grpc-port`; needs the `api-grpc` build) |
+| `DXMT_WORKER_THREADS` | request worker threads (default: one per CPU core) |
 | `DXMT_RECORD_STORE`, `DXMT_VECTOR_STORE` | `disk` (the default when there is a WAL directory) or `memory` |
 | `DXMT_INDEX_ALGORITHM` | `hnsw-pq` (default) or `hnsw` for new tables |
 | `DXMT_HNSW_EF_CONSTRUCTION` | graph build effort |
@@ -395,8 +399,11 @@ Less often needed, and read the same way:
 | `DXMT_VECTOR_F16` | `1` keeps new tables' full vectors on disk as fp16 rather than f32 |
 | `DXMT_MIN_FREE_MEMORY_MB` | refuse writes when free memory falls below this |
 
-`DXMT_COMPRESSION` and `DXMT_WORKER_THREADS` are parsed and currently select nothing; the WAL
-and row files are not compressed.
+Through 1.3.2, `DXMT_HOST` and `DXMT_PORT` were listed here and read by nothing: `serve` bound
+`--host` and `--port`, whose defaults are the same values. `DXMT_WORKER_THREADS` was parsed
+and sized nothing. All three work now. `DXMT_COMPRESSION` is gone: it was parsed and
+selected nothing, and the WAL and row files are not compressed. Logging is `RUST_LOG`
+(`RUST_LOG=info`); there is no `DXMT_LOG_LEVEL`.
 
 `DXMT_STORAGE_TYPE` is gone as of 2026-09-27. It was parsed into config and selected nothing —
 the server constructs `IntelligentIndexedStorage` unconditionally — and a documented variable

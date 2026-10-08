@@ -53,7 +53,6 @@ pub struct SsdConfig {
     pub enabled: bool,
     pub cache_dir: String,
     pub max_size_gb: usize,
-    pub compression: String,
 }
 
 /// 对象存储配置
@@ -237,9 +236,6 @@ impl Default for AppConfig {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10);
 
-        let compression =
-            crate::config::env::var("DXMT_COMPRESSION").unwrap_or_else(|_| "zstd".to_string());
-
         // 对象存储配置
         let object_storage =
             if let Ok(s3_provider) = crate::config::env::var("DXMT_OBJECT_STORAGE_PROVIDER") {
@@ -401,7 +397,6 @@ impl Default for AppConfig {
                     enabled: true,
                     cache_dir: ssd_cache_dir,
                     max_size_gb: ssd_cache_size,
-                    compression,
                 }),
                 object_storage,
             },
@@ -544,13 +539,11 @@ mod tests {
         std::env::set_var("DXMT_MEMORY_CACHE_SIZE", "1024");
         std::env::set_var("DXMT_SSD_CACHE_DIR", "/tmp/cache");
         std::env::set_var("DXMT_SSD_CACHE_SIZE", "20");
-        std::env::set_var("DXMT_COMPRESSION", "lz4");
 
         let config = AppConfig::default();
         assert_eq!(config.storage.memory.as_ref().unwrap().max_size_mb, 1024);
         assert_eq!(config.storage.ssd.as_ref().unwrap().cache_dir, "/tmp/cache");
         assert_eq!(config.storage.ssd.as_ref().unwrap().max_size_gb, 20);
-        assert_eq!(config.storage.ssd.as_ref().unwrap().compression, "lz4");
 
         // 清理环境变量
         clear_all_env_vars();
@@ -664,7 +657,6 @@ mod tests {
             "DXMT_MEMORY_CACHE_SIZE",
             "DXMT_SSD_CACHE_DIR",
             "DXMT_SSD_CACHE_SIZE",
-            "DXMT_COMPRESSION",
             "DXMT_OBJECT_STORAGE_PROVIDER",
             "DXMT_S3_BUCKET",
             "DXMT_S3_REGION",

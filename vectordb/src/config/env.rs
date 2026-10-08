@@ -45,9 +45,20 @@ pub fn var(name: &str) -> Result<String, std::env::VarError> {
     }
 }
 
-/// `DXMT_WAL_DIR` -> `DB_WAL_DIR`; `None` for a variable this server does not own.
+/// The variables whose old name is *not* honoured: `DB_HOST` and `DB_PORT`.
+///
+/// No release ever read them -- `serve` took its address from `--host` and `--port` alone
+/// until `DXMT_HOST` and `DXMT_PORT` were wired to those flags -- so there is no deployment
+/// to keep working, and they are the two names most likely to belong to someone else's
+/// database in the same environment. Adopting them would have started binding the server to
+/// `postgres` the day the new names began to work.
+const NOT_ADOPTED: &[&str] = &["HOST", "PORT"];
+
+/// `DXMT_WAL_DIR` -> `DB_WAL_DIR`; `None` for a variable this server does not own, or one
+/// whose old name is not honoured (see [`NOT_ADOPTED`]).
 pub fn legacy_name(name: &str) -> Option<String> {
     name.strip_prefix(PREFIX)
+        .filter(|rest| !NOT_ADOPTED.contains(rest))
         .map(|rest| format!("{LEGACY_PREFIX}{rest}"))
 }
 
@@ -65,6 +76,9 @@ pub fn adopt_legacy_names() -> Vec<(String, String)> {
     let mut adopted: Vec<(String, String)> = std::env::vars()
         .filter_map(|(name, value)| {
             let rest = name.strip_prefix(LEGACY_PREFIX)?;
+            if NOT_ADOPTED.contains(&rest) {
+                return None;
+            }
             let current = format!("{PREFIX}{rest}");
             // Set and empty counts as set: `DXMT_WAL_DIR=` is an instruction, not an absence.
             if std::env::var(&current).is_ok() {
@@ -156,6 +170,31 @@ mod tests {
     fn the_legacy_name_is_the_prefix_swapped() {
         assert_eq!(legacy_name("DXMT_WAL_DIR").as_deref(), Some("DB_WAL_DIR"));
         assert_eq!(legacy_name("DXMT_API_KEY").as_deref(), Some("DB_API_KEY"));
+    }
+
+    /// `DB_HOST=postgres` is the most ordinary line in a compose file. It must not become
+    /// the address this server binds.
+    #[test]
+    #[serial]
+    fn db_host_and_db_port_are_not_adopted() {
+        assert_eq!(legacy_name("DXMT_HOST"), None);
+        assert_eq!(legacy_name("DXMT_PORT"), None);
+        for (old, new) in [("DB_HOST", "DXMT_HOST"), ("DB_PORT", "DXMT_PORT")] {
+            let before = std::env::var(new).ok();
+            std::env::remove_var(new);
+            std::env::set_var(old, "postgres");
+            let adopted = adopt_legacy_names();
+            assert!(
+                !adopted.iter().any(|(was, _)| was == old),
+                "{old} was adopted"
+            );
+            assert!(std::env::var(new).is_err(), "{new} was set from {old}");
+            assert!(var(new).is_err(), "{new} fell back to {old}");
+            std::env::remove_var(old);
+            if let Some(value) = before {
+                std::env::set_var(new, value);
+            }
+        }
     }
 
     /// A variable this server does not own is read straight through. `Layout` asks for `HOME`
