@@ -36,8 +36,18 @@ release, and the first commit that was ever pushed anywhere.
   `DXMT_DEFAULT_DIMENSION`/`_DISTANCE_METRIC`, `DXMT_MAX_RECORDS_PER_TABLE`). Logging is
   `RUST_LOG`.
 
+- **A start no longer warns about a file nobody wrote.** Every start logged "Failed to load
+  config file, using default configuration", twice, and every stop of a server without a WAL
+  logged "Shutdown snapshot failed". Neither was a failure.
+
 ### Removed
 
+- **Reading `config.toml` from the working directory.** It was never documented. When the file
+  parsed, it replaced every environment setting at once, and a file with that name was used
+  even when nobody meant it for this server (a Hugo site has one). When it did not parse, the
+  server fell back to the environment with only that warning. Configuration is the environment
+  and `.env`, as the README says. The `config` and `toml` crates, which only that path used,
+  are gone from the dependencies.
 - **`DXMT_COMPRESSION`**, and the `compression` field of `config::SsdConfig` it filled. It
   selected nothing; the WAL and row files are not compressed.
 

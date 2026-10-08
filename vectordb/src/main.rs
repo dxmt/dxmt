@@ -304,8 +304,9 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
 
                 // A clean shutdown used to discard everything written since the last snapshot.
                 // Not a correctness problem — the WAL still held it — but it made the next
-                // start replay the whole log for no reason.
-                if let Some(storage) = storage {
+                // start replay the whole log for no reason. Without a WAL there is nothing to
+                // snapshot, and saying it failed on every stop was noise.
+                if let Some(storage) = storage.filter(|s| s.is_persistent()) {
                     match storage.snapshot().await {
                         Ok(tables) => info!("Shutdown snapshot written for {} table(s)", tables),
                         Err(e) => tracing::warn!("Shutdown snapshot failed: {}", e),

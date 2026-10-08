@@ -141,46 +141,28 @@ pub struct MinioConfig {
 }
 
 impl AppConfig {
-    /// 加载配置
+    /// The configuration: `.env`, then the environment.
+    ///
+    /// There is no configuration file. Through 1.3.2 this also read `config.toml` from the
+    /// working directory -- undocumented, replacing the environment's settings wholesale when
+    /// it parsed, and warning "Failed to load config file" on every start when it did not,
+    /// which was every start. A file of that name in whatever directory the server happened
+    /// to start in (a Hugo site has one) is not a configuration anyone meant to give it.
     pub fn load() -> crate::Result<Self> {
-        // 首先尝试加载 .env 文件中的环境变量
         Self::load_env_file();
-
-        // 先尝试加载配置文件，如果失败则使用默认配置
-        match Self::load_from_file() {
-            Ok(config) => {
-                tracing::info!("Configuration loaded from file");
-                Ok(config)
-            }
-            Err(_) => {
-                tracing::warn!("Failed to load config file, using default configuration");
-                Ok(AppConfig::default())
-            }
-        }
+        Ok(AppConfig::default())
     }
 
-    /// 加载 .env 文件
+    /// `.env` in the working directory, if there is one. A variable already set wins.
+    ///
+    /// Said once: the server loads the configuration more than once on the way up.
     fn load_env_file() {
-        // 尝试加载 .env 文件，失败时静默处理
-        if dotenv::dotenv().is_err() {
-            // .env 文件不存在或无法读取，使用系统环境变量
-            tracing::debug!("No .env file found, using system environment variables")
-        } else {
-            tracing::info!("Environment variables loaded from .env file");
-        }
-    }
-
-    /// 从文件加载配置
-    fn load_from_file() -> crate::Result<Self> {
-        let config_str = std::fs::read_to_string("config.toml").map_err(|e| {
-            crate::Error::InvalidConfig(format!("Failed to read config file: {}", e))
-        })?;
-
-        let config: AppConfig = toml::from_str(&config_str).map_err(|e| {
-            crate::Error::InvalidConfig(format!("Failed to parse config file: {}", e))
-        })?;
-
-        Ok(config)
+        static SAID: std::sync::Once = std::sync::Once::new();
+        let loaded = dotenv::dotenv();
+        SAID.call_once(|| match loaded {
+            Ok(path) => tracing::info!("Environment variables loaded from {}", path.display()),
+            Err(_) => tracing::debug!("No .env file; using the environment as it is"),
+        });
     }
 
     /// 验证配置

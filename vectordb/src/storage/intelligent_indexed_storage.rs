@@ -2268,6 +2268,12 @@ impl IntelligentIndexedStorage {
         wal_dir.join("snapshot")
     }
 
+    /// Whether writes go to a WAL, and so whether there is anything to snapshot.
+    /// `DXMT_WAL_DIR=` (set and empty) builds a storage without one.
+    pub fn is_persistent(&self) -> bool {
+        self.wal.is_some()
+    }
+
     /// 把当前所有表写成快照，并记下 WAL 的下一个序号。
     ///
     /// 恢复时先加载快照、再只回放该序号之后的日志，避免把每条记录重新插一遍索引——

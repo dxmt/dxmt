@@ -158,8 +158,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 log = "0.4"
 
 # Configuration
-config = { version = "0.14", features = ["toml", "json", "yaml"] }
-toml = "0.8"
 dotenv = "0.15"
 
 # Cryptography and security
