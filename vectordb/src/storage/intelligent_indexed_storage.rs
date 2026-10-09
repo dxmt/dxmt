@@ -288,6 +288,10 @@ struct SnapshotHead {
     indexed_below: Option<u64>,
 }
 
+/// Record entries of one table waiting to be replayed together: the table, each record with
+/// the row its entry names, and the sequence number of the first.
+type ReplayRun = (String, Vec<(Record, Option<u64>)>, u64);
+
 /// The current meta layout: a MessagePack head, then bincode records.
 const SNAPSHOT_KIND: &str = "table-snapshot-v2";
 /// Everything written before 2026-09-24: one bincode `{table, algorithm, records, has_index}`.
@@ -2132,7 +2136,45 @@ impl IntelligentIndexedStorage {
         let mut records = 0usize;
         let mut skipped = 0usize;
 
+        // Consecutive record entries for one table are applied as a run (see
+        // `restore_records_from_wal`); anything else -- another table, a delete, a schema
+        // change -- applies the run first, so the log's order is kept.
+        const RUN: usize = 1_000;
+        let mut run: Option<ReplayRun> = None;
+
         for (seq, entry) in entries {
+            let entry = match entry {
+                WalEntry::UpsertRecordV2 { table, record } => {
+                    self.add_to_run(
+                        &mut run,
+                        table,
+                        record,
+                        None,
+                        seq,
+                        RUN,
+                        &mut records,
+                        &mut skipped,
+                    )
+                    .await;
+                    continue;
+                }
+                WalEntry::UpsertRecordInRowFile { table, record, row } => {
+                    self.add_to_run(
+                        &mut run,
+                        table,
+                        record,
+                        Some(row),
+                        seq,
+                        RUN,
+                        &mut records,
+                        &mut skipped,
+                    )
+                    .await;
+                    continue;
+                }
+                other => other,
+            };
+            self.apply_run(&mut run, &mut records, &mut skipped).await;
             let outcome = match entry {
                 WalEntry::CreateTableWithConfig { config } => {
                     self.create_table(config).await.map(|_| {
@@ -2191,18 +2233,9 @@ impl IntelligentIndexedStorage {
                         records += 1;
                     })
                 }
-                WalEntry::UpsertRecordV2 { table, record } => self
-                    .restore_record_from_wal(&table, record, None)
-                    .await
-                    .map(|_| {
-                        records += 1;
-                    }),
-                WalEntry::UpsertRecordInRowFile { table, record, row } => self
-                    .restore_record_from_wal(&table, record, Some(row))
-                    .await
-                    .map(|_| {
-                        records += 1;
-                    }),
+                WalEntry::UpsertRecordV2 { .. } | WalEntry::UpsertRecordInRowFile { .. } => {
+                    unreachable!("record entries are batched above")
+                }
                 WalEntry::AlterTable { table, request } => {
                     self.alter_table(&table, request).await.map(|_| ())
                 }
@@ -2221,6 +2254,8 @@ impl IntelligentIndexedStorage {
                 warn!("WAL seq {} could not be replayed, skipping: {}", seq, e);
             }
         }
+
+        self.apply_run(&mut run, &mut records, &mut skipped).await;
 
         self.replaying.store(false, Ordering::SeqCst);
         // Replay inserts one record at a time, so the normal insert path skips adaptive rebuilds
@@ -2407,35 +2442,125 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
-    /// Replay one current-format record through the normal index path, then restore metadata
-    /// that is not part of a create request. Replay is single-threaded and WAL writes are
-    /// suppressed while this runs, so replacing the map value after indexing is deterministic.
-    ///
-    /// `row` is where the entry says the vector is in the table's row file
-    /// (`UpsertRecordInRowFile`); an entry that carries its vector passes `None`.
+    /// Add a record entry to the pending run, applying the run first if it is for another
+    /// table or full.
+    #[allow(clippy::too_many_arguments)]
+    async fn add_to_run(
+        &self,
+        run: &mut Option<ReplayRun>,
+        table: String,
+        record: Record,
+        row: Option<u64>,
+        seq: u64,
+        limit: usize,
+        records: &mut usize,
+        skipped: &mut usize,
+    ) {
+        if run
+            .as_ref()
+            .is_some_and(|(t, entries, _)| *t != table || entries.len() >= limit)
+        {
+            self.apply_run(run, records, skipped).await;
+        }
+        run.get_or_insert_with(|| (table, Vec::new(), seq))
+            .1
+            .push((record, row));
+    }
+
+    /// Apply the pending run, if any, counting what was applied and what was skipped.
+    async fn apply_run(
+        &self,
+        run: &mut Option<ReplayRun>,
+        records: &mut usize,
+        skipped: &mut usize,
+    ) {
+        let Some((table, entries, first_seq)) = run.take() else {
+            return;
+        };
+        let total = entries.len();
+        match self.restore_records_from_wal(&table, entries).await {
+            Ok(failed) => {
+                for (id, e) in &failed {
+                    warn!(
+                        "WAL record '{}' (run from seq {}) could not be replayed, skipping: {}",
+                        id, first_seq, e
+                    );
+                }
+                *skipped += failed.len();
+                *records += total - failed.len();
+            }
+            Err(e) => {
+                warn!(
+                    "WAL run of {} record(s) from seq {} could not be replayed, skipping: {}",
+                    total, first_seq, e
+                );
+                *skipped += total;
+            }
+        }
+    }
+
+    /// Replay one current-format record. See [`Self::restore_records_from_wal`], which this is
+    /// the single-entry case of; an entry that cannot be applied is the error.
     async fn restore_record_from_wal(
         &self,
         table: &str,
         record: Record,
         row: Option<u64>,
     ) -> crate::Result<()> {
+        match self
+            .restore_records_from_wal(table, vec![(record, row)])
+            .await?
+            .into_iter()
+            .next()
+        {
+            Some((_, e)) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Replay a run of current-format records for one table through the normal index path,
+    /// then restore what a create request cannot carry. Replay is single-threaded and WAL
+    /// writes are suppressed while it runs, so replacing the map values after indexing is
+    /// deterministic. Returns the entries that could not be applied, each with its reason;
+    /// the rest are applied.
+    ///
+    /// A run, not one record at a time: each record used to be its own trip through the
+    /// insertion processor and two appends to the record store, each fsynced -- about 8.7 ms
+    /// an entry, so the 3,000-entry tail of one test took 26 s to recover, and the tail a
+    /// crash leaves after five minutes of ingest at 3,000 rows/s would have taken hours.
+    ///
+    /// `row` is where the entry says the vector is in the table's row file
+    /// (`UpsertRecordInRowFile`); an entry that carries its vector passes `None`.
+    async fn restore_records_from_wal(
+        &self,
+        table: &str,
+        entries: Vec<(Record, Option<u64>)>,
+    ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
+        let mut failed = Vec::new();
+
+        // One entry per id, the one sequential replay would have ended on: a later entry
+        // replaces an earlier one unless the earlier carries a higher version (see below).
+        let mut order: Vec<RecordId> = Vec::new();
+        let mut latest: HashMap<RecordId, (Record, Option<u64>)> = HashMap::new();
+        for (record, row) in entries {
+            match latest.get(&record.id) {
+                Some((kept, _)) if kept.version > record.version => {}
+                Some(_) => {
+                    latest.insert(record.id.clone(), (record, row));
+                }
+                None => {
+                    order.push(record.id.clone());
+                    latest.insert(record.id.clone(), (record, row));
+                }
+            }
+        }
+
         // A mutation is logged after it has been applied and after the table lock is released,
         // so two concurrent updates to the same id can reach the log in the opposite order to
         // the one in which they took effect. Replaying that log blindly would resurrect the
         // older version. The record carries the version the writer assigned, so an entry that
         // is behind what is already restored is a reordered write, not a new one: skip it.
-        {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            if let Some(existing) = tables
-                .get(table)
-                .and_then(|data| data.records.get(&record.id))
-            {
-                if existing.version > record.version {
-                    return Ok(());
-                }
-            }
-        }
-
+        //
         // A log written before `update_record` recorded its vector holds update entries
         // without one. The vector is still in the row file — the update wrote it there before it
         // logged anything — so read it back rather than re-index nothing. If it is not there
@@ -2448,100 +2573,148 @@ impl IntelligentIndexedStorage {
         // and rows are never renumbered, so the row the entry was written with is still the
         // row. (A row the sweep has since punched reads as zeros; the entry after it in the
         // log is the delete that made it dead.)
-        let vector = if let Some(row) = row {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            let read = tables
-                .get(table)
-                .and_then(|data| data.vector_file.as_ref())
-                .and_then(|file| file.read(row));
-            match read {
-                Some(vector) => vector,
-                None => {
-                    return Err(crate::Error::InvalidVector(format!(
-                        "WAL entry for '{}' points at row {} of a row file that does not hold it",
-                        record.id, row
-                    )))
+        let mut records = Vec::with_capacity(order.len());
+        let mut requests = Vec::with_capacity(order.len());
+        let mut rows = Vec::with_capacity(order.len());
+        {
+            let tables = self.read_tables("restore_records_from_wal").await;
+            let data = tables.get(table);
+            for id in order {
+                let (record, row) = latest.remove(&id).expect("every ordered id is kept");
+                if data
+                    .and_then(|data| data.records.get(&record.id))
+                    .is_some_and(|existing| existing.version > record.version)
+                {
+                    continue;
+                }
+                let vector = if let Some(row) = row {
+                    match data
+                        .and_then(|data| data.vector_file.as_ref())
+                        .and_then(|file| file.read(row))
+                    {
+                        Some(vector) => vector,
+                        None => {
+                            failed.push((
+                                record.id.clone(),
+                                crate::Error::InvalidVector(format!(
+                                    "WAL entry for '{}' points at row {} of a row file that \
+                                     does not hold it",
+                                    record.id, row
+                                )),
+                            ));
+                            continue;
+                        }
+                    }
+                } else if record.vector.is_empty() {
+                    data.map(|data| data.vector_for(&record))
+                        .unwrap_or_default()
+                } else {
+                    record.vector.clone()
+                };
+                if vector.is_empty() {
+                    failed.push((
+                        record.id.clone(),
+                        crate::Error::InvalidVector(format!(
+                            "WAL entry for '{}' has no vector and none is stored for it",
+                            record.id
+                        )),
+                    ));
+                    continue;
+                }
+                requests.push(CreateRecordRequest {
+                    id: record.id.clone(),
+                    vector,
+                    sparse_vector: record.sparse_vector.clone(),
+                    named_vectors: record.named_vectors.clone(),
+                    payload: Some(record.payload.clone()),
+                    text: None,
+                });
+                rows.push(row);
+                records.push(record);
+            }
+        }
+        if records.is_empty() {
+            return Ok(failed);
+        }
+
+        // An entry that named its row hands the row on, so the processor indexes the vector
+        // without appending it a second time. The processor refuses a whole request for one
+        // bad record; a run that fails is retried one entry at a time, so one bad entry costs
+        // itself and not its neighbours.
+        if let Err(e) = self
+            .insert_records_with_rows(table, requests.clone(), rows.clone())
+            .await
+        {
+            if records.len() == 1 {
+                failed.push((records[0].id.clone(), e));
+                return Ok(failed);
+            }
+            for (record, row) in records.into_iter().zip(rows) {
+                let id = record.id.clone();
+                if let Err(e) = Box::pin(self.restore_record_from_wal(table, record, row)).await {
+                    failed.push((id, e));
                 }
             }
-        } else if record.vector.is_empty() {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            tables
-                .get(table)
-                .map(|data| data.vector_for(&record))
-                .unwrap_or_default()
-        } else {
-            record.vector.clone()
-        };
-        if vector.is_empty() {
-            return Err(crate::Error::InvalidVector(format!(
-                "WAL entry for '{}' has no vector and none is stored for it",
-                record.id
-            )));
+            return Ok(failed);
         }
-        let request = CreateRecordRequest {
-            id: record.id.clone(),
-            vector,
-            sparse_vector: record.sparse_vector.clone(),
-            named_vectors: record.named_vectors.clone(),
-            payload: Some(record.payload.clone()),
-            text: None,
-        };
-        // An entry that named its row hands the row on, so the processor indexes the vector
-        // without appending it a second time.
-        self.insert_records_with_rows(table, vec![request], vec![row])
-            .await?;
 
-        let mut tables = self.write_tables("restore_record_from_wal").await;
+        let mut tables = self.write_tables("restore_records_from_wal").await;
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        // The insert above put the vector in the row file and the row in the store; this
-        // re-store of the record, which exists for the timestamps and version the create
-        // request could not carry, has to keep that row or the record comes back with no
-        // vector at all. It stored `None` here, which was hidden while every entry carried
-        // its vector inline: the store then held a second copy of it per replayed record.
-        let mut record = record;
-        let row = data
-            .vector_file
-            .as_ref()
-            .and_then(|_| data.vector_row(&record.id));
-        if row.is_some() {
-            record.vector = Vec::new();
+        let mut restored = Vec::with_capacity(records.len());
+        let replaying = self.replaying.load(Ordering::SeqCst);
+        let mut replayed = self.replayed_rows.lock().ok();
+        for mut record in records {
+            // The insert above put the vector in the row file and the row in the store; this
+            // re-store of the record, which exists for the timestamps and version the create
+            // request could not carry, has to keep that row or the record comes back with no
+            // vector at all. It stored `None` here, which was hidden while every entry carried
+            // its vector inline: the store then held a second copy of it per replayed record.
+            let row = data
+                .vector_file
+                .as_ref()
+                .and_then(|_| data.vector_row(&record.id));
+            if row.is_some() {
+                record.vector = Vec::new();
+            }
+            // Only while replaying: `import_table` comes through here too, and nothing would
+            // ever empty the map behind it.
+            if let (Some(row), true, Some(replayed)) = (row, replaying, replayed.as_mut()) {
+                replayed
+                    .entry(table.to_string())
+                    .or_default()
+                    .insert(record.id.clone(), row);
+            }
+            restored.push((Arc::new(record), row));
         }
-        // Only while replaying: `import_table` comes through here too, and nothing would
-        // ever empty the map behind it.
-        if let (Some(row), true, Ok(mut replayed)) = (
-            row,
-            self.replaying.load(Ordering::SeqCst),
-            self.replayed_rows.lock(),
-        ) {
-            replayed
-                .entry(table.to_string())
-                .or_default()
-                .insert(record.id.clone(), row);
-        }
-        data.records.insert(Arc::new(record.clone()), row)?;
-        // The insert above indexed the record with the time it was *replayed*, because a create
-        // request carries no timestamp; the map now holds the one it was written with. A table
-        // created by this same replay has its payload index built from the start, so that index
-        // kept the replay time, and `records/list` with a filter — which pages by the index's
-        // timestamps — ordered every replayed record by when recovery reached it. A record the
-        // log had upserted went through the path that keeps its original time, which is older
-        // than every replay time, and sank to the bottom. Found by the stateful walk: two bulk
-        // inserts sharing one id, then `kill -9`. Re-file it under the time the map holds.
-        if let Some(derived) = data.derived_mut().as_mut() {
-            derived.payload.update_record(
-                &record.id,
-                &record.payload,
-                &record.payload,
-                crate::storage::payload_index::created_key(&record.created_at),
-            );
+        drop(replayed);
+        // One append, and one fsync, for the run.
+        data.records.insert_batch(restored.clone())?;
+        for (record, _) in &restored {
+            // The insert above indexed the record with the time it was *replayed*, because a
+            // create request carries no timestamp; the map now holds the one it was written
+            // with. A table created by this same replay has its payload index built from the
+            // start, so that index kept the replay time, and `records/list` with a filter —
+            // which pages by the index's timestamps — ordered every replayed record by when
+            // recovery reached it. A record the log had upserted went through the path that
+            // keeps its original time, which is older than every replay time, and sank to the
+            // bottom. Found by the stateful walk: two bulk inserts sharing one id, then
+            // `kill -9`. Re-file it under the time the map holds.
+            if let Some(derived) = data.derived_mut().as_mut() {
+                derived.payload.update_record(
+                    &record.id,
+                    &record.payload,
+                    &record.payload,
+                    crate::storage::payload_index::created_key(&record.created_at),
+                );
+            }
+            if record.updated_at > data.table.updated_at {
+                data.table.updated_at = record.updated_at;
+            }
         }
         data.table.record_count = data.records.len() as u64;
-        if record.updated_at > data.table.updated_at {
-            data.table.updated_at = record.updated_at;
-        }
-        Ok(())
+        Ok(failed)
     }
 
     /// 一张表的快照元数据。索引本体在同名的 `.idx` 文件里。
@@ -3466,15 +3639,29 @@ impl IntelligentIndexedStorage {
         const BATCH: usize = 1_000;
         for chunk in meta.records.chunks(BATCH) {
             let mut entries = Vec::with_capacity(chunk.len());
+            let mut batch = Vec::with_capacity(chunk.len());
             for record in chunk {
                 let record = (**record).clone();
                 entries.push(WalEntry::UpsertRecordV2 {
                     table: name.clone(),
                     record: record.clone(),
                 });
-                self.restore_record_from_wal(&name, record, None).await?;
-                imported += 1;
+                batch.push((record, None));
             }
+            // A chunk at a time, as replay does: one record at a time was one fsynced trip
+            // through the processor and two record-store appends per record.
+            if let Some((id, e)) = self
+                .restore_records_from_wal(&name, batch)
+                .await?
+                .into_iter()
+                .next()
+            {
+                return Err(crate::Error::InvalidInput(format!(
+                    "record '{id}' in {} could not be imported: {e}",
+                    path.display()
+                )));
+            }
+            imported += chunk.len();
             self.wal_append(entries).await?;
         }
 

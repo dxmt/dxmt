@@ -30,6 +30,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **Recovery replayed the log one record at a time, about 80x slower than it needs to.** Each
+  logged write was its own trip through the insert path and two fsynced record-store appends:
+  6 ms an entry, so 20,000 entries took 120 s, and the tail five minutes of ingest at 3,000
+  rows/s leaves behind would have taken over an hour to come back from a crash. Consecutive
+  writes to one table are now replayed in runs of up to 1,000: 1.5 s for the same 20,000.
+  Table import goes the same way.
 - **A crash between a record's data and its log line corrupted every later record of that
   table.** Data is written first; extra bytes past the last row the log names were left in
   place, the next append landed after them while its log line placed it before, and every row
