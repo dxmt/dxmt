@@ -89,6 +89,17 @@ async fn index(headers: HeaderMap) -> Response {
 async fn asset(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path().trim_start_matches("/dashboard/");
 
+    // A path that climbs is refused, not answered. Nothing outside the embedded bundle could be
+    // read either way, but `/dashboard/../../etc/passwd` ends in a segment with no dot and so
+    // took the history fallback below: a 200 with the app's page for a traversal probe. Its
+    // test never saw this, because it used curl, which squashes `..` before sending.
+    if path.split('/').any(|segment| {
+        let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+        segment == ".." || segment == "."
+    }) {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+
     if DashboardAssets::get(path).is_some() {
         return serve(path, &headers);
     }

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 /// per record while the structs account for about 6.8 KB, and constraining it with
 /// MALLOC_ARENA_MAX=2 brought that to 11,450 at the cost of 31% of insert throughput. The
 /// gap is per-arena free lists that never get reused, not anything the database is storing.
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(windows)))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -18,7 +18,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// same 1M load: 8.5 KB per record after a 3,000-query burst instead of 11.5 KB, and the
 /// same throughput. jemalloc reads this symbol before `main` runs; it replaces the
 /// `_RJEM_MALLOC_CONF` environment variable, which an operator would otherwise have to know.
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(windows)))]
 #[allow(non_upper_case_globals)]
 #[export_name = "_rjem_malloc_conf"]
 pub static malloc_conf: &[u8] = b"background_thread:true\0";

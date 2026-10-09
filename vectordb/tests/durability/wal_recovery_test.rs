@@ -3112,3 +3112,30 @@ async fn a_failed_write_after_a_snapshot_is_all_there_or_all_gone_after_restart(
         }
     }
 }
+
+/// A second instance over a directory that is already open is refused, and the directory is
+/// free again once the first is gone. Two writers to one log corrupt it; nothing stopped a
+/// second `serve`, or `vectordb mcp` beside a running server, from opening it.
+#[tokio::test]
+async fn a_store_cannot_be_opened_twice_at_once() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let first = open(&wal_dir).await;
+    first
+        .create_table(table("t", 2, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+
+    let err = IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal_dir.clone()))
+        .await
+        .err()
+        .expect("a second instance opened a store already in use");
+    assert!(
+        err.to_string().contains("in use by another process"),
+        "{err}"
+    );
+
+    drop(first);
+    let again = open(&wal_dir).await;
+    assert_eq!(again.list_tables().await.unwrap().len(), 1);
+}

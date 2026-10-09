@@ -125,7 +125,7 @@ impl MemoryGuard {
 /// Inside a container `/proc/meminfo` describes the host, not the limit the process is
 /// actually held to, so the cgroup's own headroom wins when it is smaller.
 fn available_bytes() -> Option<u64> {
-    let host = meminfo_field("MemAvailable:");
+    let host = meminfo_field("MemAvailable:").or_else(|| from_sysinfo().map(|(_, a)| a));
     match cgroup_available() {
         Some(cg) => Some(host.map_or(cg, |h| h.min(cg))),
         None => host,
@@ -134,13 +134,30 @@ fn available_bytes() -> Option<u64> {
 
 /// Total memory the process may use: the host's, capped by a cgroup limit when there is one.
 ///
-/// `None` where neither is readable (not Linux).
+/// Linux reads `/proc/meminfo` and the cgroup; elsewhere `sysinfo` answers.
 pub fn total_bytes() -> Option<u64> {
-    let host = meminfo_field("MemTotal:");
+    let host = meminfo_field("MemTotal:").or_else(|| from_sysinfo().map(|(t, _)| t));
     match cgroup_limit() {
         Some(limit) => Some(host.map_or(limit, |h| h.min(limit))),
         None => host,
     }
+}
+
+/// `(total, available)` from the OS, for systems without `/proc/meminfo`. Until this, macOS
+/// and Windows reported nothing, so the floor in `DXMT_MIN_FREE_MEMORY_MB` never refused a
+/// write there. Not used on Linux, where the kernel's own file is cheaper and the cgroup
+/// beside it is what a container is actually held to.
+#[cfg(not(target_os = "linux"))]
+fn from_sysinfo() -> Option<(u64, u64)> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    (total > 0).then(|| (total, sys.available_memory()))
+}
+
+#[cfg(target_os = "linux")]
+fn from_sysinfo() -> Option<(u64, u64)> {
+    None
 }
 
 /// `/proc/meminfo` reports kB, whatever the field.
@@ -258,8 +275,8 @@ mod tests {
 
     #[test]
     fn this_machine_reports_a_plausible_amount_of_memory() {
-        let total = total_bytes().expect("Linux exposes MemTotal");
-        let available = available_bytes().expect("Linux exposes MemAvailable");
+        let total = total_bytes().expect("the OS reports its total memory");
+        let available = available_bytes().expect("the OS reports its available memory");
         assert!(total > 0 && available <= total, "{available} of {total}");
     }
 }

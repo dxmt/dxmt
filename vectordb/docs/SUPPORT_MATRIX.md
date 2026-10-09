@@ -19,6 +19,7 @@ single-node.
 
 | Area | Supported path | Notes |
 | --- | --- | --- |
+| Platforms | Linux x86_64 | Every measurement in this file is Linux. **Windows x86_64** builds natively (MSVC) and passes the full test suite as of 2026-10-09, with no published binary yet and no load measured on it; hole punching is Linux-only, so elsewhere a table's row files do not shrink after updates. **macOS** has not been built or tested. One process per store: a second process opening the same directory is refused (`{DXMT_WAL_DIR}/LOCK`). |
 | Server | `vectordb serve` | Axum HTTP server; routes live under `/api/v1`, probes at the root. One data model, several protocols (REST, gRPC, GraphQL, WebSocket, MCP) — the `serve --simple` mode that served a second model at `/collections/*` has been removed. |
 | Index tuning | `hnsw` and `quantization` on create | Per table: `m`, `ef_construction`, `ef_search`, and `num_subvectors`, `num_centroids`, `quantize_at_rows`. Persisted, so rebuilds and restarts keep them; `quantize_at_rows` above the table's eventual size keeps a table exact. `GET /tables/{t}/stats` reports `quantized`, which is the regime the index is in and decides both its recall and its memory. |
 | Tables | Create, list, alter, delete, branch | Table configuration is persisted in WAL and snapshots. |

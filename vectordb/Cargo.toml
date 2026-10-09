@@ -136,7 +136,10 @@ parking_lot = { version = "0.12", features = ["serde"] }
 # glibc's own knob trades it back the wrong way: MALLOC_ARENA_MAX=2 cut RSS 29% and
 # throughput 31%, because sixteen threads then contend on two arenas. jemalloc's per-thread
 # caches and background page return address both sides at once.
-tikv-jemallocator = { version = "0.6", optional = true }
+#
+# Declared under `[target.'cfg(not(windows))'.dependencies]` below the dependency list:
+# jemalloc does not build for Windows, where the `jemalloc` feature stays in the default set
+# and is inert (see the `cfg` on the allocator in main.rs).
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
 dashmap = "5.5"
@@ -252,6 +255,9 @@ hashbrown = { version = "0.15", default-features = false }
 # axum 0.6 is built on hyper 0.14; keeping this dependency on the same
 # version avoids two incompatible `tower_service` traits in the server binary.
 hyper = "0.14.32"
+
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 # Testing frameworks

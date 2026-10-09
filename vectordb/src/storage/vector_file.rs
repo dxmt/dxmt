@@ -349,14 +349,25 @@ impl VectorFile {
             .read(true)
             .open(path)?;
         let row_bytes = dim * format.bytes_per_dim();
-        let len = file.metadata()?.len();
+        let mut len = file.metadata()?.len();
+        // A partial last row is an append that stopped partway -- a crash, a full disk -- and
+        // was never acknowledged: the `.rows` line naming it is written after the data. This
+        // used to refuse to open, which is a server that does not come back after a crash at
+        // the wrong moment. Cut it back to the last whole row.
         if row_bytes > 0 && len % row_bytes as u64 != 0 {
-            return Err(crate::Error::Serialization(format!(
-                "{}: {} bytes is not a whole number of {}-byte rows",
+            let whole = len - len % row_bytes as u64;
+            tracing::warn!(
+                "{}: {} bytes is not a whole number of {}-byte rows; cutting the partial last \
+                 row (an append that never finished)",
                 path.display(),
                 len,
                 row_bytes
-            )));
+            );
+            // A handle of its own: an append-mode handle may not change the length on Windows.
+            let cut = OpenOptions::new().write(true).open(path)?;
+            cut.set_len(whole)?;
+            cut.sync_all()?;
+            len = whole;
         }
         let rows = if row_bytes > 0 {
             len / row_bytes as u64
@@ -777,7 +788,6 @@ impl VectorFile {
     /// on the calling thread in the order asked. Allocates a buffer per row; this is the
     /// cold path, where the disk is the cost.
     fn with_rows_parallel(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
-        use std::os::unix::fs::FileExt;
         let mapped_rows = self.map.read().rows;
         let bufs: Vec<Option<Vec<f32>>> = rows
             .par_chunks(PARALLEL_CHUNK)
@@ -786,9 +796,7 @@ impl VectorFile {
                 let mut buf = vec![0u8; self.row_bytes];
                 for &row in chunk {
                     if row < mapped_rows
-                        && self
-                            .reader
-                            .read_exact_at(&mut buf, row * self.row_bytes as u64)
+                        && read_exact_at(&self.reader, &mut buf, row * self.row_bytes as u64)
                             .is_ok()
                     {
                         out.push(Some(self.decode(&buf)));
@@ -888,6 +896,29 @@ impl VectorFile {
     }
 }
 
+/// A positional read that leaves the file's cursor alone, so the parallel readers can share
+/// one handle. Unix has it as `read_exact_at`; Windows has `seek_read`, which moves the cursor
+/// (harmless here: nothing reads this handle sequentially) and may return short.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset)? {
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            n => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,6 +927,25 @@ mod tests {
         (0..dim)
             .map(|d| (seed * 31 + d as u64) as f32 * 0.5)
             .collect()
+    }
+
+    #[test]
+    fn a_partial_last_row_is_cut_and_the_file_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.f32");
+        let (file, _) = VectorFile::open(&path, 4).unwrap();
+        file.append(&[("a", &v(0, 4))]).unwrap();
+        drop(file);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[1u8; 6]).unwrap(); // a 16-byte row, six bytes in
+        drop(f);
+
+        let (file, ids) = VectorFile::open(&path, 4).unwrap();
+        assert_eq!(file.rows(), 1);
+        assert_eq!(ids, vec![("a".to_string(), 0)]);
+        assert_eq!(file.append(&[("b", &v(1, 4))]).unwrap(), vec![1]);
+        assert_eq!(file.read(1).unwrap(), v(1, 4));
+        assert_eq!(file.read(0).unwrap(), v(0, 4));
     }
 
     #[test]

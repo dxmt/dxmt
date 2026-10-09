@@ -100,7 +100,8 @@ fn test_files() -> BTreeSet<String> {
                     path.strip_prefix(base)
                         .expect("under the crate root")
                         .to_string_lossy()
-                        .to_string(),
+                        // Cargo.toml writes `/` whatever the platform.
+                        .replace('\\', "/"),
                 );
             }
         }

@@ -14,6 +14,9 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -68,37 +71,12 @@ fn start_server_on(wal_dir: &Path) -> Server {
 }
 
 fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
-    let url = if path.starts_with("/health") {
-        format!("http://127.0.0.1:{port}{path}")
+    let path = if path.starts_with("/health") {
+        path.to_string()
     } else {
-        format!("http://127.0.0.1:{port}/api/v1{path}")
+        format!("/api/v1{path}")
     };
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .arg("-o")
-        .arg("-")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-X")
-        .arg(method)
-        .arg(&url);
-    if let Some(body) = body {
-        command
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-d")
-            .arg(body);
-    }
-    let output = command.output().expect("curl is required for this test");
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let (body, status) = text.rsplit_once('\n')?;
-    Some((status.trim().parse().ok()?, body.to_string()))
+    http::call(port, method, &path, &[], body)
 }
 
 fn ok(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
@@ -181,7 +159,7 @@ fn a_backup_restores_into_a_working_server() {
             server.port,
             "POST",
             "/backup",
-            Some(&format!(r#"{{"path":"{}"}}"#, backup_dir.to_string_lossy())),
+            Some(&serde_json::json!({ "path": backup_dir }).to_string()),
         );
         let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(parsed["data"]["tables"], 1);
@@ -288,7 +266,7 @@ fn the_manifest_lists_the_files_that_are_there() {
         server.port,
         "POST",
         "/backup",
-        Some(&format!(r#"{{"path":"{}"}}"#, backup_dir.to_string_lossy())),
+        Some(&serde_json::json!({ "path": backup_dir }).to_string()),
     );
     let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
     let listed: Vec<String> = parsed["data"]["files"]
@@ -380,7 +358,7 @@ fn a_backup_outside_the_root_is_refused() {
             server.port,
             "POST",
             "/backup",
-            Some(&format!(r#"{{"path":"{destination}"}}"#)),
+            Some(&serde_json::json!({ "path": destination }).to_string()),
         )
         .expect("the server answered");
         serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"))
@@ -415,13 +393,17 @@ fn a_backup_outside_the_root_is_refused() {
     }
 
     // A symlink inside the root pointing out of it is resolved before the check, not after.
-    let link = allowed.path().join("link");
-    std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
-    let through_link = link.join("via-symlink");
-    let answer = backup(through_link.to_string_lossy().to_string());
-    assert_eq!(
-        answer["success"], false,
-        "a symlink out of the root was followed: {answer}"
-    );
-    assert!(!elsewhere.path().join("via-symlink").exists());
+    // Unix only: creating one on Windows needs a privilege a test runner rarely has.
+    #[cfg(unix)]
+    {
+        let link = allowed.path().join("link");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+        let through_link = link.join("via-symlink");
+        let answer = backup(through_link.to_string_lossy().to_string());
+        assert_eq!(
+            answer["success"], false,
+            "a symlink out of the root was followed: {answer}"
+        );
+        assert!(!elsewhere.path().join("via-symlink").exists());
+    }
 }

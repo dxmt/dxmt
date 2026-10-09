@@ -17,7 +17,34 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **Windows.** The server builds natively with MSVC and the whole suite passes there (82 test
+  binaries, 767 tests; the four that measure Unix-only behaviour -- hole punching, permission
+  bits, symlinks -- are compiled out). jemalloc is not used on Windows. Not yet a release
+  target: see `docs/SUPPORT_MATRIX.md`.
+- **One process per store.** Opening a store takes an exclusive lock on `{DXMT_WAL_DIR}/LOCK`;
+  a second `serve`, or `vectordb mcp` beside a running server, is refused with the directory
+  it found in use, instead of both appending to one log. The OS releases the lock however the
+  process exits.
+
 ### Fixed
+
+- **A crash between a record's data and its log line corrupted every later record of that
+  table.** Data is written first; extra bytes past the last row the log names were left in
+  place, the next append landed after them while its log line placed it before, and every row
+  from there decoded another row's bytes. A backup copying the two files while a write went in
+  did the same. They are now cut on open. Found on Windows, where the slower fsync made a
+  backup under writes lose records on every run.
+- **A vector file with a partial last row refused to open**, so a crash or a full disk midway
+  through an append left a server that would not start. The partial row is cut instead.
+- **On Windows:** an alias could not be set ("Access is denied": the alias file was synced
+  through a read-only handle); data went under the working directory when `HOME` was unset,
+  which a plain PowerShell does not set (`USERPROFILE` is used now); and the free-memory floor
+  never refused a write, there or on macOS, because only `/proc/meminfo` was read.
+- **`/dashboard/../…` answered 200 with the app page.** Nothing outside the bundle was ever
+  readable, but a path that climbs is now a 404. Its test had never sent one: it used curl,
+  which removes `..` before sending.
 
 - **A backup taken while the periodic snapshot ran could restore without a delete, an update
   or a table created in between.** `backup_to` took its snapshot and then copied, with nothing

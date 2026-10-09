@@ -659,6 +659,12 @@ pub struct IntelligentIndexedStorage {
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
 
+    /// `{wal_dir}/LOCK`, held exclusively for as long as this instance lives. Nothing stopped a
+    /// second process -- a second `serve` on another port, `vectordb mcp` beside a running
+    /// server, an embedded client starting its own -- from opening the same directory, and two
+    /// processes appending to one WAL and one set of row files corrupt both.
+    _dir_lock: Option<std::fs::File>,
+
     /// Recovery only, emptied when it ends. Each table the snapshot restored, with the row
     /// below which its graph was known to be current (`None`: a snapshot from before that was
     /// recorded); and for each table, the row each replayed record was indexed from.
@@ -1844,6 +1850,8 @@ impl IntelligentIndexedStorage {
         let mut storage = Self::build(config).await?;
 
         if let Some(dir) = wal_dir {
+            // Before the log is opened: opening it can already write (a torn tail is cut).
+            storage._dir_lock = Some(Self::lock_dir(&dir)?);
             let manager = WalManager::new(&dir)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
@@ -2005,6 +2013,7 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            _dir_lock: None,
             recovery_floors: StdMutex::new(HashMap::new()),
             replayed_rows: StdMutex::new(HashMap::new()),
             #[cfg(feature = "test-failpoints")]
@@ -2225,6 +2234,29 @@ impl IntelligentIndexedStorage {
             total, tables, records, skipped
         );
         Ok(())
+    }
+
+    /// Take `{dir}/LOCK` exclusively, or say which directory is already in use. The OS drops
+    /// the lock when the process exits, however it exits, so a crash leaves nothing stale.
+    fn lock_dir(dir: &std::path::Path) -> crate::Result<std::fs::File> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("LOCK");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(crate::Error::InvalidConfig(format!(
+                "{} is in use by another process (it holds {}). Two processes writing one \
+                 store corrupt it; stop the other one, or point this one at a different \
+                 DXMT_ROOT_DIR / DXMT_WAL_DIR.",
+                dir.display(),
+                path.display()
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => Err(crate::Error::Io(e)),
+        }
     }
 
     /// After recovery, re-read into the graph every row it may hold an older version of.
@@ -3148,8 +3180,15 @@ impl IntelligentIndexedStorage {
         // Through a temporary file: a crash during the write must leave the previous set, not a
         // half-written one that loads as "no aliases" and points every caller at nothing.
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        {
+            // Written and synced through one writable handle, closed before the rename. It was
+            // `File::open(&tmp)?.sync_all()`: a read-only handle, which Linux will flush and
+            // Windows refuses with "Access is denied", so on Windows no alias could be set.
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
