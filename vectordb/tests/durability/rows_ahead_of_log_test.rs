@@ -467,3 +467,53 @@ async fn a_snapshot_during_a_backup_waits_for_the_copy() {
     assert_eq!(held.len(), 19);
     assert_eq!(restored.get_index_record_count("t").await.unwrap(), 19);
 }
+
+/// A lost insert and a lost delete in one table, which leave the counts equal.
+///
+/// Both writes reach the row files and neither reaches the log: the restored graph (the
+/// snapshot's) still holds the deleted row and lacks the inserted one, and the record count
+/// matches the graph's. Recovery used to compare only the counts, so the deleted record stayed
+/// searchable for the life of the table.
+#[tokio::test]
+async fn a_lost_insert_and_a_lost_delete_that_cancel_out_are_both_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("wal");
+    let log = wal.join("wal.log");
+
+    {
+        let storage = open(&wal).await;
+        storage.create_table(table("t")).await.unwrap();
+        storage.insert_records("t", rows(0, 100)).await.unwrap();
+        storage.snapshot().await.unwrap();
+        let at_snapshot = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+
+        storage.insert_records("t", rows(100, 101)).await.unwrap();
+        storage
+            .delete_records("t", vec!["r7".to_string()])
+            .await
+            .unwrap();
+        drop(storage);
+        // Both entries lost, as if the process died before either reached the log.
+        let f = std::fs::OpenOptions::new().write(true).open(&log).unwrap();
+        f.set_len(at_snapshot).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let storage = open(&wal).await;
+    assert_eq!(storage.get_table("t").await.unwrap().record_count, 100);
+    assert_eq!(
+        storage.get_index_record_count("t").await.unwrap(),
+        100,
+        "the graph has to hold what the rows hold"
+    );
+    assert_eq!(
+        top1(&storage, 100, SearchMode::Normal).await.as_deref(),
+        Some("r100"),
+        "the inserted row is not in the graph"
+    );
+    assert_ne!(
+        top1(&storage, 7, SearchMode::Normal).await.as_deref(),
+        Some("r7"),
+        "the deleted row is still in the graph"
+    );
+}

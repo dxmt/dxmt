@@ -2363,9 +2363,11 @@ impl IntelligentIndexedStorage {
     /// `GET` and the exact scan read the rows, the ordinary search reads the graph, and the two
     /// disagreed for the life of the table. `restore_table` already added the first kind against
     /// a snapshot's index; nothing covered replay or the other two. The counts gate the walk, as
-    /// they do there, so a missed insert and a missed delete that cancel out still hide the
-    /// delete (the insert is re-read by `reindex_rows_the_graph_may_not_reflect`, which runs
-    /// first and is what catches a graph holding an *older* vector for an id).
+    /// they do there. A missed insert and a missed delete that cancel out do not hide behind
+    /// them: `reindex_rows_the_graph_may_not_reflect` runs first and puts the insert in the
+    /// graph, which unbalances the counts (`a_lost_insert_and_a_lost_delete_that_cancel_out_are_
+    /// both_repaired`). They can still hide in a table whose vectors have no row file, and
+    /// behind a snapshot written before `indexed_below` was recorded.
     async fn index_rows_the_log_missed(&self) -> crate::Result<()> {
         let mut work = Vec::new();
         {
