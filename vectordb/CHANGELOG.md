@@ -30,6 +30,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **Ingest into a quantized table spent a third of its CPU in `memcpy`.** Decoding a PQ code
+  copies one centroid per subspace, and the copy for a four-float subspace -- the width of
+  every 768-, 1024- and 1536-dimension table -- was a call to `memcpy` each time: 192 calls of
+  16 bytes per decode. Widths 1-4, 6, 8 and 16 now copy as fixed-size arrays. Steady ingest
+  into a quantized 768-d table, over HTTP: 1,905 -> 2,448 rows/s with one writer, 1,615 ->
+  2,369 with four.
 - **The first filtered query after a restart could stop the whole server.** It built the
   payload and sparse indexes inside the table map's read lock -- 23 s at 10M rows -- and a write
   waiting for that lock queued every later request to every table behind it. It reached that
