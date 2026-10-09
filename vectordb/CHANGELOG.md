@@ -17,6 +17,49 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DXMT_HOST` and `DXMT_PORT` set the address `serve` binds.** The README and
+  `.env.example` listed both, and no release read them: `serve` took `--host` and `--port`
+  alone, whose defaults are the same values, so a setting looked like it worked until it was
+  anything but the default. A flag still wins over the variable. `serve` also reads `.env`
+  before the flags are parsed, so `DXMT_GRPC_PORT` there now applies too. The legacy
+  `DB_HOST` and `DB_PORT` are *not* accepted: no release read them either, and they are what
+  a compose file calls its Postgres.
+- **`DXMT_WORKER_THREADS` sizes the runtime.** It was parsed and sized nothing; the runtime
+  always ran one worker per core. `0` is refused at startup.
+- **`.env.example` lists only variables the server reads**, in English, with everything
+  commented out. Copied as it was, it stopped a default build from starting: it set
+  `DXMT_OBJECT_STORAGE_PROVIDER=s3`, which needs the `s3-storage` feature. It also listed
+  eight variables that did nothing (`DXMT_COMPRESSION`, `DXMT_LOG_LEVEL`,
+  `DXMT_LOG_FORMAT`, `DXMT_MAX_CONNECTIONS`, `DXMT_QUERY_TIMEOUT`,
+  `DXMT_DEFAULT_DIMENSION`/`_DISTANCE_METRIC`, `DXMT_MAX_RECORDS_PER_TABLE`). Logging is
+  `RUST_LOG`.
+
+- **A start no longer warns about a file nobody wrote.** Every start logged "Failed to load
+  config file, using default configuration", twice, and every stop of a server without a WAL
+  logged "Shutdown snapshot failed". Neither was a failure.
+
+### Removed
+
+- **Reading `config.toml` from the working directory.** It was never documented. When the file
+  parsed, it replaced every environment setting at once, and a file with that name was used
+  even when nobody meant it for this server (a Hugo site has one). When it did not parse, the
+  server fell back to the environment with only that warning. Configuration is the environment
+  and `.env`, as the README says. The `config` and `toml` crates, which only that path used,
+  are gone from the dependencies.
+- **`DXMT_COMPRESSION`**, and the `compression` field of `config::SsdConfig` it filled. It
+  selected nothing; the WAL and row files are not compressed.
+
+### Added
+
+- **A storage fixture written by 1.3.2** (`tests/compat/fixtures/1.3.2/`), which every later
+  build has to open, write to and recover after a crash. The only fixture until now was
+  0.2.0's, so nothing checked that a release could read what 1.x wrote. The generator now also
+  writes a table with the 1.x table settings -- a payload-index policy, fast-scan off, a rerank
+  provider and a recall target -- and alters it after the snapshot, so the log has to replay
+  those fields; the test checks each one, and that a filter on the unindexed field is refused.
+
 ## [1.3.2] - 2026-10-07
 
 The pre-publication pass: the Docker images, the README and the CI toolchain. Nothing changes

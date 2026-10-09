@@ -110,6 +110,20 @@ def check(server, expected, where):
         assert sorted(s["name"] for s in table.get("named_vectors") or []) == sorted(config["named_vectors"]), f"{where}: {name} named vector spaces"
         if "description" in config:
             assert table.get("description") == config["description"], f"{where}: {name} description"
+        # The 1.x table settings, in fixtures that carry them (written by 1.3.2 and later).
+        if "payload_index_except" in config:
+            assert (table.get("payload_index") or {}).get("except") == config["payload_index_except"], f"{where}: {name} payload_index {table.get('payload_index')}"
+            # The policy is in force, not just reported: a filter on an excluded field is refused.
+            field = config["payload_index_except"][0]
+            status, _ = server.call("POST", f"/tables/{name}/records/count",
+                                    {"filter": {"must": [{"key": field, "operation": {"type": "IsEmpty"}}]}})
+            assert status == 400, f"{where}: {name} answered a filter on '{field}', which it does not index"
+        if "fast_scan" in config:
+            assert (table.get("quantization") or {}).get("fast_scan") == config["fast_scan"], f"{where}: {name} quantization {table.get('quantization')}"
+        if "recall_target" in config:
+            assert table.get("recall_target") == config["recall_target"], f"{where}: {name} recall_target {table.get('recall_target')}"
+        for key, value in (config.get("rerank") or {}).items():
+            assert (table.get("rerank") or {}).get(key) == value, f"{where}: {name} rerank {table.get('rerank')}"
 
         want = expected["records"][name]
         page = server.ok("POST", f"/tables/{name}/records/list", {"limit": 10000, "with_vector": True})

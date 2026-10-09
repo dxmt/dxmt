@@ -49,10 +49,10 @@ enum Commands {
     /// Start the VectorDB server
     Serve {
         /// Host to bind
-        #[arg(long, default_value = "0.0.0.0")]
+        #[arg(long, default_value = "0.0.0.0", env = "DXMT_HOST")]
         host: String,
         /// Port to bind
-        #[arg(long, default_value = "9999")]
+        #[arg(long, default_value = "9999", env = "DXMT_PORT")]
         port: u16,
         /// Serve the Swagger UI at /api/docs. On by default; `--no-swagger` turns it off.
         ///
@@ -123,8 +123,10 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // `.env` first, so the variables clap reads (`DXMT_HOST`, `DXMT_PORT`, `DXMT_GRPC_PORT`)
+    // and the legacy names below see it too. A variable already set in the environment wins.
+    let _ = dotenv::dotenv();
     // Before `Cli::parse`, because clap reads some variables itself and takes one name each.
     let legacy = dxmt_vectordb::config::env::adopt_legacy_names();
 
@@ -153,7 +155,31 @@ async fn main() -> Result<()> {
         );
     }
 
-    match cli.command {
+    // Before the runtime, because its size is one of the settings.
+    let config = AppConfig::load()?;
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    match config.server.workers {
+        Some(0) => {
+            return Err(dxmt_vectordb::Error::InvalidConfig(
+                "DXMT_WORKER_THREADS must be at least 1".to_string(),
+            ))
+        }
+        Some(threads) => {
+            info!("Running {} worker threads (DXMT_WORKER_THREADS)", threads);
+            runtime.worker_threads(threads);
+        }
+        // One per core, tokio's default.
+        None => {}
+    }
+    runtime
+        .build()
+        .map_err(|e| dxmt_vectordb::Error::Internal(format!("cannot start the runtime: {e}")))?
+        .block_on(run(cli.command, config))
+}
+
+async fn run(command: Commands, config: AppConfig) -> Result<()> {
+    match command {
         Commands::Serve {
             host,
             port,
@@ -183,7 +209,6 @@ async fn main() -> Result<()> {
                 // protocols over one model; none ships two models.
                 info!("Starting DXMT VectorDB on {}...", bind_addr);
 
-                let config = AppConfig::load()?;
                 let cluster_enabled = config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false);
                 let (app, storage) = if cluster_enabled {
                     {
@@ -279,8 +304,9 @@ async fn main() -> Result<()> {
 
                 // A clean shutdown used to discard everything written since the last snapshot.
                 // Not a correctness problem — the WAL still held it — but it made the next
-                // start replay the whole log for no reason.
-                if let Some(storage) = storage {
+                // start replay the whole log for no reason. Without a WAL there is nothing to
+                // snapshot, and saying it failed on every stop was noise.
+                if let Some(storage) = storage.filter(|s| s.is_persistent()) {
                     match storage.snapshot().await {
                         Ok(tables) => info!("Shutdown snapshot written for {} table(s)", tables),
                         Err(e) => tracing::warn!("Shutdown snapshot failed: {}", e),
@@ -290,7 +316,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Mcp { wal_dir } => {
-            let config = AppConfig::load()?;
             let wal_dir = match wal_dir {
                 Some(dir) if dir.trim().is_empty() => None,
                 Some(dir) => Some(std::path::PathBuf::from(dir)),
@@ -310,4 +335,35 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No release before this read `DXMT_HOST` or `DXMT_PORT`, although the README listed both.
+    /// A flag still wins over the variable. One test, because the environment is the process's.
+    #[test]
+    fn serve_takes_its_address_from_the_environment_unless_a_flag_says_otherwise() {
+        let address = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Serve { host, port, .. } => (host, port),
+            Commands::Mcp { .. } => unreachable!(),
+        };
+        std::env::set_var("DXMT_HOST", "127.0.0.1");
+        std::env::set_var("DXMT_PORT", "19876");
+        assert_eq!(
+            address(&["vectordb", "serve"]),
+            ("127.0.0.1".to_string(), 19876)
+        );
+        assert_eq!(
+            address(&["vectordb", "serve", "--port", "9999"]),
+            ("127.0.0.1".to_string(), 9999)
+        );
+        std::env::remove_var("DXMT_HOST");
+        std::env::remove_var("DXMT_PORT");
+        assert_eq!(
+            address(&["vectordb", "serve"]),
+            ("0.0.0.0".to_string(), 9999)
+        );
+    }
 }

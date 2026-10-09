@@ -18,6 +18,10 @@ What the directory holds, and why each part is there:
   * payloads in every shape the filter rules care about — arrays, numbers as int and float, big
     numbers, nested objects, missing fields, an empty payload.
   * replace, merge and vector-only updates, deletes, a dropped table, an altered table.
+  * a table carrying the 1.x table settings -- a payload-index policy, fast-scan off, a rerank
+    provider and a recall target -- altered again after the snapshot, so the WAL replays
+    `AlterTable` entries with those fields. The log writes these structs as positional
+    arrays, which is the format a new field most easily breaks (1.3.0 nearly shipped that).
 
 `expected.json` is the model of what was written, not an answer read back from the server —
 otherwise whatever the server got wrong at generation time would be written down as correct. The
@@ -121,7 +125,7 @@ def main():
     def insert(server, table, dim, ids, extra=None):
         body = []
         for rid in ids:
-            v, p = vec(dim), payload(int(rid.lstrip("dgpm")))
+            v, p = vec(dim), payload(int(rid.lstrip("dgpmc")))
             item = {"id": rid, "vector": v, "payload": p}
             record = {"vector": v, "payload": p}
             if extra:
@@ -175,6 +179,17 @@ def main():
         del tables["dropped"], records["dropped"]
         s.call("PATCH", "/tables/docs", {"description": "altered before the snapshot"})
         tables["docs"]["description"] = "altered before the snapshot"
+        # The table settings 1.x added. The provider is never called: nothing here searches
+        # with `rerank`, and the address is a closed port.
+        rerank = {"model": "compat-reranker", "base_url": "http://127.0.0.1:9", "api_key_env": "DXMT_COMPAT_UNSET"}
+        s.call("POST", "/tables", {"name": "configured", "dimension": 4, "distance_metric": "cosine",
+                                   "payload_index": {"except": ["nested"]}, "quantization": {"fast_scan": False},
+                                   "rerank": rerank})
+        tables["configured"] = {"dimension": 4, "distance_metric": "cosine", "named_vectors": [],
+                                "payload_index_except": ["nested"], "fast_scan": False}
+        records["configured"] = {}
+        insert(s, "configured", 4, [f"c{i}" for i in range(12)])
+        s.call("PATCH", "/tables/configured", {"recall_target": 0.9})
         s.stop(signal.SIGTERM)
 
     # ── phase 2: an in-memory table, and writes after the snapshot, ending in a crash ────
@@ -188,6 +203,11 @@ def main():
         update(s, "docs", "d8", {"vector": vec(8)})
         delete(s, "docs", ["d9"])
         delete(s, "mem", ["m3"])
+        # Altered after the snapshot: these come back only by replaying the log.
+        s.call("PATCH", "/tables/configured", {"recall_target": 0.8,
+                                               "rerank": {**rerank, "model": "compat-reranker-2", "top_n": 7}})
+        tables["configured"].update(recall_target=0.8, rerank={"model": "compat-reranker-2", "top_n": 7})
+        insert(s, "configured", 4, [f"c{i}" for i in range(12, 16)])
         s.stop(signal.SIGKILL)
 
     os.makedirs(out)
