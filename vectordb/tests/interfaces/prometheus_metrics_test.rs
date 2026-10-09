@@ -184,3 +184,52 @@ fn the_durability_frontier_is_exported() {
         "a write has been acknowledged, so a sync timestamp must exist: {body}"
     );
 }
+
+#[test]
+fn where_the_time_goes_is_exported() {
+    // The table lock, recovery and snapshots: costs no single request shows, and the first
+    // things to read when latency climbs with nothing slow to blame.
+    let server = start();
+    let port = server.port;
+    post(
+        port,
+        "/api/v1/tables",
+        r#"{"name": "timed", "dimension": 2}"#,
+    );
+    post(
+        port,
+        "/api/v1/tables/timed/records",
+        r#"{"records": [{"id": "a", "vector": [1, 0]}]}"#,
+    );
+    post(port, "/api/v1/snapshot", "{}");
+
+    let body = get(port, "/metrics").expect("no answer");
+    let samples = samples(&body);
+    for mode in ["read", "write"] {
+        let taken: u64 = value_of(
+            &samples,
+            &format!("dxmt_table_lock_acquisitions_total{{mode=\"{mode}\"}}"),
+        )
+        .parse()
+        .unwrap();
+        assert!(
+            taken > 0,
+            "the {mode} lock was taken and not counted: {body}"
+        );
+        value_of(
+            &samples,
+            &format!("dxmt_table_lock_wait_seconds_total{{mode=\"{mode}\"}}"),
+        );
+    }
+    value_of(&samples, "dxmt_table_lock_slow_holds_total");
+    value_of(&samples, "dxmt_index_rebuilds_total");
+    let recovery: f64 = value_of(&samples, "dxmt_last_recovery_seconds")
+        .parse()
+        .unwrap();
+    assert!(recovery >= 0.0);
+    assert_eq!(value_of(&samples, "dxmt_last_recovery_wal_entries"), "0");
+    let snapshot: f64 = value_of(&samples, "dxmt_last_snapshot_duration_seconds")
+        .parse()
+        .unwrap();
+    assert!(snapshot > 0.0, "a snapshot ran and took no time: {body}");
+}

@@ -22,9 +22,39 @@ use tracing::{debug, error, info, warn};
 static MAX_TABLE_LOCK_HOLD_MICROS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-fn record_lock_hold(held: std::time::Duration) {
+const LOCK_READ: usize = 0;
+const LOCK_WRITE: usize = 1;
+/// Cumulative nanoseconds spent waiting for, and holding, the table map's lock, and how often
+/// it was taken -- `[read, write]`. The log names a single hold that lasted a second; these say
+/// how much of the server's time the lock is costing overall, which is what a latency graph
+/// that climbs without any one slow request needs.
+static TABLE_LOCK_WAIT_NS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static TABLE_LOCK_HOLD_NS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static TABLE_LOCK_ACQUIRED: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+/// Holds of a second or more: the ones the log warns about.
+static TABLE_LOCK_SLOW_HOLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn record_lock_hold(held: std::time::Duration, mode: usize) {
     let micros = held.as_micros() as u64;
     MAX_TABLE_LOCK_HOLD_MICROS.fetch_max(micros, Ordering::Relaxed);
+    TABLE_LOCK_HOLD_NS[mode].fetch_add(held.as_nanos() as u64, Ordering::Relaxed);
+    if held >= std::time::Duration::from_secs(1) {
+        TABLE_LOCK_SLOW_HOLDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_lock_wait(waited: std::time::Duration, mode: usize) {
+    TABLE_LOCK_WAIT_NS[mode].fetch_add(waited.as_nanos() as u64, Ordering::Relaxed);
+    TABLE_LOCK_ACQUIRED[mode].fetch_add(1, Ordering::Relaxed);
 }
 
 /// Longest single hold of the table map's lock since [`reset_max_table_lock_hold`].
@@ -90,7 +120,7 @@ impl std::ops::Deref for TimedRead<'_> {
 impl Drop for TimedRead<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
-        record_lock_hold(held);
+        record_lock_hold(held, LOCK_READ);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table read lock for {:.1}s; anything that wanted to write queued \
@@ -105,7 +135,7 @@ impl Drop for TimedRead<'_> {
 impl Drop for TimedWrite<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
-        record_lock_hold(held);
+        record_lock_hold(held, LOCK_WRITE);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table write lock for {:.1}s; every read and write on every table \
@@ -233,6 +263,34 @@ pub struct StorageHealthSnapshot {
     pub last_snapshot_error: Option<String>,
     /// Which branch answered each filtered search. See [`FilterPathCounts`].
     pub filter_paths: FilterPathCounts,
+    /// Where time goes outside a request: the table lock, rebuilds, recovery, snapshots.
+    pub timings: OperationTimings,
+}
+
+/// Cumulative timings for the work that does not show up as a slow request of its own but
+/// makes every request slower: waiting on the table map's lock, index rebuilds, and the two
+/// numbers an operator needs after a restart -- how long recovery took and how much log it
+/// replayed. Lock figures are process-wide (see `TABLE_LOCK_WAIT_NS`); the rest are this
+/// instance's. Nanoseconds; `/metrics` reports seconds.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperationTimings {
+    pub table_lock_read_wait_ns: u64,
+    pub table_lock_write_wait_ns: u64,
+    pub table_lock_read_hold_ns: u64,
+    pub table_lock_write_hold_ns: u64,
+    pub table_lock_reads: u64,
+    pub table_lock_writes: u64,
+    /// Holds of a second or more.
+    pub table_lock_slow_holds: u64,
+    pub index_rebuilds: u64,
+    pub index_rebuild_ns: u64,
+    /// The part of the rebuilds spent waiting for the write lock to swap the new index in.
+    pub index_rebuild_swap_wait_ns: u64,
+    /// The last recovery at startup, when this instance opened a WAL directory.
+    pub last_recovery_ns: Option<u64>,
+    pub last_recovery_wal_entries: Option<u64>,
+    /// The last snapshot that succeeded.
+    pub last_snapshot_ns: Option<u64>,
 }
 
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
@@ -662,6 +720,14 @@ pub struct IntelligentIndexedStorage {
     /// 日志截断，并发跑会互相拆台——后果从"索引被静默丢掉"一路到"日志被截断到落盘快照
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
+
+    /// See [`OperationTimings`].
+    index_rebuilds: AtomicU64,
+    index_rebuild_ns: AtomicU64,
+    index_rebuild_swap_wait_ns: AtomicU64,
+    /// `(nanoseconds, WAL entries replayed)` for the recovery this instance did at open.
+    last_recovery: StdMutex<Option<(u64, u64)>>,
+    last_snapshot_ns: StdMutex<Option<u64>>,
 
     /// `{wal_dir}/LOCK`, held exclusively for as long as this instance lives. Nothing stopped a
     /// second process -- a second `serve` on another port, `vectordb mcp` beside a running
@@ -1854,6 +1920,7 @@ impl IntelligentIndexedStorage {
         let mut storage = Self::build(config).await?;
 
         if let Some(dir) = wal_dir {
+            let recovery_started = std::time::Instant::now();
             // Before the log is opened: opening it can already write (a torn tail is cut).
             storage._dir_lock = Some(Self::lock_dir(&dir)?);
             let manager = WalManager::new(&dir)?;
@@ -1934,6 +2001,7 @@ impl IntelligentIndexedStorage {
                 }
             }
 
+            let replayed = pending.len() as u64;
             if pending.is_empty() {
                 info!(
                     "No WAL entries after sequence {}; recovery complete from snapshot alone",
@@ -1944,6 +2012,15 @@ impl IntelligentIndexedStorage {
             }
             storage.reindex_rows_the_graph_may_not_reflect().await?;
             storage.index_rows_the_log_missed().await?;
+            let took = recovery_started.elapsed();
+            info!(
+                "Recovery took {:.2}s ({} WAL entries replayed)",
+                took.as_secs_f64(),
+                replayed
+            );
+            if let Ok(mut last) = storage.last_recovery.lock() {
+                *last = Some((took.as_nanos() as u64, replayed));
+            }
         }
 
         Ok(storage)
@@ -2017,6 +2094,11 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            index_rebuilds: AtomicU64::new(0),
+            index_rebuild_ns: AtomicU64::new(0),
+            index_rebuild_swap_wait_ns: AtomicU64::new(0),
+            last_recovery: StdMutex::new(None),
+            last_snapshot_ns: StdMutex::new(None),
             _dir_lock: None,
             recovery_floors: StdMutex::new(HashMap::new()),
             replayed_rows: StdMutex::new(HashMap::new()),
@@ -2750,9 +2832,13 @@ impl IntelligentIndexedStorage {
     /// for as long as it copies: a snapshot in the middle of the copy compacts the log past the
     /// one the backup carries.
     async fn snapshot_serialized(&self) -> crate::Result<usize> {
+        let started = std::time::Instant::now();
         let result = self.snapshot_inner().await;
         match &result {
             Ok(_) => {
+                if let Ok(mut last) = self.last_snapshot_ns.lock() {
+                    *last = Some(started.elapsed().as_nanos() as u64);
+                }
                 if let Ok(mut at) = self.last_snapshot_at.lock() {
                     *at = Some(chrono::Utc::now().to_rfc3339());
                 }
@@ -3150,7 +3236,9 @@ impl IntelligentIndexedStorage {
     /// 交给调用方的 TableNotFound 去报。
     /// Take the table map's read lock, reporting it if it is held for long enough to matter.
     async fn read_tables(&self, who: &'static str) -> TimedRead<'_> {
+        let asked = std::time::Instant::now();
         let guard = self.tables.read().await;
+        record_lock_wait(asked.elapsed(), LOCK_READ);
         TimedRead {
             guard,
             who,
@@ -3160,7 +3248,9 @@ impl IntelligentIndexedStorage {
 
     /// Take the table map's write lock, reporting it if it is held for long enough to matter.
     async fn write_tables(&self, who: &'static str) -> TimedWrite<'_> {
+        let asked = std::time::Instant::now();
         let guard = self.tables.write().await;
+        record_lock_wait(asked.elapsed(), LOCK_WRITE);
         TimedWrite {
             guard,
             who,
@@ -9443,6 +9533,12 @@ impl IntelligentIndexedStorage {
                 final_delta
             );
 
+            self.index_rebuilds.fetch_add(1, Ordering::Relaxed);
+            self.index_rebuild_ns
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.index_rebuild_swap_wait_ns
+                .fetch_add(t_swap_wait.as_nanos() as u64, Ordering::Relaxed);
+
             table_data.index = new_wrapper.clone();
             table_data.table.index_type = index_type_of(&algorithm);
             table_data.selected_algorithm = algorithm;
@@ -10797,6 +10893,33 @@ impl IntelligentIndexedStorage {
                 post_filter_ns: self.filter_path_ns[4].load(Ordering::Relaxed),
                 eval_ns: self.filter_eval_ns.load(Ordering::Relaxed),
                 node_map_misses: self.filter_node_map_misses.load(Ordering::Relaxed),
+            },
+            timings: {
+                let (last_recovery_ns, last_recovery_wal_entries) = self
+                    .last_recovery
+                    .lock()
+                    .ok()
+                    .and_then(|r| *r)
+                    .map_or((None, None), |(ns, entries)| (Some(ns), Some(entries)));
+                OperationTimings {
+                    table_lock_read_wait_ns: TABLE_LOCK_WAIT_NS[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_write_wait_ns: TABLE_LOCK_WAIT_NS[LOCK_WRITE]
+                        .load(Ordering::Relaxed),
+                    table_lock_read_hold_ns: TABLE_LOCK_HOLD_NS[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_write_hold_ns: TABLE_LOCK_HOLD_NS[LOCK_WRITE]
+                        .load(Ordering::Relaxed),
+                    table_lock_reads: TABLE_LOCK_ACQUIRED[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_writes: TABLE_LOCK_ACQUIRED[LOCK_WRITE].load(Ordering::Relaxed),
+                    table_lock_slow_holds: TABLE_LOCK_SLOW_HOLDS.load(Ordering::Relaxed),
+                    index_rebuilds: self.index_rebuilds.load(Ordering::Relaxed),
+                    index_rebuild_ns: self.index_rebuild_ns.load(Ordering::Relaxed),
+                    index_rebuild_swap_wait_ns: self
+                        .index_rebuild_swap_wait_ns
+                        .load(Ordering::Relaxed),
+                    last_recovery_ns,
+                    last_recovery_wal_entries,
+                    last_snapshot_ns: self.last_snapshot_ns.lock().ok().and_then(|n| *n),
+                }
             },
         }
     }
