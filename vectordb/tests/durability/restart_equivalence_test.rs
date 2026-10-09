@@ -24,6 +24,9 @@
 use std::collections::BTreeMap;
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -68,23 +71,8 @@ fn start(dir: &std::path::Path, port: u16) -> Server {
 }
 
 fn call(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<serde_json::Value> {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("60")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    if let Some(body) = body {
-        command
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-d")
-            .arg(body);
-    }
-    let out = command.output().expect("curl is required for this test");
-    serde_json::from_slice(&out.stdout).ok()
+    let (_, text) = http::call(port, method, path, &[], body)?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Strip what is allowed to differ between two runs of the same question.

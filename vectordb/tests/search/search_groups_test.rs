@@ -12,6 +12,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
 }
@@ -52,35 +55,8 @@ fn start(dir: &std::path::Path, port: u16) -> Server {
 }
 
 fn call(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<serde_json::Value> {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("60")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    if body.is_some() {
-        command
-            .arg("-H")
-            .arg("content-type: application/json")
-            .arg("--data-binary")
-            .arg("@-")
-            .stdin(Stdio::piped());
-    }
-    command.stdout(Stdio::piped());
-    let mut child = command.spawn().expect("curl is required for this test");
-    if let Some(body) = body {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(body.as_bytes())
-            .expect("curl took the body");
-    }
-    let out = child.wait_with_output().expect("curl ran");
-    serde_json::from_slice(&out.stdout).ok()
+    let (_, text) = http::call(port, method, path, &[], body)?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Twelve documents of eight chunks each, nearest first by document, plus one record with no

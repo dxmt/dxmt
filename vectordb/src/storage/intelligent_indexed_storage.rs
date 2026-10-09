@@ -118,8 +118,8 @@ impl Drop for TimedWrite<'_> {
 }
 
 pub use crate::storage::index_selector::{
-    CostConstraints, ExpectedPerformance, HardwareCapabilities, IndexAlgorithm, IndexConfig,
-    IndexDecision, IntelligentIndexSelector, PerformanceRequirements,
+    CostConstraints, HardwareCapabilities, IndexAlgorithm, IndexConfig, IndexDecision,
+    IntelligentIndexSelector, PerformanceRequirements,
 };
 
 use crate::config::StorageConfig;
@@ -9921,12 +9921,6 @@ impl IntelligentIndexedStorage {
         Ok(IndexDecision {
             selected_algorithm,
             confidence: 0.95,
-            expected_performance: ExpectedPerformance {
-                recall: 0.99,
-                latency_p95_ms: 1.0,
-                throughput_qps: 3000.0,
-                memory_usage_mb: config.dataset_size * bytes_per_row / 1024 / 1024,
-            },
         })
     }
 

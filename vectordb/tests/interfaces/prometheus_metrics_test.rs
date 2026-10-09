@@ -9,6 +9,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -56,33 +59,12 @@ fn start() -> Server {
     panic!("server did not become ready on port {port}");
 }
 
-fn curl(args: &[&str]) -> Option<String> {
-    let out = Command::new("curl")
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .args(args)
-        .output()
-        .expect("curl is required for this test");
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 fn get(port: u16, path: &str) -> Option<String> {
-    curl(&[&format!("http://127.0.0.1:{port}{path}")])
+    http::call(port, "GET", path, &[], None).map(|(_, body)| body)
 }
 
 fn post(port: u16, path: &str, body: &str) -> Option<String> {
-    curl(&[
-        "-X",
-        "POST",
-        "-H",
-        "content-type: application/json",
-        "-d",
-        body,
-        &format!("http://127.0.0.1:{port}{path}"),
-    ])
+    http::call(port, "POST", path, &[], Some(body)).map(|(_, body)| body)
 }
 
 /// Every sample line, as (name-with-labels, value).
@@ -158,13 +140,15 @@ fn the_endpoint_is_parseable_prometheus_text() {
 #[test]
 fn the_content_type_is_the_one_scrapers_expect() {
     let server = start();
-    let headers = curl(&[
-        "-D",
-        "-",
-        "-o",
-        "/dev/null",
-        &format!("http://127.0.0.1:{}/metrics", server.port),
-    ])
+    let headers = http::request(
+        server.port,
+        "GET",
+        "/metrics",
+        &[],
+        None,
+        std::time::Duration::from_secs(30),
+    )
+    .and_then(|reply| reply.header("content-type").map(str::to_string))
     .expect("no answer");
     assert!(
         headers.to_lowercase().contains("text/plain"),
