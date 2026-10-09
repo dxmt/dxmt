@@ -3006,8 +3006,8 @@ async fn assert_consistent(storage: &IntelligentIndexedStorage, op: InFlight, la
 }
 
 #[cfg(feature = "test-failpoints")]
-async fn a_failed_write_then_restart(fault: Fault, op: InFlight) {
-    let label = format!("{fault:?} during {op:?}");
+async fn a_failed_write_then_restart(fault: Fault, op: InFlight, snapshot_first: bool) {
+    let label = format!("{fault:?} during {op:?}, snapshot first: {snapshot_first}");
     let tmp = TempDir::new().unwrap();
     let wal_dir = tmp.path().join("wal");
 
@@ -3027,6 +3027,11 @@ async fn a_failed_write_then_restart(fault: Fault, op: InFlight) {
             )
             .await
             .unwrap();
+        // With a snapshot in between, the graph that comes back is the snapshot's rather than
+        // one rebuilt from the log -- the case where a lost update left the old vector in it.
+        if snapshot_first {
+            storage.snapshot().await.unwrap();
+        }
 
         match fault {
             Fault::Sync => storage.fail_next_wal_sync_for_test().unwrap(),
@@ -3086,7 +3091,7 @@ async fn a_failed_write_then_restart(fault: Fault, op: InFlight) {
 #[tokio::test]
 async fn a_write_whose_fsync_failed_is_all_there_or_all_gone_after_restart() {
     for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
-        a_failed_write_then_restart(Fault::Sync, op).await;
+        a_failed_write_then_restart(Fault::Sync, op, false).await;
     }
 }
 
@@ -3094,6 +3099,16 @@ async fn a_write_whose_fsync_failed_is_all_there_or_all_gone_after_restart() {
 #[tokio::test]
 async fn a_write_torn_by_a_full_disk_is_all_there_or_all_gone_after_restart() {
     for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
-        a_failed_write_then_restart(Fault::Torn, op).await;
+        a_failed_write_then_restart(Fault::Torn, op, false).await;
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+#[tokio::test]
+async fn a_failed_write_after_a_snapshot_is_all_there_or_all_gone_after_restart() {
+    for fault in [Fault::Sync, Fault::Torn] {
+        for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
+            a_failed_write_then_restart(fault, op, true).await;
+        }
     }
 }

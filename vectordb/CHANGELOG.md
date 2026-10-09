@@ -32,6 +32,14 @@ release, and the first commit that was ever pushed anywhere.
   exact scan returned the row's state while the graph held the log's. Restarts with no
   snapshot never indexed such an insert or update at all, and a lost delete stayed in the
   graph. Recovery now reconciles each table's graph with its rows in both directions.
+- **An update lost from the log after a snapshot no longer leaves the old vector in the
+  graph.** The snapshot's graph came back with the previous vector, the row file had the
+  new one, and the record counts agreed, so nothing noticed: `GET` returned the new vector and
+  an ordinary search found the record by the old one. A snapshot now records, per table, the
+  row below which its graph is current (writes still between their row and the graph are
+  accounted for), and recovery re-indexes every record at or above it that replay did not.
+  Snapshots written before this carry no such row and are not re-checked; the next snapshot
+  writes one.
 
 - **`DXMT_HOST` and `DXMT_PORT` set the address `serve` binds.** The README and
   `.env.example` listed both, and no release read them: `serve` took `--host` and `--port`

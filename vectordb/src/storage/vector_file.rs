@@ -26,7 +26,8 @@ use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// How a rerank's rows are read.
 ///
@@ -293,6 +294,24 @@ pub struct VectorFile {
     /// parallel 99 / 11 ms, mmap 697 / 158 ms. The mapping loses in every state there, warm
     /// included, so nothing about it is worth probing for.
     mappable: AtomicBool,
+    /// Writes that have appended rows the graph does not reflect yet, as `(token, floor)`:
+    /// `floor` is the row count before the write appended, so every row it appends is at or
+    /// above it. See [`Self::indexed_below`].
+    unindexed: Mutex<Vec<(u64, u64)>>,
+    next_token: AtomicU64,
+}
+
+/// A write between appending its rows and updating the graph; dropped once the graph has it.
+/// Created by [`VectorFile::begin_unindexed`].
+pub struct UnindexedRows {
+    file: Arc<VectorFile>,
+    token: u64,
+}
+
+impl Drop for UnindexedRows {
+    fn drop(&mut self) {
+        self.file.unindexed.lock().retain(|(t, _)| *t != self.token);
+    }
 }
 
 struct Writer {
@@ -396,6 +415,8 @@ impl VectorFile {
             cold: AtomicBool::new(true),
             since_probe: AtomicU32::new(0),
             mappable: AtomicBool::new(true),
+            unindexed: Mutex::new(Vec::new()),
+            next_token: AtomicU64::new(0),
         };
         this.remap(rows)?;
         Ok((this, ids))
@@ -441,6 +462,32 @@ impl VectorFile {
     /// Rows appended so far, dead ones included.
     pub fn rows(&self) -> u64 {
         self.writer.lock().rows
+    }
+
+    /// Declare a write that is about to append rows and then update the graph. Hold the
+    /// guard until the graph has the write; take it *before* appending.
+    pub fn begin_unindexed(self: &Arc<Self>) -> UnindexedRows {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        let floor = self.rows();
+        self.unindexed.lock().push((token, floor));
+        UnindexedRows {
+            file: Arc::clone(self),
+            token,
+        }
+    }
+
+    /// A row number below which every row's write has reached the graph: a graph serialized
+    /// after this call reflects every row under it. Rows at or above it may belong to a write
+    /// the graph has not seen yet.
+    ///
+    /// The row count is read before the open writes. A write that registers after that read
+    /// appends after it too, so its rows are at or above the count; one that registered before
+    /// is in the list and its floor bounds its rows; one that has already dropped its guard is
+    /// in the graph.
+    pub fn indexed_below(&self) -> u64 {
+        let rows = self.rows();
+        let open = self.unindexed.lock().iter().map(|(_, floor)| *floor).min();
+        open.map_or(rows, |floor| floor.min(rows))
     }
 
     /// Append one row per vector and return their row numbers, in order. Durable on return.
@@ -849,6 +896,26 @@ mod tests {
         (0..dim)
             .map(|d| (seed * 31 + d as u64) as f32 * 0.5)
             .collect()
+    }
+
+    #[test]
+    fn rows_of_a_write_still_open_are_not_counted_as_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = VectorFile::open(&dir.path().join("v.f32"), 4).unwrap();
+        let file = Arc::new(file);
+        file.append(&[("a", &v(0, 4)), ("b", &v(1, 4))]).unwrap();
+        assert_eq!(file.indexed_below(), 2);
+
+        let first = file.begin_unindexed();
+        file.append(&[("c", &v(2, 4))]).unwrap();
+        let second = file.begin_unindexed();
+        file.append(&[("d", &v(3, 4))]).unwrap();
+        assert_eq!(file.indexed_below(), 2, "c's write is still open");
+
+        drop(first);
+        assert_eq!(file.indexed_below(), 3, "d's write is still open");
+        drop(second);
+        assert_eq!(file.indexed_below(), 4);
     }
 
     #[test]

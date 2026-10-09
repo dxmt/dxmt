@@ -249,6 +249,8 @@ struct TableSnapshot {
     /// second 90 GB of them in memory first (design doc section 34.3).
     records: Vec<Arc<Record>>,
     has_index: bool,
+    /// See [`SnapshotHead::indexed_below`].
+    indexed_below: Option<u64>,
 }
 
 /// What a `tN.meta` file holds, and why it is in two halves.
@@ -278,6 +280,12 @@ struct SnapshotHead {
     table: Table,
     algorithm: IndexAlgorithm,
     has_index: bool,
+    /// For a table with a row file: every row below this had reached the graph this snapshot
+    /// holds (`VectorFile::indexed_below`, read just before the graph was written). Recovery
+    /// re-checks the rows at or above it. Absent in snapshots written before 2026-10-09, and
+    /// for tables without a row file.
+    #[serde(default)]
+    indexed_below: Option<u64>,
 }
 
 /// The current meta layout: a MessagePack head, then bincode records.
@@ -312,6 +320,7 @@ fn read_snapshot_head(path: &std::path::Path) -> crate::Result<SnapshotHead> {
                 algorithm: old.algorithm.into(),
                 // Not read, and the one caller that wants it re-reads the whole file.
                 has_index: false,
+                indexed_below: None,
             })
         }
         other => Err(crate::Error::Serialization(format!(
@@ -334,6 +343,7 @@ fn read_snapshot_meta(path: &std::path::Path) -> crate::Result<TableSnapshot> {
                 algorithm: head.algorithm,
                 records: file.records,
                 has_index: head.has_index,
+                indexed_below: head.indexed_below,
             })
         }
         SNAPSHOT_KIND_V1 => {
@@ -344,6 +354,7 @@ fn read_snapshot_meta(path: &std::path::Path) -> crate::Result<TableSnapshot> {
                 algorithm: old.algorithm.into(),
                 records: old.records,
                 has_index: old.has_index,
+                indexed_below: None,
             })
         }
         other => Err(crate::Error::Serialization(format!(
@@ -462,6 +473,8 @@ struct TableTemplate {
     /// no records would give it an empty table. Read from the row file rather than copied
     /// out of memory, so this is the slow snapshot again -- only in that configuration.
     mirrored_rows: Option<MirroredRows>,
+    /// For `VectorFile::indexed_below`, read just before the graph is written.
+    vector_file: Option<Arc<crate::storage::vector_file::VectorFile>>,
 }
 
 /// A disk table's rows as a mirrored snapshot copies them out: the vector file, and each
@@ -493,6 +506,8 @@ struct UpdateArtifacts {
     vector: Vec<f32>,
     /// The row-file row the vector was appended to, when the table has a row file.
     vector_row: Option<u64>,
+    /// Open from before the append until this is dropped, after the graph update.
+    _unindexed: Option<crate::storage::vector_file::UnindexedRows>,
     #[cfg(feature = "text-bm25")]
     full_text_engine: Option<Arc<FullTextSearchEngine>>,
 }
@@ -643,6 +658,12 @@ pub struct IntelligentIndexedStorage {
     /// 日志截断，并发跑会互相拆台——后果从"索引被静默丢掉"一路到"日志被截断到落盘快照
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
+
+    /// Recovery only, emptied when it ends. Each table the snapshot restored, with the row
+    /// below which its graph was known to be current (`None`: a snapshot from before that was
+    /// recorded); and for each table, the row each replayed record was indexed from.
+    recovery_floors: StdMutex<HashMap<String, Option<u64>>>,
+    replayed_rows: StdMutex<HashMap<String, HashMap<RecordId, u64>>>,
 
     /// Test-only: `backup_to` stops between its snapshot and its copy, says so on the first
     /// channel and waits on the second. See `pause_next_backup_for_test`.
@@ -1425,6 +1446,9 @@ async fn process_insert_group(
             (t.vector_file.clone(), t.table.dimension)
         };
         let mut appended_rows: Vec<Vec<Option<u64>>> = Vec::new();
+        // Held until the graph has this group (the end of this function): a snapshot taken in
+        // between must not claim these rows are in the graph it serializes.
+        let _unindexed = vector_file.as_ref().map(|file| file.begin_unindexed());
         let stage = std::time::Instant::now();
         if let Some(file) = &vector_file {
             // A record whose vector is already in the file (replay of an entry that points
@@ -1906,6 +1930,7 @@ impl IntelligentIndexedStorage {
             } else {
                 storage.replay(pending).await?;
             }
+            storage.reindex_rows_the_graph_may_not_reflect().await?;
             storage.index_rows_the_log_missed().await?;
         }
 
@@ -1980,6 +2005,8 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            recovery_floors: StdMutex::new(HashMap::new()),
+            replayed_rows: StdMutex::new(HashMap::new()),
             #[cfg(feature = "test-failpoints")]
             backup_pause: StdMutex::new(None),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
@@ -2200,6 +2227,95 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
+    /// After recovery, re-read into the graph every row it may hold an older version of.
+    ///
+    /// A write appends its row, updates the graph, and only then logs. A snapshot's graph
+    /// reflects every row below the `indexed_below` it recorded; a row at or above it whose log
+    /// entry never landed -- a crash, a full disk -- is a write the graph may not have, and for
+    /// an update the graph then holds the *previous* vector under the same id: the counts
+    /// agree, `GET` returns the new vector, and an ordinary search finds the record by the old
+    /// one. So each record whose current row is at or above the floor is re-indexed from its
+    /// row, unless replay indexed it from exactly that row. A table the snapshot did not hold
+    /// was built by replay alone, so its floor is zero. A snapshot written before the floor was
+    /// recorded is left alone, rather than turning the first start after an upgrade into a
+    /// rebuild of every table.
+    async fn reindex_rows_the_graph_may_not_reflect(&self) -> crate::Result<()> {
+        let floors = self
+            .recovery_floors
+            .lock()
+            .map(|mut f| std::mem::take(&mut *f))
+            .unwrap_or_default();
+        let mut replayed = self
+            .replayed_rows
+            .lock()
+            .map(|mut r| std::mem::take(&mut *r))
+            .unwrap_or_default();
+        let names: Vec<String> = self
+            .read_tables("reindex_rows_the_graph_may_not_reflect")
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        for name in names {
+            let floor = match floors.get(&name) {
+                Some(Some(floor)) => *floor,
+                Some(None) => continue,
+                None => 0,
+            };
+            let rows = replayed.remove(&name).unwrap_or_default();
+            self.reindex_rows_from(&name, floor, &rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Re-index, from the row file, every record of `name` whose row is at or above `floor`
+    /// and was not indexed from that same row by replay (`replayed`).
+    async fn reindex_rows_from(
+        &self,
+        name: &str,
+        floor: u64,
+        replayed: &HashMap<RecordId, u64>,
+    ) -> crate::Result<usize> {
+        let (index, vectors) = {
+            let tables = self.read_tables("reindex_rows_from").await;
+            let Some(data) = tables.get(name) else {
+                return Ok(0);
+            };
+            let Some(file) = &data.vector_file else {
+                return Ok(0);
+            };
+            if file.rows() <= floor {
+                return Ok(0);
+            }
+            let stale: Vec<RecordId> = data
+                .records
+                .ids()
+                .into_iter()
+                .filter(|id| {
+                    data.vector_row(id)
+                        .is_some_and(|row| row >= floor && replayed.get(id) != Some(&row))
+                })
+                .collect();
+            if stale.is_empty() {
+                return Ok(0);
+            }
+            (data.index.clone(), data.vectors_for_ids(&stale))
+        };
+        warn!(
+            "Table '{}': {} record(s) were written at or after the snapshot's graph without a \
+             log entry for that version; re-indexing them from the row file",
+            name,
+            vectors.len()
+        );
+        for (id, _) in &vectors {
+            // Not there at all is the other case this repairs; nothing to remove then.
+            let _ = index.remove(id).await;
+        }
+        let count = vectors.len();
+        index.insert_batch(vectors).await?;
+        Ok(count)
+    }
+
     /// After recovery, make each graph hold exactly the records the row files hold.
     ///
     /// A write reaches the row file, fsynced, before its WAL entry; when the entry never lands
@@ -2215,8 +2331,9 @@ impl IntelligentIndexedStorage {
     /// `GET` and the exact scan read the rows, the ordinary search reads the graph, and the two
     /// disagreed for the life of the table. `restore_table` already added the first kind against
     /// a snapshot's index; nothing covered replay or the other two. The counts gate the walk, as
-    /// they do there, so a missed insert and a missed delete that cancel out still hide, as does
-    /// a graph holding an *older* vector for an id whose row moved on; see the roadmap.
+    /// they do there, so a missed insert and a missed delete that cancel out still hide the
+    /// delete (the insert is re-read by `reindex_rows_the_graph_may_not_reflect`, which runs
+    /// first and is what catches a graph holding an *older* vector for an id).
     async fn index_rows_the_log_missed(&self) -> crate::Result<()> {
         let mut work = Vec::new();
         {
@@ -2356,6 +2473,18 @@ impl IntelligentIndexedStorage {
             .and_then(|_| data.vector_row(&record.id));
         if row.is_some() {
             record.vector = Vec::new();
+        }
+        // Only while replaying: `import_table` comes through here too, and nothing would
+        // ever empty the map behind it.
+        if let (Some(row), true, Ok(mut replayed)) = (
+            row,
+            self.replaying.load(Ordering::SeqCst),
+            self.replayed_rows.lock(),
+        ) {
+            replayed
+                .entry(table.to_string())
+                .or_default()
+                .insert(record.id.clone(), row);
         }
         data.records.insert(Arc::new(record.clone()), row)?;
         // The insert above indexed the record with the time it was *replayed*, because a create
@@ -2503,6 +2632,7 @@ impl IntelligentIndexedStorage {
                                 });
                                 (data.vector_file.clone(), rows)
                             }),
+                            vector_file: data.vector_file.clone(),
                         },
                     )
                 })
@@ -2525,6 +2655,8 @@ impl IntelligentIndexedStorage {
             // it just rebuilds the graph from the rows, correctly and arbitrarily slowly.
             // Fail the snapshot instead: the WAL still covers everything, so the cost is a
             // warning and one skipped snapshot.
+            // Before the graph is written, so every row under it is in what gets written.
+            let indexed_below = template.vector_file.as_ref().map(|f| f.indexed_below());
             let has_index = index.snapshot_to(&idx_path).await.map_err(|e| {
                 crate::Error::Internal(format!(
                     "table '{}': index would not write itself to the snapshot: {}",
@@ -2554,6 +2686,7 @@ impl IntelligentIndexedStorage {
                 table: template.table,
                 algorithm: template.algorithm,
                 has_index,
+                indexed_below,
             })
             .map_err(|e| crate::Error::Serialization(e.to_string()))?;
             crate::search::index_persistence::write_index(
@@ -2880,8 +3013,15 @@ impl IntelligentIndexedStorage {
         }
 
         info!("Rehydrating evicted table '{}' from snapshot", table_name);
+        let floor = meta.indexed_below;
         self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
             .await?;
+        // Nothing is replayed on this path, so every row the snapshot's graph may not reflect
+        // is re-read.
+        if let Some(floor) = floor {
+            self.reindex_rows_from(table_name, floor, &HashMap::new())
+                .await?;
+        }
         self.tier_policy.set_current_tier(table_name, Tier::Warm);
         Ok(())
     }
@@ -3181,6 +3321,7 @@ impl IntelligentIndexedStorage {
                 enable_parallel: false,
             },
             has_index: false,
+            indexed_below: None,
         })
         .map_err(|e| crate::Error::Serialization(e.to_string()))?;
         crate::search::index_persistence::write_index(
@@ -4519,6 +4660,9 @@ impl IntelligentIndexedStorage {
             })?;
 
             let name = meta.table.name.clone();
+            if let Ok(mut floors) = self.recovery_floors.lock() {
+                floors.insert(name.clone(), meta.indexed_below);
+            }
             self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
                 .await
                 .map_err(|e| {
@@ -10004,8 +10148,10 @@ impl IntelligentIndexedStorage {
             let index_vector = request.vector.clone();
             let mut updated_vector_row: Option<u64> = None;
             let mut appended_row: Option<u64> = None;
+            let mut unindexed = None;
             let stored_vector = match &table_data.vector_file {
                 Some(file) if request.vector.len() == expected_dim => {
+                    unindexed = Some(file.begin_unindexed());
                     // Appended here under the map lock -- updates are rare and single.
                     let row = file.append(&[(record_id.as_str(), request.vector.as_slice())])?[0];
                     appended_row = Some(row);
@@ -10078,6 +10224,7 @@ impl IntelligentIndexedStorage {
                 record,
                 vector: index_vector,
                 vector_row: appended_row,
+                _unindexed: unindexed,
                 #[cfg(feature = "text-bm25")]
                 full_text_engine: table_data.full_text_engine.clone(),
             }
