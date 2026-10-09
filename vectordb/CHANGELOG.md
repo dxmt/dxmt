@@ -19,6 +19,20 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A backup taken while the periodic snapshot ran could restore without a delete, an update
+  or a table created in between.** `backup_to` took its snapshot and then copied, with nothing
+  stopping another snapshot from compacting the log in the meantime, so the backup's `wal.log`
+  could start after its snapshot's replay point; recovery replayed from that point without
+  noticing the log began later. A backup now holds the snapshot lock until its last file is
+  copied, and **recovery refuses to start on a log that begins after the snapshot's replay
+  point**, naming both files, rather than coming up without the entries in between.
+- **A write whose WAL entry never landed is no longer half there after a restart.** A write
+  reaches the row file before its log entry; when the entry is lost -- a crash in between, a
+  full disk tearing the frame, a backup copying the two at different moments -- `GET` and the
+  exact scan returned the row's state while the graph held the log's. Restarts with no
+  snapshot never indexed such an insert or update at all, and a lost delete stayed in the
+  graph. Recovery now reconciles each table's graph with its rows in both directions.
+
 - **`DXMT_HOST` and `DXMT_PORT` set the address `serve` binds.** The README and
   `.env.example` listed both, and no release read them: `serve` took `--host` and `--port`
   alone, whose defaults are the same values, so a setting looked like it worked until it was

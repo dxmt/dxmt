@@ -4,6 +4,7 @@
 //! a wrapper that uses RwLock to enable mutations through immutable references.
 
 use crate::types::vector::{DenseVector, RecordId};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -526,6 +527,23 @@ impl IndexWrapper {
             }
         }
         Some(missing)
+    }
+
+    /// The ids this index holds a live entry for and `keep` rejects -- the other direction of
+    /// [`Self::missing_ids`], under one read lock. `None` when the index has no positions to
+    /// walk or cannot answer membership.
+    pub async fn live_ids_not_in(&self, keep: impl Fn(&str) -> bool) -> Option<Vec<RecordId>> {
+        let index = self.index.read().await;
+        let mut extra = Vec::new();
+        let mut seen = HashSet::new();
+        for idx in 0..index.slot_count() {
+            let id = index.node_id(idx)?;
+            if keep(id) || !index.contains_id(id)? || !seen.insert(id) {
+                continue;
+            }
+            extra.push(id.to_string());
+        }
+        Some(extra)
     }
 
     /// Get index length - requires read lock

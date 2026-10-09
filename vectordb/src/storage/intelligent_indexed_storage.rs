@@ -644,6 +644,16 @@ pub struct IntelligentIndexedStorage {
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
 
+    /// Test-only: `backup_to` stops between its snapshot and its copy, says so on the first
+    /// channel and waits on the second. See `pause_next_backup_for_test`.
+    #[cfg(feature = "test-failpoints")]
+    backup_pause: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+
     /// 对象存储上 WAL 的清单，常驻内存，每次变更后回写。
     wal_manifest: Arc<StdMutex<WalManifest>>,
 
@@ -1865,6 +1875,29 @@ impl IntelligentIndexedStorage {
                 }
             }
 
+            // The log has to pick up exactly where the snapshot left off. Compaction keeps every
+            // entry from the snapshot's replay point on, so a log that starts later belongs to a
+            // later snapshot than the one loaded -- a backup whose `wal.log` was copied after
+            // another snapshot compacted it, or a snapshot directory restored on its own. The
+            // entries in between are in neither file. Inserts among them come back from the row
+            // files, which is why this used to restore without complaint; a delete, an update or
+            // a table created there does not, and the index and the rows then disagree for good.
+            if let Some((first, _)) = pending.first() {
+                if *first > from_seq {
+                    return Err(crate::Error::Internal(format!(
+                        "{} starts at entry {} but the snapshot in {} replays from entry {}; \
+                         entries {}..{} are in neither, so starting would lose the writes they \
+                         hold. Restore a snapshot and wal.log taken together.",
+                        dir.join("wal.log").display(),
+                        first,
+                        Self::snapshot_dir(&dir).display(),
+                        from_seq,
+                        from_seq,
+                        first
+                    )));
+                }
+            }
+
             if pending.is_empty() {
                 info!(
                     "No WAL entries after sequence {}; recovery complete from snapshot alone",
@@ -1873,6 +1906,7 @@ impl IntelligentIndexedStorage {
             } else {
                 storage.replay(pending).await?;
             }
+            storage.index_rows_the_log_missed().await?;
         }
 
         Ok(storage)
@@ -1946,6 +1980,8 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(feature = "test-failpoints")]
+            backup_pause: StdMutex::new(None),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
@@ -2006,6 +2042,35 @@ impl IntelligentIndexedStorage {
     /// Test-only hook for forcing the next WAL sync to fail.
     #[cfg(feature = "test-failpoints")]
     pub fn fail_next_wal_sync_for_test(&self) -> crate::Result<()> {
+        self.with_wal_for_test(crate::wal::WalManager::fail_next_sync_for_test)
+    }
+
+    /// Test-only hook for tearing the next WAL write: half the frame reaches the file.
+    #[cfg(feature = "test-failpoints")]
+    pub fn tear_next_wal_write_for_test(&self) -> crate::Result<()> {
+        self.with_wal_for_test(crate::wal::WalManager::tear_next_write_for_test)
+    }
+
+    /// Test-only: the next `backup_to` stops after its snapshot and before it copies anything.
+    /// The first receiver fires when it gets there; dropping or sending on the sender lets it
+    /// go on.
+    #[cfg(feature = "test-failpoints")]
+    pub fn pause_next_backup_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pause) = self.backup_pause.lock() {
+            *pause = Some((reached_tx, resume_rx));
+        }
+        (reached_rx, resume_tx)
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    fn with_wal_for_test(&self, f: impl FnOnce(&mut crate::wal::WalManager)) -> crate::Result<()> {
         let Some(ref wal) = self.wal else {
             return Err(crate::Error::InvalidInput(
                 "WAL failpoint requires a WAL-backed storage".to_string(),
@@ -2014,7 +2079,7 @@ impl IntelligentIndexedStorage {
         let mut guard = wal
             .lock()
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
-        guard.fail_next_sync_for_test();
+        f(&mut guard);
         Ok(())
     }
 
@@ -2132,6 +2197,62 @@ impl IntelligentIndexedStorage {
             "WAL replay finished: {} entries -> {} tables, {} records, {} skipped",
             total, tables, records, skipped
         );
+        Ok(())
+    }
+
+    /// After recovery, make each graph hold exactly the records the row files hold.
+    ///
+    /// A write reaches the row file, fsynced, before its WAL entry; when the entry never lands
+    /// -- a crash in between, a disk that filled halfway through the frame, a backup that copied
+    /// `records/` after the write and `wal.log` before its entry -- the rows have moved on and
+    /// the log does not say so. Replay rebuilds the graph from the log, so:
+    ///
+    /// - an insert the log missed was never indexed;
+    /// - an update it missed left the id out of the graph altogether, because replay skips each
+    ///   older logged version of a record the row store already holds newer;
+    /// - a delete it missed left the id in the graph with no record behind it.
+    ///
+    /// `GET` and the exact scan read the rows, the ordinary search reads the graph, and the two
+    /// disagreed for the life of the table. `restore_table` already added the first kind against
+    /// a snapshot's index; nothing covered replay or the other two. The counts gate the walk, as
+    /// they do there, so a missed insert and a missed delete that cancel out still hide, as does
+    /// a graph holding an *older* vector for an id whose row moved on; see the roadmap.
+    async fn index_rows_the_log_missed(&self) -> crate::Result<()> {
+        let mut work = Vec::new();
+        {
+            let tables = self.read_tables("index_rows_the_log_missed").await;
+            for (name, data) in tables.iter() {
+                if data.index.len().await == data.records.len() {
+                    continue;
+                }
+                let ids = data.records.ids();
+                let missing = data.index.missing_ids(ids.iter()).await.unwrap_or_default();
+                let extra = data
+                    .index
+                    .live_ids_not_in(|id| data.records.contains(id))
+                    .await
+                    .unwrap_or_default();
+                if missing.is_empty() && extra.is_empty() {
+                    continue;
+                }
+                warn!(
+                    "Table '{}': after recovery {} record(s) in the row files were not in the \
+                     index and {} in the index were not in the row files; reconciling",
+                    name,
+                    missing.len(),
+                    extra.len()
+                );
+                work.push((data.index.clone(), data.vectors_for_ids(&missing), extra));
+            }
+        }
+        for (index, vectors, extra) in work {
+            for id in &extra {
+                index.remove(id).await?;
+            }
+            if !vectors.is_empty() {
+                index.insert_batch(vectors).await?;
+            }
+        }
         Ok(())
     }
 
@@ -2282,6 +2403,17 @@ impl IntelligentIndexedStorage {
     /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
     /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
     pub async fn snapshot(&self) -> crate::Result<usize> {
+        // Serialize before reading the sequence number, not after: two snapshots that both
+        // sampled the sequence and then queued would still truncate the log to the later one's
+        // position while the earlier one's manifest is what ends up on disk.
+        let _serialized = self.snapshotting.lock().await;
+        self.snapshot_serialized().await
+    }
+
+    /// [`Self::snapshot`] for a caller already holding `snapshotting`, which `backup_to` does
+    /// for as long as it copies: a snapshot in the middle of the copy compacts the log past the
+    /// one the backup carries.
+    async fn snapshot_serialized(&self) -> crate::Result<usize> {
         let result = self.snapshot_inner().await;
         match &result {
             Ok(_) => {
@@ -2315,11 +2447,6 @@ impl IntelligentIndexedStorage {
                 "snapshot requires a WAL-backed storage (use new_with_wal)".to_string(),
             ));
         };
-
-        // Serialize before reading the sequence number, not after: two snapshots that both
-        // sampled the sequence and then queued would still truncate the log to the later one's
-        // position while the earlier one's manifest is what ends up on disk.
-        let _serialized = self.snapshotting.lock().await;
 
         let seq = {
             let mut guard = wal
@@ -3230,7 +3357,21 @@ impl IntelligentIndexedStorage {
             )));
         }
 
-        let tables = self.snapshot().await?;
+        // Held until the last file is copied. The copy runs snapshot, row files, then
+        // `wal.log`, and a periodic snapshot landing in between compacted the log past the one
+        // this backup carries: the entries between the two replay points were in neither half,
+        // and a delete or an update among them was gone from the restore.
+        let _serialized = self.snapshotting.lock().await;
+        let tables = self.snapshot_serialized().await?;
+
+        #[cfg(feature = "test-failpoints")]
+        {
+            let pause = self.backup_pause.lock().ok().and_then(|mut p| p.take());
+            if let Some((reached, resume)) = pause {
+                let _ = reached.send(());
+                let _ = resume.await;
+            }
+        }
 
         std::fs::create_dir_all(dest)?;
         let mut copied = Vec::new();
