@@ -307,6 +307,16 @@ debug = true
 opt-level = 0
 incremental = true
 
+# `cargo test` only; `cargo build` and the debugger keep the dev profile above. The suite is
+# index builds and searches, and at opt-level 0 it was most of an hour of CPU: measured on
+# 2026-10-09, opt-level 1 took the library's unit tests from 221 s to 10 s and
+# calibration_test from 148 s to 5.8 s, for a slower compile of this crate only. Line tables
+# keep file:line in panics and backtraces at a fraction of full debuginfo, which matters
+# with 82 test binaries each linking the whole crate.
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
+
 # Dependency resolution overrides for compatibility
 [patch.crates-io]
 # If needed, we can patch specific dependencies here
