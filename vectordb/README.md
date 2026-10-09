@@ -732,9 +732,10 @@ experimental, and what a feature has to have before it moves between the two.
   the records and not written anywhere. Since 1.2.0 the server builds them in the background
   once recovery is done (26.8 s at 10M rows, on every core), so the cost is CPU after startup
   rather than a slow first query — unless a filtered or sparse query arrives before the
-  build finishes, or a write reaches the table first, in which case that query builds the
-  index itself: 187 ms at 100,000 rows, 23 s at 10M. Every query after it is proportional to
-  what matches. See the numbers above.
+  build finishes, in which case that query waits for it: up to 23 s at 10M. Writes during the
+  build are caught up into it, and the build never holds the table lock, so other tables and
+  unfiltered queries are not held up. Every query after it is proportional to what matches.
+  See the numbers above.
 - **Object-storage mirroring is experimental.** Snapshots, WAL chunks and partition segments are
   uploaded when configured, and a fresh node can recover from them, but remote upload failures
   are logged without failing an already durable local write. Multi-process coordination and full

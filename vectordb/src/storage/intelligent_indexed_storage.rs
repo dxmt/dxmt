@@ -907,6 +907,12 @@ struct IntelligentTableData {
     /// The two indexes that are a pure function of the records, and are rebuilt rather than
     /// restored. `None` means "not built yet" -- see [`IntelligentTableData::derived`].
     derived: parking_lot::RwLock<Option<DerivedIndexes>>,
+    /// While `derived` is being built outside the map lock: every id a write touched, with
+    /// the payload it held before the first such write (`None`: it did not exist yet). The
+    /// build catches these up before installing; see [`IntelligentIndexedStorage::warm_derived`].
+    derived_changes: parking_lot::Mutex<Option<HashMap<RecordId, Option<serde_json::Value>>>>,
+    /// One build of `derived` at a time; a second caller waits and finds it built.
+    derived_build: Arc<tokio::sync::Mutex<()>>,
     /// Payload ordinals against the graph's node positions, filled lazily by filtered
     /// searches; see `storage::node_map`. Behind its own lock because it is written by the
     /// first search to meet new nodes while the table map is only read.
@@ -1086,6 +1092,17 @@ impl IntelligentTableData {
             None => store.for_each(|record| index(&record)),
         }
         records
+    }
+
+    /// A write that found `derived` unbuilt: if a build is running, note the id and the
+    /// payload it held before (the first time only -- that is the payload the build may have
+    /// indexed), so the build can catch it up.
+    fn note_unindexed_change(&self, id: &str, before: Option<&serde_json::Value>) {
+        if let Some(changes) = self.derived_changes.lock().as_mut() {
+            changes
+                .entry(id.to_string())
+                .or_insert_with(|| before.cloned());
+        }
     }
 
     fn derived_mut(&self) -> parking_lot::MappedRwLockWriteGuard<'_, Option<DerivedIndexes>> {
@@ -1685,6 +1702,8 @@ async fn process_insert_group(
                                 crate::storage::payload_index::created_key(&record.created_at),
                             );
                         }
+                    } else {
+                        table_data.note_unindexed_change(&record_id, old_payload.as_ref());
                     }
                     // The caller gets the record as sent; the map keeps it without the
                     // vector when that lives in the row file.
@@ -5861,6 +5880,8 @@ impl IntelligentIndexedStorage {
             // there is nothing to rebuild. `restore_table` clears this back to `None`.
             node_map: Default::default(),
             writes: Default::default(),
+            derived_changes: parking_lot::Mutex::new(None),
+            derived_build: Arc::new(tokio::sync::Mutex::new(())),
             derived: parking_lot::RwLock::new(Some(DerivedIndexes {
                 payload: {
                     let mut payload = crate::storage::payload_index::PayloadIndex::new();
@@ -6231,6 +6252,7 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        self.ensure_derived(tablename).await?;
         let tables = self.read_tables("facet").await;
         let data = tables
             .get(tablename)
@@ -6459,6 +6481,9 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<SearchResult> {
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
+        if query.filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let query = self.embed_query(tablename, query).await?;
         if query.filter.is_some() {
             let tables = self.read_tables("search").await;
@@ -7450,6 +7475,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
 
         let cap = Self::knn_graph_max_nodes();
         if sample > cap {
@@ -8454,6 +8482,9 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         Self::check_filter(request.filter.as_ref())?;
+        if request.filter.is_some() || request.sparse_vector.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let start_time = std::time::Instant::now();
 
         let fetch_limit = if request.filter.is_some() {
@@ -8999,38 +9030,71 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
-    /// Build a table's payload and sparse indexes ahead of the first filtered query, and fill
-    /// its node map, without holding the table lock for the build: the rows are decoded a
-    /// chunk at a time under short read locks, and the result is installed only if no write
-    /// reached the table meanwhile -- otherwise it is dropped and the first filtered query
-    /// builds as before. `Ok(true)` when it installed something.
+    /// Build `tablename`'s payload and sparse indexes outside the table map's lock if they are
+    /// not built yet, so a caller that goes on to read them under the lock finds them there
+    /// instead of building them inside it. Every read path that needs them calls this first.
+    async fn ensure_derived(&self, tablename: &str) -> crate::Result<()> {
+        let unbuilt = self
+            .read_tables("ensure_derived")
+            .await
+            .get(tablename)
+            .is_some_and(|data| data.derived.read().is_none());
+        if unbuilt {
+            self.warm_derived(tablename).await?;
+        }
+        Ok(())
+    }
+
+    /// Build a table's payload and sparse indexes, and fill its node map, without holding the
+    /// table map's lock for the build: the rows are decoded a chunk at a time under short read
+    /// locks. `Ok(true)` when it installed something.
     ///
-    /// This is what makes a restart not cost the first filtered query 33 s on a 10M-row
-    /// table: the build is the same pass, started as soon as recovery is done rather than
-    /// when a caller is waiting on it, and it decodes on every core.
+    /// Run ahead of the first filtered query after a restart (the server's warm-up), and by that
+    /// query itself when the warm-up has not finished ([`Self::ensure_derived`]). Before this
+    /// the query built inside `IntelligentTableData::derived`, under the map's read lock -- 27 s
+    /// at 10M rows during which a waiting writer queued every later request to every table.
+    ///
+    /// Writes during the build are caught up rather than voiding it. A write that finds the
+    /// indexes unbuilt notes the id and the payload it held before its first change
+    /// (`note_unindexed_change`). The build scans the rows that existed when it started, so
+    /// for a noted id it holds either nothing or exactly that earlier payload; under the read
+    /// lock that keeps writers out, each noted id is taken out with its earlier payload and
+    /// put back as the store now has it, and the rows appended meanwhile get their creation
+    /// times. A write used to void the build, which on a server taking writes was every build.
     pub async fn warm_derived(&self, tablename: &str) -> crate::Result<bool> {
         let tablename = &*self.resolve(tablename);
-        let (writes_at_start, rows, policy) = {
+        let build_lock = {
+            let tables = self.read_tables("warm_derived").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            if data.derived.read().is_some() || data.records.row_count().is_none() {
+                // Built already; or in memory, small by construction, where the lazy build is
+                // a map walk.
+                return Ok(false);
+            }
+            Arc::clone(&data.derived_build)
+        };
+        let _building = build_lock.lock().await;
+
+        let (rows, policy) = {
             let tables = self.read_tables("warm_derived").await;
             let data = tables
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
             if data.derived.read().is_some() {
-                return Ok(false);
+                return Ok(false); // the build we waited behind installed it
             }
-            let Some(rows) = data.records.row_count() else {
-                // In memory: small by construction; the lazy build is a map walk.
-                return Ok(false);
-            };
+            // From here every write that skips the unbuilt indexes is noted.
+            *data.derived_changes.lock() = Some(HashMap::new());
             (
-                data.writes.load(Ordering::Relaxed),
-                rows,
+                data.records.row_count().unwrap_or(0),
                 data.table.payload_index.clone(),
             )
         };
         let started = std::time::Instant::now();
         let mut built = DerivedIndexes::default();
-        if let Some(policy) = policy {
+        if let Some(policy) = policy.clone() {
             built.payload.set_policy(policy);
         }
         built.payload.begin_bulk(rows as usize);
@@ -9042,13 +9106,9 @@ impl IntelligentIndexedStorage {
             let to = (from + CHUNK).min(rows);
             let chunk = {
                 let tables = self.read_tables("warm_derived").await;
-                let data = tables
-                    .get(tablename)
-                    .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-                if data.writes.load(Ordering::Relaxed) != writes_at_start {
-                    debug!("warm_derived('{tablename}'): a write landed; leaving the build to the first filtered query");
+                let Some(data) = tables.get(tablename) else {
                     return Ok(false);
-                }
+                };
                 tokio::task::block_in_place(|| data.records.decode_range(from, to))
                     .unwrap_or_default()
             };
@@ -9077,26 +9137,66 @@ impl IntelligentIndexedStorage {
             tokio::task::yield_now().await;
         }
         tokio::task::block_in_place(|| built.payload.end_bulk());
-        let installed = {
+
+        let (installed, caught_up) = {
+            // A read lock: every write that touches these indexes holds the write lock, so
+            // none can land between the catch-up and the install.
             let tables = self.read_tables("warm_derived").await;
-            let data = tables
-                .get(tablename)
-                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-            if data.writes.load(Ordering::Relaxed) != writes_at_start {
-                false
-            } else {
-                data.records.publish_created(created);
-                let mut slot = data.derived.write();
-                if slot.is_none() {
-                    *slot = Some(built);
-                    true
-                } else {
-                    false
+            let Some(data) = tables.get(tablename) else {
+                return Ok(false);
+            };
+            let Some(changes) = data.derived_changes.lock().take() else {
+                // Not the table this build started on: it was dropped and created again.
+                return Ok(false);
+            };
+            if data.derived.read().is_some() || data.table.payload_index != policy {
+                // Built by the lazy path meanwhile, or the policy changed under the build.
+                return Ok(false);
+            }
+            let caught_up = changes.len();
+            tokio::task::block_in_place(|| {
+                for (id, before) in changes {
+                    if built.payload.ordinal_of(&id).is_some() {
+                        if let Some(before) = &before {
+                            built.payload.remove_record(&id, before);
+                        }
+                        let _ = built.sparse.delete(&id);
+                    }
+                    if let Some(record) = data.records.get(&id) {
+                        built.payload.insert_record(
+                            &id,
+                            &record.payload,
+                            crate::storage::payload_index::created_key(&record.created_at),
+                        );
+                        if let Some(sparse) = &record.sparse_vector {
+                            if let Err(e) = built.sparse.insert(id.clone(), sparse) {
+                                warn!("Failed to index sparse vector for {}: {}", id, e);
+                            }
+                        }
+                    }
                 }
+                // Rows appended during the build, which the scan did not reach.
+                let now = data.records.row_count().unwrap_or(rows);
+                for slot in data.records.decode_range(rows, now).unwrap_or_default() {
+                    created.push(slot.map_or(i64::MIN, |record| {
+                        crate::storage::payload_index::created_key(&record.created_at)
+                    }));
+                }
+            });
+            data.records.publish_created(created);
+            let mut slot = data.derived.write();
+            if slot.is_none() {
+                *slot = Some(built);
+                (true, caught_up)
+            } else {
+                (false, caught_up)
             }
         };
         if !installed {
             return Ok(false);
+        }
+        if caught_up > 0 {
+            debug!("warm_derived('{tablename}'): caught up {caught_up} record(s) written during the build");
         }
         let built_in = started.elapsed();
         // The node map too, so the first filtered query does not pay that either -- in
@@ -10529,6 +10629,8 @@ impl IntelligentIndexedStorage {
                         );
                     }
                 }
+            } else {
+                table_data.note_unindexed_change(record_id, old_payload.as_ref());
             }
 
             table_data.table.record_count = table_data.records.len() as u64;
@@ -10697,6 +10799,8 @@ impl IntelligentIndexedStorage {
                     if let Err(e) = derived.sparse.delete(id) {
                         warn!("Failed to remove record {} from sparse index: {}", id, e);
                     }
+                } else {
+                    table_data.note_unindexed_change(id, old_payload.as_ref());
                 }
             }
 
@@ -11056,6 +11160,9 @@ impl IntelligentIndexedStorage {
         use crate::storage::payload_index::{created_key, ListCursor};
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("list_records_after").await;
         let table_data = tables
             .get(tablename)
@@ -11310,6 +11417,7 @@ impl IntelligentIndexedStorage {
         }
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        self.ensure_derived(tablename).await?;
 
         let tables = self.read_tables("sparse_search").await;
         let table_data = tables
@@ -11444,6 +11552,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("count_records").await;
         let table_data = tables
             .get(tablename)
@@ -11513,6 +11624,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("list_records").await;
         let table_data = tables
             .get(tablename)

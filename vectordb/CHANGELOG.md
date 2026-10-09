@@ -30,6 +30,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **The first filtered query after a restart could stop the whole server.** It built the
+  payload and sparse indexes inside the table map's read lock -- 23 s at 10M rows -- and a write
+  waiting for that lock queued every later request to every table behind it. It reached that
+  path whenever a write landed during the background warm-up, because a write voided the
+  warm-up: on a server taking writes, after every restart. Writes during the build are now
+  caught up into it, and every read that needs the indexes builds them outside the lock.
 - **Recovery replayed the log one record at a time, about 80x slower than it needs to.** Each
   logged write was its own trip through the insert path and two fsynced record-store appends:
   6 ms an entry, so 20,000 entries took 120 s, and the tail five minutes of ingest at 3,000
