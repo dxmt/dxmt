@@ -9,6 +9,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -56,33 +59,12 @@ fn start() -> Server {
     panic!("server did not become ready on port {port}");
 }
 
-fn curl(args: &[&str]) -> Option<String> {
-    let out = Command::new("curl")
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .args(args)
-        .output()
-        .expect("curl is required for this test");
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 fn get(port: u16, path: &str) -> Option<String> {
-    curl(&[&format!("http://127.0.0.1:{port}{path}")])
+    http::call(port, "GET", path, &[], None).map(|(_, body)| body)
 }
 
 fn post(port: u16, path: &str, body: &str) -> Option<String> {
-    curl(&[
-        "-X",
-        "POST",
-        "-H",
-        "content-type: application/json",
-        "-d",
-        body,
-        &format!("http://127.0.0.1:{port}{path}"),
-    ])
+    http::call(port, "POST", path, &[], Some(body)).map(|(_, body)| body)
 }
 
 /// Every sample line, as (name-with-labels, value).
@@ -158,13 +140,15 @@ fn the_endpoint_is_parseable_prometheus_text() {
 #[test]
 fn the_content_type_is_the_one_scrapers_expect() {
     let server = start();
-    let headers = curl(&[
-        "-D",
-        "-",
-        "-o",
-        "/dev/null",
-        &format!("http://127.0.0.1:{}/metrics", server.port),
-    ])
+    let headers = http::request(
+        server.port,
+        "GET",
+        "/metrics",
+        &[],
+        None,
+        std::time::Duration::from_secs(30),
+    )
+    .and_then(|reply| reply.header("content-type").map(str::to_string))
     .expect("no answer");
     assert!(
         headers.to_lowercase().contains("text/plain"),
@@ -199,4 +183,53 @@ fn the_durability_frontier_is_exported() {
         body.contains("dxmt_last_wal_sync_timestamp_seconds"),
         "a write has been acknowledged, so a sync timestamp must exist: {body}"
     );
+}
+
+#[test]
+fn where_the_time_goes_is_exported() {
+    // The table lock, recovery and snapshots: costs no single request shows, and the first
+    // things to read when latency climbs with nothing slow to blame.
+    let server = start();
+    let port = server.port;
+    post(
+        port,
+        "/api/v1/tables",
+        r#"{"name": "timed", "dimension": 2}"#,
+    );
+    post(
+        port,
+        "/api/v1/tables/timed/records",
+        r#"{"records": [{"id": "a", "vector": [1, 0]}]}"#,
+    );
+    post(port, "/api/v1/snapshot", "{}");
+
+    let body = get(port, "/metrics").expect("no answer");
+    let samples = samples(&body);
+    for mode in ["read", "write"] {
+        let taken: u64 = value_of(
+            &samples,
+            &format!("dxmt_table_lock_acquisitions_total{{mode=\"{mode}\"}}"),
+        )
+        .parse()
+        .unwrap();
+        assert!(
+            taken > 0,
+            "the {mode} lock was taken and not counted: {body}"
+        );
+        value_of(
+            &samples,
+            &format!("dxmt_table_lock_wait_seconds_total{{mode=\"{mode}\"}}"),
+        );
+    }
+    value_of(&samples, "dxmt_table_lock_slow_holds_total");
+    value_of(&samples, "dxmt_index_rebuilds_total");
+    let recovery: f64 = value_of(&samples, "dxmt_last_recovery_seconds")
+        .parse()
+        .unwrap();
+    assert!(recovery >= 0.0);
+    assert_eq!(value_of(&samples, "dxmt_last_recovery_wal_entries"), "0");
+    let snapshot: f64 = value_of(&samples, "dxmt_last_snapshot_duration_seconds")
+        .parse()
+        .unwrap();
+    assert!(snapshot > 0.0, "a snapshot ran and took no time: {body}");
 }

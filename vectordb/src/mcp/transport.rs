@@ -3,7 +3,9 @@
 use async_trait::async_trait;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::sync::Arc;
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 /// Transport trait for MCP communication

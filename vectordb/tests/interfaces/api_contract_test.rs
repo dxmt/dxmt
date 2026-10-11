@@ -11,6 +11,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 /// A route an SDK depends on, and where that dependency lives.
 struct Contract {
     method: &'static str,
@@ -274,40 +277,21 @@ fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16,
             | "/health/metrics"
             | "/metrics"
     );
-    let url = if root_probe {
+    let path = if root_probe || path.starts_with("/api/v1/") {
         // System probes are served at the root for orchestrators.
-        format!("http://127.0.0.1:{}{}", port, path)
-    } else if path.starts_with("/api/v1/") {
-        format!("http://127.0.0.1:{}{}", port, path)
+        path.to_string()
     } else {
-        format!("http://127.0.0.1:{}/api/v1{}", port, path)
+        format!("/api/v1{path}")
     };
-
-    let mut cmd = Command::new("curl");
-    cmd.arg("-s")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-m")
-        .arg("10")
-        .arg("-X")
-        .arg(method)
-        .arg(&url);
-    if let Some(body) = body {
-        cmd.arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-d")
-            .arg(body);
-    }
-
-    let out = cmd.output().expect("curl is required for this test");
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n')?;
-    let code: u16 = code.trim().parse().ok()?;
-    if code == 0 {
-        None
-    } else {
-        Some((code, body.to_string()))
-    }
+    http::request(
+        port,
+        method,
+        &path,
+        &[],
+        body.map(str::as_bytes),
+        std::time::Duration::from_secs(10),
+    )
+    .map(|reply| (reply.status, reply.text()))
 }
 
 /// True when the router did not recognise the request at all.

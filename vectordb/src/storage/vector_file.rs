@@ -26,7 +26,8 @@ use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// How a rerank's rows are read.
 ///
@@ -293,6 +294,24 @@ pub struct VectorFile {
     /// parallel 99 / 11 ms, mmap 697 / 158 ms. The mapping loses in every state there, warm
     /// included, so nothing about it is worth probing for.
     mappable: AtomicBool,
+    /// Writes that have appended rows the graph does not reflect yet, as `(token, floor)`:
+    /// `floor` is the row count before the write appended, so every row it appends is at or
+    /// above it. See [`Self::indexed_below`].
+    unindexed: Mutex<Vec<(u64, u64)>>,
+    next_token: AtomicU64,
+}
+
+/// A write between appending its rows and updating the graph; dropped once the graph has it.
+/// Created by [`VectorFile::begin_unindexed`].
+pub struct UnindexedRows {
+    file: Arc<VectorFile>,
+    token: u64,
+}
+
+impl Drop for UnindexedRows {
+    fn drop(&mut self) {
+        self.file.unindexed.lock().retain(|(t, _)| *t != self.token);
+    }
 }
 
 struct Writer {
@@ -330,14 +349,25 @@ impl VectorFile {
             .read(true)
             .open(path)?;
         let row_bytes = dim * format.bytes_per_dim();
-        let len = file.metadata()?.len();
+        let mut len = file.metadata()?.len();
+        // A partial last row is an append that stopped partway -- a crash, a full disk -- and
+        // was never acknowledged: the `.rows` line naming it is written after the data. This
+        // used to refuse to open, which is a server that does not come back after a crash at
+        // the wrong moment. Cut it back to the last whole row.
         if row_bytes > 0 && len % row_bytes as u64 != 0 {
-            return Err(crate::Error::Serialization(format!(
-                "{}: {} bytes is not a whole number of {}-byte rows",
+            let whole = len - len % row_bytes as u64;
+            tracing::warn!(
+                "{}: {} bytes is not a whole number of {}-byte rows; cutting the partial last \
+                 row (an append that never finished)",
                 path.display(),
                 len,
                 row_bytes
-            )));
+            );
+            // A handle of its own: an append-mode handle may not change the length on Windows.
+            let cut = OpenOptions::new().write(true).open(path)?;
+            cut.set_len(whole)?;
+            cut.sync_all()?;
+            len = whole;
         }
         let rows = if row_bytes > 0 {
             len / row_bytes as u64
@@ -396,6 +426,8 @@ impl VectorFile {
             cold: AtomicBool::new(true),
             since_probe: AtomicU32::new(0),
             mappable: AtomicBool::new(true),
+            unindexed: Mutex::new(Vec::new()),
+            next_token: AtomicU64::new(0),
         };
         this.remap(rows)?;
         Ok((this, ids))
@@ -441,6 +473,32 @@ impl VectorFile {
     /// Rows appended so far, dead ones included.
     pub fn rows(&self) -> u64 {
         self.writer.lock().rows
+    }
+
+    /// Declare a write that is about to append rows and then update the graph. Hold the
+    /// guard until the graph has the write; take it *before* appending.
+    pub fn begin_unindexed(self: &Arc<Self>) -> UnindexedRows {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        let floor = self.rows();
+        self.unindexed.lock().push((token, floor));
+        UnindexedRows {
+            file: Arc::clone(self),
+            token,
+        }
+    }
+
+    /// A row number below which every row's write has reached the graph: a graph serialized
+    /// after this call reflects every row under it. Rows at or above it may belong to a write
+    /// the graph has not seen yet.
+    ///
+    /// The row count is read before the open writes. A write that registers after that read
+    /// appends after it too, so its rows are at or above the count; one that registered before
+    /// is in the list and its floor bounds its rows; one that has already dropped its guard is
+    /// in the graph.
+    pub fn indexed_below(&self) -> u64 {
+        let rows = self.rows();
+        let open = self.unindexed.lock().iter().map(|(_, floor)| *floor).min();
+        open.map_or(rows, |floor| floor.min(rows))
     }
 
     /// Append one row per vector and return their row numbers, in order. Durable on return.
@@ -730,7 +788,6 @@ impl VectorFile {
     /// on the calling thread in the order asked. Allocates a buffer per row; this is the
     /// cold path, where the disk is the cost.
     fn with_rows_parallel(&self, rows: &[u64], mut f: impl FnMut(usize, Option<&[f32]>)) {
-        use std::os::unix::fs::FileExt;
         let mapped_rows = self.map.read().rows;
         let bufs: Vec<Option<Vec<f32>>> = rows
             .par_chunks(PARALLEL_CHUNK)
@@ -739,9 +796,7 @@ impl VectorFile {
                 let mut buf = vec![0u8; self.row_bytes];
                 for &row in chunk {
                     if row < mapped_rows
-                        && self
-                            .reader
-                            .read_exact_at(&mut buf, row * self.row_bytes as u64)
+                        && read_exact_at(&self.reader, &mut buf, row * self.row_bytes as u64)
                             .is_ok()
                     {
                         out.push(Some(self.decode(&buf)));
@@ -841,6 +896,29 @@ impl VectorFile {
     }
 }
 
+/// A positional read that leaves the file's cursor alone, so the parallel readers can share
+/// one handle. Unix has it as `read_exact_at`; Windows has `seek_read`, which moves the cursor
+/// (harmless here: nothing reads this handle sequentially) and may return short.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset)? {
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            n => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +927,45 @@ mod tests {
         (0..dim)
             .map(|d| (seed * 31 + d as u64) as f32 * 0.5)
             .collect()
+    }
+
+    #[test]
+    fn a_partial_last_row_is_cut_and_the_file_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.f32");
+        let (file, _) = VectorFile::open(&path, 4).unwrap();
+        file.append(&[("a", &v(0, 4))]).unwrap();
+        drop(file);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[1u8; 6]).unwrap(); // a 16-byte row, six bytes in
+        drop(f);
+
+        let (file, ids) = VectorFile::open(&path, 4).unwrap();
+        assert_eq!(file.rows(), 1);
+        assert_eq!(ids, vec![("a".to_string(), 0)]);
+        assert_eq!(file.append(&[("b", &v(1, 4))]).unwrap(), vec![1]);
+        assert_eq!(file.read(1).unwrap(), v(1, 4));
+        assert_eq!(file.read(0).unwrap(), v(0, 4));
+    }
+
+    #[test]
+    fn rows_of_a_write_still_open_are_not_counted_as_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = VectorFile::open(&dir.path().join("v.f32"), 4).unwrap();
+        let file = Arc::new(file);
+        file.append(&[("a", &v(0, 4)), ("b", &v(1, 4))]).unwrap();
+        assert_eq!(file.indexed_below(), 2);
+
+        let first = file.begin_unindexed();
+        file.append(&[("c", &v(2, 4))]).unwrap();
+        let second = file.begin_unindexed();
+        file.append(&[("d", &v(3, 4))]).unwrap();
+        assert_eq!(file.indexed_below(), 2, "c's write is still open");
+
+        drop(first);
+        assert_eq!(file.indexed_below(), 3, "d's write is still open");
+        drop(second);
+        assert_eq!(file.indexed_below(), 4);
     }
 
     #[test]

@@ -2822,6 +2822,117 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         );
     }
 
+    // Where time goes outside any one request. A latency graph that climbs with no slow
+    // request to blame is usually the table lock; these say how much of it there is.
+    let t = &storage.timings;
+    let secs = |ns: u64| ns as f64 / 1e9;
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_table_lock_wait_seconds_total Seconds spent waiting for the table map's lock."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_table_lock_wait_seconds_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_wait_seconds_total{{mode=\"read\"}} {:.6}",
+        secs(t.table_lock_read_wait_ns)
+    );
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_wait_seconds_total{{mode=\"write\"}} {:.6}",
+        secs(t.table_lock_write_wait_ns)
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_table_lock_hold_seconds_total Seconds the table map's lock was held."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_table_lock_hold_seconds_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_hold_seconds_total{{mode=\"read\"}} {:.6}",
+        secs(t.table_lock_read_hold_ns)
+    );
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_hold_seconds_total{{mode=\"write\"}} {:.6}",
+        secs(t.table_lock_write_hold_ns)
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_table_lock_acquisitions_total Times the table map's lock was taken."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_table_lock_acquisitions_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_acquisitions_total{{mode=\"read\"}} {}",
+        t.table_lock_reads
+    );
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_acquisitions_total{{mode=\"write\"}} {}",
+        t.table_lock_writes
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_table_lock_slow_holds_total Holds of the table map's lock that lasted a second or more."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_table_lock_slow_holds_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_table_lock_slow_holds_total {}",
+        t.table_lock_slow_holds
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_index_rebuilds_total Index rebuilds that completed and were swapped in."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_index_rebuilds_total counter");
+    let _ = writeln!(out, "dxmt_index_rebuilds_total {}", t.index_rebuilds);
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_index_rebuild_seconds_total Seconds spent in completed index rebuilds."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_index_rebuild_seconds_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_index_rebuild_seconds_total {:.6}",
+        secs(t.index_rebuild_ns)
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_index_rebuild_swap_wait_seconds_total Seconds rebuilds waited for the write lock to swap the new index in."
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE dxmt_index_rebuild_swap_wait_seconds_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "dxmt_index_rebuild_swap_wait_seconds_total {:.6}",
+        secs(t.index_rebuild_swap_wait_ns)
+    );
+    if let (Some(ns), Some(entries)) = (t.last_recovery_ns, t.last_recovery_wal_entries) {
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_last_recovery_seconds How long recovery took when this process opened its store."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_last_recovery_seconds gauge");
+        let _ = writeln!(out, "dxmt_last_recovery_seconds {:.6}", secs(ns));
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_last_recovery_wal_entries WAL entries that recovery replayed when this process opened its store."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_last_recovery_wal_entries gauge");
+        let _ = writeln!(out, "dxmt_last_recovery_wal_entries {entries}");
+    }
+    if let Some(ns) = t.last_snapshot_ns {
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_last_snapshot_duration_seconds How long the most recent successful snapshot took."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_last_snapshot_duration_seconds gauge");
+        let _ = writeln!(out, "dxmt_last_snapshot_duration_seconds {:.6}", secs(ns));
+    }
+
     let _ = writeln!(
         out,
         "# HELP dxmt_operations_total Operations completed since process start."
@@ -2838,6 +2949,16 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         out,
         "dxmt_snapshot_failures_total {}",
         storage.snapshot_failures
+    );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_backup_failures_total Backups, manual or scheduled, that failed since process start."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_backup_failures_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_backup_failures_total {}",
+        storage.backup_failures
     );
 
     // The durability frontier: how much a restart would replay, and how far behind the last
@@ -2868,6 +2989,11 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
             "dxmt_last_snapshot_timestamp_seconds",
             "Unix time of the most recently installed snapshot.",
             storage.last_snapshot_at.as_deref(),
+        ),
+        (
+            "dxmt_last_backup_timestamp_seconds",
+            "Unix time the most recent backup, manual or scheduled, finished.",
+            storage.last_backup_at.as_deref(),
         ),
     ] {
         if let Some(seconds) = value

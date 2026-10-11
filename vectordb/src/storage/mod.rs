@@ -36,6 +36,6 @@ pub use crate::types::{
 
 // Re-export index selector types (moved from intelligent_indexed_storage)
 pub use index_selector::{
-    CostConstraints, ExpectedPerformance, HardwareCapabilities, IndexAlgorithm, IndexConfig,
-    IndexDecision, IntelligentIndexSelector, PerformanceRequirements,
+    CostConstraints, HardwareCapabilities, IndexAlgorithm, IndexConfig, IndexDecision,
+    IntelligentIndexSelector, PerformanceRequirements,
 };

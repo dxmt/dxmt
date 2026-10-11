@@ -17,7 +17,88 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **A clean restart keeps the payload and sparse indexes.** They used to be rebuilt after
+  every restart -- 23-27 s of every core at 10M rows. A clean shutdown now writes them to
+  `DXMT_WAL_DIR/derived/`, with the record store's row and live counts; the next start reads
+  them back if both still match, before serving anything, and deletes the file whether or not
+  it was used. A crash, or any write in between, means a rebuild as before. At 1M rows:
+  read back in 0.3 s, against 2.5 s to rebuild; 68 MB on disk, 0.2 s to write.
+- **Scheduled backups and a restore command.** `DXMT_BACKUP_INTERVAL_SECS` (off by default)
+  writes a backup into `DXMT_BACKUP_ROOT/auto-<UTC time>` on a timer and keeps the newest
+  `DXMT_BACKUP_KEEP` (default 7); backups taken by hand are never pruned. `vectordb restore
+  <dir>` restores one with the server stopped: it checks the backup against its manifest,
+  refuses while the store is open, moves the store's previous contents aside instead of
+  deleting them, and opens the result to list what came back. `/metrics` has
+  `dxmt_last_backup_timestamp_seconds` and `dxmt_backup_failures_total`.
+
+- **Windows.** The server builds natively with MSVC and the whole suite passes there (82 test
+  binaries, 767 tests; the four that measure Unix-only behaviour -- hole punching, permission
+  bits, symlinks -- are compiled out). jemalloc is not used on Windows. Not yet a release
+  target: see `docs/SUPPORT_MATRIX.md`.
+- **One process per store.** Opening a store takes an exclusive lock on `{DXMT_WAL_DIR}/LOCK`;
+  a second `serve`, or `vectordb mcp` beside a running server, is refused with the directory
+  it found in use, instead of both appending to one log. The OS releases the lock however the
+  process exits.
+
 ### Fixed
+
+- **Ingest into a quantized table spent a third of its CPU in `memcpy`.** Decoding a PQ code
+  copies one centroid per subspace, and the copy for a four-float subspace -- the width of
+  every 768-, 1024- and 1536-dimension table -- was a call to `memcpy` each time: 192 calls of
+  16 bytes per decode. Widths 1-4, 6, 8 and 16 now copy as fixed-size arrays. Steady ingest
+  into a quantized 768-d table, over HTTP: 1,905 -> 2,448 rows/s with one writer, 1,615 ->
+  2,369 with four.
+- **The first filtered query after a restart could stop the whole server.** It built the
+  payload and sparse indexes inside the table map's read lock -- 23 s at 10M rows -- and a write
+  waiting for that lock queued every later request to every table behind it. It reached that
+  path whenever a write landed during the background warm-up, because a write voided the
+  warm-up: on a server taking writes, after every restart. Writes during the build are now
+  caught up into it, and every read that needs the indexes builds them outside the lock.
+- **Recovery replayed the log one record at a time, about 80x slower than it needs to.** Each
+  logged write was its own trip through the insert path and two fsynced record-store appends:
+  6 ms an entry, so 20,000 entries took 120 s, and the tail five minutes of ingest at 3,000
+  rows/s leaves behind would have taken over an hour to come back from a crash. Consecutive
+  writes to one table are now replayed in runs of up to 1,000: 1.5 s for the same 20,000.
+  Table import goes the same way.
+- **A crash between a record's data and its log line corrupted every later record of that
+  table.** Data is written first; extra bytes past the last row the log names were left in
+  place, the next append landed after them while its log line placed it before, and every row
+  from there decoded another row's bytes. A backup copying the two files while a write went in
+  did the same. They are now cut on open. Found on Windows, where the slower fsync made a
+  backup under writes lose records on every run.
+- **A vector file with a partial last row refused to open**, so a crash or a full disk midway
+  through an append left a server that would not start. The partial row is cut instead.
+- **On Windows:** an alias could not be set ("Access is denied": the alias file was synced
+  through a read-only handle); data went under the working directory when `HOME` was unset,
+  which a plain PowerShell does not set (`USERPROFILE` is used now); and the free-memory floor
+  never refused a write, there or on macOS, because only `/proc/meminfo` was read.
+- **`/dashboard/../…` answered 200 with the app page.** Nothing outside the bundle was ever
+  readable, but a path that climbs is now a 404. Its test had never sent one: it used curl,
+  which removes `..` before sending.
+
+- **A backup taken while the periodic snapshot ran could restore without a delete, an update
+  or a table created in between.** `backup_to` took its snapshot and then copied, with nothing
+  stopping another snapshot from compacting the log in the meantime, so the backup's `wal.log`
+  could start after its snapshot's replay point; recovery replayed from that point without
+  noticing the log began later. A backup now holds the snapshot lock until its last file is
+  copied, and **recovery refuses to start on a log that begins after the snapshot's replay
+  point**, naming both files, rather than coming up without the entries in between.
+- **A write whose WAL entry never landed is no longer half there after a restart.** A write
+  reaches the row file before its log entry; when the entry is lost -- a crash in between, a
+  full disk tearing the frame, a backup copying the two at different moments -- `GET` and the
+  exact scan returned the row's state while the graph held the log's. Restarts with no
+  snapshot never indexed such an insert or update at all, and a lost delete stayed in the
+  graph. Recovery now reconciles each table's graph with its rows in both directions.
+- **An update lost from the log after a snapshot no longer leaves the old vector in the
+  graph.** The snapshot's graph came back with the previous vector, the row file had the
+  new one, and the record counts agreed, so nothing noticed: `GET` returned the new vector and
+  an ordinary search found the record by the old one. A snapshot now records, per table, the
+  row below which its graph is current (writes still between their row and the graph are
+  accounted for), and recovery re-indexes every record at or above it that replay did not.
+  Snapshots written before this carry no such row and are not re-checked; the next snapshot
+  writes one.
 
 - **`DXMT_HOST` and `DXMT_PORT` set the address `serve` binds.** The README and
   `.env.example` listed both, and no release read them: `serve` took `--host` and `--port`

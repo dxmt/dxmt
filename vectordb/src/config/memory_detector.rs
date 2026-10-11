@@ -129,6 +129,7 @@ mod tests {
     /// sysinfo returned kibibytes up to 0.29 and bytes from 0.30. This crate is on 0.30, so
     /// a `* 1024` here overstates memory 1024-fold, and everything downstream sizes itself
     /// from that number.
+    #[cfg(target_os = "linux")] // the kernel's own figure is in /proc/meminfo
     #[test]
     fn detected_memory_matches_the_kernel() {
         let proc_total: u64 = std::fs::read_to_string("/proc/meminfo")

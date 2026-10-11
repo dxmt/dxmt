@@ -24,6 +24,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -143,30 +146,31 @@ impl Reply {
 }
 
 fn fetch(port: u16, path: &str, extra: &[&str]) -> Option<Reply> {
-    // `-D -` so the headers are the subject of most of these assertions, and `--compressed`
-    // left off deliberately: whether a body arrives encoded is one of the things under test.
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-D")
-        .arg("/dev/stderr")
-        .arg("-m")
-        .arg("15")
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    for arg in extra {
-        command.arg(arg);
-    }
-    let out = command.output().expect("curl is required for this test");
-    let headers = String::from_utf8_lossy(&out.stderr).to_string();
-    let status = headers
-        .lines()
-        .find(|line| line.starts_with("HTTP/"))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse().ok())?;
+    // `extra` is still written as curl's `-H "Name: value"` pairs, which is how the callers
+    // read best. No `Accept-Encoding` unless one is given: whether a body arrives encoded is
+    // one of the things under test.
+    let headers: Vec<(&str, &str)> = extra
+        .chunks(2)
+        .filter(|pair| pair[0] == "-H")
+        .filter_map(|pair| pair[1].split_once(':'))
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .collect();
+    let reply = http::request(
+        port,
+        "GET",
+        path,
+        &headers,
+        None,
+        std::time::Duration::from_secs(15),
+    )?;
     Some(Reply {
-        status,
-        headers,
-        body: String::from_utf8_lossy(&out.stdout).to_string(),
+        status: reply.status,
+        headers: reply
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\n"))
+            .collect(),
+        body: reply.text(),
     })
 }
 

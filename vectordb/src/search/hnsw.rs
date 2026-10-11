@@ -853,6 +853,20 @@ fn adc_fn() -> AdcFn {
     })
 }
 
+/// `QuantizedStore::decode_into` for a subspace width known at compile time: each centroid is
+/// copied as a `[f32; D]`, which compiles to a move rather than a memcpy call.
+#[inline(always)]
+fn decode_fixed<const D: usize>(code: &[u8], flat: &[f32], k: usize, out: &mut [f32]) {
+    for (sub, &c) in code.iter().enumerate() {
+        let at = (sub * k + c as usize) * D;
+        let src: &[f32; D] = flat[at..at + D].try_into().expect("a whole centroid");
+        let dst: &mut [f32; D] = (&mut out[sub * D..(sub + 1) * D])
+            .try_into()
+            .expect("a whole subspace");
+        *dst = *src;
+    }
+}
+
 impl QuantizedStore {
     fn from_quantizer(pq: ProductQuantizer) -> Self {
         let m = pq.num_subvectors;
@@ -886,22 +900,20 @@ impl QuantizedStore {
         let k = self.pq.num_centroids;
         let d = self.pq.subvector_dim;
         let code = self.code(idx);
-        // A subspace is one dimension below 64 and two below 256 (`default_subvectors`), and
-        // a `copy_from_slice` of four or eight bytes is a call to memcpy per subspace -- at
-        // 25 dimensions that was most of the decode. Index directly for the narrow cases.
+        // A `copy_from_slice` of a run whose length is only known at run time is a call to
+        // memcpy, and a subspace is a handful of floats: at 25 dimensions that was most of the
+        // decode, which is why one and two were indexed directly. Four is the width of every
+        // 768-, 1024- and 1536-dimension table (`default_subvectors`), and it was still on the
+        // memcpy path: 192 sixteen-byte calls per decode, 31% of the CPU of a steady 768-d
+        // ingest, measured 2026-10-09. A fixed-size array copy is a register move.
         match d {
-            1 => {
-                for (sub, &c) in code.iter().enumerate() {
-                    out[sub] = self.flat[sub * k + c as usize];
-                }
-            }
-            2 => {
-                for (sub, &c) in code.iter().enumerate() {
-                    let at = (sub * k + c as usize) * 2;
-                    out[sub * 2] = self.flat[at];
-                    out[sub * 2 + 1] = self.flat[at + 1];
-                }
-            }
+            1 => decode_fixed::<1>(code, &self.flat, k, out),
+            2 => decode_fixed::<2>(code, &self.flat, k, out),
+            3 => decode_fixed::<3>(code, &self.flat, k, out),
+            4 => decode_fixed::<4>(code, &self.flat, k, out),
+            6 => decode_fixed::<6>(code, &self.flat, k, out),
+            8 => decode_fixed::<8>(code, &self.flat, k, out),
+            16 => decode_fixed::<16>(code, &self.flat, k, out),
             _ => {
                 for (sub, &c) in code.iter().enumerate() {
                     let at = (sub * k + c as usize) * d;
@@ -3734,5 +3746,40 @@ mod quantized_tests {
                 "a loaded quantized graph must answer exactly as the one that was saved"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::decode_fixed;
+
+    /// The generic copy `decode_into` falls back to, which every specialised width must match.
+    fn decode_generic(code: &[u8], flat: &[f32], k: usize, d: usize, out: &mut [f32]) {
+        for (sub, &c) in code.iter().enumerate() {
+            let at = (sub * k + c as usize) * d;
+            out[sub * d..(sub + 1) * d].copy_from_slice(&flat[at..at + d]);
+        }
+    }
+
+    fn check<const D: usize>() {
+        let (m, k) = (24usize, 256usize);
+        let flat: Vec<f32> = (0..m * k * D).map(|i| i as f32 * 0.5 - 7.0).collect();
+        let code: Vec<u8> = (0..m).map(|i| ((i * 37 + 11) % k) as u8).collect();
+        let mut fixed = vec![0.0f32; m * D];
+        let mut generic = vec![1.0f32; m * D];
+        decode_fixed::<D>(&code, &flat, k, &mut fixed);
+        decode_generic(&code, &flat, k, D, &mut generic);
+        assert_eq!(fixed, generic, "width {D}");
+    }
+
+    #[test]
+    fn every_specialised_width_decodes_as_the_generic_copy_does() {
+        check::<1>();
+        check::<2>();
+        check::<3>();
+        check::<4>();
+        check::<6>();
+        check::<8>();
+        check::<16>();
     }
 }

@@ -13,6 +13,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
 }
@@ -57,39 +60,7 @@ fn start(dir: &std::path::Path, port: u16) -> Server {
 /// The response body and its status, since a route that cannot find the table answers 404 with
 /// a body worth reading.
 fn request(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("60")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    if body.is_some() {
-        command
-            .arg("-H")
-            .arg("content-type: application/json")
-            .arg("--data-binary")
-            .arg("@-")
-            .stdin(Stdio::piped());
-    }
-    command.stdout(Stdio::piped());
-    let mut child = command.spawn().expect("curl is required for this test");
-    if let Some(body) = body {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(body.as_bytes())
-            .expect("curl took the body");
-    }
-    let out = child.wait_with_output().expect("curl ran");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (body, status) = text.rsplit_once('\n').unwrap_or((text.as_str(), "0"));
-    (status.parse().unwrap_or(0), body.to_string())
+    http::call(port, method, path, &[], body).unwrap_or((0, String::new()))
 }
 
 fn call(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<serde_json::Value> {

@@ -136,7 +136,10 @@ parking_lot = { version = "0.12", features = ["serde"] }
 # glibc's own knob trades it back the wrong way: MALLOC_ARENA_MAX=2 cut RSS 29% and
 # throughput 31%, because sixteen threads then contend on two arenas. jemalloc's per-thread
 # caches and background page return address both sides at once.
-tikv-jemallocator = { version = "0.6", optional = true }
+#
+# Declared under `[target.'cfg(not(windows))'.dependencies]` below the dependency list:
+# jemalloc does not build for Windows, where the `jemalloc` feature stays in the default set
+# and is inert (see the `cfg` on the allocator in main.rs).
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
 dashmap = "5.5"
@@ -242,7 +245,7 @@ utoipa = { version = "4.2", features = ["axum_extras"], optional = true }
 # crate is built on. Removing that and declaring this is a net subtraction.
 rust-embed = { version = "8.7", features = ["mime-guess", "debug-embed"], optional = true }
 ordered-float = "5.0.0"
-roaring = "0.11.2"
+roaring = { version = "0.11.2", features = ["serde"] }
 # Already in the graph through hashbrown; declared so the payload index can name its hasher.
 # See `FastMap` in `src/storage/payload_index.rs` for why it is keyed rather than FxHash.
 ahash = "0.8"
@@ -252,6 +255,9 @@ hashbrown = { version = "0.15", default-features = false }
 # axum 0.6 is built on hyper 0.14; keeping this dependency on the same
 # version avoids two incompatible `tower_service` traits in the server binary.
 hyper = "0.14.32"
+
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 # Testing frameworks
@@ -306,6 +312,16 @@ strip = false
 debug = true
 opt-level = 0
 incremental = true
+
+# `cargo test` only; `cargo build` and the debugger keep the dev profile above. The suite is
+# index builds and searches, and at opt-level 0 it was most of an hour of CPU: measured on
+# 2026-10-09, opt-level 1 took the library's unit tests from 221 s to 10 s and
+# calibration_test from 148 s to 5.8 s, for a slower compile of this crate only. Line tables
+# keep file:line in panics and backtraces at a fraction of full debuginfo, which matters
+# with 82 test binaries each linking the whole crate.
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
 
 # Dependency resolution overrides for compatibility
 [patch.crates-io]

@@ -103,7 +103,9 @@ impl ListCursor {
 type Ordinal = u32;
 
 /// Payload索引 - 为每个字段维护倒排索引
-#[derive(Debug, Clone)]
+/// Serialisable so a clean shutdown can write it beside the store and the next start read it
+/// back instead of rebuilding it; see `IntelligentIndexedStorage::persist_derived`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadIndex {
     /// 字段名 -> 字段索引
     field_indices: FastMap<String, FieldIndex>,
@@ -124,6 +126,7 @@ pub struct PayloadIndex {
     unindexed: FastMap<String, roaring::RoaringBitmap>,
     /// Set while the index is being rebuilt from the records in one pass. See
     /// [`PayloadIndex::begin_bulk`].
+    #[serde(skip)]
     bulk: bool,
     /// Per key, the records whose value there is `null` or an empty array.
     ///
@@ -382,6 +385,60 @@ struct Ids {
     created: Vec<i64>,
 }
 
+/// What [`Ids`] is on disk: the ids by ordinal, the free list and the timestamps. The
+/// `id -> ordinal` table is not stored -- its hasher is keyed per process -- and is rebuilt from
+/// the ids on load, one insert per live slot.
+#[derive(Serialize)]
+struct IdsRef<'a> {
+    by_ordinal: &'a Vec<Option<Box<str>>>,
+    free: &'a Vec<Ordinal>,
+    created: &'a Vec<i64>,
+}
+
+#[derive(Deserialize)]
+struct IdsOwned {
+    by_ordinal: Vec<Option<Box<str>>>,
+    free: Vec<Ordinal>,
+    created: Vec<i64>,
+}
+
+impl Serialize for Ids {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        IdsRef {
+            by_ordinal: &self.by_ordinal,
+            free: &self.free,
+            created: &self.created,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ids {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let IdsOwned {
+            by_ordinal,
+            free,
+            created,
+        } = IdsOwned::deserialize(deserializer)?;
+        let hasher = ahash::RandomState::new();
+        let mut table = hashbrown::HashTable::with_capacity(by_ordinal.len());
+        for (ordinal, slot) in by_ordinal.iter().enumerate() {
+            if let Some(id) = slot {
+                table.insert_unique(Self::hash(&hasher, id), ordinal as Ordinal, |&o| {
+                    Self::hash(&hasher, Self::stored(&by_ordinal, o))
+                });
+            }
+        }
+        Ok(Ids {
+            by_ordinal,
+            table,
+            hasher,
+            free,
+            created,
+        })
+    }
+}
+
 impl Ids {
     /// What the shared per-record bookkeeping costs: the ids themselves, the slots addressing
     /// them, the `id -> ordinal` table and the timestamps.
@@ -503,7 +560,7 @@ impl Ids {
 }
 
 /// 单个字段的索引
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FieldIndex {
     /// 值 -> 包含该值的记录ID集合。
     ///
@@ -539,7 +596,7 @@ struct FieldIndex {
 ///
 /// `One` is the common case and `Many` the general one; a stored entry is never empty, because
 /// removal reports when it would be and the caller drops the key instead.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum Postings {
     One(Ordinal),
     Many(roaring::RoaringBitmap),
@@ -641,7 +698,7 @@ impl Postings {
 /// already makes. A field nobody filters geographically pays nothing, because nothing that is
 /// not a coordinate pair lands here; a field that is one pays about 400 MB at 10M rows across
 /// all three structures, and `payload_index`'s `except` is how to decline that.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct GeoIndex {
     /// Sorted by latitude. `(latitude, longitude, record)`.
     sorted: Vec<(OrderedFloat, f64, Ordinal)>,
@@ -765,7 +822,7 @@ impl GeoIndex {
 /// (2026-10-04). `recent` absorbs `pending` with a linear merge of its own size, and is
 /// itself merged into `sorted` only when it has grown to a 64th of it, so an entry is
 /// copied a bounded number of times at each level rather than once per fold.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct NumericIndex {
     /// Sorted by value. Ties keep insertion order, which nothing depends on.
     sorted: Vec<(OrderedFloat, Ordinal)>,
@@ -1073,7 +1130,7 @@ impl NumericIndex {
 }
 
 /// 字段统计信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FieldStats {
     /// 数值字段的最小值
     numeric_min: Option<f64>,
@@ -1138,7 +1195,7 @@ impl PartialOrd for FacetEntry {
 }
 
 /// 值的键（用于HashMap）
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum ValueKey {
     String(String),
     Number(i64),         // 整数
@@ -1188,7 +1245,7 @@ impl ValueKey {
 /// Integers above 2^53 are keyed as the nearest `f64`, which is what `matches_filter` compares
 /// them as too — agreement matters more here than a precision JSON clients mostly cannot
 /// represent anyway.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 struct OrderedFloat(u64);
 
 impl From<f64> for OrderedFloat {
@@ -1215,7 +1272,7 @@ impl From<OrderedFloat> for f64 {
 }
 
 /// 字段类型（推断）
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum FieldType {
     String,
     Number,

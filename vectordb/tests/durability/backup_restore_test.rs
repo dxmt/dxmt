@@ -14,6 +14,9 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -39,8 +42,14 @@ impl Drop for Server {
 /// this is what an operator does when the backups belong on another mount. The refusal itself
 /// is checked by `a_backup_outside_the_root_is_refused`.
 fn start_server_on(wal_dir: &Path) -> Server {
+    start_server_with(wal_dir, &[])
+}
+
+/// `start_server_on` with more environment, which wins over the defaults above.
+fn start_server_with(wal_dir: &Path, extra: &[(&str, &str)]) -> Server {
     let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vectordb"));
+    command
         .arg("serve")
         .arg("--host")
         .arg("127.0.0.1")
@@ -53,7 +62,11 @@ fn start_server_on(wal_dir: &Path) -> Server {
         .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
         .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (name, value) in extra {
+        command.env(name, value);
+    }
+    let child = command
         .spawn()
         .expect("failed to spawn the vectordb binary");
 
@@ -68,37 +81,12 @@ fn start_server_on(wal_dir: &Path) -> Server {
 }
 
 fn curl(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
-    let url = if path.starts_with("/health") {
-        format!("http://127.0.0.1:{port}{path}")
+    let path = if path.starts_with("/health") {
+        path.to_string()
     } else {
-        format!("http://127.0.0.1:{port}/api/v1{path}")
+        format!("/api/v1{path}")
     };
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .arg("-o")
-        .arg("-")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-X")
-        .arg(method)
-        .arg(&url);
-    if let Some(body) = body {
-        command
-            .arg("-H")
-            .arg("Content-Type: application/json")
-            .arg("-d")
-            .arg(body);
-    }
-    let output = command.output().expect("curl is required for this test");
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let (body, status) = text.rsplit_once('\n')?;
-    Some((status.trim().parse().ok()?, body.to_string()))
+    http::call(port, method, &path, &[], body)
 }
 
 fn ok(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
@@ -181,7 +169,7 @@ fn a_backup_restores_into_a_working_server() {
             server.port,
             "POST",
             "/backup",
-            Some(&format!(r#"{{"path":"{}"}}"#, backup_dir.to_string_lossy())),
+            Some(&serde_json::json!({ "path": backup_dir }).to_string()),
         );
         let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(parsed["data"]["tables"], 1);
@@ -288,7 +276,7 @@ fn the_manifest_lists_the_files_that_are_there() {
         server.port,
         "POST",
         "/backup",
-        Some(&format!(r#"{{"path":"{}"}}"#, backup_dir.to_string_lossy())),
+        Some(&serde_json::json!({ "path": backup_dir }).to_string()),
     );
     let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
     let listed: Vec<String> = parsed["data"]["files"]
@@ -380,7 +368,7 @@ fn a_backup_outside_the_root_is_refused() {
             server.port,
             "POST",
             "/backup",
-            Some(&format!(r#"{{"path":"{destination}"}}"#)),
+            Some(&serde_json::json!({ "path": destination }).to_string()),
         )
         .expect("the server answered");
         serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"))
@@ -415,13 +403,109 @@ fn a_backup_outside_the_root_is_refused() {
     }
 
     // A symlink inside the root pointing out of it is resolved before the check, not after.
-    let link = allowed.path().join("link");
-    std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
-    let through_link = link.join("via-symlink");
-    let answer = backup(through_link.to_string_lossy().to_string());
-    assert_eq!(
-        answer["success"], false,
-        "a symlink out of the root was followed: {answer}"
+    // Unix only: creating one on Windows needs a privilege a test runner rarely has.
+    #[cfg(unix)]
+    {
+        let link = allowed.path().join("link");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+        let through_link = link.join("via-symlink");
+        let answer = backup(through_link.to_string_lossy().to_string());
+        assert_eq!(
+            answer["success"], false,
+            "a symlink out of the root was followed: {answer}"
+        );
+        assert!(!elsewhere.path().join("via-symlink").exists());
+    }
+}
+
+/// Scheduled backups run on their own, are kept to `DXMT_BACKUP_KEEP`, and `vectordb restore`
+/// brings one back into a stopped server's data directory.
+#[test]
+fn scheduled_backups_keep_the_newest_and_restore_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wal_dir = tmp.path().join("store");
+    let root = tmp.path().join("backups");
+    std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.display().to_string();
+
+    let server = start_server_with(
+        &wal_dir,
+        &[
+            ("DXMT_BACKUP_ROOT", root_text.as_str()),
+            ("DXMT_BACKUP_INTERVAL_SECS", "1"),
+            ("DXMT_BACKUP_KEEP", "2"),
+        ],
     );
-    assert!(!elsewhere.path().join("via-symlink").exists());
+    seed(server.port);
+    let expected = search_ids(server.port);
+
+    let scheduled = || -> Vec<std::path::PathBuf> {
+        let mut found: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.join("BACKUP.json").is_file()
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("auto-")
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    // Long enough for at least four ticks, so pruning has had to run.
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..40 {
+        let now = scheduled();
+        assert!(now.len() <= 2, "more than DXMT_BACKUP_KEEP kept: {now:?}");
+        seen.extend(now);
+        if seen.len() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        seen.len() >= 4,
+        "only {} scheduled backups were seen",
+        seen.len()
+    );
+    let metrics = curl(server.port, "GET", "/metrics", None)
+        .expect("metrics")
+        .1;
+    assert!(
+        metrics.contains("dxmt_last_backup_timestamp_seconds"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("dxmt_backup_failures_total 0"),
+        "{metrics}"
+    );
+
+    // Change the data after the backups, then stop the server.
+    ok(server.port, "DELETE", &format!("/tables/{TABLE}"), None);
+    drop(server);
+
+    let newest = scheduled().pop().expect("a scheduled backup");
+    let out = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .arg("restore")
+        .arg(&newest)
+        .arg("--wal-dir")
+        .arg(&wal_dir)
+        .output()
+        .expect("run vectordb restore");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "restore failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(TABLE),
+        "the restored table is not listed: {stdout}"
+    );
+    assert!(stdout.contains("previous contents"), "{stdout}");
+
+    let server = start_server_on(&wal_dir);
+    assert_eq!(search_ids(server.port), expected);
 }

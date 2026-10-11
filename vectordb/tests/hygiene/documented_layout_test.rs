@@ -117,8 +117,14 @@ fn nothing_documented_points_at_the_working_directory() {
 /// And the root itself is the user's, not the process's.
 #[test]
 fn the_default_root_is_absolute() {
+    // A home directory as this platform writes one; `/home/someone` is relative on Windows.
+    let home = if cfg!(windows) {
+        r"C:\Users\someone"
+    } else {
+        "/home/someone"
+    };
     let layout = dxmt_vectordb::config::layout::Layout::resolve(|name| match name {
-        "HOME" => Some("/home/someone".to_string()),
+        "HOME" => Some(home.to_string()),
         _ => None,
     });
     assert!(
@@ -126,5 +132,5 @@ fn the_default_root_is_absolute() {
         "{} is not absolute",
         layout.root().display()
     );
-    assert!(layout.store().path.starts_with(Path::new("/home/someone")));
+    assert!(layout.store().path.starts_with(Path::new(home)));
 }

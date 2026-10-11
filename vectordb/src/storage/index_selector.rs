@@ -252,15 +252,6 @@ pub struct HardwareCapabilities {
 pub struct IndexDecision {
     pub selected_algorithm: IndexAlgorithm,
     pub confidence: f32,
-    pub expected_performance: ExpectedPerformance,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExpectedPerformance {
-    pub recall: f32,
-    pub latency_p95_ms: f32,
-    pub throughput_qps: f32,
-    pub memory_usage_mb: usize,
 }
 
 pub struct IntelligentIndexSelector;
@@ -284,12 +275,6 @@ impl IntelligentIndexSelector {
                     enable_parallel: true,
                 },
                 confidence: 0.95,
-                expected_performance: ExpectedPerformance {
-                    recall: 1.0,
-                    latency_p95_ms: 10.0,
-                    throughput_qps: 1000.0,
-                    memory_usage_mb: config.dimension * config.dataset_size * 4 / 1024 / 1024,
-                },
             });
         }
 
@@ -341,9 +326,6 @@ impl IntelligentIndexSelector {
         let codebook_memory_mb = 1;
         let hnswpq_total_memory_mb = pq_codes_memory_mb + graph_memory_mb + codebook_memory_mb;
 
-        let estimated_latency_ms = (config.dataset_size as f32).log2() * 0.5;
-        let estimated_qps = 1000.0 / estimated_latency_ms.max(1.0);
-
         if config.dataset_size >= 1_000_000 && hnsw_total_memory_mb > config.memory_budget_mb {
             info!(
                 "Selecting Enhanced DiskANN: dataset_size={}, HNSW-PQ memory={}MB, budget={}MB",
@@ -360,12 +342,6 @@ impl IntelligentIndexSelector {
                     cache_size,
                 },
                 confidence: 0.88,
-                expected_performance: ExpectedPerformance {
-                    recall: 0.95,
-                    latency_p95_ms: estimated_latency_ms + 5.0,
-                    throughput_qps: estimated_qps * 0.7,
-                    memory_usage_mb: cache_size * config.dimension * 4 / 1024 / 1024,
-                },
             });
         }
 
@@ -386,12 +362,6 @@ impl IntelligentIndexSelector {
                     fast_scan: true,
                 },
                 confidence: 0.90,
-                expected_performance: ExpectedPerformance {
-                    recall: 0.97,
-                    latency_p95_ms: estimated_latency_ms + 1.0,
-                    throughput_qps: estimated_qps * 0.9,
-                    memory_usage_mb: hnswpq_total_memory_mb,
-                },
             });
         }
 
@@ -406,12 +376,6 @@ impl IntelligentIndexSelector {
                 ef_search,
             },
             confidence: 0.92,
-            expected_performance: ExpectedPerformance {
-                recall: 0.98,
-                latency_p95_ms: estimated_latency_ms,
-                throughput_qps: estimated_qps,
-                memory_usage_mb: hnsw_total_memory_mb,
-            },
         })
     }
 }

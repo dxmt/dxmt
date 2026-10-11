@@ -11,6 +11,9 @@
 //! comes back, and that reclaiming it did not disturb a single live row. The second is the
 //! one that would make this feature worse than the bug.
 
+// The disk-measuring test below is Linux-only; its helpers go unused elsewhere.
+#![cfg_attr(not(target_os = "linux"), allow(unused))]
+
 use dxmt_vectordb::{
     config::{MemoryConfig, StorageConfig},
     storage::IntelligentIndexedStorage,
@@ -66,6 +69,7 @@ fn vector_file(wal: &Path) -> PathBuf {
 
 /// Blocks the filesystem is actually holding for `path`. `metadata().len()` is the apparent
 /// length, which a punched file keeps.
+#[cfg(target_os = "linux")]
 fn allocated(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path)
@@ -90,6 +94,8 @@ async fn write_pass(storage: &IntelligentIndexedStorage, pass: usize) {
     }
 }
 
+// Punching holes is Linux-only (`storage::punch`); elsewhere nothing is given back to measure.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn upserts_give_their_disk_back_and_every_live_row_survives() {
     std::env::set_var("DXMT_VECTOR_STORE", "disk");

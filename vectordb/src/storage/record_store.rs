@@ -24,6 +24,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::warn;
 
 /// Ids kept once, in a byte arena, addressed by row; a hash table finds a row by id.
 ///
@@ -286,6 +287,28 @@ impl RowStore {
                 _ => {}
             }
         }
+        // Bytes past the last row the log names belong to a write whose log line never landed:
+        // data is written and synced first, so a crash between the two -- or a backup that
+        // copied the log, then the data file while an append went in -- leaves them. The write
+        // was not acknowledged, so they are not a row. Left in place they were worse than
+        // useless: the next append lands at the true end of the file while its log line places
+        // it at the end of the last named row, and every row from there on decodes another
+        // row's bytes. Found by a backup under writes on Windows, whose slower fsync widens the
+        // window: listed records vanished, and `GET` on others failed.
+        let covered = *ends.last().unwrap();
+        if data_len > covered {
+            warn!(
+                "{}: {} bytes past the last row its log names; cutting them (a write whose \
+                 log line never landed)",
+                path.display(),
+                data_len - covered
+            );
+            // A handle of its own: an append-mode handle may not change the length on Windows.
+            let cut = OpenOptions::new().write(true).open(path)?;
+            cut.set_len(covered)?;
+            cut.sync_all()?;
+        }
+
         // An id re-appended by an update leaves its older rows dead.
         for row in 0..ids.rows() as u32 {
             if ids.row_of(ids.id(row)) != Some(row) {
@@ -571,6 +594,12 @@ impl RowStore {
 
     /// Publish the `created_at` column from a full scan's rows, if nothing has yet and the
     /// scan covered every row the table has now.
+    /// The `created_at` column, if it has been built. For persisting it beside the derived
+    /// indexes at shutdown.
+    pub fn created_column(&self) -> Option<Vec<i64>> {
+        self.created.read().clone()
+    }
+
     pub fn publish_created(&self, created: Vec<i64>) {
         let mut slot = self.created.write();
         if slot.is_none() && created.len() == self.ids.rows() {
@@ -881,6 +910,14 @@ impl RecordStore {
         match self {
             RecordStore::Memory(_) => None,
             RecordStore::Disk(s) => Some(s.decode_range(from, to)),
+        }
+    }
+
+    /// See [`RowStore::created_column`]; nothing for the in-memory map.
+    pub fn created_column(&self) -> Option<Vec<i64>> {
+        match self {
+            RecordStore::Disk(s) => s.created_column(),
+            RecordStore::Memory(_) => None,
         }
     }
 
@@ -1306,6 +1343,34 @@ mod tests {
         seen.sort();
         assert_eq!(seen, vec!["b", "c"]);
         assert!(store.resident_bytes() < 260, "{}", store.resident_bytes());
+    }
+
+    #[test]
+    fn bytes_past_the_last_logged_row_are_cut_and_the_next_append_lands_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.rec");
+        let mut store = RowStore::open(&path).unwrap();
+        store.append(&[(record("a", 1.0), None)]).unwrap();
+        drop(store);
+        // The data half of a write whose log line never landed.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"half of a row nobody logged").unwrap();
+        drop(f);
+
+        let mut store = RowStore::open(&path).unwrap();
+        store
+            .append(&[(record("b", 2.0), None), (record("c", 3.0), None)])
+            .unwrap();
+        for (id, v) in [("a", 1.0), ("b", 2.0), ("c", 3.0)] {
+            let got = store
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} does not decode"));
+            assert_eq!(got.id, id);
+            assert_eq!(got.payload["v"], v);
+        }
+        drop(store);
+        let store = RowStore::open(&path).unwrap();
+        assert_eq!(store.get("c").unwrap().id, "c", "and again after a reopen");
     }
 
     #[test]

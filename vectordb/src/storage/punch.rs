@@ -139,6 +139,7 @@ pub fn coalesce(mut ranges: Vec<DeadRange>) -> Vec<DeadRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::io::{Read, Seek, SeekFrom, Write};
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::MetadataExt;

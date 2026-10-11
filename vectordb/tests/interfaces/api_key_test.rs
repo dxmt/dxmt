@@ -12,6 +12,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -76,28 +79,7 @@ fn status(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> Opti
 }
 
 fn call(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> Option<(u16, String)> {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .arg("-o")
-        .arg("/dev/stdout")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    for (name, value) in headers {
-        command.arg("-H").arg(format!("{name}: {value}"));
-    }
-    let out = command.output().expect("curl is required for this test");
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n')?;
-    Some((code.trim().parse().ok()?, body.to_string()))
+    http::call(port, method, path, headers, None)
 }
 
 const KEY: &str = "a-test-key-1234";
@@ -298,28 +280,16 @@ fn header_value(
     headers: &[(&str, &str)],
     wanted: &str,
 ) -> Option<String> {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .arg("-D")
-        .arg("-")
-        .arg("-o")
-        .arg("/dev/null")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    for (name, value) in headers {
-        command.arg("-H").arg(format!("{name}: {value}"));
-    }
-    let out = command.output().expect("curl is required for this test");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            (name.trim().eq_ignore_ascii_case(wanted)).then(|| value.trim().to_string())
-        })
+    http::request(
+        port,
+        method,
+        path,
+        headers,
+        None,
+        std::time::Duration::from_secs(30),
+    )?
+    .header(wanted)
+    .map(str::to_string)
 }
 
 /// A 401 says how to retry. Without it a browser prompt has nothing to show and a client has

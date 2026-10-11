@@ -88,7 +88,17 @@ impl Layout {
 
         let (root, root_explicit, root_note) = match value("DXMT_ROOT_DIR") {
             Some(root) => (root, true, None),
-            None => match value("HOME") {
+            // Windows sets USERPROFILE and usually not HOME (Git Bash and OpenSSH add it, a
+            // plain PowerShell does not), so without the second a Windows server put its data
+            // in the working directory and opened a different, empty store wherever it was
+            // started from.
+            None => match value("HOME").or_else(|| {
+                if cfg!(windows) {
+                    value("USERPROFILE")
+                } else {
+                    None
+                }
+            }) {
                 Some(home) => (home.join(ROOT_UNDER_HOME), false, None),
                 // `/nonexistent` under systemd's `DynamicUser=`, `/` in some images. Falling
                 // back to the working directory keeps the server usable and says why that is a
@@ -430,6 +440,7 @@ mod tests {
     /// one has nothing to observe there (as in a container's default user, or the Dockerfile's
     /// `test` stage). Asked of the directory rather than inferred from the uid, so it also
     /// covers CAP_DAC_OVERRIDE and filesystems that ignore the bits.
+    #[cfg(unix)]
     fn permissions_bind(readonly: &Path) -> bool {
         let probe = readonly.join(".probe");
         match std::fs::File::create(&probe) {
@@ -447,6 +458,8 @@ mod tests {
     /// `create_dir_all` failing and a directory that exists but will not take a file are
     /// different problems with different fixes, and the second is the one a permissions check
     /// that only creates would miss entirely.
+    // Permission bits are how this makes a directory unwritable; Windows has ACLs instead.
+    #[cfg(unix)]
     #[test]
     fn prepare_refuses_what_it_cannot_create_and_what_it_cannot_write() {
         use std::os::unix::fs::PermissionsExt;
@@ -488,6 +501,8 @@ mod tests {
     }
 
     /// The message has to say which variable moves the thing that failed, not just the root.
+    // Permission bits are how this makes a directory unwritable; Windows has ACLs instead.
+    #[cfg(unix)]
     #[test]
     fn a_child_that_fails_names_its_own_variable() {
         use std::os::unix::fs::PermissionsExt;
@@ -516,6 +531,13 @@ mod tests {
         );
 
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_without_home_uses_the_user_profile() {
+        let layout = layout(&[("USERPROFILE", r"C:\Users\someone")]);
+        assert_eq!(layout.root(), Path::new(r"C:\Users\someone\.dxmt"));
     }
 
     /// The real environment still reaches the same place — `from_env` is the only caller that

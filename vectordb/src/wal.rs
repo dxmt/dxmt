@@ -112,6 +112,9 @@ pub struct WalManager {
     /// depending on filesystem permissions or filling the host disk.
     #[cfg(feature = "test-failpoints")]
     fail_next_sync: bool,
+    /// Write half of the next flush and then fail, as a full disk does.
+    #[cfg(feature = "test-failpoints")]
+    tear_next_write: bool,
 }
 
 impl WalManager {
@@ -139,6 +142,8 @@ impl WalManager {
             compression_level,
             #[cfg(feature = "test-failpoints")]
             fail_next_sync: false,
+            #[cfg(feature = "test-failpoints")]
+            tear_next_write: false,
         };
 
         manager.open_current_file()?;
@@ -151,9 +156,6 @@ impl WalManager {
 
     /// Write an entry to the WAL (using MessagePack + optional compression + batch flush)
     pub fn write_entry(&mut self, entry: WalEntry) -> Result<u64> {
-        let seq = self.sequence_number;
-        self.sequence_number += 1;
-
         // Serialize using MessagePack (supports dynamic types like serde_json::Value)
         let entry_bytes =
             rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -163,8 +165,14 @@ impl WalManager {
             zstd::encode_all(&entry_bytes[..], self.compression_level)
                 .map_err(|e| Error::Serialization(format!("Compression failed: {}", e)))?
         } else {
-            entry_bytes.clone()
+            entry_bytes
         };
+
+        // Numbered only once there is a frame to number. Recovery refuses a log that starts
+        // after the snapshot's replay point, so a number spent on an entry that never reached
+        // the file would read as lost writes.
+        let seq = self.sequence_number;
+        self.sequence_number += 1;
 
         // Write format: [seq: u64][compressed_flag: u8][len: u32][data: bytes]
         // Append to buffer instead of immediate write
@@ -185,12 +193,10 @@ impl WalManager {
 
     /// Write multiple entries in a batch (optimized for high throughput + compression)
     pub fn write_entries_batch(&mut self, entries: Vec<WalEntry>) -> Result<Vec<u64>> {
-        let mut seq_numbers = Vec::with_capacity(entries.len());
-
+        // Every entry is encoded before any is numbered or buffered, for the reason given in
+        // `write_entry`: a failure halfway through must not leave numbers without frames.
+        let mut encoded = Vec::with_capacity(entries.len());
         for entry in entries {
-            let seq = self.sequence_number;
-            self.sequence_number += 1;
-
             // Serialize using MessagePack
             let entry_bytes =
                 rmp_serde::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -202,6 +208,13 @@ impl WalManager {
             } else {
                 entry_bytes
             };
+            encoded.push(compressed);
+        }
+
+        let mut seq_numbers = Vec::with_capacity(encoded.len());
+        for compressed in encoded {
+            let seq = self.sequence_number;
+            self.sequence_number += 1;
 
             // Append to buffer
             self.write_buffer.extend_from_slice(&seq.to_le_bytes());
@@ -232,6 +245,13 @@ impl WalManager {
         // a failed `sync_data`.
         let pending = std::mem::take(&mut self.write_buffer);
         if let Some(ref mut file) = self.current_file {
+            #[cfg(feature = "test-failpoints")]
+            if self.tear_next_write {
+                self.tear_next_write = false;
+                file.write_all(&pending[..pending.len() / 2])
+                    .map_err(Error::Io)?;
+                return Err(Error::Io(std::io::Error::other("injected torn WAL write")));
+            }
             file.write_all(&pending).map_err(Error::Io)?;
             #[cfg(feature = "test-failpoints")]
             if self.fail_next_sync {
@@ -259,6 +279,12 @@ impl WalManager {
     #[cfg(feature = "test-failpoints")]
     pub fn fail_next_sync_for_test(&mut self) {
         self.fail_next_sync = true;
+    }
+
+    /// Inject one torn write: half the pending bytes reach the file, then the flush fails.
+    #[cfg(feature = "test-failpoints")]
+    pub fn tear_next_write_for_test(&mut self) {
+        self.tear_next_write = true;
     }
 
     /// Sequence number the next entry will get.

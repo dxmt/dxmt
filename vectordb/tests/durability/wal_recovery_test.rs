@@ -2866,3 +2866,276 @@ async fn a_filtered_list_keeps_its_order_across_a_crash() {
         "the filtered list is in replay order, not write order"
     );
 }
+
+/// How a local WAL write failed: the bytes reached the file and the fsync failed, or only half
+/// of the frame reached it (a full disk).
+#[cfg(feature = "test-failpoints")]
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    Sync,
+    Torn,
+}
+
+/// The write that was in flight when the WAL failed.
+#[cfg(feature = "test-failpoints")]
+#[derive(Clone, Copy, Debug)]
+enum InFlight {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[cfg(feature = "test-failpoints")]
+const KEPT: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+#[cfg(feature = "test-failpoints")]
+const ORIGINAL: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+#[cfg(feature = "test-failpoints")]
+const CHANGED: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+#[cfg(feature = "test-failpoints")]
+const FRESH: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
+
+/// The ids an exact and an ordinary search put at distance zero from `v`. Euclidean, whose
+/// score is `1 / (1 + distance)`, so a stored copy of `v` scores exactly 1 and nothing else
+/// does.
+#[cfg(feature = "test-failpoints")]
+async fn at(storage: &IntelligentIndexedStorage, v: [f32; 4]) -> (Vec<String>, Vec<String>) {
+    use dxmt_vectordb::types::record::SearchMode;
+    let mut out = Vec::new();
+    for mode in [SearchMode::Exact, SearchMode::Normal] {
+        let hits = storage
+            .search(
+                "t",
+                SearchQuery {
+                    vector: v.to_vec(),
+                    top_k: 10,
+                    limit: 10,
+                    search_mode: mode,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .hits;
+        let mut ids: Vec<String> = hits
+            .into_iter()
+            .filter(|h| (h.score - 1.0).abs() < 1e-6)
+            .map(|h| h.id)
+            .collect();
+        ids.sort();
+        out.push(ids);
+    }
+    let normal = out.pop().unwrap();
+    (out.pop().unwrap(), normal)
+}
+
+/// After a restart, the store agrees with itself and with what was acknowledged.
+///
+/// The write that failed was not acknowledged and the contract does not say whether it
+/// survives -- its row may be on disk though its log entry is not, or the reverse. What it
+/// does say is that the answer is one answer: `GET`, the exact scan and the graph all hold the
+/// write or all do not. Everything acknowledged before it is there; the write refused once the
+/// store was read-only is not.
+#[cfg(feature = "test-failpoints")]
+async fn assert_consistent(storage: &IntelligentIndexedStorage, op: InFlight, label: &str) {
+    let get = |id: &'static str| async move { storage.get_record("t", &id.to_string()).await };
+
+    assert_eq!(get("kept").await.unwrap().vector, KEPT.to_vec(), "{label}");
+    assert_eq!(
+        at(storage, KEPT).await,
+        (vec!["kept".into()], vec!["kept".into()]),
+        "{label}"
+    );
+    assert!(
+        get("refused").await.is_err(),
+        "{label}: a refused write came back"
+    );
+
+    match op {
+        InFlight::Insert => {
+            let held = get("fresh").await.is_ok();
+            let expect: Vec<String> = if held { vec!["fresh".into()] } else { vec![] };
+            assert_eq!(
+                at(storage, FRESH).await,
+                (expect.clone(), expect),
+                "{label}: GET says {held} and the searches disagree"
+            );
+        }
+        InFlight::Update => {
+            let vector = get("a")
+                .await
+                .expect("an update cannot remove a record")
+                .vector;
+            let (now, other) = if vector == CHANGED.to_vec() {
+                (CHANGED, ORIGINAL)
+            } else {
+                assert_eq!(
+                    vector,
+                    ORIGINAL.to_vec(),
+                    "{label}: a vector neither write wrote"
+                );
+                (ORIGINAL, CHANGED)
+            };
+            assert_eq!(
+                at(storage, now).await,
+                (vec!["a".into()], vec!["a".into()]),
+                "{label}: GET returns {now:?} and the searches do not find it there"
+            );
+            assert_eq!(
+                at(storage, other).await,
+                (vec![], vec![]),
+                "{label}: GET returns {now:?} and a search finds the record at {other:?}"
+            );
+        }
+        InFlight::Delete => {
+            let held = get("a").await.is_ok();
+            let expect: Vec<String> = if held { vec!["a".into()] } else { vec![] };
+            assert_eq!(
+                at(storage, ORIGINAL).await,
+                (expect.clone(), expect),
+                "{label}: GET says {held} and the searches disagree"
+            );
+        }
+    }
+
+    let stored = storage.list_tables().await.unwrap()[0].record_count;
+    assert_eq!(
+        storage.get_index_record_count("t").await.unwrap() as u64,
+        stored,
+        "{label}: the index and the rows hold different numbers of records"
+    );
+}
+
+#[cfg(feature = "test-failpoints")]
+async fn a_failed_write_then_restart(fault: Fault, op: InFlight, snapshot_first: bool) {
+    let label = format!("{fault:?} during {op:?}, snapshot first: {snapshot_first}");
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+
+    {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("kept", KEPT.to_vec()),
+                    record("a", ORIGINAL.to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        // With a snapshot in between, the graph that comes back is the snapshot's rather than
+        // one rebuilt from the log -- the case where a lost update left the old vector in it.
+        if snapshot_first {
+            storage.snapshot().await.unwrap();
+        }
+
+        match fault {
+            Fault::Sync => storage.fail_next_wal_sync_for_test().unwrap(),
+            Fault::Torn => storage.tear_next_wal_write_for_test().unwrap(),
+        }
+        let failed = match op {
+            InFlight::Insert => storage
+                .insert_records("t", vec![record("fresh", FRESH.to_vec())])
+                .await
+                .map(|_| ()),
+            InFlight::Update => storage
+                .update_record("t", &"a".to_string(), record("a", CHANGED.to_vec()))
+                .await
+                .map(|_| ()),
+            InFlight::Delete => storage
+                .delete_records("t", vec!["a".to_string()])
+                .await
+                .map(|_| ()),
+        };
+        assert_eq!(
+            failed.expect_err(&label).status_code(),
+            503,
+            "{label}: the failed write must not be acknowledged"
+        );
+        assert!(storage
+            .insert_records("t", vec![record("refused", vec![0.5, 0.5, 0.0, 0.0])])
+            .await
+            .is_err());
+    }
+
+    let first = open(&wal_dir).await;
+    assert_consistent(&first, op, &format!("{label}, first restart")).await;
+
+    // Writable again, and what it writes now survives the next restart: the sequence numbers
+    // after a failed frame do not collide with it.
+    first
+        .insert_records("t", vec![record("after", vec![0.0, 0.5, 0.5, 0.0])])
+        .await
+        .unwrap();
+    let held_before = first.list_tables().await.unwrap()[0].record_count;
+    drop(first);
+
+    let second = open(&wal_dir).await;
+    assert_consistent(&second, op, &format!("{label}, second restart")).await;
+    assert!(
+        second.get_record("t", &"after".to_string()).await.is_ok(),
+        "{label}"
+    );
+    assert_eq!(
+        second.list_tables().await.unwrap()[0].record_count,
+        held_before,
+        "{label}: the second restart changed its mind about the failed write"
+    );
+}
+
+#[cfg(feature = "test-failpoints")]
+#[tokio::test]
+async fn a_write_whose_fsync_failed_is_all_there_or_all_gone_after_restart() {
+    for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
+        a_failed_write_then_restart(Fault::Sync, op, false).await;
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+#[tokio::test]
+async fn a_write_torn_by_a_full_disk_is_all_there_or_all_gone_after_restart() {
+    for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
+        a_failed_write_then_restart(Fault::Torn, op, false).await;
+    }
+}
+
+#[cfg(feature = "test-failpoints")]
+#[tokio::test]
+async fn a_failed_write_after_a_snapshot_is_all_there_or_all_gone_after_restart() {
+    for fault in [Fault::Sync, Fault::Torn] {
+        for op in [InFlight::Insert, InFlight::Update, InFlight::Delete] {
+            a_failed_write_then_restart(fault, op, true).await;
+        }
+    }
+}
+
+/// A second instance over a directory that is already open is refused, and the directory is
+/// free again once the first is gone. Two writers to one log corrupt it; nothing stopped a
+/// second `serve`, or `vectordb mcp` beside a running server, from opening it.
+#[tokio::test]
+async fn a_store_cannot_be_opened_twice_at_once() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let first = open(&wal_dir).await;
+    first
+        .create_table(table("t", 2, DistanceMetric::Cosine))
+        .await
+        .unwrap();
+
+    let err = IntelligentIndexedStorage::new_with_wal(&storage_config(), Some(wal_dir.clone()))
+        .await
+        .err()
+        .expect("a second instance opened a store already in use");
+    assert!(
+        err.to_string().contains("in use by another process"),
+        "{err}"
+    );
+
+    drop(first);
+    let again = open(&wal_dir).await;
+    assert_eq!(again.list_tables().await.unwrap().len(), 1);
+}

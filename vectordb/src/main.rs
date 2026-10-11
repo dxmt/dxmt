@@ -8,7 +8,7 @@ use tracing::{info, warn};
 /// per record while the structs account for about 6.8 KB, and constraining it with
 /// MALLOC_ARENA_MAX=2 brought that to 11,450 at the cost of 31% of insert throughput. The
 /// gap is per-arena free lists that never get reused, not anything the database is storing.
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(windows)))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -18,7 +18,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// same 1M load: 8.5 KB per record after a 3,000-query burst instead of 11.5 KB, and the
 /// same throughput. jemalloc reads this symbol before `main` runs; it replaces the
 /// `_RJEM_MALLOC_CONF` environment variable, which an operator would otherwise have to know.
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(windows)))]
 #[allow(non_upper_case_globals)]
 #[export_name = "_rjem_malloc_conf"]
 pub static malloc_conf: &[u8] = b"background_thread:true\0";
@@ -93,6 +93,20 @@ enum Commands {
         /// Directory for the write-ahead log; empty disables persistence
         #[arg(long)]
         wal_dir: Option<String>,
+    },
+
+    /// Restore a backup into the data directory, with the server stopped.
+    ///
+    /// The backup is checked against its manifest first; whatever the data directory held is
+    /// moved into a sibling directory rather than deleted; the restored store is opened once
+    /// to prove it recovers, and its tables are listed.
+    Restore {
+        /// A directory written by `POST /api/v1/backup` or a scheduled backup
+        backup: std::path::PathBuf,
+        /// The data directory to restore into; defaults to the one `serve` would open
+        /// (`DXMT_WAL_DIR`, else `$DXMT_ROOT_DIR/store`)
+        #[arg(long)]
+        wal_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -311,7 +325,30 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                         Ok(tables) => info!("Shutdown snapshot written for {} table(s)", tables),
                         Err(e) => tracing::warn!("Shutdown snapshot failed: {}", e),
                     }
+                    // And the payload and sparse indexes, so the next start reads them instead
+                    // of rebuilding them -- 23-27 s of every core at 10M rows.
+                    if let Err(e) = storage.persist_derived().await {
+                        tracing::warn!("Derived indexes not persisted: {}", e);
+                    }
                 }
+            }
+        }
+
+        Commands::Restore { backup, wal_dir } => {
+            let Some(store) = wal_dir.or_else(dxmt_vectordb::api::server::wal_dir_from_env) else {
+                return Err(dxmt_vectordb::Error::InvalidConfig(
+                    "no data directory to restore into: DXMT_WAL_DIR is empty; pass --wal-dir"
+                        .to_string(),
+                ));
+            };
+            let report =
+                IntelligentIndexedStorage::restore_backup(&config.storage, &backup, &store).await?;
+            println!("Restored {} into {}", backup.display(), store.display());
+            if let Some(aside) = &report.moved_aside {
+                println!("The previous contents are in {}", aside.display());
+            }
+            for (table, records) in &report.tables {
+                println!("  {table}: {records} records");
             }
         }
 
@@ -347,7 +384,7 @@ mod tests {
     fn serve_takes_its_address_from_the_environment_unless_a_flag_says_otherwise() {
         let address = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
             Commands::Serve { host, port, .. } => (host, port),
-            Commands::Mcp { .. } => unreachable!(),
+            Commands::Mcp { .. } | Commands::Restore { .. } => unreachable!(),
         };
         std::env::set_var("DXMT_HOST", "127.0.0.1");
         std::env::set_var("DXMT_PORT", "19876");

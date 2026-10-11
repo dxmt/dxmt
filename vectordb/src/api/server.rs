@@ -153,6 +153,71 @@ fn snapshot_interval_from_env() -> u64 {
         .unwrap_or(300)
 }
 
+/// Scheduled backup interval in seconds; 0, the default, disables.
+///
+/// Off by default because each backup is a full copy of the store: on by default, a server
+/// would quietly use several times its data's disk space. `DXMT_BACKUP_KEEP` bounds how many
+/// it keeps (default 7).
+fn backup_schedule_from_env() -> (u64, usize) {
+    let interval = crate::config::env::var("DXMT_BACKUP_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let keep = crate::config::env::var("DXMT_BACKUP_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&keep: &usize| keep > 0)
+        .unwrap_or(7);
+    (interval, keep)
+}
+
+/// Back the store up on a timer into `{DXMT_BACKUP_ROOT}/auto-<UTC time>`, keeping the newest
+/// `keep`. A failure is logged and counted (`dxmt_backup_failures_total`) and the next tick
+/// tries again; it never stops the server.
+fn spawn_periodic_backups(storage: Arc<IntelligentIndexedStorage>, interval: u64, keep: usize) {
+    if interval == 0 {
+        return;
+    }
+    let Some(root) = storage.backup_root_dir() else {
+        tracing::warn!(
+            "DXMT_BACKUP_INTERVAL_SECS is set but there is no data directory to back up"
+        );
+        return;
+    };
+    tracing::info!(
+        "Scheduled backups every {}s into {}, keeping {}",
+        interval,
+        root.display(),
+        keep
+    );
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let dest = root.join(format!(
+                "{}{}",
+                crate::storage::intelligent_indexed_storage::SCHEDULED_BACKUP_PREFIX,
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            ));
+            match storage.backup_to(&dest).await {
+                Ok(_) => {
+                    tracing::info!("Scheduled backup written to {}", dest.display());
+                    match IntelligentIndexedStorage::prune_scheduled_backups(&root, keep) {
+                        Ok(removed) => {
+                            for path in removed {
+                                tracing::info!("Removed old scheduled backup {}", path.display());
+                            }
+                        }
+                        Err(e) => tracing::warn!("Pruning scheduled backups failed: {}", e),
+                    }
+                }
+                Err(e) => tracing::warn!("Scheduled backup to {} failed: {}", dest.display(), e),
+            }
+        }
+    });
+}
+
 /// Eviction sweep interval in seconds; 0 disables. Default 600.
 fn eviction_interval_from_env() -> u64 {
     crate::config::env::var("DXMT_EVICTION_INTERVAL_SECS")
@@ -620,6 +685,8 @@ pub async fn create_app_with_storage(
     let app = app.with_state(base_state);
 
     spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+    let (backup_interval, backup_keep) = backup_schedule_from_env();
+    spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
     spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
     spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
     IntelligentIndexedStorage::spawn_derived_warmup(storage.clone());

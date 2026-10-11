@@ -22,9 +22,39 @@ use tracing::{debug, error, info, warn};
 static MAX_TABLE_LOCK_HOLD_MICROS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-fn record_lock_hold(held: std::time::Duration) {
+const LOCK_READ: usize = 0;
+const LOCK_WRITE: usize = 1;
+/// Cumulative nanoseconds spent waiting for, and holding, the table map's lock, and how often
+/// it was taken -- `[read, write]`. The log names a single hold that lasted a second; these say
+/// how much of the server's time the lock is costing overall, which is what a latency graph
+/// that climbs without any one slow request needs.
+static TABLE_LOCK_WAIT_NS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static TABLE_LOCK_HOLD_NS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+static TABLE_LOCK_ACQUIRED: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+/// Holds of a second or more: the ones the log warns about.
+static TABLE_LOCK_SLOW_HOLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn record_lock_hold(held: std::time::Duration, mode: usize) {
     let micros = held.as_micros() as u64;
     MAX_TABLE_LOCK_HOLD_MICROS.fetch_max(micros, Ordering::Relaxed);
+    TABLE_LOCK_HOLD_NS[mode].fetch_add(held.as_nanos() as u64, Ordering::Relaxed);
+    if held >= std::time::Duration::from_secs(1) {
+        TABLE_LOCK_SLOW_HOLDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_lock_wait(waited: std::time::Duration, mode: usize) {
+    TABLE_LOCK_WAIT_NS[mode].fetch_add(waited.as_nanos() as u64, Ordering::Relaxed);
+    TABLE_LOCK_ACQUIRED[mode].fetch_add(1, Ordering::Relaxed);
 }
 
 /// Longest single hold of the table map's lock since [`reset_max_table_lock_hold`].
@@ -90,7 +120,7 @@ impl std::ops::Deref for TimedRead<'_> {
 impl Drop for TimedRead<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
-        record_lock_hold(held);
+        record_lock_hold(held, LOCK_READ);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table read lock for {:.1}s; anything that wanted to write queued \
@@ -105,7 +135,7 @@ impl Drop for TimedRead<'_> {
 impl Drop for TimedWrite<'_> {
     fn drop(&mut self) {
         let held = self.since.elapsed();
-        record_lock_hold(held);
+        record_lock_hold(held, LOCK_WRITE);
         if held >= std::time::Duration::from_secs(1) {
             warn!(
                 "{} held the table write lock for {:.1}s; every read and write on every table \
@@ -118,8 +148,8 @@ impl Drop for TimedWrite<'_> {
 }
 
 pub use crate::storage::index_selector::{
-    CostConstraints, ExpectedPerformance, HardwareCapabilities, IndexAlgorithm, IndexConfig,
-    IndexDecision, IntelligentIndexSelector, PerformanceRequirements,
+    CostConstraints, HardwareCapabilities, IndexAlgorithm, IndexConfig, IndexDecision,
+    IntelligentIndexSelector, PerformanceRequirements,
 };
 
 use crate::config::StorageConfig;
@@ -226,6 +256,10 @@ pub struct StorageHealthSnapshot {
     pub last_wal_sync_at: Option<String>,
     /// RFC3339 timestamp of the most recent successfully installed snapshot.
     pub last_snapshot_at: Option<String>,
+    /// When the last backup -- manual or scheduled -- finished writing, RFC 3339.
+    pub last_backup_at: Option<String>,
+    /// Backups that failed since process start.
+    pub backup_failures: u64,
     /// Number of snapshot attempts that failed since process start.
     pub snapshot_failures: u64,
     /// Most recent snapshot failure, if any. A failed snapshot does not make the WAL unreadable;
@@ -233,6 +267,34 @@ pub struct StorageHealthSnapshot {
     pub last_snapshot_error: Option<String>,
     /// Which branch answered each filtered search. See [`FilterPathCounts`].
     pub filter_paths: FilterPathCounts,
+    /// Where time goes outside a request: the table lock, rebuilds, recovery, snapshots.
+    pub timings: OperationTimings,
+}
+
+/// Cumulative timings for the work that does not show up as a slow request of its own but
+/// makes every request slower: waiting on the table map's lock, index rebuilds, and the two
+/// numbers an operator needs after a restart -- how long recovery took and how much log it
+/// replayed. Lock figures are process-wide (see `TABLE_LOCK_WAIT_NS`); the rest are this
+/// instance's. Nanoseconds; `/metrics` reports seconds.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperationTimings {
+    pub table_lock_read_wait_ns: u64,
+    pub table_lock_write_wait_ns: u64,
+    pub table_lock_read_hold_ns: u64,
+    pub table_lock_write_hold_ns: u64,
+    pub table_lock_reads: u64,
+    pub table_lock_writes: u64,
+    /// Holds of a second or more.
+    pub table_lock_slow_holds: u64,
+    pub index_rebuilds: u64,
+    pub index_rebuild_ns: u64,
+    /// The part of the rebuilds spent waiting for the write lock to swap the new index in.
+    pub index_rebuild_swap_wait_ns: u64,
+    /// The last recovery at startup, when this instance opened a WAL directory.
+    pub last_recovery_ns: Option<u64>,
+    pub last_recovery_wal_entries: Option<u64>,
+    /// The last snapshot that succeeded.
+    pub last_snapshot_ns: Option<u64>,
 }
 
 /// 单表快照。索引在同名 `.idx` 文件里；`has_index` 为 false 表示该索引类型没有磁盘格式
@@ -249,6 +311,8 @@ struct TableSnapshot {
     /// second 90 GB of them in memory first (design doc section 34.3).
     records: Vec<Arc<Record>>,
     has_index: bool,
+    /// See [`SnapshotHead::indexed_below`].
+    indexed_below: Option<u64>,
 }
 
 /// What a `tN.meta` file holds, and why it is in two halves.
@@ -278,6 +342,50 @@ struct SnapshotHead {
     table: Table,
     algorithm: IndexAlgorithm,
     has_index: bool,
+    /// For a table with a row file: every row below this had reached the graph this snapshot
+    /// holds (`VectorFile::indexed_below`, read just before the graph was written). Recovery
+    /// re-checks the rows at or above it. Absent in snapshots written before 2026-10-09, and
+    /// for tables without a row file.
+    #[serde(default)]
+    indexed_below: Option<u64>,
+}
+
+/// Record entries of one table waiting to be replayed together: the table, each record with
+/// the row its entry names, and the sequence number of the first.
+type ReplayRun = (String, Vec<(Record, Option<u64>)>, u64);
+
+/// The derived indexes of one table as a clean shutdown leaves them, with what the record
+/// store looked like at that moment. Read once at the next start and deleted.
+const DERIVED_FILE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize)]
+struct PersistedDerivedOut<'a> {
+    version: u32,
+    rows: u32,
+    live: usize,
+    created: Option<Vec<i64>>,
+    derived: &'a DerivedIndexes,
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedDerivedIn {
+    version: u32,
+    rows: u32,
+    live: usize,
+    created: Option<Vec<i64>>,
+    derived: DerivedIndexes,
+}
+
+/// The name every scheduled backup starts with, so pruning touches only those.
+pub const SCHEDULED_BACKUP_PREFIX: &str = "auto-";
+
+/// What [`IntelligentIndexedStorage::restore_backup`] did.
+#[derive(Debug)]
+pub struct RestoreReport {
+    /// Where the store's previous contents went, if it had any.
+    pub moved_aside: Option<PathBuf>,
+    /// Every table the restored store opened with, and its record count.
+    pub tables: Vec<(String, u64)>,
 }
 
 /// The current meta layout: a MessagePack head, then bincode records.
@@ -312,6 +420,7 @@ fn read_snapshot_head(path: &std::path::Path) -> crate::Result<SnapshotHead> {
                 algorithm: old.algorithm.into(),
                 // Not read, and the one caller that wants it re-reads the whole file.
                 has_index: false,
+                indexed_below: None,
             })
         }
         other => Err(crate::Error::Serialization(format!(
@@ -334,6 +443,7 @@ fn read_snapshot_meta(path: &std::path::Path) -> crate::Result<TableSnapshot> {
                 algorithm: head.algorithm,
                 records: file.records,
                 has_index: head.has_index,
+                indexed_below: head.indexed_below,
             })
         }
         SNAPSHOT_KIND_V1 => {
@@ -344,6 +454,7 @@ fn read_snapshot_meta(path: &std::path::Path) -> crate::Result<TableSnapshot> {
                 algorithm: old.algorithm.into(),
                 records: old.records,
                 has_index: old.has_index,
+                indexed_below: None,
             })
         }
         other => Err(crate::Error::Serialization(format!(
@@ -462,6 +573,8 @@ struct TableTemplate {
     /// no records would give it an empty table. Read from the row file rather than copied
     /// out of memory, so this is the slow snapshot again -- only in that configuration.
     mirrored_rows: Option<MirroredRows>,
+    /// For `VectorFile::indexed_below`, read just before the graph is written.
+    vector_file: Option<Arc<crate::storage::vector_file::VectorFile>>,
 }
 
 /// A disk table's rows as a mirrored snapshot copies them out: the vector file, and each
@@ -493,6 +606,8 @@ struct UpdateArtifacts {
     vector: Vec<f32>,
     /// The row-file row the vector was appended to, when the table has a row file.
     vector_row: Option<u64>,
+    /// Open from before the append until this is dropped, after the graph update.
+    _unindexed: Option<crate::storage::vector_file::UnindexedRows>,
     #[cfg(feature = "text-bm25")]
     full_text_engine: Option<Arc<FullTextSearchEngine>>,
 }
@@ -644,6 +759,36 @@ pub struct IntelligentIndexedStorage {
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
 
+    /// See [`OperationTimings`].
+    index_rebuilds: AtomicU64,
+    index_rebuild_ns: AtomicU64,
+    index_rebuild_swap_wait_ns: AtomicU64,
+    /// `(nanoseconds, WAL entries replayed)` for the recovery this instance did at open.
+    last_recovery: StdMutex<Option<(u64, u64)>>,
+    last_snapshot_ns: StdMutex<Option<u64>>,
+
+    /// `{wal_dir}/LOCK`, held exclusively for as long as this instance lives. Nothing stopped a
+    /// second process -- a second `serve` on another port, `vectordb mcp` beside a running
+    /// server, an embedded client starting its own -- from opening the same directory, and two
+    /// processes appending to one WAL and one set of row files corrupt both.
+    _dir_lock: Option<std::fs::File>,
+
+    /// Recovery only, emptied when it ends. Each table the snapshot restored, with the row
+    /// below which its graph was known to be current (`None`: a snapshot from before that was
+    /// recorded); and for each table, the row each replayed record was indexed from.
+    recovery_floors: StdMutex<HashMap<String, Option<u64>>>,
+    replayed_rows: StdMutex<HashMap<String, HashMap<RecordId, u64>>>,
+
+    /// Test-only: `backup_to` stops between its snapshot and its copy, says so on the first
+    /// channel and waits on the second. See `pause_next_backup_for_test`.
+    #[cfg(feature = "test-failpoints")]
+    backup_pause: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+
     /// 对象存储上 WAL 的清单，常驻内存，每次变更后回写。
     wal_manifest: Arc<StdMutex<WalManifest>>,
 
@@ -667,6 +812,8 @@ pub struct IntelligentIndexedStorage {
     /// of truth.
     last_wal_sync_at: Arc<StdMutex<Option<String>>>,
     last_snapshot_at: Arc<StdMutex<Option<String>>>,
+    last_backup_at: StdMutex<Option<String>>,
+    backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
     /// and one `.meta` file per evicted table — off disk on every call.
@@ -745,7 +892,7 @@ type NamedVectors = Vec<(String, Vec<(RecordId, Vec<f32>)>)>;
 ///
 /// Writes do not build it. An insert into a table whose indexes are not built leaves them not
 /// built, because a later build reads the records the insert just landed. Only a read forces it.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct DerivedIndexes {
     payload: crate::storage::payload_index::PayloadIndex,
     sparse: SparseIndex,
@@ -800,6 +947,12 @@ struct IntelligentTableData {
     /// The two indexes that are a pure function of the records, and are rebuilt rather than
     /// restored. `None` means "not built yet" -- see [`IntelligentTableData::derived`].
     derived: parking_lot::RwLock<Option<DerivedIndexes>>,
+    /// While `derived` is being built outside the map lock: every id a write touched, with
+    /// the payload it held before the first such write (`None`: it did not exist yet). The
+    /// build catches these up before installing; see [`IntelligentIndexedStorage::warm_derived`].
+    derived_changes: parking_lot::Mutex<Option<HashMap<RecordId, Option<serde_json::Value>>>>,
+    /// One build of `derived` at a time; a second caller waits and finds it built.
+    derived_build: Arc<tokio::sync::Mutex<()>>,
     /// Payload ordinals against the graph's node positions, filled lazily by filtered
     /// searches; see `storage::node_map`. Behind its own lock because it is written by the
     /// first search to meet new nodes while the table map is only read.
@@ -979,6 +1132,17 @@ impl IntelligentTableData {
             None => store.for_each(|record| index(&record)),
         }
         records
+    }
+
+    /// A write that found `derived` unbuilt: if a build is running, note the id and the
+    /// payload it held before (the first time only -- that is the payload the build may have
+    /// indexed), so the build can catch it up.
+    fn note_unindexed_change(&self, id: &str, before: Option<&serde_json::Value>) {
+        if let Some(changes) = self.derived_changes.lock().as_mut() {
+            changes
+                .entry(id.to_string())
+                .or_insert_with(|| before.cloned());
+        }
     }
 
     fn derived_mut(&self) -> parking_lot::MappedRwLockWriteGuard<'_, Option<DerivedIndexes>> {
@@ -1415,6 +1579,9 @@ async fn process_insert_group(
             (t.vector_file.clone(), t.table.dimension)
         };
         let mut appended_rows: Vec<Vec<Option<u64>>> = Vec::new();
+        // Held until the graph has this group (the end of this function): a snapshot taken in
+        // between must not claim these rows are in the graph it serializes.
+        let _unindexed = vector_file.as_ref().map(|file| file.begin_unindexed());
         let stage = std::time::Instant::now();
         if let Some(file) = &vector_file {
             // A record whose vector is already in the file (replay of an entry that points
@@ -1575,6 +1742,8 @@ async fn process_insert_group(
                                 crate::storage::payload_index::created_key(&record.created_at),
                             );
                         }
+                    } else {
+                        table_data.note_unindexed_change(&record_id, old_payload.as_ref());
                     }
                     // The caller gets the record as sent; the map keeps it without the
                     // vector when that lives in the row file.
@@ -1810,6 +1979,9 @@ impl IntelligentIndexedStorage {
         let mut storage = Self::build(config).await?;
 
         if let Some(dir) = wal_dir {
+            let recovery_started = std::time::Instant::now();
+            // Before the log is opened: opening it can already write (a torn tail is cut).
+            storage._dir_lock = Some(Self::lock_dir(&dir)?);
             let manager = WalManager::new(&dir)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
@@ -1865,6 +2037,30 @@ impl IntelligentIndexedStorage {
                 }
             }
 
+            // The log has to pick up exactly where the snapshot left off. Compaction keeps every
+            // entry from the snapshot's replay point on, so a log that starts later belongs to a
+            // later snapshot than the one loaded -- a backup whose `wal.log` was copied after
+            // another snapshot compacted it, or a snapshot directory restored on its own. The
+            // entries in between are in neither file. Inserts among them come back from the row
+            // files, which is why this used to restore without complaint; a delete, an update or
+            // a table created there does not, and the index and the rows then disagree for good.
+            if let Some((first, _)) = pending.first() {
+                if *first > from_seq {
+                    return Err(crate::Error::Internal(format!(
+                        "{} starts at entry {} but the snapshot in {} replays from entry {}; \
+                         entries {}..{} are in neither, so starting would lose the writes they \
+                         hold. Restore a snapshot and wal.log taken together.",
+                        dir.join("wal.log").display(),
+                        first,
+                        Self::snapshot_dir(&dir).display(),
+                        from_seq,
+                        from_seq,
+                        first
+                    )));
+                }
+            }
+
+            let replayed = pending.len() as u64;
             if pending.is_empty() {
                 info!(
                     "No WAL entries after sequence {}; recovery complete from snapshot alone",
@@ -1873,6 +2069,18 @@ impl IntelligentIndexedStorage {
             } else {
                 storage.replay(pending).await?;
             }
+            storage.reindex_rows_the_graph_may_not_reflect().await?;
+            storage.index_rows_the_log_missed().await?;
+            let took = recovery_started.elapsed();
+            info!(
+                "Recovery took {:.2}s ({} WAL entries replayed)",
+                took.as_secs_f64(),
+                replayed
+            );
+            if let Ok(mut last) = storage.last_recovery.lock() {
+                *last = Some((took.as_nanos() as u64, replayed));
+            }
+            storage.load_persisted_derived().await;
         }
 
         Ok(storage)
@@ -1946,11 +2154,23 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            index_rebuilds: AtomicU64::new(0),
+            index_rebuild_ns: AtomicU64::new(0),
+            index_rebuild_swap_wait_ns: AtomicU64::new(0),
+            last_recovery: StdMutex::new(None),
+            last_snapshot_ns: StdMutex::new(None),
+            _dir_lock: None,
+            recovery_floors: StdMutex::new(HashMap::new()),
+            replayed_rows: StdMutex::new(HashMap::new()),
+            #[cfg(feature = "test-failpoints")]
+            backup_pause: StdMutex::new(None),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
             last_snapshot_at: Arc::new(StdMutex::new(None)),
+            last_backup_at: StdMutex::new(None),
+            backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
             dropped_since_snapshot: Arc::new(StdMutex::new(std::collections::HashSet::new())),
@@ -2006,6 +2226,35 @@ impl IntelligentIndexedStorage {
     /// Test-only hook for forcing the next WAL sync to fail.
     #[cfg(feature = "test-failpoints")]
     pub fn fail_next_wal_sync_for_test(&self) -> crate::Result<()> {
+        self.with_wal_for_test(crate::wal::WalManager::fail_next_sync_for_test)
+    }
+
+    /// Test-only hook for tearing the next WAL write: half the frame reaches the file.
+    #[cfg(feature = "test-failpoints")]
+    pub fn tear_next_wal_write_for_test(&self) -> crate::Result<()> {
+        self.with_wal_for_test(crate::wal::WalManager::tear_next_write_for_test)
+    }
+
+    /// Test-only: the next `backup_to` stops after its snapshot and before it copies anything.
+    /// The first receiver fires when it gets there; dropping or sending on the sender lets it
+    /// go on.
+    #[cfg(feature = "test-failpoints")]
+    pub fn pause_next_backup_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pause) = self.backup_pause.lock() {
+            *pause = Some((reached_tx, resume_rx));
+        }
+        (reached_rx, resume_tx)
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    fn with_wal_for_test(&self, f: impl FnOnce(&mut crate::wal::WalManager)) -> crate::Result<()> {
         let Some(ref wal) = self.wal else {
             return Err(crate::Error::InvalidInput(
                 "WAL failpoint requires a WAL-backed storage".to_string(),
@@ -2014,7 +2263,7 @@ impl IntelligentIndexedStorage {
         let mut guard = wal
             .lock()
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))?;
-        guard.fail_next_sync_for_test();
+        f(&mut guard);
         Ok(())
     }
 
@@ -2031,7 +2280,45 @@ impl IntelligentIndexedStorage {
         let mut records = 0usize;
         let mut skipped = 0usize;
 
+        // Consecutive record entries for one table are applied as a run (see
+        // `restore_records_from_wal`); anything else -- another table, a delete, a schema
+        // change -- applies the run first, so the log's order is kept.
+        const RUN: usize = 1_000;
+        let mut run: Option<ReplayRun> = None;
+
         for (seq, entry) in entries {
+            let entry = match entry {
+                WalEntry::UpsertRecordV2 { table, record } => {
+                    self.add_to_run(
+                        &mut run,
+                        table,
+                        record,
+                        None,
+                        seq,
+                        RUN,
+                        &mut records,
+                        &mut skipped,
+                    )
+                    .await;
+                    continue;
+                }
+                WalEntry::UpsertRecordInRowFile { table, record, row } => {
+                    self.add_to_run(
+                        &mut run,
+                        table,
+                        record,
+                        Some(row),
+                        seq,
+                        RUN,
+                        &mut records,
+                        &mut skipped,
+                    )
+                    .await;
+                    continue;
+                }
+                other => other,
+            };
+            self.apply_run(&mut run, &mut records, &mut skipped).await;
             let outcome = match entry {
                 WalEntry::CreateTableWithConfig { config } => {
                     self.create_table(config).await.map(|_| {
@@ -2090,18 +2377,9 @@ impl IntelligentIndexedStorage {
                         records += 1;
                     })
                 }
-                WalEntry::UpsertRecordV2 { table, record } => self
-                    .restore_record_from_wal(&table, record, None)
-                    .await
-                    .map(|_| {
-                        records += 1;
-                    }),
-                WalEntry::UpsertRecordInRowFile { table, record, row } => self
-                    .restore_record_from_wal(&table, record, Some(row))
-                    .await
-                    .map(|_| {
-                        records += 1;
-                    }),
+                WalEntry::UpsertRecordV2 { .. } | WalEntry::UpsertRecordInRowFile { .. } => {
+                    unreachable!("record entries are batched above")
+                }
                 WalEntry::AlterTable { table, request } => {
                     self.alter_table(&table, request).await.map(|_| ())
                 }
@@ -2121,6 +2399,8 @@ impl IntelligentIndexedStorage {
             }
         }
 
+        self.apply_run(&mut run, &mut records, &mut skipped).await;
+
         self.replaying.store(false, Ordering::SeqCst);
         // Replay inserts one record at a time, so the normal insert path skips adaptive rebuilds
         // while the log is applied. Re-evaluate once against final table sizes so recovery
@@ -2135,35 +2415,296 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
-    /// Replay one current-format record through the normal index path, then restore metadata
-    /// that is not part of a create request. Replay is single-threaded and WAL writes are
-    /// suppressed while this runs, so replacing the map value after indexing is deterministic.
+    /// Take `{dir}/LOCK` exclusively, or say which directory is already in use. The OS drops
+    /// the lock when the process exits, however it exits, so a crash leaves nothing stale.
+    fn lock_dir(dir: &std::path::Path) -> crate::Result<std::fs::File> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("LOCK");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(crate::Error::InvalidConfig(format!(
+                "{} is in use by another process (it holds {}). Two processes writing one \
+                 store corrupt it; stop the other one, or point this one at a different \
+                 DXMT_ROOT_DIR / DXMT_WAL_DIR.",
+                dir.display(),
+                path.display()
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => Err(crate::Error::Io(e)),
+        }
+    }
+
+    /// After recovery, re-read into the graph every row it may hold an older version of.
     ///
-    /// `row` is where the entry says the vector is in the table's row file
-    /// (`UpsertRecordInRowFile`); an entry that carries its vector passes `None`.
+    /// A write appends its row, updates the graph, and only then logs. A snapshot's graph
+    /// reflects every row below the `indexed_below` it recorded; a row at or above it whose log
+    /// entry never landed -- a crash, a full disk -- is a write the graph may not have, and for
+    /// an update the graph then holds the *previous* vector under the same id: the counts
+    /// agree, `GET` returns the new vector, and an ordinary search finds the record by the old
+    /// one. So each record whose current row is at or above the floor is re-indexed from its
+    /// row, unless replay indexed it from exactly that row. A table the snapshot did not hold
+    /// was built by replay alone, so its floor is zero. A snapshot written before the floor was
+    /// recorded is left alone, rather than turning the first start after an upgrade into a
+    /// rebuild of every table.
+    async fn reindex_rows_the_graph_may_not_reflect(&self) -> crate::Result<()> {
+        let floors = self
+            .recovery_floors
+            .lock()
+            .map(|mut f| std::mem::take(&mut *f))
+            .unwrap_or_default();
+        let mut replayed = self
+            .replayed_rows
+            .lock()
+            .map(|mut r| std::mem::take(&mut *r))
+            .unwrap_or_default();
+        let names: Vec<String> = self
+            .read_tables("reindex_rows_the_graph_may_not_reflect")
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        for name in names {
+            let floor = match floors.get(&name) {
+                Some(Some(floor)) => *floor,
+                Some(None) => continue,
+                None => 0,
+            };
+            let rows = replayed.remove(&name).unwrap_or_default();
+            self.reindex_rows_from(&name, floor, &rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Re-index, from the row file, every record of `name` whose row is at or above `floor`
+    /// and was not indexed from that same row by replay (`replayed`).
+    async fn reindex_rows_from(
+        &self,
+        name: &str,
+        floor: u64,
+        replayed: &HashMap<RecordId, u64>,
+    ) -> crate::Result<usize> {
+        let (index, vectors) = {
+            let tables = self.read_tables("reindex_rows_from").await;
+            let Some(data) = tables.get(name) else {
+                return Ok(0);
+            };
+            let Some(file) = &data.vector_file else {
+                return Ok(0);
+            };
+            if file.rows() <= floor {
+                return Ok(0);
+            }
+            let stale: Vec<RecordId> = data
+                .records
+                .ids()
+                .into_iter()
+                .filter(|id| {
+                    data.vector_row(id)
+                        .is_some_and(|row| row >= floor && replayed.get(id) != Some(&row))
+                })
+                .collect();
+            if stale.is_empty() {
+                return Ok(0);
+            }
+            (data.index.clone(), data.vectors_for_ids(&stale))
+        };
+        warn!(
+            "Table '{}': {} record(s) were written at or after the snapshot's graph without a \
+             log entry for that version; re-indexing them from the row file",
+            name,
+            vectors.len()
+        );
+        for (id, _) in &vectors {
+            // Not there at all is the other case this repairs; nothing to remove then.
+            let _ = index.remove(id).await;
+        }
+        let count = vectors.len();
+        index.insert_batch(vectors).await?;
+        Ok(count)
+    }
+
+    /// After recovery, make each graph hold exactly the records the row files hold.
+    ///
+    /// A write reaches the row file, fsynced, before its WAL entry; when the entry never lands
+    /// -- a crash in between, a disk that filled halfway through the frame, a backup that copied
+    /// `records/` after the write and `wal.log` before its entry -- the rows have moved on and
+    /// the log does not say so. Replay rebuilds the graph from the log, so:
+    ///
+    /// - an insert the log missed was never indexed;
+    /// - an update it missed left the id out of the graph altogether, because replay skips each
+    ///   older logged version of a record the row store already holds newer;
+    /// - a delete it missed left the id in the graph with no record behind it.
+    ///
+    /// `GET` and the exact scan read the rows, the ordinary search reads the graph, and the two
+    /// disagreed for the life of the table. `restore_table` already added the first kind against
+    /// a snapshot's index; nothing covered replay or the other two. The counts gate the walk, as
+    /// they do there. A missed insert and a missed delete that cancel out do not hide behind
+    /// them: `reindex_rows_the_graph_may_not_reflect` runs first and puts the insert in the
+    /// graph, which unbalances the counts (`a_lost_insert_and_a_lost_delete_that_cancel_out_are_
+    /// both_repaired`). They can still hide in a table whose vectors have no row file, and
+    /// behind a snapshot written before `indexed_below` was recorded.
+    async fn index_rows_the_log_missed(&self) -> crate::Result<()> {
+        let mut work = Vec::new();
+        {
+            let tables = self.read_tables("index_rows_the_log_missed").await;
+            for (name, data) in tables.iter() {
+                if data.index.len().await == data.records.len() {
+                    continue;
+                }
+                let ids = data.records.ids();
+                let missing = data.index.missing_ids(ids.iter()).await.unwrap_or_default();
+                let extra = data
+                    .index
+                    .live_ids_not_in(|id| data.records.contains(id))
+                    .await
+                    .unwrap_or_default();
+                if missing.is_empty() && extra.is_empty() {
+                    continue;
+                }
+                warn!(
+                    "Table '{}': after recovery {} record(s) in the row files were not in the \
+                     index and {} in the index were not in the row files; reconciling",
+                    name,
+                    missing.len(),
+                    extra.len()
+                );
+                work.push((data.index.clone(), data.vectors_for_ids(&missing), extra));
+            }
+        }
+        for (index, vectors, extra) in work {
+            for id in &extra {
+                index.remove(id).await?;
+            }
+            if !vectors.is_empty() {
+                index.insert_batch(vectors).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Add a record entry to the pending run, applying the run first if it is for another
+    /// table or full.
+    #[allow(clippy::too_many_arguments)]
+    async fn add_to_run(
+        &self,
+        run: &mut Option<ReplayRun>,
+        table: String,
+        record: Record,
+        row: Option<u64>,
+        seq: u64,
+        limit: usize,
+        records: &mut usize,
+        skipped: &mut usize,
+    ) {
+        if run
+            .as_ref()
+            .is_some_and(|(t, entries, _)| *t != table || entries.len() >= limit)
+        {
+            self.apply_run(run, records, skipped).await;
+        }
+        run.get_or_insert_with(|| (table, Vec::new(), seq))
+            .1
+            .push((record, row));
+    }
+
+    /// Apply the pending run, if any, counting what was applied and what was skipped.
+    async fn apply_run(
+        &self,
+        run: &mut Option<ReplayRun>,
+        records: &mut usize,
+        skipped: &mut usize,
+    ) {
+        let Some((table, entries, first_seq)) = run.take() else {
+            return;
+        };
+        let total = entries.len();
+        match self.restore_records_from_wal(&table, entries).await {
+            Ok(failed) => {
+                for (id, e) in &failed {
+                    warn!(
+                        "WAL record '{}' (run from seq {}) could not be replayed, skipping: {}",
+                        id, first_seq, e
+                    );
+                }
+                *skipped += failed.len();
+                *records += total - failed.len();
+            }
+            Err(e) => {
+                warn!(
+                    "WAL run of {} record(s) from seq {} could not be replayed, skipping: {}",
+                    total, first_seq, e
+                );
+                *skipped += total;
+            }
+        }
+    }
+
+    /// Replay one current-format record. See [`Self::restore_records_from_wal`], which this is
+    /// the single-entry case of; an entry that cannot be applied is the error.
     async fn restore_record_from_wal(
         &self,
         table: &str,
         record: Record,
         row: Option<u64>,
     ) -> crate::Result<()> {
+        match self
+            .restore_records_from_wal(table, vec![(record, row)])
+            .await?
+            .into_iter()
+            .next()
+        {
+            Some((_, e)) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Replay a run of current-format records for one table through the normal index path,
+    /// then restore what a create request cannot carry. Replay is single-threaded and WAL
+    /// writes are suppressed while it runs, so replacing the map values after indexing is
+    /// deterministic. Returns the entries that could not be applied, each with its reason;
+    /// the rest are applied.
+    ///
+    /// A run, not one record at a time: each record used to be its own trip through the
+    /// insertion processor and two appends to the record store, each fsynced -- about 8.7 ms
+    /// an entry, so the 3,000-entry tail of one test took 26 s to recover, and the tail a
+    /// crash leaves after five minutes of ingest at 3,000 rows/s would have taken hours.
+    ///
+    /// `row` is where the entry says the vector is in the table's row file
+    /// (`UpsertRecordInRowFile`); an entry that carries its vector passes `None`.
+    async fn restore_records_from_wal(
+        &self,
+        table: &str,
+        entries: Vec<(Record, Option<u64>)>,
+    ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
+        let mut failed = Vec::new();
+
+        // One entry per id, the one sequential replay would have ended on: a later entry
+        // replaces an earlier one unless the earlier carries a higher version (see below).
+        let mut order: Vec<RecordId> = Vec::new();
+        let mut latest: HashMap<RecordId, (Record, Option<u64>)> = HashMap::new();
+        for (record, row) in entries {
+            match latest.get(&record.id) {
+                Some((kept, _)) if kept.version > record.version => {}
+                Some(_) => {
+                    latest.insert(record.id.clone(), (record, row));
+                }
+                None => {
+                    order.push(record.id.clone());
+                    latest.insert(record.id.clone(), (record, row));
+                }
+            }
+        }
+
         // A mutation is logged after it has been applied and after the table lock is released,
         // so two concurrent updates to the same id can reach the log in the opposite order to
         // the one in which they took effect. Replaying that log blindly would resurrect the
         // older version. The record carries the version the writer assigned, so an entry that
         // is behind what is already restored is a reordered write, not a new one: skip it.
-        {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            if let Some(existing) = tables
-                .get(table)
-                .and_then(|data| data.records.get(&record.id))
-            {
-                if existing.version > record.version {
-                    return Ok(());
-                }
-            }
-        }
-
+        //
         // A log written before `update_record` recorded its vector holds update entries
         // without one. The vector is still in the row file — the update wrote it there before it
         // logged anything — so read it back rather than re-index nothing. If it is not there
@@ -2176,88 +2717,148 @@ impl IntelligentIndexedStorage {
         // and rows are never renumbered, so the row the entry was written with is still the
         // row. (A row the sweep has since punched reads as zeros; the entry after it in the
         // log is the delete that made it dead.)
-        let vector = if let Some(row) = row {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            let read = tables
-                .get(table)
-                .and_then(|data| data.vector_file.as_ref())
-                .and_then(|file| file.read(row));
-            match read {
-                Some(vector) => vector,
-                None => {
-                    return Err(crate::Error::InvalidVector(format!(
-                        "WAL entry for '{}' points at row {} of a row file that does not hold it",
-                        record.id, row
-                    )))
+        let mut records = Vec::with_capacity(order.len());
+        let mut requests = Vec::with_capacity(order.len());
+        let mut rows = Vec::with_capacity(order.len());
+        {
+            let tables = self.read_tables("restore_records_from_wal").await;
+            let data = tables.get(table);
+            for id in order {
+                let (record, row) = latest.remove(&id).expect("every ordered id is kept");
+                if data
+                    .and_then(|data| data.records.get(&record.id))
+                    .is_some_and(|existing| existing.version > record.version)
+                {
+                    continue;
+                }
+                let vector = if let Some(row) = row {
+                    match data
+                        .and_then(|data| data.vector_file.as_ref())
+                        .and_then(|file| file.read(row))
+                    {
+                        Some(vector) => vector,
+                        None => {
+                            failed.push((
+                                record.id.clone(),
+                                crate::Error::InvalidVector(format!(
+                                    "WAL entry for '{}' points at row {} of a row file that \
+                                     does not hold it",
+                                    record.id, row
+                                )),
+                            ));
+                            continue;
+                        }
+                    }
+                } else if record.vector.is_empty() {
+                    data.map(|data| data.vector_for(&record))
+                        .unwrap_or_default()
+                } else {
+                    record.vector.clone()
+                };
+                if vector.is_empty() {
+                    failed.push((
+                        record.id.clone(),
+                        crate::Error::InvalidVector(format!(
+                            "WAL entry for '{}' has no vector and none is stored for it",
+                            record.id
+                        )),
+                    ));
+                    continue;
+                }
+                requests.push(CreateRecordRequest {
+                    id: record.id.clone(),
+                    vector,
+                    sparse_vector: record.sparse_vector.clone(),
+                    named_vectors: record.named_vectors.clone(),
+                    payload: Some(record.payload.clone()),
+                    text: None,
+                });
+                rows.push(row);
+                records.push(record);
+            }
+        }
+        if records.is_empty() {
+            return Ok(failed);
+        }
+
+        // An entry that named its row hands the row on, so the processor indexes the vector
+        // without appending it a second time. The processor refuses a whole request for one
+        // bad record; a run that fails is retried one entry at a time, so one bad entry costs
+        // itself and not its neighbours.
+        if let Err(e) = self
+            .insert_records_with_rows(table, requests.clone(), rows.clone())
+            .await
+        {
+            if records.len() == 1 {
+                failed.push((records[0].id.clone(), e));
+                return Ok(failed);
+            }
+            for (record, row) in records.into_iter().zip(rows) {
+                let id = record.id.clone();
+                if let Err(e) = Box::pin(self.restore_record_from_wal(table, record, row)).await {
+                    failed.push((id, e));
                 }
             }
-        } else if record.vector.is_empty() {
-            let tables = self.read_tables("restore_record_from_wal").await;
-            tables
-                .get(table)
-                .map(|data| data.vector_for(&record))
-                .unwrap_or_default()
-        } else {
-            record.vector.clone()
-        };
-        if vector.is_empty() {
-            return Err(crate::Error::InvalidVector(format!(
-                "WAL entry for '{}' has no vector and none is stored for it",
-                record.id
-            )));
+            return Ok(failed);
         }
-        let request = CreateRecordRequest {
-            id: record.id.clone(),
-            vector,
-            sparse_vector: record.sparse_vector.clone(),
-            named_vectors: record.named_vectors.clone(),
-            payload: Some(record.payload.clone()),
-            text: None,
-        };
-        // An entry that named its row hands the row on, so the processor indexes the vector
-        // without appending it a second time.
-        self.insert_records_with_rows(table, vec![request], vec![row])
-            .await?;
 
-        let mut tables = self.write_tables("restore_record_from_wal").await;
+        let mut tables = self.write_tables("restore_records_from_wal").await;
         let data = tables
             .get_mut(table)
             .ok_or_else(|| crate::Error::TableNotFound(table.to_string()))?;
-        // The insert above put the vector in the row file and the row in the store; this
-        // re-store of the record, which exists for the timestamps and version the create
-        // request could not carry, has to keep that row or the record comes back with no
-        // vector at all. It stored `None` here, which was hidden while every entry carried
-        // its vector inline: the store then held a second copy of it per replayed record.
-        let mut record = record;
-        let row = data
-            .vector_file
-            .as_ref()
-            .and_then(|_| data.vector_row(&record.id));
-        if row.is_some() {
-            record.vector = Vec::new();
+        let mut restored = Vec::with_capacity(records.len());
+        let replaying = self.replaying.load(Ordering::SeqCst);
+        let mut replayed = self.replayed_rows.lock().ok();
+        for mut record in records {
+            // The insert above put the vector in the row file and the row in the store; this
+            // re-store of the record, which exists for the timestamps and version the create
+            // request could not carry, has to keep that row or the record comes back with no
+            // vector at all. It stored `None` here, which was hidden while every entry carried
+            // its vector inline: the store then held a second copy of it per replayed record.
+            let row = data
+                .vector_file
+                .as_ref()
+                .and_then(|_| data.vector_row(&record.id));
+            if row.is_some() {
+                record.vector = Vec::new();
+            }
+            // Only while replaying: `import_table` comes through here too, and nothing would
+            // ever empty the map behind it.
+            if let (Some(row), true, Some(replayed)) = (row, replaying, replayed.as_mut()) {
+                replayed
+                    .entry(table.to_string())
+                    .or_default()
+                    .insert(record.id.clone(), row);
+            }
+            restored.push((Arc::new(record), row));
         }
-        data.records.insert(Arc::new(record.clone()), row)?;
-        // The insert above indexed the record with the time it was *replayed*, because a create
-        // request carries no timestamp; the map now holds the one it was written with. A table
-        // created by this same replay has its payload index built from the start, so that index
-        // kept the replay time, and `records/list` with a filter — which pages by the index's
-        // timestamps — ordered every replayed record by when recovery reached it. A record the
-        // log had upserted went through the path that keeps its original time, which is older
-        // than every replay time, and sank to the bottom. Found by the stateful walk: two bulk
-        // inserts sharing one id, then `kill -9`. Re-file it under the time the map holds.
-        if let Some(derived) = data.derived_mut().as_mut() {
-            derived.payload.update_record(
-                &record.id,
-                &record.payload,
-                &record.payload,
-                crate::storage::payload_index::created_key(&record.created_at),
-            );
+        drop(replayed);
+        // One append, and one fsync, for the run.
+        data.records.insert_batch(restored.clone())?;
+        for (record, _) in &restored {
+            // The insert above indexed the record with the time it was *replayed*, because a
+            // create request carries no timestamp; the map now holds the one it was written
+            // with. A table created by this same replay has its payload index built from the
+            // start, so that index kept the replay time, and `records/list` with a filter —
+            // which pages by the index's timestamps — ordered every replayed record by when
+            // recovery reached it. A record the log had upserted went through the path that
+            // keeps its original time, which is older than every replay time, and sank to the
+            // bottom. Found by the stateful walk: two bulk inserts sharing one id, then
+            // `kill -9`. Re-file it under the time the map holds.
+            if let Some(derived) = data.derived_mut().as_mut() {
+                derived.payload.update_record(
+                    &record.id,
+                    &record.payload,
+                    &record.payload,
+                    crate::storage::payload_index::created_key(&record.created_at),
+                );
+            }
+            if record.updated_at > data.table.updated_at {
+                data.table.updated_at = record.updated_at;
+            }
         }
         data.table.record_count = data.records.len() as u64;
-        if record.updated_at > data.table.updated_at {
-            data.table.updated_at = record.updated_at;
-        }
-        Ok(())
+        Ok(failed)
     }
 
     /// 一张表的快照元数据。索引本体在同名的 `.idx` 文件里。
@@ -2282,9 +2883,24 @@ impl IntelligentIndexedStorage {
     /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
     /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
     pub async fn snapshot(&self) -> crate::Result<usize> {
+        // Serialize before reading the sequence number, not after: two snapshots that both
+        // sampled the sequence and then queued would still truncate the log to the later one's
+        // position while the earlier one's manifest is what ends up on disk.
+        let _serialized = self.snapshotting.lock().await;
+        self.snapshot_serialized().await
+    }
+
+    /// [`Self::snapshot`] for a caller already holding `snapshotting`, which `backup_to` does
+    /// for as long as it copies: a snapshot in the middle of the copy compacts the log past the
+    /// one the backup carries.
+    async fn snapshot_serialized(&self) -> crate::Result<usize> {
+        let started = std::time::Instant::now();
         let result = self.snapshot_inner().await;
         match &result {
             Ok(_) => {
+                if let Ok(mut last) = self.last_snapshot_ns.lock() {
+                    *last = Some(started.elapsed().as_nanos() as u64);
+                }
                 if let Ok(mut at) = self.last_snapshot_at.lock() {
                     *at = Some(chrono::Utc::now().to_rfc3339());
                 }
@@ -2315,11 +2931,6 @@ impl IntelligentIndexedStorage {
                 "snapshot requires a WAL-backed storage (use new_with_wal)".to_string(),
             ));
         };
-
-        // Serialize before reading the sequence number, not after: two snapshots that both
-        // sampled the sequence and then queued would still truncate the log to the later one's
-        // position while the earlier one's manifest is what ends up on disk.
-        let _serialized = self.snapshotting.lock().await;
 
         let seq = {
             let mut guard = wal
@@ -2376,6 +2987,7 @@ impl IntelligentIndexedStorage {
                                 });
                                 (data.vector_file.clone(), rows)
                             }),
+                            vector_file: data.vector_file.clone(),
                         },
                     )
                 })
@@ -2398,6 +3010,8 @@ impl IntelligentIndexedStorage {
             // it just rebuilds the graph from the rows, correctly and arbitrarily slowly.
             // Fail the snapshot instead: the WAL still covers everything, so the cost is a
             // warning and one skipped snapshot.
+            // Before the graph is written, so every row under it is in what gets written.
+            let indexed_below = template.vector_file.as_ref().map(|f| f.indexed_below());
             let has_index = index.snapshot_to(&idx_path).await.map_err(|e| {
                 crate::Error::Internal(format!(
                     "table '{}': index would not write itself to the snapshot: {}",
@@ -2427,6 +3041,7 @@ impl IntelligentIndexedStorage {
                 table: template.table,
                 algorithm: template.algorithm,
                 has_index,
+                indexed_below,
             })
             .map_err(|e| crate::Error::Serialization(e.to_string()))?;
             crate::search::index_persistence::write_index(
@@ -2683,7 +3298,9 @@ impl IntelligentIndexedStorage {
     /// 交给调用方的 TableNotFound 去报。
     /// Take the table map's read lock, reporting it if it is held for long enough to matter.
     async fn read_tables(&self, who: &'static str) -> TimedRead<'_> {
+        let asked = std::time::Instant::now();
         let guard = self.tables.read().await;
+        record_lock_wait(asked.elapsed(), LOCK_READ);
         TimedRead {
             guard,
             who,
@@ -2693,7 +3310,9 @@ impl IntelligentIndexedStorage {
 
     /// Take the table map's write lock, reporting it if it is held for long enough to matter.
     async fn write_tables(&self, who: &'static str) -> TimedWrite<'_> {
+        let asked = std::time::Instant::now();
         let guard = self.tables.write().await;
+        record_lock_wait(asked.elapsed(), LOCK_WRITE);
         TimedWrite {
             guard,
             who,
@@ -2753,8 +3372,15 @@ impl IntelligentIndexedStorage {
         }
 
         info!("Rehydrating evicted table '{}' from snapshot", table_name);
+        let floor = meta.indexed_below;
         self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
             .await?;
+        // Nothing is replayed on this path, so every row the snapshot's graph may not reflect
+        // is re-read.
+        if let Some(floor) = floor {
+            self.reindex_rows_from(table_name, floor, &HashMap::new())
+                .await?;
+        }
         self.tier_policy.set_current_tier(table_name, Tier::Warm);
         Ok(())
     }
@@ -2881,8 +3507,15 @@ impl IntelligentIndexedStorage {
         // Through a temporary file: a crash during the write must leave the previous set, not a
         // half-written one that loads as "no aliases" and points every caller at nothing.
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        {
+            // Written and synced through one writable handle, closed before the rename. It was
+            // `File::open(&tmp)?.sync_all()`: a read-only handle, which Linux will flush and
+            // Windows refuses with "Access is denied", so on Windows no alias could be set.
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -3054,6 +3687,7 @@ impl IntelligentIndexedStorage {
                 enable_parallel: false,
             },
             has_index: false,
+            indexed_below: None,
         })
         .map_err(|e| crate::Error::Serialization(e.to_string()))?;
         crate::search::index_persistence::write_index(
@@ -3157,15 +3791,29 @@ impl IntelligentIndexedStorage {
         const BATCH: usize = 1_000;
         for chunk in meta.records.chunks(BATCH) {
             let mut entries = Vec::with_capacity(chunk.len());
+            let mut batch = Vec::with_capacity(chunk.len());
             for record in chunk {
                 let record = (**record).clone();
                 entries.push(WalEntry::UpsertRecordV2 {
                     table: name.clone(),
                     record: record.clone(),
                 });
-                self.restore_record_from_wal(&name, record, None).await?;
-                imported += 1;
+                batch.push((record, None));
             }
+            // A chunk at a time, as replay does: one record at a time was one fsynced trip
+            // through the processor and two record-store appends per record.
+            if let Some((id, e)) = self
+                .restore_records_from_wal(&name, batch)
+                .await?
+                .into_iter()
+                .next()
+            {
+                return Err(crate::Error::InvalidInput(format!(
+                    "record '{id}' in {} could not be imported: {e}",
+                    path.display()
+                )));
+            }
+            imported += chunk.len();
             self.wal_append(entries).await?;
         }
 
@@ -3184,7 +3832,293 @@ impl IntelligentIndexedStorage {
         }))
     }
 
+    /// Copy the store to `dest`, a new directory inside the backup root. See
+    /// `docs/operations/backup-restore.md`; [`Self::restore_backup`] is the way back.
     pub async fn backup_to(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
+        let result = self.backup_to_inner(dest).await;
+        match &result {
+            Ok(_) => {
+                if let Ok(mut at) = self.last_backup_at.lock() {
+                    *at = Some(chrono::Utc::now().to_rfc3339());
+                }
+            }
+            Err(_) => {
+                self.backup_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Where backups may be written for this store: `DXMT_BACKUP_ROOT`, or beside the store.
+    /// `None` without a WAL directory, which has nothing to back up.
+    pub fn backup_root_dir(&self) -> Option<PathBuf> {
+        self.wal_dir.as_deref().map(Self::backup_root)
+    }
+
+    /// Delete the oldest scheduled backups under `root` until `keep` remain, and return what was
+    /// deleted.
+    ///
+    /// Only directories this server's schedule wrote are candidates: named `auto-<timestamp>`
+    /// and holding the `BACKUP.json` a finished backup ends with. A backup someone took by hand,
+    /// one still being written, and anything else an operator keeps there are never touched.
+    /// The timestamp sorts as text, so the oldest come first.
+    pub fn prune_scheduled_backups(
+        root: &std::path::Path,
+        keep: usize,
+    ) -> crate::Result<Vec<PathBuf>> {
+        let mut scheduled: Vec<PathBuf> = match std::fs::read_dir(root) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.is_dir()
+                        && p.join("BACKUP.json").is_file()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(SCHEDULED_BACKUP_PREFIX))
+                })
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        scheduled.sort();
+        let excess = scheduled.len().saturating_sub(keep);
+        let removed: Vec<PathBuf> = scheduled.into_iter().take(excess).collect();
+        for path in &removed {
+            std::fs::remove_dir_all(path)?;
+        }
+        Ok(removed)
+    }
+
+    /// Where a table's derived indexes are kept between a clean shutdown and the next start.
+    fn derived_path(wal_dir: &std::path::Path, table: &str) -> PathBuf {
+        wal_dir.join("derived").join(format!(
+            "{}.bin",
+            crate::types::table::Table::table_id(table)
+        ))
+    }
+
+    /// Write every built payload and sparse index beside the store, for the next start to read
+    /// back instead of rebuilding. Called at a clean shutdown, after the shutdown snapshot,
+    /// when nothing can write any more; returns how many tables were written.
+    ///
+    /// The rebuild this saves is 23-27 s of every core at 10M rows. Each file records the
+    /// record store's row count and live count, and the next start uses it only if both still
+    /// match -- a crash, or anything that writes in between, leaves it unused -- and deletes it
+    /// either way, so it is never read twice.
+    pub async fn persist_derived(&self) -> crate::Result<usize> {
+        let Some(wal_dir) = self.wal_dir.clone() else {
+            return Ok(0);
+        };
+        let mut written = 0usize;
+        let tables = self.read_tables("persist_derived").await;
+        for (name, data) in tables.iter() {
+            let Some(rows) = data.records.row_count() else {
+                continue; // in memory: rebuilt from the records, which is a map walk
+            };
+            let derived = data.derived.read();
+            let Some(derived) = derived.as_ref() else {
+                continue;
+            };
+            let path = Self::derived_path(&wal_dir, name);
+            let started = std::time::Instant::now();
+            let result = tokio::task::block_in_place(|| -> crate::Result<()> {
+                std::fs::create_dir_all(path.parent().expect("derived/ has a parent"))?;
+                let tmp = path.with_extension("tmp");
+                {
+                    let file = std::fs::File::create(&tmp)?;
+                    let mut writer = std::io::BufWriter::new(file);
+                    bincode::serialize_into(
+                        &mut writer,
+                        &PersistedDerivedOut {
+                            version: DERIVED_FILE_VERSION,
+                            rows,
+                            live: data.records.len(),
+                            created: data.records.created_column(),
+                            derived,
+                        },
+                    )?;
+                    use std::io::Write as _;
+                    writer.flush()?;
+                    writer.get_ref().sync_all()?;
+                }
+                std::fs::rename(&tmp, &path)?;
+                Ok(())
+            });
+            match result {
+                Ok(()) => {
+                    written += 1;
+                    info!(
+                        "Table '{}': derived indexes written for the next start in {:.1}s",
+                        name,
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                Err(e) => warn!("Table '{}': derived indexes not written: {}", name, e),
+            }
+        }
+        Ok(written)
+    }
+
+    /// Install the derived indexes a clean shutdown wrote, for every table whose record store is
+    /// exactly as it was then. Runs at the end of recovery, before anything is served. Every
+    /// file is deleted once read, used or not.
+    async fn load_persisted_derived(&self) {
+        let Some(wal_dir) = self.wal_dir.clone() else {
+            return;
+        };
+        if !wal_dir.join("derived").is_dir() {
+            return;
+        }
+        let tables = self.read_tables("load_persisted_derived").await;
+        for (name, data) in tables.iter() {
+            let path = Self::derived_path(&wal_dir, name);
+            if !path.is_file() {
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let read = tokio::task::block_in_place(|| -> crate::Result<PersistedDerivedIn> {
+                let file = std::fs::File::open(&path)?;
+                Ok(bincode::deserialize_from(std::io::BufReader::new(file))?)
+            });
+            let _ = std::fs::remove_file(&path);
+            let persisted = match read {
+                Ok(persisted) => persisted,
+                Err(e) => {
+                    warn!(
+                        "Table '{}': derived indexes on disk unreadable, rebuilding: {}",
+                        name, e
+                    );
+                    continue;
+                }
+            };
+            let now = (data.records.row_count(), data.records.len());
+            if persisted.version != DERIVED_FILE_VERSION
+                || now != (Some(persisted.rows), persisted.live)
+                || data.table.payload_index.clone().unwrap_or_default()
+                    != *persisted.derived.payload.policy()
+            {
+                info!(
+                    "Table '{}': derived indexes on disk do not match the records any more; rebuilding",
+                    name
+                );
+                continue;
+            }
+            if let Some(created) = persisted.created {
+                data.records.publish_created(created);
+            }
+            *data.derived.write() = Some(persisted.derived);
+            info!(
+                "Table '{}': derived indexes read from disk in {:.1}s instead of rebuilt",
+                name,
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    /// Replace the store at `store` with the backup at `backup`, offline, and open the result
+    /// to prove it recovers.
+    ///
+    /// Refused while any process has the store open (its `LOCK`). Nothing is deleted: whatever
+    /// the store held is moved into a sibling directory, named in the report, first. The
+    /// backup is checked against its own manifest before anything moves, so an incomplete copy
+    /// is refused rather than half-restored. Restoring used to be five `cp -a` lines in a
+    /// document, one of which -- `vectors/` -- older versions of that document did not have.
+    pub async fn restore_backup(
+        config: &StorageConfig,
+        backup: &std::path::Path,
+        store: &std::path::Path,
+    ) -> crate::Result<RestoreReport> {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(backup.join("BACKUP.json")).map_err(|e| {
+                crate::Error::InvalidInput(format!(
+                    "{} is not a backup: no readable BACKUP.json ({e})",
+                    backup.display()
+                ))
+            })?)
+            .map_err(|e| {
+                crate::Error::InvalidInput(format!("{}/BACKUP.json: {e}", backup.display()))
+            })?;
+        let files: Vec<String> = manifest["files"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let missing: Vec<&String> = files
+            .iter()
+            .filter(|f| !backup.join(f.as_str()).is_file())
+            .collect();
+        if !missing.is_empty() {
+            return Err(crate::Error::InvalidInput(format!(
+                "{} is incomplete; its manifest names files that are not there: {:?}",
+                backup.display(),
+                missing
+            )));
+        }
+
+        let moved_aside = {
+            let _lock = Self::lock_dir(store)?;
+            let present: Vec<PathBuf> = std::fs::read_dir(store)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.file_name().is_some_and(|n| n != "LOCK"))
+                .collect();
+            let aside = if present.is_empty() {
+                None
+            } else {
+                let name = format!(
+                    "{}.before-restore-{}",
+                    store
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("store"),
+                    chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                );
+                let aside = store.with_file_name(name);
+                std::fs::create_dir_all(&aside)?;
+                for path in present {
+                    let name = path.file_name().expect("a directory entry has a name");
+                    std::fs::rename(&path, aside.join(name))?;
+                }
+                Some(aside)
+            };
+            for file in &files {
+                let to = store.join(file);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(backup.join(file), &to)?;
+            }
+            aside
+        };
+
+        let opened = Self::new_with_wal(config, Some(store.to_path_buf()))
+            .await
+            .map_err(|e| {
+                crate::Error::Internal(format!(
+                    "the backup was copied into {} but does not open: {e}{}",
+                    store.display(),
+                    moved_aside
+                        .as_ref()
+                        .map(|a| format!("; the previous store is in {}", a.display()))
+                        .unwrap_or_default()
+                ))
+            })?;
+        let tables = opened
+            .list_tables()
+            .await?
+            .into_iter()
+            .map(|t| (t.name, t.record_count))
+            .collect();
+        Ok(RestoreReport {
+            moved_aside,
+            tables,
+        })
+    }
+
+    async fn backup_to_inner(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(
                 "backup requires WAL-backed storage; this instance has no durable state"
@@ -3230,7 +4164,21 @@ impl IntelligentIndexedStorage {
             )));
         }
 
-        let tables = self.snapshot().await?;
+        // Held until the last file is copied. The copy runs snapshot, row files, then
+        // `wal.log`, and a periodic snapshot landing in between compacted the log past the one
+        // this backup carries: the entries between the two replay points were in neither half,
+        // and a delete or an update among them was gone from the restore.
+        let _serialized = self.snapshotting.lock().await;
+        let tables = self.snapshot_serialized().await?;
+
+        #[cfg(feature = "test-failpoints")]
+        {
+            let pause = self.backup_pause.lock().ok().and_then(|mut p| p.take());
+            if let Some((reached, resume)) = pause {
+                let _ = reached.send(());
+                let _ = resume.await;
+            }
+        }
 
         std::fs::create_dir_all(dest)?;
         let mut copied = Vec::new();
@@ -4378,6 +5326,9 @@ impl IntelligentIndexedStorage {
             })?;
 
             let name = meta.table.name.clone();
+            if let Ok(mut floors) = self.recovery_floors.lock() {
+                floors.insert(name.clone(), meta.indexed_below);
+            }
             self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
                 .await
                 .map_err(|e| {
@@ -5258,6 +6209,8 @@ impl IntelligentIndexedStorage {
             // there is nothing to rebuild. `restore_table` clears this back to `None`.
             node_map: Default::default(),
             writes: Default::default(),
+            derived_changes: parking_lot::Mutex::new(None),
+            derived_build: Arc::new(tokio::sync::Mutex::new(())),
             derived: parking_lot::RwLock::new(Some(DerivedIndexes {
                 payload: {
                     let mut payload = crate::storage::payload_index::PayloadIndex::new();
@@ -5628,6 +6581,7 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        self.ensure_derived(tablename).await?;
         let tables = self.read_tables("facet").await;
         let data = tables
             .get(tablename)
@@ -5856,6 +6810,9 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<SearchResult> {
         Self::check_filter(query.filter.as_ref())?;
         self.ensure_resident(tablename).await?;
+        if query.filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let query = self.embed_query(tablename, query).await?;
         if query.filter.is_some() {
             let tables = self.read_tables("search").await;
@@ -6847,6 +7804,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
 
         let cap = Self::knn_graph_max_nodes();
         if sample > cap {
@@ -7851,6 +8811,9 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         Self::check_filter(request.filter.as_ref())?;
+        if request.filter.is_some() || request.sparse_vector.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let start_time = std::time::Instant::now();
 
         let fetch_limit = if request.filter.is_some() {
@@ -8396,38 +9359,80 @@ impl IntelligentIndexedStorage {
         Ok(())
     }
 
-    /// Build a table's payload and sparse indexes ahead of the first filtered query, and fill
-    /// its node map, without holding the table lock for the build: the rows are decoded a
-    /// chunk at a time under short read locks, and the result is installed only if no write
-    /// reached the table meanwhile -- otherwise it is dropped and the first filtered query
-    /// builds as before. `Ok(true)` when it installed something.
+    /// Build `tablename`'s payload and sparse indexes outside the table map's lock if they are
+    /// not built yet, so a caller that goes on to read them under the lock finds them there
+    /// instead of building them inside it. Every read path that needs them calls this first.
+    async fn ensure_derived(&self, tablename: &str) -> crate::Result<()> {
+        let unbuilt = self
+            .read_tables("ensure_derived")
+            .await
+            .get(tablename)
+            .is_some_and(|data| data.derived.read().is_none());
+        if unbuilt {
+            self.warm_derived(tablename).await?;
+        }
+        Ok(())
+    }
+
+    /// Build a table's payload and sparse indexes, and fill its node map, without holding the
+    /// table map's lock for the build: the rows are decoded a chunk at a time under short read
+    /// locks. `Ok(true)` when it installed something.
     ///
-    /// This is what makes a restart not cost the first filtered query 33 s on a 10M-row
-    /// table: the build is the same pass, started as soon as recovery is done rather than
-    /// when a caller is waiting on it, and it decodes on every core.
+    /// Run ahead of the first filtered query after a restart (the server's warm-up), and by that
+    /// query itself when the warm-up has not finished ([`Self::ensure_derived`]). Before this
+    /// the query built inside `IntelligentTableData::derived`, under the map's read lock -- 27 s
+    /// at 10M rows during which a waiting writer queued every later request to every table.
+    ///
+    /// Writes during the build are caught up rather than voiding it. A write that finds the
+    /// indexes unbuilt notes the id and the payload it held before its first change
+    /// (`note_unindexed_change`). The build scans the rows that existed when it started, so
+    /// for a noted id it holds either nothing or exactly that earlier payload; under the read
+    /// lock that keeps writers out, each noted id is taken out with its earlier payload and
+    /// put back as the store now has it, and the rows appended meanwhile get their creation
+    /// times. A write used to void the build, which on a server taking writes was every build.
     pub async fn warm_derived(&self, tablename: &str) -> crate::Result<bool> {
         let tablename = &*self.resolve(tablename);
-        let (writes_at_start, rows, policy) = {
+        let (built_already, build_lock) = {
+            let tables = self.read_tables("warm_derived").await;
+            let data = tables
+                .get(tablename)
+                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+            if data.records.row_count().is_none() {
+                // In memory: small by construction, where the lazy build is a map walk.
+                return Ok(false);
+            }
+            let built = data.derived.read().is_some();
+            (built, Arc::clone(&data.derived_build))
+        };
+        if built_already {
+            // Read from disk at startup (`load_persisted_derived`): only the node map is left.
+            let map_in = self.fill_node_map(tablename).await;
+            debug!(
+                "Table '{tablename}': node map filled in {:.1}s",
+                map_in.as_secs_f64()
+            );
+            return Ok(false);
+        }
+        let _building = build_lock.lock().await;
+
+        let (rows, policy) = {
             let tables = self.read_tables("warm_derived").await;
             let data = tables
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
             if data.derived.read().is_some() {
-                return Ok(false);
+                return Ok(false); // the build we waited behind installed it
             }
-            let Some(rows) = data.records.row_count() else {
-                // In memory: small by construction; the lazy build is a map walk.
-                return Ok(false);
-            };
+            // From here every write that skips the unbuilt indexes is noted.
+            *data.derived_changes.lock() = Some(HashMap::new());
             (
-                data.writes.load(Ordering::Relaxed),
-                rows,
+                data.records.row_count().unwrap_or(0),
                 data.table.payload_index.clone(),
             )
         };
         let started = std::time::Instant::now();
         let mut built = DerivedIndexes::default();
-        if let Some(policy) = policy {
+        if let Some(policy) = policy.clone() {
             built.payload.set_policy(policy);
         }
         built.payload.begin_bulk(rows as usize);
@@ -8439,13 +9444,9 @@ impl IntelligentIndexedStorage {
             let to = (from + CHUNK).min(rows);
             let chunk = {
                 let tables = self.read_tables("warm_derived").await;
-                let data = tables
-                    .get(tablename)
-                    .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-                if data.writes.load(Ordering::Relaxed) != writes_at_start {
-                    debug!("warm_derived('{tablename}'): a write landed; leaving the build to the first filtered query");
+                let Some(data) = tables.get(tablename) else {
                     return Ok(false);
-                }
+                };
                 tokio::task::block_in_place(|| data.records.decode_range(from, to))
                     .unwrap_or_default()
             };
@@ -8474,28 +9475,80 @@ impl IntelligentIndexedStorage {
             tokio::task::yield_now().await;
         }
         tokio::task::block_in_place(|| built.payload.end_bulk());
-        let installed = {
+
+        let (installed, caught_up) = {
+            // A read lock: every write that touches these indexes holds the write lock, so
+            // none can land between the catch-up and the install.
             let tables = self.read_tables("warm_derived").await;
-            let data = tables
-                .get(tablename)
-                .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-            if data.writes.load(Ordering::Relaxed) != writes_at_start {
-                false
-            } else {
-                data.records.publish_created(created);
-                let mut slot = data.derived.write();
-                if slot.is_none() {
-                    *slot = Some(built);
-                    true
-                } else {
-                    false
+            let Some(data) = tables.get(tablename) else {
+                return Ok(false);
+            };
+            let Some(changes) = data.derived_changes.lock().take() else {
+                // Not the table this build started on: it was dropped and created again.
+                return Ok(false);
+            };
+            if data.derived.read().is_some() || data.table.payload_index != policy {
+                // Built by the lazy path meanwhile, or the policy changed under the build.
+                return Ok(false);
+            }
+            let caught_up = changes.len();
+            tokio::task::block_in_place(|| {
+                for (id, before) in changes {
+                    if built.payload.ordinal_of(&id).is_some() {
+                        if let Some(before) = &before {
+                            built.payload.remove_record(&id, before);
+                        }
+                        let _ = built.sparse.delete(&id);
+                    }
+                    if let Some(record) = data.records.get(&id) {
+                        built.payload.insert_record(
+                            &id,
+                            &record.payload,
+                            crate::storage::payload_index::created_key(&record.created_at),
+                        );
+                        if let Some(sparse) = &record.sparse_vector {
+                            if let Err(e) = built.sparse.insert(id.clone(), sparse) {
+                                warn!("Failed to index sparse vector for {}: {}", id, e);
+                            }
+                        }
+                    }
                 }
+                // Rows appended during the build, which the scan did not reach.
+                let now = data.records.row_count().unwrap_or(rows);
+                for slot in data.records.decode_range(rows, now).unwrap_or_default() {
+                    created.push(slot.map_or(i64::MIN, |record| {
+                        crate::storage::payload_index::created_key(&record.created_at)
+                    }));
+                }
+            });
+            data.records.publish_created(created);
+            let mut slot = data.derived.write();
+            if slot.is_none() {
+                *slot = Some(built);
+                (true, caught_up)
+            } else {
+                (false, caught_up)
             }
         };
         if !installed {
             return Ok(false);
         }
+        if caught_up > 0 {
+            debug!("warm_derived('{tablename}'): caught up {caught_up} record(s) written during the build");
+        }
         let built_in = started.elapsed();
+        let map_in = self.fill_node_map(tablename).await;
+        info!(
+            "Table '{tablename}': payload and sparse indexes warmed from {records} records in {:.1}s, node map in {:.1}s",
+            built_in.as_secs_f64(),
+            map_in.as_secs_f64()
+        );
+        Ok(true)
+    }
+
+    /// Fill a table's node map from its graph, so the first filtered query does not pay for
+    /// it, and return how long that took.
+    async fn fill_node_map(&self, tablename: &str) -> std::time::Duration {
         // The node map too, so the first filtered query does not pay that either -- in
         // slices, releasing the table lock between them: one pass over 10M nodes held it
         // for 3.2 s and queued every writer behind it.
@@ -8526,12 +9579,7 @@ impl IntelligentIndexedStorage {
             }
             tokio::task::yield_now().await;
         }
-        info!(
-            "Table '{tablename}': payload and sparse indexes warmed from {records} records in {:.1}s, node map in {:.1}s",
-            built_in.as_secs_f64(),
-            map_started.elapsed().as_secs_f64()
-        );
-        Ok(true)
+        map_started.elapsed()
     }
 
     /// Warm every table's derived indexes in the background, one table at a time, once the
@@ -8929,6 +9977,12 @@ impl IntelligentIndexedStorage {
                 t_swap_wait.as_secs_f64(),
                 final_delta
             );
+
+            self.index_rebuilds.fetch_add(1, Ordering::Relaxed);
+            self.index_rebuild_ns
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            self.index_rebuild_swap_wait_ns
+                .fetch_add(t_swap_wait.as_nanos() as u64, Ordering::Relaxed);
 
             table_data.index = new_wrapper.clone();
             table_data.table.index_type = index_type_of(&algorithm);
@@ -9408,12 +10462,6 @@ impl IntelligentIndexedStorage {
         Ok(IndexDecision {
             selected_algorithm,
             confidence: 0.95,
-            expected_performance: ExpectedPerformance {
-                recall: 0.99,
-                latency_p95_ms: 1.0,
-                throughput_qps: 3000.0,
-                memory_usage_mb: config.dataset_size * bytes_per_row / 1024 / 1024,
-            },
         })
     }
 
@@ -9863,8 +10911,10 @@ impl IntelligentIndexedStorage {
             let index_vector = request.vector.clone();
             let mut updated_vector_row: Option<u64> = None;
             let mut appended_row: Option<u64> = None;
+            let mut unindexed = None;
             let stored_vector = match &table_data.vector_file {
                 Some(file) if request.vector.len() == expected_dim => {
+                    unindexed = Some(file.begin_unindexed());
                     // Appended here under the map lock -- updates are rare and single.
                     let row = file.append(&[(record_id.as_str(), request.vector.as_slice())])?[0];
                     appended_row = Some(row);
@@ -9924,6 +10974,8 @@ impl IntelligentIndexedStorage {
                         );
                     }
                 }
+            } else {
+                table_data.note_unindexed_change(record_id, old_payload.as_ref());
             }
 
             table_data.table.record_count = table_data.records.len() as u64;
@@ -9937,6 +10989,7 @@ impl IntelligentIndexedStorage {
                 record,
                 vector: index_vector,
                 vector_row: appended_row,
+                _unindexed: unindexed,
                 #[cfg(feature = "text-bm25")]
                 full_text_engine: table_data.full_text_engine.clone(),
             }
@@ -10091,6 +11144,8 @@ impl IntelligentIndexedStorage {
                     if let Err(e) = derived.sparse.delete(id) {
                         warn!("Failed to remove record {} from sparse index: {}", id, e);
                     }
+                } else {
+                    table_data.note_unindexed_change(id, old_payload.as_ref());
                 }
             }
 
@@ -10272,6 +11327,8 @@ impl IntelligentIndexedStorage {
             total_records,
             last_wal_sync_at,
             last_snapshot_at,
+            last_backup_at: self.last_backup_at.lock().ok().and_then(|at| at.clone()),
+            backup_failures: self.backup_failures.load(Ordering::Relaxed),
             snapshot_failures: self.snapshot_failures.load(Ordering::Relaxed),
             last_snapshot_error,
             filter_paths: FilterPathCounts {
@@ -10287,6 +11344,33 @@ impl IntelligentIndexedStorage {
                 post_filter_ns: self.filter_path_ns[4].load(Ordering::Relaxed),
                 eval_ns: self.filter_eval_ns.load(Ordering::Relaxed),
                 node_map_misses: self.filter_node_map_misses.load(Ordering::Relaxed),
+            },
+            timings: {
+                let (last_recovery_ns, last_recovery_wal_entries) = self
+                    .last_recovery
+                    .lock()
+                    .ok()
+                    .and_then(|r| *r)
+                    .map_or((None, None), |(ns, entries)| (Some(ns), Some(entries)));
+                OperationTimings {
+                    table_lock_read_wait_ns: TABLE_LOCK_WAIT_NS[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_write_wait_ns: TABLE_LOCK_WAIT_NS[LOCK_WRITE]
+                        .load(Ordering::Relaxed),
+                    table_lock_read_hold_ns: TABLE_LOCK_HOLD_NS[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_write_hold_ns: TABLE_LOCK_HOLD_NS[LOCK_WRITE]
+                        .load(Ordering::Relaxed),
+                    table_lock_reads: TABLE_LOCK_ACQUIRED[LOCK_READ].load(Ordering::Relaxed),
+                    table_lock_writes: TABLE_LOCK_ACQUIRED[LOCK_WRITE].load(Ordering::Relaxed),
+                    table_lock_slow_holds: TABLE_LOCK_SLOW_HOLDS.load(Ordering::Relaxed),
+                    index_rebuilds: self.index_rebuilds.load(Ordering::Relaxed),
+                    index_rebuild_ns: self.index_rebuild_ns.load(Ordering::Relaxed),
+                    index_rebuild_swap_wait_ns: self
+                        .index_rebuild_swap_wait_ns
+                        .load(Ordering::Relaxed),
+                    last_recovery_ns,
+                    last_recovery_wal_entries,
+                    last_snapshot_ns: self.last_snapshot_ns.lock().ok().and_then(|n| *n),
+                }
             },
         }
     }
@@ -10423,6 +11507,9 @@ impl IntelligentIndexedStorage {
         use crate::storage::payload_index::{created_key, ListCursor};
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("list_records_after").await;
         let table_data = tables
             .get(tablename)
@@ -10677,6 +11764,7 @@ impl IntelligentIndexedStorage {
         }
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        self.ensure_derived(tablename).await?;
 
         let tables = self.read_tables("sparse_search").await;
         let table_data = tables
@@ -10811,6 +11899,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("count_records").await;
         let table_data = tables
             .get(tablename)
@@ -10880,6 +11971,9 @@ impl IntelligentIndexedStorage {
         let tablename = &*self.resolve(tablename);
         Self::check_filter(filter)?;
         self.ensure_resident(tablename).await?;
+        if filter.is_some() {
+            self.ensure_derived(tablename).await?;
+        }
         let tables = self.read_tables("list_records").await;
         let table_data = tables
             .get(tablename)

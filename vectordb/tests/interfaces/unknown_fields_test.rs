@@ -17,6 +17,9 @@
 
 use std::process::{Child, Command, Stdio};
 
+#[path = "../common/http.rs"]
+mod http;
+
 struct Server {
     child: Child,
     port: u16,
@@ -65,32 +68,7 @@ fn start() -> Server {
 }
 
 fn call(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
-    let mut command = Command::new("curl");
-    command
-        .arg("-s")
-        .arg("-m")
-        .arg("30")
-        .arg("-o")
-        .arg("/dev/stdout")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("-X")
-        .arg(method)
-        .arg(format!("http://127.0.0.1:{port}{path}"));
-    if let Some(body) = body {
-        command
-            .arg("-H")
-            .arg("content-type: application/json")
-            .arg("-d")
-            .arg(body);
-    }
-    let out = command.output().expect("curl is required for this test");
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n')?;
-    Some((code.trim().parse().ok()?, body.to_string()))
+    http::call(port, method, path, &[], body)
 }
 
 fn post(port: u16, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {

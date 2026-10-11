@@ -16,6 +16,7 @@ WAL 会被截断——快照校验通过后，它所覆盖的那段日志会被�
 | `$DXMT_WAL_DIR/vectors/` | 盘表的全量向量(`<表>.f32` 或 `.f16` + `.rows`) | **是** |
 | `$DXMT_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
 | `$DXMT_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
+| `$DXMT_WAL_DIR/derived/` | 正常关机时写下的筛选/稀疏索引，下次启动读一次即删 | 否（可从记录重建） |
 | 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**(等价于上面几项:配了对象存储时,盘表的快照会把记录连同向量一起带上,所以一台没有行文件的新机器也能从它恢复;代价是快照又回到按记录数计时) |
 
 服务器写的所有东西都在一个根下面，`DXMT_ROOT_DIR`，默认 `~/.dxmt`：
@@ -74,28 +75,42 @@ curl -sX POST http://localhost:9999/api/v1/backup \
 
 ---
 
+## 定时备份
+
+```bash
+DXMT_BACKUP_INTERVAL_SECS=86400   # 每天一次；默认 0，关闭
+DXMT_BACKUP_KEEP=7                # 保留最近 7 份，默认 7
+```
+
+写到 `$DXMT_BACKUP_ROOT/auto-<UTC 时间>`，和手动 `POST /backup` 是同一份东西。超过保留份数时删最旧的——
+**只删名字以 `auto-` 开头、且有 `BACKUP.json` 的目录**：手动备份、写到一半的备份、你放在那里的
+其他东西都不会碰。默认关闭，因为每份都是完整拷贝，默认打开会在不知情时占掉几倍的磁盘。
+
+是否成功看 `/metrics` 的 `dxmt_last_backup_timestamp_seconds` 和 `dxmt_backup_failures_total`
+（手动备份也计入）。失败只记日志和计数，下一轮再试，不影响服务。
+
+---
+
 ## 恢复
 
-恢复是离线操作，不走 API：
+恢复是离线操作，服务要先停：
 
 ```bash
 systemctl stop dxmt-vectordb          # 或 kill -TERM
-
-rm -rf   /var/lib/dxmt/wal
-mkdir -p /var/lib/dxmt/wal
-cp -a /backups/dxmt-2026-08-15/snapshot /var/lib/dxmt/wal/
-cp -a /backups/dxmt-2026-08-15/records  /var/lib/dxmt/wal/   # 盘表的记录
-cp -a /backups/dxmt-2026-08-15/vectors  /var/lib/dxmt/wal/   # 盘表的向量
-cp -a /backups/dxmt-2026-08-15/wal.log  /var/lib/dxmt/wal/   # 如果备份里有
-
-DXMT_WAL_DIR=/var/lib/dxmt/wal systemctl start dxmt-vectordb
+vectordb restore /backups/dxmt-2026-08-15            # 恢复到 serve 会打开的那个数据目录
+vectordb restore /backups/dxmt-2026-08-15 --wal-dir /var/lib/dxmt/store   # 或明确指定
+systemctl start dxmt-vectordb
 ```
 
-启动日志里应当看到：
+它会：
 
-```
-Snapshot loaded: 3 tables; replaying WAL from sequence 41
-```
+1. 按备份里的 `BACKUP.json` 核对文件都在，缺一个就拒绝，什么都不动；
+2. 拿数据目录的 `LOCK`——服务没停就拒绝；
+3. 把数据目录原有的内容**移到** `<目录名>.before-restore-<时间>`，不删除——恢复错了可以搬回来；
+4. 拷入备份，然后实际打开一次、跑完恢复，打印每张表和记录数。
+
+手工拷贝也仍然可以（`snapshot/`、`records/`、`vectors/`、`wal.log`、`aliases` 拷进数据目录），
+但容易漏——这份文档的旧版本就漏过 `vectors/`。
 
 **故意不做成 API**：往一个正在跑的服务里灌恢复数据，需要先停掉写入、清空内存状态、
 再重放——那是一个比"停机拷文件"复杂得多、也更容易出错的路径，而收益只是省一次重启。
