@@ -2950,6 +2950,16 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         "dxmt_snapshot_failures_total {}",
         storage.snapshot_failures
     );
+    let _ = writeln!(
+        out,
+        "# HELP dxmt_backup_failures_total Backups, manual or scheduled, that failed since process start."
+    );
+    let _ = writeln!(out, "# TYPE dxmt_backup_failures_total counter");
+    let _ = writeln!(
+        out,
+        "dxmt_backup_failures_total {}",
+        storage.backup_failures
+    );
 
     // The durability frontier: how much a restart would replay, and how far behind the last
     // snapshot is. `wal_next_sequence - snapshot_wal_next_sequence` is the replay depth.
@@ -2979,6 +2989,11 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
             "dxmt_last_snapshot_timestamp_seconds",
             "Unix time of the most recently installed snapshot.",
             storage.last_snapshot_at.as_deref(),
+        ),
+        (
+            "dxmt_last_backup_timestamp_seconds",
+            "Unix time the most recent backup, manual or scheduled, finished.",
+            storage.last_backup_at.as_deref(),
         ),
     ] {
         if let Some(seconds) = value

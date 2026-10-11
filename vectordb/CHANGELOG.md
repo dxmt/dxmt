@@ -19,6 +19,14 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Scheduled backups and a restore command.** `DXMT_BACKUP_INTERVAL_SECS` (off by default)
+  writes a backup into `DXMT_BACKUP_ROOT/auto-<UTC time>` on a timer and keeps the newest
+  `DXMT_BACKUP_KEEP` (default 7); backups taken by hand are never pruned. `vectordb restore
+  <dir>` restores one with the server stopped: it checks the backup against its manifest,
+  refuses while the store is open, moves the store's previous contents aside instead of
+  deleting them, and opens the result to list what came back. `/metrics` has
+  `dxmt_last_backup_timestamp_seconds` and `dxmt_backup_failures_total`.
+
 - **Windows.** The server builds natively with MSVC and the whole suite passes there (82 test
   binaries, 767 tests; the four that measure Unix-only behaviour -- hole punching, permission
   bits, symlinks -- are compiled out). jemalloc is not used on Windows. Not yet a release

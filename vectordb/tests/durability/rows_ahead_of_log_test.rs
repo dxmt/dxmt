@@ -517,3 +517,112 @@ async fn a_lost_insert_and_a_lost_delete_that_cancel_out_are_both_repaired() {
         "the deleted row is still in the graph"
     );
 }
+
+/// Scheduled backups are pruned to the newest `keep`; a backup taken by hand, and one that
+/// never finished (no `BACKUP.json`), are not candidates.
+#[test]
+fn pruning_keeps_the_newest_scheduled_backups_and_nothing_else() {
+    let root = tempfile::tempdir().unwrap();
+    let make = |name: &str, finished: bool| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        if finished {
+            std::fs::write(dir.join("BACKUP.json"), b"{}").unwrap();
+        }
+    };
+    for stamp in [
+        "20261001T000000Z",
+        "20261002T000000Z",
+        "20261003T000000Z",
+        "20261004T000000Z",
+    ] {
+        make(&format!("auto-{stamp}"), true);
+    }
+    make("auto-20261005T000000Z", false); // still being written
+    make("before-the-upgrade", true); // taken by hand
+
+    let removed = IntelligentIndexedStorage::prune_scheduled_backups(root.path(), 2).unwrap();
+    let mut removed: Vec<String> = removed
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    removed.sort();
+    assert_eq!(removed, ["auto-20261001T000000Z", "auto-20261002T000000Z"]);
+    let mut left: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "auto-20261003T000000Z",
+            "auto-20261004T000000Z",
+            "auto-20261005T000000Z",
+            "before-the-upgrade"
+        ]
+    );
+}
+
+/// A restore brings back the backup's state exactly, keeps what the store held aside, and is
+/// refused while the store is open or when the backup is incomplete.
+#[tokio::test]
+#[serial_test::serial] // sets DXMT_BACKUP_ROOT
+async fn a_restore_brings_back_the_backup_and_keeps_what_was_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("store");
+    let backups = dir.path().join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    std::env::set_var("DXMT_BACKUP_ROOT", &backups);
+    let backup = backups.join("b");
+
+    {
+        let storage = open(&wal).await;
+        storage.create_table(table("t")).await.unwrap();
+        storage.insert_records("t", rows(0, 50)).await.unwrap();
+        storage.backup_to(&backup).await.unwrap();
+        // After the backup: more rows, a delete, and a second table.
+        storage.insert_records("t", rows(50, 80)).await.unwrap();
+        storage
+            .delete_records("t", vec!["r3".to_string()])
+            .await
+            .unwrap();
+        storage.create_table(table("later")).await.unwrap();
+
+        let refused = IntelligentIndexedStorage::restore_backup(&storage_config(), &backup, &wal)
+            .await
+            .expect_err("restored into a store that is open");
+        assert!(refused.to_string().contains("in use"), "{refused}");
+    }
+
+    let broken = backups.join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::copy(backup.join("BACKUP.json"), broken.join("BACKUP.json")).unwrap();
+    let refused = IntelligentIndexedStorage::restore_backup(&storage_config(), &broken, &wal)
+        .await
+        .expect_err("restored an incomplete backup");
+    assert!(refused.to_string().contains("incomplete"), "{refused}");
+
+    let report = IntelligentIndexedStorage::restore_backup(&storage_config(), &backup, &wal)
+        .await
+        .unwrap();
+    assert_eq!(report.tables, vec![("t".to_string(), 50)]);
+    let aside = report
+        .moved_aside
+        .expect("the store held data, so it was kept");
+    assert!(aside.join("wal.log").exists() || aside.join("records").exists());
+
+    let storage = open(&wal).await;
+    assert_eq!(ids(&storage).await.len(), 50);
+    assert!(
+        storage.get_record("t", &"r3".to_string()).await.is_ok(),
+        "the delete after the backup is undone"
+    );
+    assert!(storage.get_table("later").await.is_err());
+    for i in [0, 3, 49] {
+        assert_eq!(
+            top1(&storage, i, SearchMode::Normal).await.as_deref(),
+            Some(format!("r{i}").as_str())
+        );
+    }
+}

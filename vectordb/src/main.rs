@@ -94,6 +94,20 @@ enum Commands {
         #[arg(long)]
         wal_dir: Option<String>,
     },
+
+    /// Restore a backup into the data directory, with the server stopped.
+    ///
+    /// The backup is checked against its manifest first; whatever the data directory held is
+    /// moved into a sibling directory rather than deleted; the restored store is opened once
+    /// to prove it recovers, and its tables are listed.
+    Restore {
+        /// A directory written by `POST /api/v1/backup` or a scheduled backup
+        backup: std::path::PathBuf,
+        /// The data directory to restore into; defaults to the one `serve` would open
+        /// (`DXMT_WAL_DIR`, else `$DXMT_ROOT_DIR/store`)
+        #[arg(long)]
+        wal_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Resolve when the process is asked to stop, so the server can drain and then snapshot.
@@ -315,6 +329,24 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             }
         }
 
+        Commands::Restore { backup, wal_dir } => {
+            let Some(store) = wal_dir.or_else(dxmt_vectordb::api::server::wal_dir_from_env) else {
+                return Err(dxmt_vectordb::Error::InvalidConfig(
+                    "no data directory to restore into: DXMT_WAL_DIR is empty; pass --wal-dir"
+                        .to_string(),
+                ));
+            };
+            let report =
+                IntelligentIndexedStorage::restore_backup(&config.storage, &backup, &store).await?;
+            println!("Restored {} into {}", backup.display(), store.display());
+            if let Some(aside) = &report.moved_aside {
+                println!("The previous contents are in {}", aside.display());
+            }
+            for (table, records) in &report.tables {
+                println!("  {table}: {records} records");
+            }
+        }
+
         Commands::Mcp { wal_dir } => {
             let wal_dir = match wal_dir {
                 Some(dir) if dir.trim().is_empty() => None,
@@ -347,7 +379,7 @@ mod tests {
     fn serve_takes_its_address_from_the_environment_unless_a_flag_says_otherwise() {
         let address = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
             Commands::Serve { host, port, .. } => (host, port),
-            Commands::Mcp { .. } => unreachable!(),
+            Commands::Mcp { .. } | Commands::Restore { .. } => unreachable!(),
         };
         std::env::set_var("DXMT_HOST", "127.0.0.1");
         std::env::set_var("DXMT_PORT", "19876");

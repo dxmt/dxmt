@@ -42,8 +42,14 @@ impl Drop for Server {
 /// this is what an operator does when the backups belong on another mount. The refusal itself
 /// is checked by `a_backup_outside_the_root_is_refused`.
 fn start_server_on(wal_dir: &Path) -> Server {
+    start_server_with(wal_dir, &[])
+}
+
+/// `start_server_on` with more environment, which wins over the defaults above.
+fn start_server_with(wal_dir: &Path, extra: &[(&str, &str)]) -> Server {
     let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vectordb"));
+    command
         .arg("serve")
         .arg("--host")
         .arg("127.0.0.1")
@@ -56,7 +62,11 @@ fn start_server_on(wal_dir: &Path) -> Server {
         .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
         .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (name, value) in extra {
+        command.env(name, value);
+    }
+    let child = command
         .spawn()
         .expect("failed to spawn the vectordb binary");
 
@@ -406,4 +416,96 @@ fn a_backup_outside_the_root_is_refused() {
         );
         assert!(!elsewhere.path().join("via-symlink").exists());
     }
+}
+
+/// Scheduled backups run on their own, are kept to `DXMT_BACKUP_KEEP`, and `vectordb restore`
+/// brings one back into a stopped server's data directory.
+#[test]
+fn scheduled_backups_keep_the_newest_and_restore_from_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wal_dir = tmp.path().join("store");
+    let root = tmp.path().join("backups");
+    std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.display().to_string();
+
+    let server = start_server_with(
+        &wal_dir,
+        &[
+            ("DXMT_BACKUP_ROOT", root_text.as_str()),
+            ("DXMT_BACKUP_INTERVAL_SECS", "1"),
+            ("DXMT_BACKUP_KEEP", "2"),
+        ],
+    );
+    seed(server.port);
+    let expected = search_ids(server.port);
+
+    let scheduled = || -> Vec<std::path::PathBuf> {
+        let mut found: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.join("BACKUP.json").is_file()
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("auto-")
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    // Long enough for at least four ticks, so pruning has had to run.
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..40 {
+        let now = scheduled();
+        assert!(now.len() <= 2, "more than DXMT_BACKUP_KEEP kept: {now:?}");
+        seen.extend(now);
+        if seen.len() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        seen.len() >= 4,
+        "only {} scheduled backups were seen",
+        seen.len()
+    );
+    let metrics = curl(server.port, "GET", "/metrics", None)
+        .expect("metrics")
+        .1;
+    assert!(
+        metrics.contains("dxmt_last_backup_timestamp_seconds"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("dxmt_backup_failures_total 0"),
+        "{metrics}"
+    );
+
+    // Change the data after the backups, then stop the server.
+    ok(server.port, "DELETE", &format!("/tables/{TABLE}"), None);
+    drop(server);
+
+    let newest = scheduled().pop().expect("a scheduled backup");
+    let out = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .arg("restore")
+        .arg(&newest)
+        .arg("--wal-dir")
+        .arg(&wal_dir)
+        .output()
+        .expect("run vectordb restore");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "restore failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(TABLE),
+        "the restored table is not listed: {stdout}"
+    );
+    assert!(stdout.contains("previous contents"), "{stdout}");
+
+    let server = start_server_on(&wal_dir);
+    assert_eq!(search_ids(server.port), expected);
 }

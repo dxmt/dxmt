@@ -256,6 +256,10 @@ pub struct StorageHealthSnapshot {
     pub last_wal_sync_at: Option<String>,
     /// RFC3339 timestamp of the most recent successfully installed snapshot.
     pub last_snapshot_at: Option<String>,
+    /// When the last backup -- manual or scheduled -- finished writing, RFC 3339.
+    pub last_backup_at: Option<String>,
+    /// Backups that failed since process start.
+    pub backup_failures: u64,
     /// Number of snapshot attempts that failed since process start.
     pub snapshot_failures: u64,
     /// Most recent snapshot failure, if any. A failed snapshot does not make the WAL unreadable;
@@ -349,6 +353,18 @@ struct SnapshotHead {
 /// Record entries of one table waiting to be replayed together: the table, each record with
 /// the row its entry names, and the sequence number of the first.
 type ReplayRun = (String, Vec<(Record, Option<u64>)>, u64);
+
+/// The name every scheduled backup starts with, so pruning touches only those.
+pub const SCHEDULED_BACKUP_PREFIX: &str = "auto-";
+
+/// What [`IntelligentIndexedStorage::restore_backup`] did.
+#[derive(Debug)]
+pub struct RestoreReport {
+    /// Where the store's previous contents went, if it had any.
+    pub moved_aside: Option<PathBuf>,
+    /// Every table the restored store opened with, and its record count.
+    pub tables: Vec<(String, u64)>,
+}
 
 /// The current meta layout: a MessagePack head, then bincode records.
 const SNAPSHOT_KIND: &str = "table-snapshot-v2";
@@ -774,6 +790,8 @@ pub struct IntelligentIndexedStorage {
     /// of truth.
     last_wal_sync_at: Arc<StdMutex<Option<String>>>,
     last_snapshot_at: Arc<StdMutex<Option<String>>>,
+    last_backup_at: StdMutex<Option<String>>,
+    backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
     /// and one `.meta` file per evicted table — off disk on every call.
@@ -2128,6 +2146,8 @@ impl IntelligentIndexedStorage {
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
             last_snapshot_at: Arc::new(StdMutex::new(None)),
+            last_backup_at: StdMutex::new(None),
+            backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
             dropped_since_snapshot: Arc::new(StdMutex::new(std::collections::HashSet::new())),
@@ -3789,7 +3809,167 @@ impl IntelligentIndexedStorage {
         }))
     }
 
+    /// Copy the store to `dest`, a new directory inside the backup root. See
+    /// `docs/operations/backup-restore.md`; [`Self::restore_backup`] is the way back.
     pub async fn backup_to(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
+        let result = self.backup_to_inner(dest).await;
+        match &result {
+            Ok(_) => {
+                if let Ok(mut at) = self.last_backup_at.lock() {
+                    *at = Some(chrono::Utc::now().to_rfc3339());
+                }
+            }
+            Err(_) => {
+                self.backup_failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Where backups may be written for this store: `DXMT_BACKUP_ROOT`, or beside the store.
+    /// `None` without a WAL directory, which has nothing to back up.
+    pub fn backup_root_dir(&self) -> Option<PathBuf> {
+        self.wal_dir.as_deref().map(Self::backup_root)
+    }
+
+    /// Delete the oldest scheduled backups under `root` until `keep` remain, and return what was
+    /// deleted.
+    ///
+    /// Only directories this server's schedule wrote are candidates: named `auto-<timestamp>`
+    /// and holding the `BACKUP.json` a finished backup ends with. A backup someone took by hand,
+    /// one still being written, and anything else an operator keeps there are never touched.
+    /// The timestamp sorts as text, so the oldest come first.
+    pub fn prune_scheduled_backups(
+        root: &std::path::Path,
+        keep: usize,
+    ) -> crate::Result<Vec<PathBuf>> {
+        let mut scheduled: Vec<PathBuf> = match std::fs::read_dir(root) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.is_dir()
+                        && p.join("BACKUP.json").is_file()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(SCHEDULED_BACKUP_PREFIX))
+                })
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        scheduled.sort();
+        let excess = scheduled.len().saturating_sub(keep);
+        let removed: Vec<PathBuf> = scheduled.into_iter().take(excess).collect();
+        for path in &removed {
+            std::fs::remove_dir_all(path)?;
+        }
+        Ok(removed)
+    }
+
+    /// Replace the store at `store` with the backup at `backup`, offline, and open the result
+    /// to prove it recovers.
+    ///
+    /// Refused while any process has the store open (its `LOCK`). Nothing is deleted: whatever
+    /// the store held is moved into a sibling directory, named in the report, first. The
+    /// backup is checked against its own manifest before anything moves, so an incomplete copy
+    /// is refused rather than half-restored. Restoring used to be five `cp -a` lines in a
+    /// document, one of which -- `vectors/` -- older versions of that document did not have.
+    pub async fn restore_backup(
+        config: &StorageConfig,
+        backup: &std::path::Path,
+        store: &std::path::Path,
+    ) -> crate::Result<RestoreReport> {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(backup.join("BACKUP.json")).map_err(|e| {
+                crate::Error::InvalidInput(format!(
+                    "{} is not a backup: no readable BACKUP.json ({e})",
+                    backup.display()
+                ))
+            })?)
+            .map_err(|e| {
+                crate::Error::InvalidInput(format!("{}/BACKUP.json: {e}", backup.display()))
+            })?;
+        let files: Vec<String> = manifest["files"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let missing: Vec<&String> = files
+            .iter()
+            .filter(|f| !backup.join(f.as_str()).is_file())
+            .collect();
+        if !missing.is_empty() {
+            return Err(crate::Error::InvalidInput(format!(
+                "{} is incomplete; its manifest names files that are not there: {:?}",
+                backup.display(),
+                missing
+            )));
+        }
+
+        let moved_aside = {
+            let _lock = Self::lock_dir(store)?;
+            let present: Vec<PathBuf> = std::fs::read_dir(store)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.file_name().is_some_and(|n| n != "LOCK"))
+                .collect();
+            let aside = if present.is_empty() {
+                None
+            } else {
+                let name = format!(
+                    "{}.before-restore-{}",
+                    store
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("store"),
+                    chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                );
+                let aside = store.with_file_name(name);
+                std::fs::create_dir_all(&aside)?;
+                for path in present {
+                    let name = path.file_name().expect("a directory entry has a name");
+                    std::fs::rename(&path, aside.join(name))?;
+                }
+                Some(aside)
+            };
+            for file in &files {
+                let to = store.join(file);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(backup.join(file), &to)?;
+            }
+            aside
+        };
+
+        let opened = Self::new_with_wal(config, Some(store.to_path_buf()))
+            .await
+            .map_err(|e| {
+                crate::Error::Internal(format!(
+                    "the backup was copied into {} but does not open: {e}{}",
+                    store.display(),
+                    moved_aside
+                        .as_ref()
+                        .map(|a| format!("; the previous store is in {}", a.display()))
+                        .unwrap_or_default()
+                ))
+            })?;
+        let tables = opened
+            .list_tables()
+            .await?
+            .into_iter()
+            .map(|t| (t.name, t.record_count))
+            .collect();
+        Ok(RestoreReport {
+            moved_aside,
+            tables,
+        })
+    }
+
+    async fn backup_to_inner(&self, dest: &std::path::Path) -> crate::Result<serde_json::Value> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(
                 "backup requires WAL-backed storage; this instance has no durable state"
@@ -10982,6 +11162,8 @@ impl IntelligentIndexedStorage {
             total_records,
             last_wal_sync_at,
             last_snapshot_at,
+            last_backup_at: self.last_backup_at.lock().ok().and_then(|at| at.clone()),
+            backup_failures: self.backup_failures.load(Ordering::Relaxed),
             snapshot_failures: self.snapshot_failures.load(Ordering::Relaxed),
             last_snapshot_error,
             filter_paths: FilterPathCounts {
