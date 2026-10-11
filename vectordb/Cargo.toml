@@ -245,7 +245,7 @@ utoipa = { version = "4.2", features = ["axum_extras"], optional = true }
 # crate is built on. Removing that and declaring this is a net subtraction.
 rust-embed = { version = "8.7", features = ["mime-guess", "debug-embed"], optional = true }
 ordered-float = "5.0.0"
-roaring = "0.11.2"
+roaring = { version = "0.11.2", features = ["serde"] }
 # Already in the graph through hashbrown; declared so the payload index can name its hasher.
 # See `FastMap` in `src/storage/payload_index.rs` for why it is keyed rather than FxHash.
 ahash = "0.8"

@@ -354,6 +354,28 @@ struct SnapshotHead {
 /// the row its entry names, and the sequence number of the first.
 type ReplayRun = (String, Vec<(Record, Option<u64>)>, u64);
 
+/// The derived indexes of one table as a clean shutdown leaves them, with what the record
+/// store looked like at that moment. Read once at the next start and deleted.
+const DERIVED_FILE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize)]
+struct PersistedDerivedOut<'a> {
+    version: u32,
+    rows: u32,
+    live: usize,
+    created: Option<Vec<i64>>,
+    derived: &'a DerivedIndexes,
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedDerivedIn {
+    version: u32,
+    rows: u32,
+    live: usize,
+    created: Option<Vec<i64>>,
+    derived: DerivedIndexes,
+}
+
 /// The name every scheduled backup starts with, so pruning touches only those.
 pub const SCHEDULED_BACKUP_PREFIX: &str = "auto-";
 
@@ -870,7 +892,7 @@ type NamedVectors = Vec<(String, Vec<(RecordId, Vec<f32>)>)>;
 ///
 /// Writes do not build it. An insert into a table whose indexes are not built leaves them not
 /// built, because a later build reads the records the insert just landed. Only a read forces it.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct DerivedIndexes {
     payload: crate::storage::payload_index::PayloadIndex,
     sparse: SparseIndex,
@@ -2058,6 +2080,7 @@ impl IntelligentIndexedStorage {
             if let Ok(mut last) = storage.last_recovery.lock() {
                 *last = Some((took.as_nanos() as u64, replayed));
             }
+            storage.load_persisted_derived().await;
         }
 
         Ok(storage)
@@ -3864,6 +3887,132 @@ impl IntelligentIndexedStorage {
             std::fs::remove_dir_all(path)?;
         }
         Ok(removed)
+    }
+
+    /// Where a table's derived indexes are kept between a clean shutdown and the next start.
+    fn derived_path(wal_dir: &std::path::Path, table: &str) -> PathBuf {
+        wal_dir.join("derived").join(format!(
+            "{}.bin",
+            crate::types::table::Table::table_id(table)
+        ))
+    }
+
+    /// Write every built payload and sparse index beside the store, for the next start to read
+    /// back instead of rebuilding. Called at a clean shutdown, after the shutdown snapshot,
+    /// when nothing can write any more; returns how many tables were written.
+    ///
+    /// The rebuild this saves is 23-27 s of every core at 10M rows. Each file records the
+    /// record store's row count and live count, and the next start uses it only if both still
+    /// match -- a crash, or anything that writes in between, leaves it unused -- and deletes it
+    /// either way, so it is never read twice.
+    pub async fn persist_derived(&self) -> crate::Result<usize> {
+        let Some(wal_dir) = self.wal_dir.clone() else {
+            return Ok(0);
+        };
+        let mut written = 0usize;
+        let tables = self.read_tables("persist_derived").await;
+        for (name, data) in tables.iter() {
+            let Some(rows) = data.records.row_count() else {
+                continue; // in memory: rebuilt from the records, which is a map walk
+            };
+            let derived = data.derived.read();
+            let Some(derived) = derived.as_ref() else {
+                continue;
+            };
+            let path = Self::derived_path(&wal_dir, name);
+            let started = std::time::Instant::now();
+            let result = tokio::task::block_in_place(|| -> crate::Result<()> {
+                std::fs::create_dir_all(path.parent().expect("derived/ has a parent"))?;
+                let tmp = path.with_extension("tmp");
+                {
+                    let file = std::fs::File::create(&tmp)?;
+                    let mut writer = std::io::BufWriter::new(file);
+                    bincode::serialize_into(
+                        &mut writer,
+                        &PersistedDerivedOut {
+                            version: DERIVED_FILE_VERSION,
+                            rows,
+                            live: data.records.len(),
+                            created: data.records.created_column(),
+                            derived,
+                        },
+                    )?;
+                    use std::io::Write as _;
+                    writer.flush()?;
+                    writer.get_ref().sync_all()?;
+                }
+                std::fs::rename(&tmp, &path)?;
+                Ok(())
+            });
+            match result {
+                Ok(()) => {
+                    written += 1;
+                    info!(
+                        "Table '{}': derived indexes written for the next start in {:.1}s",
+                        name,
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                Err(e) => warn!("Table '{}': derived indexes not written: {}", name, e),
+            }
+        }
+        Ok(written)
+    }
+
+    /// Install the derived indexes a clean shutdown wrote, for every table whose record store is
+    /// exactly as it was then. Runs at the end of recovery, before anything is served. Every
+    /// file is deleted once read, used or not.
+    async fn load_persisted_derived(&self) {
+        let Some(wal_dir) = self.wal_dir.clone() else {
+            return;
+        };
+        if !wal_dir.join("derived").is_dir() {
+            return;
+        }
+        let tables = self.read_tables("load_persisted_derived").await;
+        for (name, data) in tables.iter() {
+            let path = Self::derived_path(&wal_dir, name);
+            if !path.is_file() {
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let read = tokio::task::block_in_place(|| -> crate::Result<PersistedDerivedIn> {
+                let file = std::fs::File::open(&path)?;
+                Ok(bincode::deserialize_from(std::io::BufReader::new(file))?)
+            });
+            let _ = std::fs::remove_file(&path);
+            let persisted = match read {
+                Ok(persisted) => persisted,
+                Err(e) => {
+                    warn!(
+                        "Table '{}': derived indexes on disk unreadable, rebuilding: {}",
+                        name, e
+                    );
+                    continue;
+                }
+            };
+            let now = (data.records.row_count(), data.records.len());
+            if persisted.version != DERIVED_FILE_VERSION
+                || now != (Some(persisted.rows), persisted.live)
+                || data.table.payload_index.clone().unwrap_or_default()
+                    != *persisted.derived.payload.policy()
+            {
+                info!(
+                    "Table '{}': derived indexes on disk do not match the records any more; rebuilding",
+                    name
+                );
+                continue;
+            }
+            if let Some(created) = persisted.created {
+                data.records.publish_created(created);
+            }
+            *data.derived.write() = Some(persisted.derived);
+            info!(
+                "Table '{}': derived indexes read from disk in {:.1}s instead of rebuilt",
+                name,
+                started.elapsed().as_secs_f64()
+            );
+        }
     }
 
     /// Replace the store at `store` with the backup at `backup`, offline, and open the result
@@ -9243,18 +9392,27 @@ impl IntelligentIndexedStorage {
     /// times. A write used to void the build, which on a server taking writes was every build.
     pub async fn warm_derived(&self, tablename: &str) -> crate::Result<bool> {
         let tablename = &*self.resolve(tablename);
-        let build_lock = {
+        let (built_already, build_lock) = {
             let tables = self.read_tables("warm_derived").await;
             let data = tables
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
-            if data.derived.read().is_some() || data.records.row_count().is_none() {
-                // Built already; or in memory, small by construction, where the lazy build is
-                // a map walk.
+            if data.records.row_count().is_none() {
+                // In memory: small by construction, where the lazy build is a map walk.
                 return Ok(false);
             }
-            Arc::clone(&data.derived_build)
+            let built = data.derived.read().is_some();
+            (built, Arc::clone(&data.derived_build))
         };
+        if built_already {
+            // Read from disk at startup (`load_persisted_derived`): only the node map is left.
+            let map_in = self.fill_node_map(tablename).await;
+            debug!(
+                "Table '{tablename}': node map filled in {:.1}s",
+                map_in.as_secs_f64()
+            );
+            return Ok(false);
+        }
         let _building = build_lock.lock().await;
 
         let (rows, policy) = {
@@ -9379,6 +9537,18 @@ impl IntelligentIndexedStorage {
             debug!("warm_derived('{tablename}'): caught up {caught_up} record(s) written during the build");
         }
         let built_in = started.elapsed();
+        let map_in = self.fill_node_map(tablename).await;
+        info!(
+            "Table '{tablename}': payload and sparse indexes warmed from {records} records in {:.1}s, node map in {:.1}s",
+            built_in.as_secs_f64(),
+            map_in.as_secs_f64()
+        );
+        Ok(true)
+    }
+
+    /// Fill a table's node map from its graph, so the first filtered query does not pay for
+    /// it, and return how long that took.
+    async fn fill_node_map(&self, tablename: &str) -> std::time::Duration {
         // The node map too, so the first filtered query does not pay that either -- in
         // slices, releasing the table lock between them: one pass over 10M nodes held it
         // for 3.2 s and queued every writer behind it.
@@ -9409,12 +9579,7 @@ impl IntelligentIndexedStorage {
             }
             tokio::task::yield_now().await;
         }
-        info!(
-            "Table '{tablename}': payload and sparse indexes warmed from {records} records in {:.1}s, node map in {:.1}s",
-            built_in.as_secs_f64(),
-            map_started.elapsed().as_secs_f64()
-        );
-        Ok(true)
+        map_started.elapsed()
     }
 
     /// Warm every table's derived indexes in the background, one table at a time, once the

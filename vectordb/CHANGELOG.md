@@ -19,6 +19,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **A clean restart keeps the payload and sparse indexes.** They used to be rebuilt after
+  every restart -- 23-27 s of every core at 10M rows. A clean shutdown now writes them to
+  `DXMT_WAL_DIR/derived/`, with the record store's row and live counts; the next start reads
+  them back if both still match, before serving anything, and deletes the file whether or not
+  it was used. A crash, or any write in between, means a rebuild as before. At 1M rows:
+  read back in 0.3 s, against 2.5 s to rebuild; 68 MB on disk, 0.2 s to write.
 - **Scheduled backups and a restore command.** `DXMT_BACKUP_INTERVAL_SECS` (off by default)
   writes a backup into `DXMT_BACKUP_ROOT/auto-<UTC time>` on a timer and keeps the newest
   `DXMT_BACKUP_KEEP` (default 7); backups taken by hand are never pruned. `vectordb restore

@@ -317,3 +317,117 @@ async fn the_first_filtered_query_does_not_hold_the_table_lock_through_the_build
          took; the build has to happen outside it"
     );
 }
+
+/// The derived indexes a clean shutdown writes are read back at the next start instead of
+/// rebuilt, answer exactly as the rows do, and are used once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn derived_indexes_written_at_shutdown_are_read_back_instead_of_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("wal");
+    let before = {
+        let storage = open(&wal).await;
+        storage.create_table(table()).await.unwrap();
+        for chunk in (0..ROWS).collect::<Vec<_>>().chunks(5_000) {
+            storage
+                .insert_records("t", chunk.iter().map(|&i| row(i)).collect())
+                .await
+                .unwrap();
+        }
+        let page = storage
+            .list_records("t", Some(&tag(1003)), 25, 0, false)
+            .await
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>();
+        storage.snapshot().await.unwrap();
+        assert_eq!(storage.persist_derived().await.unwrap(), 1);
+        page
+    };
+    let derived_dir = wal.join("derived");
+    assert_eq!(std::fs::read_dir(&derived_dir).unwrap().count(), 1);
+
+    let storage = open(&wal).await;
+    assert_eq!(
+        std::fs::read_dir(&derived_dir).unwrap().count(),
+        0,
+        "the file is used once and deleted"
+    );
+    assert!(
+        !storage.warm_derived("t").await.unwrap(),
+        "the indexes were rebuilt rather than read back"
+    );
+    for t in [42, 7, 96, 1000, 1003] {
+        assert_eq!(
+            storage.count_records("t", Some(&tag(t))).await.unwrap(),
+            truth(&storage, t).await,
+            "tag {t}"
+        );
+    }
+    let after: Vec<String> = storage
+        .list_records("t", Some(&tag(1003)), 25, 0, false)
+        .await
+        .unwrap()
+        .0
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(
+        after, before,
+        "a filtered page comes back in the same order"
+    );
+}
+
+/// A file from an earlier shutdown is not used once the records have moved on: here it is put
+/// back after a later session wrote a row, and the next start rebuilds instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn derived_indexes_from_before_a_later_write_are_not_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("wal");
+    {
+        let storage = open(&wal).await;
+        storage.create_table(table()).await.unwrap();
+        storage
+            .insert_records("t", (0..ROWS).map(row).collect())
+            .await
+            .unwrap();
+        storage.count_records("t", Some(&tag(42))).await.unwrap();
+        storage.snapshot().await.unwrap();
+        storage.persist_derived().await.unwrap();
+    }
+    let derived_dir = wal.join("derived");
+    let file = std::fs::read_dir(&derived_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = dir.path().join("saved.bin");
+    std::fs::copy(&file, &saved).unwrap();
+    {
+        // A later session, ended by a crash rather than a clean shutdown, writes a row.
+        let storage = open(&wal).await;
+        storage
+            .insert_records("t", vec![row(ROWS + 42 * 97)])
+            .await
+            .unwrap();
+    }
+    std::fs::copy(&saved, &file).unwrap();
+
+    let storage = open(&wal).await;
+    assert!(
+        storage.warm_derived("t").await.unwrap(),
+        "a stale file was installed instead of a rebuild"
+    );
+    let expect = (0..ROWS)
+        .chain(std::iter::once(ROWS + 42 * 97))
+        .filter(|i| i % 97 == 42)
+        .count();
+    assert_eq!(
+        storage.count_records("t", Some(&tag(42))).await.unwrap(),
+        expect
+    );
+}

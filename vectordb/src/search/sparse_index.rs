@@ -15,13 +15,14 @@ use crate::types::RecordId;
 use std::collections::HashMap;
 
 /// One entry in a posting list: record id + value for that dimension
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Posting {
     id: RecordId,
     value: f32,
 }
 
 /// Sparse vector index backed by an inverted index with WAND pruning
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SparseIndex {
     /// inverted_index[dimension] = postings sorted by |value| descending
     inverted_index: HashMap<u32, Vec<Posting>>,

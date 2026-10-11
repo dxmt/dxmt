@@ -594,6 +594,12 @@ impl RowStore {
 
     /// Publish the `created_at` column from a full scan's rows, if nothing has yet and the
     /// scan covered every row the table has now.
+    /// The `created_at` column, if it has been built. For persisting it beside the derived
+    /// indexes at shutdown.
+    pub fn created_column(&self) -> Option<Vec<i64>> {
+        self.created.read().clone()
+    }
+
     pub fn publish_created(&self, created: Vec<i64>) {
         let mut slot = self.created.write();
         if slot.is_none() && created.len() == self.ids.rows() {
@@ -904,6 +910,14 @@ impl RecordStore {
         match self {
             RecordStore::Memory(_) => None,
             RecordStore::Disk(s) => Some(s.decode_range(from, to)),
+        }
+    }
+
+    /// See [`RowStore::created_column`]; nothing for the in-memory map.
+    pub fn created_column(&self) -> Option<Vec<i64>> {
+        match self {
+            RecordStore::Disk(s) => s.created_column(),
+            RecordStore::Memory(_) => None,
         }
     }
 

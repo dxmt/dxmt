@@ -730,8 +730,10 @@ experimental, and what a feature has to have before it moves between the two.
 - **`POST /api/v1/tables/{name}/records/list` omits vectors unless asked.** Pass
   `"with_vector": true` for them. The default is off because a page of 100 rows at 768
   dimensions is over a megabyte of JSON floats, and responses are not compressed.
-- **The payload and sparse indexes are rebuilt after every restart.** They are derived from
-  the records and not written anywhere. Since 1.2.0 the server builds them in the background
+- **The payload and sparse indexes are rebuilt after a restart that did not shut down
+  cleanly.** A clean shutdown (SIGTERM, Ctrl-C) writes them beside the store and the next
+  start reads them back if the records are exactly as it left them -- 0.3 s against a 2.5 s
+  rebuild at 1M rows -- and deletes the file either way. Otherwise the server builds them in the background
   once recovery is done (26.8 s at 10M rows, on every core), so the cost is CPU after startup
   rather than a slow first query — unless a filtered or sparse query arrives before the
   build finishes, in which case that query waits for it: up to 23 s at 10M. Writes during the

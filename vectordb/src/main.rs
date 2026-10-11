@@ -325,6 +325,11 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                         Ok(tables) => info!("Shutdown snapshot written for {} table(s)", tables),
                         Err(e) => tracing::warn!("Shutdown snapshot failed: {}", e),
                     }
+                    // And the payload and sparse indexes, so the next start reads them instead
+                    // of rebuilding them -- 23-27 s of every core at 10M rows.
+                    if let Err(e) = storage.persist_derived().await {
+                        tracing::warn!("Derived indexes not persisted: {}", e);
+                    }
                 }
             }
         }
