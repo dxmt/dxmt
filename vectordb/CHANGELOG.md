@@ -44,6 +44,13 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A replayed run the graph refused left its records one version ahead.** The batched
+  replay of 60d76ab sends a run of logged records through the insert path; when the graph
+  refused the run -- an id still in the snapshot's graph whose row the row files had deleted --
+  the record map had already taken it, bumping every record's version, and the one-at-a-time
+  retry checked versions again and kept the bump. Found by the stateful walk (`r2 version 10
+  != 9` after an update and a SIGKILL); the retry no longer re-checks.
+
 - **Ingest into a quantized table spent a third of its CPU in `memcpy`.** Decoding a PQ code
   copies one centroid per subspace, and the copy for a four-float subspace -- the width of
   every 768-, 1024- and 1536-dimension table -- was a call to `memcpy` each time: 192 calls of

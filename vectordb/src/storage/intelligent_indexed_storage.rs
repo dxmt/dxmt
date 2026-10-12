@@ -2643,25 +2643,6 @@ impl IntelligentIndexedStorage {
         }
     }
 
-    /// Replay one current-format record. See [`Self::restore_records_from_wal`], which this is
-    /// the single-entry case of; an entry that cannot be applied is the error.
-    async fn restore_record_from_wal(
-        &self,
-        table: &str,
-        record: Record,
-        row: Option<u64>,
-    ) -> crate::Result<()> {
-        match self
-            .restore_records_from_wal(table, vec![(record, row)])
-            .await?
-            .into_iter()
-            .next()
-        {
-            Some((_, e)) => Err(e),
-            None => Ok(()),
-        }
-    }
-
     /// Replay a run of current-format records for one table through the normal index path,
     /// then restore what a create request cannot carry. Replay is single-threaded and WAL
     /// writes are suppressed while it runs, so replacing the map values after indexing is
@@ -2679,6 +2660,17 @@ impl IntelligentIndexedStorage {
         &self,
         table: &str,
         entries: Vec<(Record, Option<u64>)>,
+    ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
+        self.restore_records_checked(table, entries, true).await
+    }
+
+    /// [`Self::restore_records_from_wal`], with the version check optional: the retry of a
+    /// refused run has checked versions already, against the store as it was before the run.
+    async fn restore_records_checked(
+        &self,
+        table: &str,
+        entries: Vec<(Record, Option<u64>)>,
+        check_versions: bool,
     ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
         let mut failed = Vec::new();
 
@@ -2725,9 +2717,10 @@ impl IntelligentIndexedStorage {
             let data = tables.get(table);
             for id in order {
                 let (record, row) = latest.remove(&id).expect("every ordered id is kept");
-                if data
-                    .and_then(|data| data.records.get(&record.id))
-                    .is_some_and(|existing| existing.version > record.version)
+                if check_versions
+                    && data
+                        .and_then(|data| data.records.get(&record.id))
+                        .is_some_and(|existing| existing.version > record.version)
                 {
                     continue;
                 }
@@ -2789,14 +2782,34 @@ impl IntelligentIndexedStorage {
             .insert_records_with_rows(table, requests.clone(), rows.clone())
             .await
         {
+            warn!(
+                "WAL run of {} record(s) for '{}' refused as a whole ({}); replaying it one \
+                 record at a time",
+                records.len(),
+                table,
+                e
+            );
             if records.len() == 1 {
                 failed.push((records[0].id.clone(), e));
                 return Ok(failed);
             }
+            // Without the version check. The processor may have applied part of the refused
+            // run before refusing it -- the record map first, then the graph, which is what
+            // refused -- and that bumped each record's version past the one logged. Checked
+            // again, every record of the run was then "behind what is restored" and skipped,
+            // keeping the bumped version: the stateful walk's `r2 version 10 != 9`. The
+            // versions were checked above against the store before the run; re-storing the
+            // logged record is what restores them. The graph refused an id it already held
+            // and the map did not (a node the snapshot's graph kept for a record the row
+            // files have since deleted); the partial apply put the id in the map, so the
+            // retry replaces the stale node rather than tripping on it.
             for (record, row) in records.into_iter().zip(rows) {
                 let id = record.id.clone();
-                if let Err(e) = Box::pin(self.restore_record_from_wal(table, record, row)).await {
-                    failed.push((id, e));
+                match Box::pin(self.restore_records_checked(table, vec![(record, row)], false))
+                    .await
+                {
+                    Ok(mut errors) => failed.append(&mut errors),
+                    Err(e) => failed.push((id, e)),
                 }
             }
             return Ok(failed);
