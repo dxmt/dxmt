@@ -35,6 +35,9 @@ MODES=${DXMT_MODES:-"memory disk"}
 PYTEST=${PYTEST:-"python3 -m pytest"}
 BIN=target/debug/vectordb
 export DXMT_FEATURES=${DXMT_FEATURES:-}
+# The same answers here as in CI, where there is no ollama: a server that found a local
+# embedding model would accept a table with neither a dimension nor a model.
+export DXMT_EMBEDDING_AUTODETECT=0
 
 # Both the OpenAPI document and the console are served by default now, so these flags are no
 # longer what turns them on. `--dashboard` is still worth passing when the caller named the

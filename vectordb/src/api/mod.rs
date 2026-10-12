@@ -7,6 +7,7 @@ pub mod graphql;
 #[cfg(feature = "api-grpc")]
 pub mod grpc;
 pub mod handlers;
+pub mod quickstart;
 pub mod response;
 pub mod server;
 pub mod server_health; // Server health monitoring and backpressure

@@ -422,10 +422,13 @@ pub async fn create_table(
             );
             return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
         }
-        None if request.embedding.is_none() => {
+        None if request.embedding.is_none() && state.storage.default_embedding().is_none() => {
             let error = ApiError::new(
                 "INVALID_INPUT",
-                "dimension is required, unless `embedding` names a model to take it from",
+                "dimension is required, unless `embedding` names a model to take it from. To \
+                 create tables from text without naming one, give the server a default: set \
+                 DXMT_EMBEDDING_MODEL, or run a local ollama with an embedding model \
+                 (`ollama pull bge-m3`) and restart",
             );
             return (StatusCode::BAD_REQUEST, ApiResponse::error(error)).into_response();
         }
@@ -491,7 +494,14 @@ pub async fn create_table(
         hnsw: request.hnsw,
         quantization: request.quantization,
         payload_index: request.payload_index,
-        embedding: request.embedding,
+        // Neither a width nor a model: the server's default model, which the check above
+        // has made sure exists. A table given a dimension stores the caller's vectors and is
+        // not given a model it did not ask for.
+        embedding: match (request.embedding, request.dimension) {
+            (Some(embedding), _) => Some(embedding),
+            (None, None) => state.storage.default_embedding(),
+            (None, Some(_)) => None,
+        },
         rerank: request.rerank,
     };
 

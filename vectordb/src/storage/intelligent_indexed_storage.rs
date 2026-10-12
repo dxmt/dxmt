@@ -813,6 +813,11 @@ pub struct IntelligentIndexedStorage {
     last_wal_sync_at: Arc<StdMutex<Option<String>>>,
     last_snapshot_at: Arc<StdMutex<Option<String>>>,
     last_backup_at: StdMutex<Option<String>>,
+    /// The model a table created with neither a dimension nor an `embedding` uses: set at
+    /// startup from `DXMT_EMBEDDING_MODEL`, or found on a local ollama. See `api::quickstart`.
+    default_embedding: StdMutex<Option<crate::types::table::EmbeddingConfig>>,
+    /// The knowledge-base table's name, read once: see `storage::knowledge_base`.
+    kb_table: Option<String>,
     backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
@@ -2170,6 +2175,8 @@ impl IntelligentIndexedStorage {
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
             last_snapshot_at: Arc::new(StdMutex::new(None)),
             last_backup_at: StdMutex::new(None),
+            default_embedding: StdMutex::new(None),
+            kb_table: crate::storage::knowledge_base::kb_table_name(),
             backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
@@ -3860,6 +3867,66 @@ impl IntelligentIndexedStorage {
             }
         }
         result
+    }
+
+    /// Make the knowledge-base table if `tablename` is its name, it does not exist yet, and the
+    /// server has a default model. Called by the paths a first note takes -- insert, search,
+    /// text and hybrid search -- so the table appears when someone uses it rather than on
+    /// every server at startup. Two first writes racing are fine: the loser finds it made.
+    async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
+        if self.kb_table.as_deref() != Some(tablename) {
+            return Ok(());
+        }
+        let Some(embedding) = self.default_embedding() else {
+            return Ok(());
+        };
+        // Not `get_table`, which calls this.
+        self.ensure_resident(tablename).await?;
+        if self
+            .read_tables("ensure_kb_table")
+            .await
+            .contains_key(tablename)
+        {
+            return Ok(());
+        }
+        match self
+            .create_table(crate::storage::knowledge_base::kb_table_config(
+                tablename, embedding,
+            ))
+            .await
+        {
+            Ok(table) => {
+                info!(
+                    "Knowledge-base table '{}' created on first use ({} dimensions, model '{}')",
+                    tablename,
+                    table.dimension,
+                    table
+                        .embedding
+                        .as_ref()
+                        .map(|e| e.model.as_str())
+                        .unwrap_or("")
+                );
+                Ok(())
+            }
+            Err(crate::Error::TableAlreadyExists(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The model a table gets when it is created with neither a dimension nor a model.
+    pub fn default_embedding(&self) -> Option<crate::types::table::EmbeddingConfig> {
+        self.default_embedding.lock().ok().and_then(|e| e.clone())
+    }
+
+    pub fn set_default_embedding(&self, embedding: Option<crate::types::table::EmbeddingConfig>) {
+        if let Ok(mut slot) = self.default_embedding.lock() {
+            *slot = embedding;
+        }
+    }
+
+    /// The directory this store lives in, when it has one.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.wal_dir.as_deref()
     }
 
     /// Where backups may be written for this store: `DXMT_BACKUP_ROOT`, or beside the store.
@@ -6377,6 +6444,38 @@ impl IntelligentIndexedStorage {
     /// The embedding has to be the table's, not the caller's choice, and not a server default:
     /// a query vector from a different model than the corpus is not a worse answer, it is a
     /// meaningless one, and it comes back looking like a normal ranked page.
+    /// The dense half of a hybrid search from its `text`, when the body has text and no
+    /// vector and the table has a model -- as `/search` does with `text`. Without this a
+    /// text-only hybrid search on a table with a model ran the keyword half alone: a question
+    /// sharing no word with the note that answers it came back empty, which on the knowledge
+    /// base table is most questions. A table without a model, or a body with a vector, is left
+    /// as it was.
+    async fn embed_hybrid_text(
+        &self,
+        tablename: &str,
+        mut request: HybridSearchRequest,
+    ) -> crate::Result<HybridSearchRequest> {
+        if request.vector.is_some() {
+            return Ok(request);
+        }
+        let Some(text) = request.text.clone().filter(|t| !t.trim().is_empty()) else {
+            return Ok(request);
+        };
+        let model = self
+            .read_tables("embed_hybrid_text")
+            .await
+            .get(tablename)
+            .and_then(|data| data.table.embedding.clone());
+        let Some(config) = model else {
+            return Ok(request);
+        };
+        request.vector = Self::embed(&config, &[text], None)
+            .await?
+            .into_iter()
+            .next();
+        Ok(request)
+    }
+
     async fn embed_query(
         &self,
         tablename: &str,
@@ -6427,6 +6526,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        self.ensure_kb_table(&self.resolve(tablename)).await?;
         self.insert_records_with_rows(tablename, requests, Vec::new())
             .await
     }
@@ -6621,6 +6721,7 @@ impl IntelligentIndexedStorage {
     }
 
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        self.ensure_kb_table(&self.resolve(tablename)).await?;
         self.search_with_budget(tablename, query, None).await
     }
 
@@ -8436,6 +8537,7 @@ impl IntelligentIndexedStorage {
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
         let tablename = &*self.resolve(tablename);
+        self.ensure_kb_table(tablename).await?;
         let plan = self
             .rerank_plan(
                 tablename,
@@ -8778,6 +8880,8 @@ impl IntelligentIndexedStorage {
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
+        self.ensure_kb_table(tablename).await?;
+        let request = self.embed_hybrid_text(tablename, request).await?;
         let plan = self
             .rerank_plan(
                 tablename,
@@ -9051,6 +9155,9 @@ impl IntelligentIndexedStorage {
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
         let name = &*self.resolve(name);
+        // Every route checks its table here first, so this is where the knowledge-base table
+        // is made on first use, for REST, MCP and gRPC alike.
+        self.ensure_kb_table(name).await?;
         self.ensure_resident(name).await?;
         let tables = self.read_tables("get_table").await;
 

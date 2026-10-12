@@ -19,6 +19,17 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **A first run needs no configuration to store and search text.** `serve` prints where
+  everything is (API, console, data directory, the embedding model in use) on stdout, with the
+  two requests that store and find a note; it printed nothing at all before unless `RUST_LOG`
+  was set, and now logs warnings by default. A default embedding model comes from
+  `DXMT_EMBEDDING_MODEL` (with `DXMT_EMBEDDING_BASE_URL`, `DXMT_EMBEDDING_API_KEY_ENV`), or
+  from a local ollama, preferring a multilingual model and warning when it can only find an
+  English-only one; a table created with neither a dimension nor a model takes it. The `kb`
+  table (`DXMT_KB_TABLE`) is made by its first write or search, with the default model and
+  Chinese-aware full-text search, so `/search/hybrid` has both halves.
+
+
 - **A clean restart keeps the payload and sparse indexes.** They used to be rebuilt after
   every restart -- 23-27 s of every core at 10M rows. A clean shutdown now writes them to
   `DXMT_WAL_DIR/derived/`, with the record store's row and live counts; the next start reads
@@ -50,6 +61,10 @@ release, and the first commit that was ever pushed anywhere.
   the record map had already taken it, bumping every record's version, and the one-at-a-time
   retry checked versions again and kept the bump. Found by the stateful walk (`r2 version 10
   != 9` after an update and a SIGKILL); the retry no longer re-checks.
+
+- **A text-only hybrid search ran only the keyword half** on a table with a model:
+  `/search` embeds `text`, `/search/hybrid` did not, so a question sharing no word with the
+  note that answers it came back empty. It embeds the text now when there is no `vector`.
 
 - **Ingest into a quantized table spent a third of its CPU in `memcpy`.** Decoding a PQ code
   copies one centroid per subspace, and the copy for a four-float subspace -- the width of

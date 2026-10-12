@@ -57,6 +57,31 @@ cargo build --release
 ./target/release/vectordb serve --host 0.0.0.0 --port 9999
 ```
 
+It prints where everything is -- the API, the console, the data directory -- and which
+embedding model text goes through.
+
+### Notes in, notes out: no configuration
+
+With an embedding model the server can reach, text goes straight in and searches come back by
+meaning. The quickest is a local [ollama](https://ollama.com) with a multilingual model, which
+the server finds on its own:
+
+```bash
+ollama pull bge-m3                     # multilingual; an English-only model searches Chinese badly
+./target/release/vectordb serve --host 127.0.0.1
+
+# The `kb` table is made by its first write: semantic search plus Chinese-aware keywords.
+curl -X POST localhost:9999/api/v1/tables/kb/records -H 'content-type: application/json' \
+     -d '{"records":[{"id":"n1","text":"HNSW 是一种用于向量检索的图索引"},
+                     {"id":"n2","text":"Python 的 GIL 限制了多线程并行"}]}'
+curl -X POST localhost:9999/api/v1/tables/kb/search/hybrid -H 'content-type: application/json' \
+     -d '{"text":"为什么 Python 跑不满多核","limit":3}'
+```
+
+Any OpenAI-compatible endpoint works instead: `DXMT_EMBEDDING_MODEL=text-embedding-3-small`
+with `OPENAI_API_KEY` set, or `DXMT_EMBEDDING_BASE_URL` for another provider. A table created
+with neither a `dimension` nor an `embedding` takes the server's model.
+
 Verify it's up:
 
 ```bash
@@ -379,6 +404,11 @@ DXMT_HOST=0.0.0.0
 DXMT_PORT=9999
 DXMT_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DXMT_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
+DXMT_EMBEDDING_MODEL=           # the default model for text; unset, a local ollama's is used if found
+DXMT_EMBEDDING_BASE_URL=        # its OpenAI-compatible endpoint (default https://api.openai.com/v1)
+DXMT_EMBEDDING_API_KEY_ENV=     # the variable holding its key (default OPENAI_API_KEY)
+DXMT_EMBEDDING_AUTODETECT=1     # 0: do not look for a local ollama
+DXMT_KB_TABLE=kb                # the notes table made on first write; `off` disables it
 DXMT_BACKUP_INTERVAL_SECS=0     # scheduled backups into DXMT_BACKUP_ROOT/auto-<time>; 0 (default) disables
 DXMT_BACKUP_KEEP=7              # scheduled backups kept; older ones deleted, hand-taken ones never
 DXMT_EVICTION_INTERVAL_SECS=600 # drop cold tables from memory; 0 disables
