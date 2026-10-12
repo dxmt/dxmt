@@ -12942,8 +12942,11 @@ mod tests {
 
         // And the size-based selector still answers what it always did, so the assertion above
         // is about the routing rather than about a selector that stopped choosing DiskANN.
+        // A billion rows, not 25M: the selector's line is half the machine's memory, and 25M
+        // x 768 is about 80 GB -- past half of the 62 GB box this was written on and well
+        // short of half of a 503 GB one, where this failed. A billion rows is 3 TB.
         let sized = storage
-            .decide_algorithm(25_000_000, 768, DistanceMetric::Cosine, false, None, None)
+            .decide_algorithm(1_000_000_000, 768, DistanceMetric::Cosine, false, None, None)
             .await?
             .selected_algorithm;
         assert!(

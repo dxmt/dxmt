@@ -273,6 +273,65 @@ async fn a_rate_limit_is_retried_and_a_bad_key_is_not() {
     );
 }
 
+/// A text past the model's context failed the whole batch -- a 60,000-character web page in
+/// DuReader, and the seven ordinary passages beside it were not stored either. Now the long
+/// one's vector is of the longest prefix the model takes, and the record keeps its whole text.
+#[tokio::test]
+async fn a_text_longer_than_the_model_takes_is_embedded_from_its_beginning() {
+    const LIMIT: usize = 1_000;
+    let (base, provider) = serve(Behaviour::ContextLimit(LIMIT)).await;
+    let storage = open().await;
+    storage
+        .create_table(table("long", Some(config(&base))))
+        .await
+        .unwrap();
+    let long = "向量 检索 ".repeat(10_000); // 60,000 characters
+    storage
+        .insert_records(
+            "long",
+            vec![
+                text_record("short", "an ordinary note"),
+                text_record("long", &long),
+                text_record("other", "another ordinary note"),
+            ],
+        )
+        .await
+        .expect("a long text should be cut to fit, not fail the batch");
+
+    let seen = provider.seen.lock().unwrap().clone();
+    let embedded = seen
+        .iter()
+        .filter(|t| long.starts_with(t.as_str()) && t.chars().count() <= LIMIT)
+        .map(|t| t.chars().count())
+        .max()
+        .expect("a prefix of the long text was embedded");
+    assert!(
+        embedded > LIMIT * 7 / 8,
+        "embedded {embedded} characters of a {LIMIT}-character context: cut far shorter than it had to be"
+    );
+    assert!(
+        provider.calls.load(Ordering::SeqCst) < 20,
+        "{} calls to fit one text",
+        provider.calls.load(Ordering::SeqCst)
+    );
+
+    for id in ["short", "other"] {
+        storage
+            .get_record("long", &id.to_string())
+            .await
+            .expect("every record of the batch is stored");
+    }
+    let stored = storage
+        .get_record("long", &"long".to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.payload.get("text").and_then(|v| v.as_str()),
+        Some(long.as_str()),
+        "the record keeps its whole text; only the vector is of a prefix"
+    );
+}
+
 #[tokio::test]
 async fn a_model_of_the_wrong_width_is_refused_before_anything_is_stored() {
     let (base, _) = serve(Behaviour::WrongDimension).await;
