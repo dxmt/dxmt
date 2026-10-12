@@ -569,11 +569,8 @@ impl FullTextSearchEngine {
                     _ => {} // Ignore unknown fields
                 }
             }
-            // Tantivy QueryParser 默认使用 OR 逻辑 (disjunction)
-            // 这正是我们想要的：提高中文分词后的召回率
-            // 例如："向量数据库" 分词后 → ["向量", "数据库"]
-            // 默认OR: 匹配包含"向量"或"数据库"的文档（召回率高）
-            // 如果调用 set_conjunction_by_default(): 仅匹配同时包含两者的文档（召回率低）
+            // Separate terms are OR-ed. One term the analyzer splits into several words becomes
+            // a phrase, which is why `segment_unspaced_words` puts spaces into Chinese first.
             QueryParser::for_index(&self.index, fields)
         });
 
@@ -615,7 +612,7 @@ impl FullTextSearchEngine {
             Box::new(BooleanQuery::new(clauses))
         } else {
             query_parser
-                .parse_query(&request.query)
+                .parse_query(&self.segment_unspaced_words(&request.query))
                 .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?
         };
 
@@ -729,34 +726,59 @@ impl FullTextSearchEngine {
         }
     }
 
-    /// Generate snippet from content
-    fn generate_snippet(&self, content: &str, query: &str, max_length: usize) -> String {
-        // Simple snippet generation - find first occurrence of query terms
-        let query_lower = query.to_lowercase();
-        let content_lower = content.to_lowercase();
-
-        if let Some(pos) = content_lower.find(&query_lower) {
-            let start = pos.saturating_sub(50);
-            let end = (pos + query_lower.len() + 50).min(content.len());
-
-            let mut snippet = String::new();
-            if start > 0 {
-                snippet.push_str("...");
+    /// The query with every unspaced CJK run split into the content field's words.
+    ///
+    /// Tantivy's `QueryParser` turns one whitespace-delimited term that its analyzer splits
+    /// into several tokens into a *phrase* query, so a Chinese sentence -- which has no
+    /// spaces, and which jieba splits into a dozen words -- matched only documents holding
+    /// those words contiguously and in that order: in practice none. On CMRC2018 a question
+    /// asked as written found its paragraph in the top ten 1.8% of the time; the same words
+    /// with spaces between them were an ordinary OR of terms. Rewriting with spaces gives the
+    /// disjunction the parser applies to separate terms. A query containing `"` is left
+    /// alone, since a quoted phrase is meant to be one, and so is a chunk carrying query
+    /// syntax (`field:term`, `+must`, `term^2`).
+    fn segment_unspaced_words(&self, query: &str) -> String {
+        if query.contains('"') {
+            return query.to_string();
+        }
+        let is_cjk = |c: char| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF);
+        let Ok(mut analyzer) = self
+            .index
+            .tokenizer_for_field(self.schema_fields.content_field)
+        else {
+            return query.to_string();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for chunk in query.split_whitespace() {
+            let syntax =
+                chunk.starts_with(['+', '-']) || chunk.chars().any(|c| ":^()[]{}~*\\".contains(c));
+            if syntax || !chunk.chars().any(is_cjk) {
+                out.push(chunk.to_string());
+                continue;
             }
-            snippet.push_str(&content[start..end]);
-            if end < content.len() {
-                snippet.push_str("...");
-            }
-
-            snippet
-        } else {
-            // Fallback to beginning of content
-            if content.len() > max_length {
-                format!("{}...", &content[..max_length])
-            } else {
-                content.to_string()
+            let mut stream = analyzer.token_stream(chunk);
+            while stream.advance() {
+                let word = &stream.token().text;
+                if word.chars().all(char::is_alphanumeric) {
+                    out.push(word.clone());
+                }
             }
         }
+        out.join(" ")
+    }
+
+    /// A snippet of `content` around the first occurrence of `query`, or its first
+    /// `max_length` characters.
+    ///
+    /// In characters, not bytes. This took byte offsets -- 50 either side of the match, or the
+    /// first 150 -- and a Chinese character is three bytes, so the cut landed inside one and
+    /// the slice panicked: `end byte index 150 is not a char boundary; it is inside '安'`.
+    /// The release profile aborts on panic, so one text search over Chinese paragraphs longer
+    /// than 50 characters took the whole server down (found running the CMRC2018 evaluation).
+    /// The match position was also found in a lowercased copy and used on the original, whose
+    /// byte offsets lowercasing can change; both are one sequence of characters here.
+    fn generate_snippet(&self, content: &str, query: &str, max_length: usize) -> String {
+        snippet_around(content, query, max_length)
     }
 
     /// Generate highlights for matched terms
@@ -1169,5 +1191,72 @@ mod tests {
         assert_eq!(range_results[0].id, "rust2");
 
         Ok(())
+    }
+}
+
+/// See `FullTextSearchEngine::generate_snippet`.
+fn snippet_around(content: &str, query: &str, max_length: usize) -> String {
+    const CONTEXT: usize = 50;
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let chars: Vec<char> = content.chars().collect();
+    let folded: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
+    let needle: Vec<char> = query.chars().map(fold).collect();
+    let found = (!needle.is_empty() && needle.len() <= folded.len())
+        .then(|| {
+            folded
+                .windows(needle.len())
+                .position(|w| w == needle.as_slice())
+        })
+        .flatten();
+    let (start, end) = match found {
+        Some(pos) => (
+            pos.saturating_sub(CONTEXT),
+            (pos + needle.len() + CONTEXT).min(chars.len()),
+        ),
+        None => (0, max_length.min(chars.len())),
+    };
+    let mut snippet = String::new();
+    if start > 0 {
+        snippet.push_str("...");
+    }
+    snippet.extend(&chars[start..end]);
+    if end < chars.len() {
+        snippet.push_str("...");
+    }
+    snippet
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::snippet_around;
+
+    /// The paragraph and the cut that crashed the server: 150 bytes into Chinese text.
+    #[test]
+    fn chinese_text_is_cut_on_a_character_not_inside_one() {
+        let text = "《战国无双3》是由光荣和ω-force开发的战国无双系列的正统第三续作。".repeat(8);
+        let start = snippet_around(&text, "不在文中的词", 150);
+        assert_eq!(
+            start.chars().count(),
+            153,
+            "150 characters and an ellipsis: {start}"
+        );
+        let around = snippet_around(&text, "正统第三续作", 150);
+        assert!(around.contains("正统第三续作"), "{around}");
+        for cut in 1..60 {
+            snippet_around(&text, "光荣", cut);
+            snippet_around(
+                &text[..text.char_indices().nth(cut).unwrap().0],
+                "续作",
+                150,
+            );
+        }
+    }
+
+    #[test]
+    fn matching_ignores_case_and_keeps_the_original_text() {
+        let s = snippet_around("Rust 的 Ownership 机制", "ownership", 150);
+        assert_eq!(s, "Rust 的 Ownership 机制");
+        assert_eq!(snippet_around("short", "x", 150), "short");
+        assert_eq!(snippet_around("abcdef", "", 3), "abc...");
     }
 }
