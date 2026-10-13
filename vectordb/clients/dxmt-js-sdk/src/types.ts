@@ -387,11 +387,11 @@ export interface HybridSearchParams {
    * The vector side's share of the score, 0 to 1; the text side gets the rest.
    *
    * Setting it selects `weighted_sum` fusion, which is the method that reads it. Left unset,
-   * the server fuses by distribution (`dbsf`), which needs no weight — and which ignores one,
-   * so a weight sent without a method changed nothing at all.
+   * the server uses its default: `weighted_sum` at 0.6 (`dbsf`, which ignores any weight, when
+   * the request carries a sparse vector).
    */
   vector_weight?: number;
-  /** Which fusion to use. Defaults to the server's `dbsf`, or to `weighted_sum` with a weight. */
+  /** Which fusion to use. Defaults to `weighted_sum` with a weight, else to the server's default. */
   fusion_method?: 'dbsf' | 'weighted_sum' | 'reciprocal_rank_fusion';
   /** Re-score the fused page with the table's rerank provider against `text_query`. */
   rerank?: RerankRequest;

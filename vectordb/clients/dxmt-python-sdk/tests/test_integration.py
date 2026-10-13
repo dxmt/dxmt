@@ -495,9 +495,9 @@ class TestHybridSearch:
     def test_the_weight_changes_the_ranking(self, client: Client) -> None:
         """`vector_weight` has to reach a fusion method that reads it.
 
-        The server's default fusion is `dbsf`, which normalises each side by its own
-        distribution and ignores the weight -- and this SDK sent the weight without ever
-        naming a method, so 0.0 and 1.0 came back with identical rows and identical scores.
+        `dbsf` normalises each side by its own distribution and ignores the weight, and it
+        was the server's default -- and this SDK sent the weight without ever naming a method,
+        so 0.0 and 1.0 came back with identical rows and identical scores.
         The tests this file used to carry passed a weight and asserted only the shape of
         the answer, which is how a knob that did nothing stayed in the API and in three
         integrations' docs.
@@ -526,9 +526,10 @@ class TestHybridSearch:
             assert top(vector_weight=1.0) == "vec"
             assert top(vector_weight=0.0) == "text"
             # Naming the method explicitly is still possible, and no weight leaves the server
-            # on its own default rather than quietly selecting one here.
+            # on its own default -- `weighted_sum` at 0.6 since 2026-10-13 -- rather than
+            # quietly selecting one here.
             assert top(vector_weight=1.0, fusion_method="reciprocal_rank_fusion") in {"vec", "text"}
-            assert top() == top(fusion_method="dbsf")
+            assert top() == top(fusion_method="weighted_sum", vector_weight=0.6)
         finally:
             client.delete_table(name)
 

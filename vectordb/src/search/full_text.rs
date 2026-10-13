@@ -611,9 +611,17 @@ impl FullTextSearchEngine {
             }
             Box::new(BooleanQuery::new(clauses))
         } else {
-            query_parser
-                .parse_query(&self.segment_unspaced_words(&request.query))
-                .map_err(|e| crate::Error::InvalidInput(format!("Invalid query: {}", e)))?
+            // Strictly first, so query syntax a caller means (`"a phrase"`, `+must`,
+            // `title:x`) still means it; leniently when that fails. A question typed as prose
+            // is not query syntax, and the strict parser refused 7 of SciFact's 300 -- an
+            // apostrophe in "Crohn's Disease", "proteins : UreD/UreH" read as a field -- with a
+            // 400 from /search/text, and in a hybrid search the text half was dropped without
+            // a word and the answer was the vector half alone.
+            let query_text = self.segment_unspaced_words(&request.query);
+            match query_parser.parse_query(&query_text) {
+                Ok(query) => query,
+                Err(_) => query_parser.parse_query_lenient(&query_text).0,
+            }
         };
 
         // Apply filters if any

@@ -623,7 +623,7 @@ mod text_routes {
                     sparse_vector: None,
                     text: Some(QUERY.to_string()),
                     vector_weight: 0.5,
-                    fusion_method: FusionMethod::Dbsf,
+                    fusion_method: Some(FusionMethod::Dbsf),
                     rrf_k: 60.0,
                     limit: 4,
                     filter: None,

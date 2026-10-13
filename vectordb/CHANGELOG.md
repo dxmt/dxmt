@@ -53,8 +53,30 @@ release, and the first commit that was ever pushed anywhere.
   it found in use, instead of both appending to one log. The OS releases the lock however the
   process exits.
 
+### Changed
+
+- **Hybrid search fuses with `weighted_sum` at `vector_weight` 0.6 when `fusion_method` is
+  omitted** (it was `dbsf` with equal weights). Measured with `eval/fusion_sweep.py` over three
+  sets, bge-m3 against BM25: mean MRR@10 0.877 against 0.873, and on DuReader-retrieval, whose
+  questions are phrased as people search, 0.971 against 0.958 and Recall@10 0.962 against
+  0.938 -- equal-weight `dbsf` there was below the vector side alone. A request carrying a
+  sparse vector still defaults to `dbsf`, which normalises all three lists. The default
+  `vector_weight` for `weighted_sum` and `reciprocal_rank_fusion` is 0.6 (was 0.7).
+
 ### Fixed
 
+- **A question with punctuation is searched, not refused.** `/search/text` parsed the query
+  strictly as Tantivy syntax, so prose with an apostrophe (`Crohn's Disease`) or a colon read
+  as a field (`proteins : UreD`) got a 400 -- 7 of BEIR SciFact's 300 questions -- and a hybrid
+  search carrying one dropped its text half without a word. A query that does not parse is now
+  parsed leniently; real syntax still parses strictly first.
+- **A Chinese question finds its paragraph by keyword.** One unspaced Chinese term that jieba
+  split into several words became a phrase query, which a question's words almost never
+  match: on CMRC2018 the paragraph was in the top ten for 1.8% of questions, now 100%.
+- **Keyword search over Chinese text no longer crashes the server.** The snippet was cut at a
+  byte offset inside a three-byte character, and the release build aborts on a panic.
+- **A text longer than the embedding model takes is embedded from its beginning** instead of
+  failing its whole batch; the record keeps its full text.
 - **A replayed run the graph refused left its records one version ahead.** The batched
   replay of 60d76ab sends a run of logged records through the insert path; when the graph
   refused the run -- an id still in the snapshot's graph whose row the row files had deleted --

@@ -1845,16 +1845,17 @@ class DXMTClient:
     def _fusion_body(vector_weight, alpha, fusion_method) -> dict[str, Any]:
         """The fusion half of a hybrid-search body.
 
-        The server's default fusion is `dbsf`, which normalises each side by its own
-        distribution and **ignores `vector_weight`** -- that is the point of it, no weight to
-        tune. This SDK sent `vector_weight` and never a `fusion_method`, so every weight a
+        `dbsf` normalises each side by its own distribution and **ignores `vector_weight`**,
+        and it was the server's default for every request until 2026-10-13 (now: `weighted_sum`
+        at 0.6, or `dbsf` when there is a sparse vector). This SDK sent `vector_weight` and never
+        a `fusion_method`, so every weight a
         caller passed, and the 0.7 default it invented for them, went to a method that does not
         read it: `vector_weight=0.0` and `vector_weight=1.0` returned the same rows with the
         same scores. Measured, not assumed.
 
         So a weight now implies a method that reads one (`weighted_sum`, min-max normalisation
         then a weighted sum, which is what "70% vector" means to a reader), and asking for no
-        weight sends neither field and leaves the server on `dbsf`.
+        weight sends neither field and leaves the choice to the server's default.
         """
         if vector_weight is None:
             vector_weight = alpha
@@ -1891,9 +1892,10 @@ class DXMTClient:
             text_query: Alias for text parameter (for compatibility).
             vector_weight: Weight for vector similarity (0-1). Sending one selects
                 `weighted_sum` fusion, which is the method that reads it; leaving it unset
-                leaves the server on `dbsf`, which needs no weight.
+                leaves the server's default (`weighted_sum` at 0.6).
             alpha: Alias for vector_weight (for compatibility).
-            fusion_method: "dbsf" (default), "weighted_sum" or "reciprocal_rank_fusion".
+            fusion_method: "weighted_sum" (the server's default), "dbsf" (its default with a
+                sparse vector) or "reciprocal_rank_fusion".
             k: Number of results to return (preferred parameter name).
             limit: Number of results to return (alias for k).
             filter: Optional metadata filter.
@@ -1963,9 +1965,10 @@ class DXMTClient:
             text_query: Alias for text parameter (for compatibility).
             vector_weight: Weight for vector similarity (0-1). Sending one selects
                 `weighted_sum` fusion, which is the method that reads it; leaving it unset
-                leaves the server on `dbsf`, which needs no weight.
+                leaves the server's default (`weighted_sum` at 0.6).
             alpha: Alias for vector_weight (for compatibility).
-            fusion_method: "dbsf" (default), "weighted_sum" or "reciprocal_rank_fusion".
+            fusion_method: "weighted_sum" (the server's default), "dbsf" (its default with a
+                sparse vector) or "reciprocal_rank_fusion".
             k: Number of results to return (preferred parameter name).
             limit: Number of results to return (alias for k).
             filter: Optional metadata filter.

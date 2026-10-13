@@ -96,7 +96,31 @@ def load_duretrieval(directory, n_questions=500, n_distractors=1500):
     return paragraphs, questions
 
 
+def load_beir(directory):
+    """A BEIR dataset (corpus.jsonl, queries.jsonl, qrels/test.tsv)."""
+    corpus = [json.loads(l) for l in open(f"{directory}/corpus.jsonl", encoding="utf-8")]
+    queries = {}
+    for l in open(f"{directory}/queries.jsonl", encoding="utf-8"):
+        q = json.loads(l)
+        queries[q["_id"]] = q["text"]
+    gold = {}
+    for n, l in enumerate(open(f"{directory}/qrels/test.tsv", encoding="utf-8")):
+        if n == 0:
+            continue
+        qid, did, s = l.rstrip("\n").split("\t")
+        if int(s) > 0:
+            gold.setdefault(qid, []).append(did)
+    paragraphs = [
+        {"id": d["_id"], "title": d.get("title", ""), "text": (d.get("title", "") + "\n" + d["text"]).strip()}
+        for d in corpus
+    ]
+    questions = [{"id": q, "question": queries[q], "answer": None, "gold": g} for q, g in sorted(gold.items())]
+    return paragraphs, questions
+
+
 def dataset(args):
+    if args.dataset == "beir":
+        return load_beir(args.beir)
     if args.dataset == "dureader":
         return load_duretrieval(args.duretrieval)
     return load_dataset(args.data)
@@ -124,7 +148,7 @@ def cmd_load(args):
                 {
                     "name": "content",
                     "source": {"metadata_field": "text"},
-                    "analyzer": "chinese",
+                    "analyzer": "standard" if args.dataset == "beir" else "chinese",
                     "boost": 1.0,
                 }
             ],
@@ -325,7 +349,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["load", "retrieval", "ragas"])
     ap.add_argument("--url", default="http://127.0.0.1:19997")
-    ap.add_argument("--dataset", choices=["cmrc", "dureader"], default="cmrc")
+    ap.add_argument("--dataset", choices=["cmrc", "dureader", "beir"], default="cmrc")
+    ap.add_argument("--beir", help="beir: a directory with corpus.jsonl, queries.jsonl, qrels/test.tsv")
     ap.add_argument("--data", default=DATA, help="cmrc: the dev set's JSON")
     ap.add_argument("--duretrieval", default=DURETRIEVAL, help="dureader: the parquet directory")
     ap.add_argument("--modes", default="vector,bm25,hybrid,hybrid:reciprocal_rank_fusion")
@@ -343,7 +368,7 @@ def main():
     ap.add_argument("--out", default="/tmp/ragas_cmrc.csv")
     args = ap.parse_args()
     global TABLE
-    TABLE = "dureader" if args.dataset == "dureader" else "cmrc"
+    TABLE = {"dureader": "dureader", "beir": "beir"}.get(args.dataset, "cmrc")
     {"load": cmd_load, "retrieval": cmd_retrieval, "ragas": cmd_ragas}[args.phase](args)
 
 

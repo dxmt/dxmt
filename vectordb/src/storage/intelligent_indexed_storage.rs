@@ -8873,7 +8873,7 @@ impl IntelligentIndexedStorage {
         combined_scores
     }
 
-    /// 混合搜索（稠密向量 + 稀疏向量 + 文本，三路 DBSF 融合）
+    /// 混合搜索（稠密向量 + 稀疏向量 + 文本）；融合方式见 `HybridSearchRequest::fusion`
     pub async fn hybrid_search(
         &self,
         tablename: &str,
@@ -9034,7 +9034,7 @@ impl IntelligentIndexedStorage {
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 4. Fuse results using the selected method
-        let combined_scores = match request.fusion_method {
+        let combined_scores = match request.fusion() {
             FusionMethod::WeightedSum => {
                 // Legacy two-path weighted sum; sparse is included as part of vector weight
                 let mut merged_vec = vector_results.clone();
@@ -12946,7 +12946,14 @@ mod tests {
         // x 768 is about 80 GB -- past half of the 62 GB box this was written on and well
         // short of half of a 503 GB one, where this failed. A billion rows is 3 TB.
         let sized = storage
-            .decide_algorithm(1_000_000_000, 768, DistanceMetric::Cosine, false, None, None)
+            .decide_algorithm(
+                1_000_000_000,
+                768,
+                DistanceMetric::Cosine,
+                false,
+                None,
+                None,
+            )
             .await?
             .selected_algorithm;
         assert!(
