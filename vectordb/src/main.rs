@@ -320,6 +320,13 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 // first note in. Without it a server started with no configuration printed
                 // nothing at all.
                 if let Some(storage) = &storage {
+                    // `api::dashboard` exists only with the feature; the minimal build has no
+                    // console to point at.
+                    #[cfg(feature = "api-dashboard")]
+                    let console =
+                        serve_dashboard && dxmt_vectordb::api::dashboard::assets_are_embedded();
+                    #[cfg(not(feature = "api-dashboard"))]
+                    let console = false;
                     print!(
                         "{}",
                         dxmt_vectordb::api::quickstart::banner(
@@ -328,7 +335,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                             &host,
                             port,
                             serve_swagger,
-                            serve_dashboard && dxmt_vectordb::api::dashboard::assets_are_embedded(),
+                            console,
                             dxmt_vectordb::api::auth::ApiKey::from_env().is_some(),
                         )
                         .await

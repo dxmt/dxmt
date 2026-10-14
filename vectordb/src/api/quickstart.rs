@@ -39,6 +39,7 @@ const ENGLISH_ONLY: &[&str] = &[
 /// The environment variable the ollama default reads its key from. Unset in practice, which
 /// sends no key at all: the default for a model would otherwise be `OPENAI_API_KEY`, and a
 /// local model has no business receiving that.
+#[cfg_attr(not(feature = "server-embedding"), allow(dead_code))]
 const LOCAL_KEY_ENV: &str = "DXMT_EMBEDDING_API_KEY";
 
 /// Where the server's default model came from, for the startup message.

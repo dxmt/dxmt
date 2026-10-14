@@ -206,7 +206,9 @@ def test_rrf_weights_each_arm_by_rank(fused_table, weight):
 
 @pytest.mark.parametrize("k", [1.0, 60.0, 500.0])
 def test_rrf_k_moves_the_scores_the_way_the_formula_says(fused_table, k):
-    want = fuse_rrf(arm_vector(fused_table), arm_text(fused_table), 0.7, k)
+    # 0.6 is the server's default `vector_weight` (0.7 until 2026-10-13); the request below
+    # sends none, so this is also the check that the default is what the server applies.
+    want = fuse_rrf(arm_vector(fused_table), arm_text(fused_table), 0.6, k)
     compare(f"rrf k={k}", hybrid(fused_table, "reciprocal_rank_fusion", rrf_k=k), want)
 
 
