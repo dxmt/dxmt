@@ -957,9 +957,9 @@ class DXMTVectorDB(VectorStore):
             k: Number of documents to return.
             vector_weight: Weight for vector similarity (0-1); the text side gets the rest.
                           Setting one selects weighted fusion, which is the method that reads
-                          it. Left unset, the server fuses by distribution (`dbsf`), which
-                          needs no weight -- this defaulted to 0.7, a number that was sent and
-                          then ignored.
+                          it. Left unset, the server uses its default (`weighted_sum` at 0.6;
+                          it was `dbsf`, which ignores weights, and this defaulted to 0.7, a
+                          number that was sent and then ignored).
             filter: Optional metadata filter.
             **kwargs: Additional keyword arguments.
 

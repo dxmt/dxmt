@@ -243,7 +243,7 @@ mod full_text_search_tests {
             vector: Some(vec![0.95, 0.05, 0.0]),  // Close to item1's vector
             text: Some("banana".to_string()),     // Matches item2's text
             vector_weight: 0.5,                   // Equal weight
-            fusion_method: dxmt_vectordb::types::record::FusionMethod::WeightedSum,
+            fusion_method: Some(dxmt_vectordb::types::record::FusionMethod::WeightedSum),
             rrf_k: 60.0,
             limit: 10,
             filter: None,
@@ -441,6 +441,39 @@ mod full_text_search_tests {
         // Mixed text: the ASCII words are still words, and case does not matter.
         assert_eq!(text_hits(&storage, "zh", "machine learning").await, vec!["zh3"]);
         assert!(text_hits(&storage, "zh", "区块链").await.is_empty(), "a word in no document");
+    }
+
+    /// A question asked as written: no spaces, words that are not contiguous in the document,
+    /// punctuation. The query parser made one jieba-split term into a phrase, so this found
+    /// nothing at all -- 1.8% of CMRC2018 questions found their paragraph in the top ten -- while
+    /// the same words separated by spaces found it.
+    #[tokio::test]
+    async fn a_chinese_question_finds_a_sentence_holding_its_words_apart() {
+        let storage = create_test_storage().await;
+        chinese_table(&storage, "zhq", TextAnalyzer::Chinese).await;
+
+        let asked = text_hits(&storage, "zhq", "哪种模型需要训练数据？").await;
+        assert_eq!(asked.first().map(String::as_str), Some("zh2"), "{asked:?}");
+        let asked = text_hits(&storage, "zhq", "向量数据库支持什么检索").await;
+        assert_eq!(asked.first().map(String::as_str), Some("zh1"), "{asked:?}");
+        // A quoted phrase is still a phrase.
+        assert!(text_hits(&storage, "zhq", "\"数据库训练\"").await.is_empty());
+    }
+
+    /// Prose is not query syntax. These are SciFact questions the strict parser refused with
+    /// a 400; a hybrid search carrying one silently lost its text half.
+    #[tokio::test]
+    async fn a_question_with_punctuation_is_searched_not_refused() {
+        let storage = create_test_storage().await;
+        chinese_table(&storage, "prose", TextAnalyzer::Standard).await;
+        for question in [
+            "Does Machine Learning relate to Crohn's Disease?",
+            "machine learning : sentence/mentions, too",
+            "The English sentence' (mentions) machine learning",
+        ] {
+            let hits = text_hits(&storage, "prose", question).await;
+            assert_eq!(hits.first().map(String::as_str), Some("zh3"), "{question}: {hits:?}");
+        }
     }
 
     #[tokio::test]

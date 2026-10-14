@@ -463,16 +463,16 @@ pub struct FullTextSearchHit {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
 pub enum FusionMethod {
-    /// 加权求和（默认方法）
-    /// 使用 Min-Max 归一化后加权求和，适合大数据集
+    /// 加权求和：Min-Max 归一化后按 `vector_weight` 加权求和。
+    /// 请求不带稀疏向量、也没指定融合方式时，用的就是它，权重默认 0.6。
+    #[default]
     WeightedSum,
     /// 倒数排名融合（Reciprocal Rank Fusion）
     /// 基于排名而非分数融合，对分数尺度不敏感，适合小数据集
     ReciprocalRankFusion,
     /// Distribution-Based Score Fusion（分布归一化融合）
-    /// 对每路结果独立做 (s-mean)/std 归一化后求和，无需调参 alpha。
-    /// 适合 dense+sparse+text 三路融合，消除量纲不一致。
-    #[default]
+    /// 对每路结果独立做 (s-mean)/std 归一化后等权求和，不读 `vector_weight`。
+    /// 请求带稀疏向量、又没指定融合方式时用它：三路各自归一化，量纲不一致也不怕。
     Dbsf,
 }
 
@@ -487,12 +487,14 @@ pub struct HybridSearchRequest {
     pub sparse_vector: Option<crate::types::sparse_vector::SparseVector>,
     /// 文本查询（可选）
     pub text: Option<String>,
-    /// 向量搜索权重 (0.0-1.0)，仅 WeightedSum 时有效
+    /// 向量一侧的权重 (0.0-1.0)，文本一侧是 `1 - vector_weight`。`weighted_sum` 和
+    /// `reciprocal_rank_fusion` 读它，`dbsf` 不读。
     #[serde(default = "default_vector_weight")]
     pub vector_weight: f32,
-    /// 融合方法，默认 Dbsf
+    /// 融合方法。不填时：带稀疏向量用 `dbsf`，否则用 `weighted_sum`。
+    /// 见 [`HybridSearchRequest::fusion`]。
     #[serde(default)]
-    pub fusion_method: FusionMethod,
+    pub fusion_method: Option<FusionMethod>,
     /// RRF 参数 k（仅当使用 ReciprocalRankFusion 时有效）
     #[serde(default = "default_rrf_k")]
     pub rrf_k: f32,
@@ -512,8 +514,33 @@ pub struct HybridSearchRequest {
     pub rerank: Option<RerankRequest>,
 }
 
+/// 0.6, measured: `eval/fusion_sweep.py` over CMRC2018 (1,000 questions), DuReader-retrieval
+/// (500) and BEIR SciFact (300), bge-m3 against BM25. `weighted_sum` at 0.6 had the best mean
+/// MRR@10 of every method and weight tried (0.877; 0.7 gave 0.870) and was within half a point
+/// of the best on each set alone.
 fn default_vector_weight() -> f32 {
-    0.7
+    0.6
+}
+
+impl HybridSearchRequest {
+    /// The fusion this request gets: the one it names, or else `dbsf` when it carries a sparse
+    /// vector and `weighted_sum` when it does not.
+    ///
+    /// The default was `dbsf` for every request until 2026-10-13. On dense + text it was the
+    /// weakest choice where the two sides disagree most: on DuReader-retrieval, whose
+    /// questions are phrased as people search rather than lifted from the passage, equal-weight
+    /// `dbsf` scored MRR@10 0.958 and Recall@10 0.938 against 0.971 and 0.962 for
+    /// `weighted_sum` at 0.6 -- below the vector side alone (0.973). `dbsf` stays the default
+    /// with a sparse vector because `weighted_sum` averages sparse scores into the dense ones
+    /// on their raw, unrelated scales, where `dbsf` normalises each of the three lists.
+    pub fn fusion(&self) -> FusionMethod {
+        self.fusion_method
+            .unwrap_or(if self.sparse_vector.is_some() {
+                FusionMethod::Dbsf
+            } else {
+                FusionMethod::WeightedSum
+            })
+    }
 }
 
 fn default_rrf_k() -> f32 {
@@ -1741,5 +1768,31 @@ mod filter_validation {
             should: None,
         };
         assert_eq!(empty.validate(), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod fusion_default_tests {
+    use super::*;
+
+    fn body(json: serde_json::Value) -> HybridSearchRequest {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn an_unnamed_fusion_is_weighted_sum_at_0_6_unless_there_is_a_sparse_vector() {
+        let plain = body(serde_json::json!({"text": "q"}));
+        assert_eq!(plain.fusion(), FusionMethod::WeightedSum);
+        assert_eq!(plain.vector_weight, 0.6);
+        let sparse = body(serde_json::json!({
+            "text": "q", "sparse_vector": {"indices": [1], "values": [0.5], "dimension": 4}
+        }));
+        assert_eq!(sparse.fusion(), FusionMethod::Dbsf);
+        // A named fusion is the caller's, with or without a sparse vector.
+        let named = body(serde_json::json!({
+            "text": "q", "fusion_method": "reciprocal_rank_fusion",
+            "sparse_vector": {"indices": [1], "values": [0.5], "dimension": 4}
+        }));
+        assert_eq!(named.fusion(), FusionMethod::ReciprocalRankFusion);
     }
 }

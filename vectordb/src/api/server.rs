@@ -466,6 +466,9 @@ pub async fn create_app_with_storage(
     let storage = Arc::new(
         IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?,
     );
+    // The model a table without a dimension or a model gets, and the one the knowledge-base
+    // table is made with: DXMT_EMBEDDING_MODEL, or what a local ollama already has.
+    crate::api::quickstart::configure_default_embedding(&storage).await;
 
     // 应用状态
     // Initialize server health monitor

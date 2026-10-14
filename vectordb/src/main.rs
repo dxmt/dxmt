@@ -153,7 +153,14 @@ fn main() -> Result<()> {
             .with_writer(std::io::stderr)
             .init();
     } else {
-        tracing_subscriber::fmt::init();
+        // Warnings by default, not errors only: with nothing set, a durability failure or a
+        // snapshot that could not be written went unsaid. Progress lines stay behind RUST_LOG.
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .init();
     }
 
     // After the subscriber exists, or the warning goes nowhere.
@@ -309,6 +316,31 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 }
 
                 info!("VectorDB server listening on {}", bind_addr);
+                // On stdout, whatever RUST_LOG says: where everything is and how to put the
+                // first note in. Without it a server started with no configuration printed
+                // nothing at all.
+                if let Some(storage) = &storage {
+                    // `api::dashboard` exists only with the feature; the minimal build has no
+                    // console to point at.
+                    #[cfg(feature = "api-dashboard")]
+                    let console =
+                        serve_dashboard && dxmt_vectordb::api::dashboard::assets_are_embedded();
+                    #[cfg(not(feature = "api-dashboard"))]
+                    let console = false;
+                    print!(
+                        "{}",
+                        dxmt_vectordb::api::quickstart::banner(
+                            storage,
+                            dxmt_vectordb::api::quickstart::resolved_default_embedding(),
+                            &host,
+                            port,
+                            serve_swagger,
+                            console,
+                            dxmt_vectordb::api::auth::ApiKey::from_env().is_some(),
+                        )
+                        .await
+                    );
+                }
 
                 axum::Server::bind(&bind_addr)
                     .serve(app.into_make_service())

@@ -312,7 +312,7 @@ async fn assert_upserted_secondary_indexes(storage: &IntelligentIndexedStorage) 
                 sparse_vector: Some(SparseVector::new(vec![0], vec![1.0], 4).unwrap()),
                 text: None,
                 vector_weight: 1.0,
-                fusion_method: FusionMethod::Dbsf,
+                fusion_method: Some(FusionMethod::Dbsf),
                 rrf_k: 60.0,
                 limit: 1,
                 filter: None,
@@ -337,7 +337,7 @@ async fn assert_upserted_secondary_indexes(storage: &IntelligentIndexedStorage) 
                 sparse_vector: Some(SparseVector::new(vec![1], vec![1.0], 4).unwrap()),
                 text: None,
                 vector_weight: 1.0,
-                fusion_method: FusionMethod::Dbsf,
+                fusion_method: Some(FusionMethod::Dbsf),
                 rrf_k: 60.0,
                 limit: 1,
                 filter: None,
@@ -3138,4 +3138,126 @@ async fn a_store_cannot_be_opened_twice_at_once() {
     drop(first);
     let again = open(&wal_dir).await;
     assert_eq!(again.list_tables().await.unwrap().len(), 1);
+}
+
+/// A record's version survives a restart that replays it, including an update that keeps the
+/// vector (an empty one). The batched replay of 60d76ab brought such a record back one version
+/// ahead -- the stateful walk caught it as `r2 version 10 != 9` after `update r2 empty` and a
+/// SIGKILL; nothing in the Rust suite compared versions across a replay.
+#[tokio::test]
+async fn replay_keeps_every_record_version() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let expected = {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("b", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+        // After the snapshot, so replay applies them: an upsert, an update with a vector, an
+        // update that keeps its vector.
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 1.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage
+            .update_record("t", &"b".to_string(), record("b", vec![0.0, 1.0, 1.0, 0.0]))
+            .await
+            .unwrap();
+        let mut keep = record("b", Vec::new());
+        keep.payload = Some(serde_json::json!({"note": "vector kept"}));
+        storage
+            .update_record("t", &"b".to_string(), keep)
+            .await
+            .unwrap();
+        let a = storage
+            .get_record("t", &"a".to_string())
+            .await
+            .unwrap()
+            .version;
+        let b = storage
+            .get_record("t", &"b".to_string())
+            .await
+            .unwrap()
+            .version;
+        (a, b)
+    };
+
+    let recovered = open(&wal_dir).await;
+    let a = recovered.get_record("t", &"a".to_string()).await.unwrap();
+    let b = recovered.get_record("t", &"b".to_string()).await.unwrap();
+    assert_eq!(
+        (a.version, b.version),
+        expected,
+        "versions changed across the replay"
+    );
+    assert_eq!(b.payload["note"], "vector kept");
+    assert_eq!(b.vector, vec![0.0, 1.0, 1.0, 0.0]);
+}
+
+/// A replayed run the graph refuses as a whole leaves every record at its logged version.
+///
+/// The snapshot's graph holds `x`; after it, `x` is upserted, `y` updated, and `x` deleted.
+/// Recovery restores that graph, the row files (where `x` is gone), and replays the tail: the
+/// run `[x, y]` reaches the processor, which applies the record map, then finds `x` already in
+/// the graph and refuses the run -- after `y`'s version was bumped. The retry, one record at a
+/// time, used to check versions again, find `y` "ahead of the log", and keep the bump. The
+/// stateful walk found it as `r2 version 10 != 9`.
+#[tokio::test]
+async fn a_refused_replay_run_leaves_versions_as_logged() {
+    let tmp = TempDir::new().unwrap();
+    let wal_dir = tmp.path().join("wal");
+    let y_version = {
+        let storage = open(&wal_dir).await;
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("x", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("y", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("x", vec![1.0, 0.5, 0.0, 0.0]),
+                    record("y", vec![0.0, 1.0, 0.5, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        storage
+            .delete_records("t", vec!["x".to_string()])
+            .await
+            .unwrap();
+        storage
+            .get_record("t", &"y".to_string())
+            .await
+            .unwrap()
+            .version
+    };
+
+    let recovered = open(&wal_dir).await;
+    let y = recovered.get_record("t", &"y".to_string()).await.unwrap();
+    assert_eq!(y.version, y_version, "y came back at another version");
+    assert!(recovered.get_record("t", &"x".to_string()).await.is_err());
 }

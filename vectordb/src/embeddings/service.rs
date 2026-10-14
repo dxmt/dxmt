@@ -101,7 +101,7 @@ pub async fn embed_texts(
 
     let mut out = Vec::with_capacity(texts.len());
     for chunk in texts.chunks(config.batch_size()) {
-        let mut vectors = embed_chunk(&url, config, api_key.as_deref(), chunk).await?;
+        let mut vectors = embed_fitting(&url, config, api_key.as_deref(), chunk).await?;
         if vectors.len() != chunk.len() {
             return Err(Error::Internal(format!(
                 "the embedding provider returned {} vectors for {} inputs (model {}, {})",
@@ -126,6 +126,108 @@ pub async fn embed_texts(
         out.append(&mut vectors);
     }
     Ok(out)
+}
+
+/// `embed_chunk`, cutting any text the model's context cannot hold until it can.
+///
+/// A provider refuses an input past the model's context rather than truncating it -- ollama
+/// with "the input length exceeds the context length", OpenAI with "maximum context length",
+/// text-embeddings-inference with a 413 -- and that refusal failed the whole insert: one
+/// 60,000-character web page in a batch of eight, loading DuReader, and none of the eight was
+/// stored. A personal knowledge base meets a long note sooner or later.
+///
+/// So the batch goes as it is, and only when it is refused for length is each text sent on
+/// its own, a refused one cut to half until it fits and then lengthened again by bisection,
+/// so what is embedded is close to the most the model takes and not merely half of it. The
+/// cut is on the vector only: the record keeps its whole text, which is what keyword search
+/// indexes and what a caller reads back. Logged, because the vector then stands for the
+/// beginning of the document, which is what every embedding of a long text is anyway, and
+/// not for all of it.
+async fn embed_fitting(
+    url: &str,
+    config: &EmbeddingConfig,
+    api_key: Option<&str>,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
+    match embed_chunk(url, config, api_key, texts).await {
+        Err(e) if is_too_long(&e) => {}
+        other => return other,
+    }
+    let mut out = Vec::with_capacity(texts.len());
+    for text in texts {
+        let whole: Vec<char> = text.chars().collect();
+        // The longest prefix known to fit, with its vector, and the shortest known not to.
+        let mut fits: Option<(usize, Vec<f32>)> = None;
+        let mut refused = whole.len();
+        let mut trying = whole.len();
+        loop {
+            let prefix: String = whole[..trying].iter().collect();
+            match embed_chunk(url, config, api_key, std::slice::from_ref(&prefix)).await {
+                Ok(mut v) if v.len() == 1 => fits = Some((trying, v.remove(0))),
+                Ok(v) => {
+                    return Err(Error::Internal(format!(
+                        "the embedding provider returned {} vectors for 1 input (model {})",
+                        v.len(),
+                        config.model
+                    )))
+                }
+                Err(e) if is_too_long(&e) && trying > MIN_CUT_CHARS => refused = trying,
+                Err(e) => return Err(e),
+            }
+            trying = match fits {
+                // Halve until something fits.
+                None => trying / 2,
+                // Then bisect towards the limit, to within an eighth of what fits.
+                Some((ok, _)) if refused - ok > ok / 8 => ok + (refused - ok) / 2,
+                Some(_) => break,
+            };
+        }
+        let (kept, vector) = fits.expect("the loop leaves only with a prefix that fit");
+        if kept < whole.len() {
+            tracing::warn!(
+                model = %config.model,
+                chars = whole.len(),
+                embedded = kept,
+                "a text was longer than the embedding model's context; its vector is of the first {} of {} characters",
+                kept,
+                whole.len()
+            );
+        }
+        out.push(vector);
+    }
+    Ok(out)
+}
+
+/// Below this a refusal for length is not about length, and cutting further would embed
+/// nothing in particular.
+const MIN_CUT_CHARS: usize = 16;
+
+/// Whether the provider refused because an input is past the model's context. Providers say
+/// so in their own words, so this is by status and wording: 413 always, a 400 or 422 when
+/// the message is about length or tokens.
+fn is_too_long(error: &Error) -> bool {
+    let Error::InvalidConfig(message) = error else {
+        return false;
+    };
+    if message.contains(" returned 413") {
+        return true;
+    }
+    if !(message.contains(" returned 400") || message.contains(" returned 422")) {
+        return false;
+    }
+    let lower = message.to_lowercase();
+    [
+        "context length",
+        "context_length",
+        "maximum context",
+        "too long",
+        "too many tokens",
+        "input length",
+        "exceeds",
+        "token limit",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
 }
 
 async fn embed_chunk(
@@ -271,6 +373,36 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.status_code(), 503, "got {err}");
+    }
+
+    #[test]
+    fn a_refusal_for_length_is_told_apart_from_other_refusals() {
+        let refused = |status: &str, detail: &str| {
+            Error::InvalidConfig(format!(
+                "embedding provider http://x/v1/embeddings (model m) returned {status}: {detail}"
+            ))
+        };
+        for (status, detail) in [
+            (
+                "400 Bad Request",
+                r#"{"error":{"message":"the input length exceeds the context length"}}"#,
+            ),
+            (
+                "400 Bad Request",
+                "This model's maximum context length is 8192 tokens",
+            ),
+            (
+                "413 Payload Too Large",
+                "Input validation error: inputs must have less than 512 tokens",
+            ),
+        ] {
+            assert!(is_too_long(&refused(status, detail)), "{status} {detail}");
+        }
+        assert!(!is_too_long(&refused("401 Unauthorized", "context length")));
+        assert!(!is_too_long(&refused("400 Bad Request", "model not found")));
+        assert!(!is_too_long(&Error::ServiceUnavailable {
+            message: "unreachable".into()
+        }));
     }
 
     #[tokio::test]

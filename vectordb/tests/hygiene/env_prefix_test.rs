@@ -12,7 +12,16 @@
 use std::path::{Path, PathBuf};
 
 /// Names that belong to somebody else and must keep their conventional spelling.
-const NOT_OURS: [&str; 4] = ["HOME", "PATH", "OPENAI_API_KEY", "COHERE_API_KEY"];
+const NOT_OURS: [&str; 6] = [
+    "HOME",
+    "PATH",
+    "OPENAI_API_KEY",
+    "COHERE_API_KEY",
+    // ollama's own: where the default embedding model is looked for (`api::quickstart`).
+    "OLLAMA_HOST",
+    // Windows' home directory, when HOME is unset (`config::layout`).
+    "USERPROFILE",
+];
 
 /// The one file allowed to name the old prefix and to call `std::env::var` on a bare name.
 const THE_HELPER: &str = "src/config/env.rs";

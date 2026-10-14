@@ -415,8 +415,8 @@ class DXMTVectorStore(BasePydanticVectorStore):
             # `alpha` selects weighted fusion, where it means what its name says: the share
             # of the score that comes from the vector side. Passing it unconditionally would
             # force that method on every caller, including the ones who never set it -- so
-            # when it is unset the server stays on its own default fusion (`dbsf`), which
-            # normalises each side by its distribution and needs no weight. Passing
+            # when it is unset the server stays on its own default fusion (`weighted_sum` at
+            # 0.6 since 2026-10-13; `dbsf`, which needs no weight, before). Passing
             # `query.alpha` straight through is what implements that: it defaults to `None`,
             # and the SDK's `_fusion_body` omits both fields for `None` rather than inventing
             # a weight. Verified rather than assumed -- `_fusion_body(None, None, None)`

@@ -19,6 +19,17 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **A first run needs no configuration to store and search text.** `serve` prints where
+  everything is (API, console, data directory, the embedding model in use) on stdout, with the
+  two requests that store and find a note; it printed nothing at all before unless `RUST_LOG`
+  was set, and now logs warnings by default. A default embedding model comes from
+  `DXMT_EMBEDDING_MODEL` (with `DXMT_EMBEDDING_BASE_URL`, `DXMT_EMBEDDING_API_KEY_ENV`), or
+  from a local ollama, preferring a multilingual model and warning when it can only find an
+  English-only one; a table created with neither a dimension nor a model takes it. The `kb`
+  table (`DXMT_KB_TABLE`) is made by its first write or search, with the default model and
+  Chinese-aware full-text search, so `/search/hybrid` has both halves.
+
+
 - **A clean restart keeps the payload and sparse indexes.** They used to be rebuilt after
   every restart -- 23-27 s of every core at 10M rows. A clean shutdown now writes them to
   `DXMT_WAL_DIR/derived/`, with the record store's row and live counts; the next start reads
@@ -42,7 +53,40 @@ release, and the first commit that was ever pushed anywhere.
   it found in use, instead of both appending to one log. The OS releases the lock however the
   process exits.
 
+### Changed
+
+- **Hybrid search fuses with `weighted_sum` at `vector_weight` 0.6 when `fusion_method` is
+  omitted** (it was `dbsf` with equal weights). Measured with `eval/fusion_sweep.py` over three
+  sets, bge-m3 against BM25: mean MRR@10 0.877 against 0.873, and on DuReader-retrieval, whose
+  questions are phrased as people search, 0.971 against 0.958 and Recall@10 0.962 against
+  0.938 -- equal-weight `dbsf` there was below the vector side alone. A request carrying a
+  sparse vector still defaults to `dbsf`, which normalises all three lists. The default
+  `vector_weight` for `weighted_sum` and `reciprocal_rank_fusion` is 0.6 (was 0.7).
+
 ### Fixed
+
+- **A question with punctuation is searched, not refused.** `/search/text` parsed the query
+  strictly as Tantivy syntax, so prose with an apostrophe (`Crohn's Disease`) or a colon read
+  as a field (`proteins : UreD`) got a 400 -- 7 of BEIR SciFact's 300 questions -- and a hybrid
+  search carrying one dropped its text half without a word. A query that does not parse is now
+  parsed leniently; real syntax still parses strictly first.
+- **A Chinese question finds its paragraph by keyword.** One unspaced Chinese term that jieba
+  split into several words became a phrase query, which a question's words almost never
+  match: on CMRC2018 the paragraph was in the top ten for 1.8% of questions, now 100%.
+- **Keyword search over Chinese text no longer crashes the server.** The snippet was cut at a
+  byte offset inside a three-byte character, and the release build aborts on a panic.
+- **A text longer than the embedding model takes is embedded from its beginning** instead of
+  failing its whole batch; the record keeps its full text.
+- **A replayed run the graph refused left its records one version ahead.** The batched
+  replay of 60d76ab sends a run of logged records through the insert path; when the graph
+  refused the run -- an id still in the snapshot's graph whose row the row files had deleted --
+  the record map had already taken it, bumping every record's version, and the one-at-a-time
+  retry checked versions again and kept the bump. Found by the stateful walk (`r2 version 10
+  != 9` after an update and a SIGKILL); the retry no longer re-checks.
+
+- **A text-only hybrid search ran only the keyword half** on a table with a model:
+  `/search` embeds `text`, `/search/hybrid` did not, so a question sharing no word with the
+  note that answers it came back empty. It embeds the text now when there is no `vector`.
 
 - **Ingest into a quantized table spent a third of its CPU in `memcpy`.** Decoding a PQ code
   copies one centroid per subspace, and the copy for a four-float subspace -- the width of

@@ -813,6 +813,11 @@ pub struct IntelligentIndexedStorage {
     last_wal_sync_at: Arc<StdMutex<Option<String>>>,
     last_snapshot_at: Arc<StdMutex<Option<String>>>,
     last_backup_at: StdMutex<Option<String>>,
+    /// The model a table created with neither a dimension nor an `embedding` uses: set at
+    /// startup from `DXMT_EMBEDDING_MODEL`, or found on a local ollama. See `api::quickstart`.
+    default_embedding: StdMutex<Option<crate::types::table::EmbeddingConfig>>,
+    /// The knowledge-base table's name, read once: see `storage::knowledge_base`.
+    kb_table: Option<String>,
     backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
@@ -2170,6 +2175,8 @@ impl IntelligentIndexedStorage {
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
             last_snapshot_at: Arc::new(StdMutex::new(None)),
             last_backup_at: StdMutex::new(None),
+            default_embedding: StdMutex::new(None),
+            kb_table: crate::storage::knowledge_base::kb_table_name(),
             backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
@@ -2643,25 +2650,6 @@ impl IntelligentIndexedStorage {
         }
     }
 
-    /// Replay one current-format record. See [`Self::restore_records_from_wal`], which this is
-    /// the single-entry case of; an entry that cannot be applied is the error.
-    async fn restore_record_from_wal(
-        &self,
-        table: &str,
-        record: Record,
-        row: Option<u64>,
-    ) -> crate::Result<()> {
-        match self
-            .restore_records_from_wal(table, vec![(record, row)])
-            .await?
-            .into_iter()
-            .next()
-        {
-            Some((_, e)) => Err(e),
-            None => Ok(()),
-        }
-    }
-
     /// Replay a run of current-format records for one table through the normal index path,
     /// then restore what a create request cannot carry. Replay is single-threaded and WAL
     /// writes are suppressed while it runs, so replacing the map values after indexing is
@@ -2679,6 +2667,17 @@ impl IntelligentIndexedStorage {
         &self,
         table: &str,
         entries: Vec<(Record, Option<u64>)>,
+    ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
+        self.restore_records_checked(table, entries, true).await
+    }
+
+    /// [`Self::restore_records_from_wal`], with the version check optional: the retry of a
+    /// refused run has checked versions already, against the store as it was before the run.
+    async fn restore_records_checked(
+        &self,
+        table: &str,
+        entries: Vec<(Record, Option<u64>)>,
+        check_versions: bool,
     ) -> crate::Result<Vec<(RecordId, crate::Error)>> {
         let mut failed = Vec::new();
 
@@ -2725,9 +2724,10 @@ impl IntelligentIndexedStorage {
             let data = tables.get(table);
             for id in order {
                 let (record, row) = latest.remove(&id).expect("every ordered id is kept");
-                if data
-                    .and_then(|data| data.records.get(&record.id))
-                    .is_some_and(|existing| existing.version > record.version)
+                if check_versions
+                    && data
+                        .and_then(|data| data.records.get(&record.id))
+                        .is_some_and(|existing| existing.version > record.version)
                 {
                     continue;
                 }
@@ -2789,14 +2789,34 @@ impl IntelligentIndexedStorage {
             .insert_records_with_rows(table, requests.clone(), rows.clone())
             .await
         {
+            warn!(
+                "WAL run of {} record(s) for '{}' refused as a whole ({}); replaying it one \
+                 record at a time",
+                records.len(),
+                table,
+                e
+            );
             if records.len() == 1 {
                 failed.push((records[0].id.clone(), e));
                 return Ok(failed);
             }
+            // Without the version check. The processor may have applied part of the refused
+            // run before refusing it -- the record map first, then the graph, which is what
+            // refused -- and that bumped each record's version past the one logged. Checked
+            // again, every record of the run was then "behind what is restored" and skipped,
+            // keeping the bumped version: the stateful walk's `r2 version 10 != 9`. The
+            // versions were checked above against the store before the run; re-storing the
+            // logged record is what restores them. The graph refused an id it already held
+            // and the map did not (a node the snapshot's graph kept for a record the row
+            // files have since deleted); the partial apply put the id in the map, so the
+            // retry replaces the stale node rather than tripping on it.
             for (record, row) in records.into_iter().zip(rows) {
                 let id = record.id.clone();
-                if let Err(e) = Box::pin(self.restore_record_from_wal(table, record, row)).await {
-                    failed.push((id, e));
+                match Box::pin(self.restore_records_checked(table, vec![(record, row)], false))
+                    .await
+                {
+                    Ok(mut errors) => failed.append(&mut errors),
+                    Err(e) => failed.push((id, e)),
                 }
             }
             return Ok(failed);
@@ -3847,6 +3867,66 @@ impl IntelligentIndexedStorage {
             }
         }
         result
+    }
+
+    /// Make the knowledge-base table if `tablename` is its name, it does not exist yet, and the
+    /// server has a default model. Called by the paths a first note takes -- insert, search,
+    /// text and hybrid search -- so the table appears when someone uses it rather than on
+    /// every server at startup. Two first writes racing are fine: the loser finds it made.
+    async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
+        if self.kb_table.as_deref() != Some(tablename) {
+            return Ok(());
+        }
+        let Some(embedding) = self.default_embedding() else {
+            return Ok(());
+        };
+        // Not `get_table`, which calls this.
+        self.ensure_resident(tablename).await?;
+        if self
+            .read_tables("ensure_kb_table")
+            .await
+            .contains_key(tablename)
+        {
+            return Ok(());
+        }
+        match self
+            .create_table(crate::storage::knowledge_base::kb_table_config(
+                tablename, embedding,
+            ))
+            .await
+        {
+            Ok(table) => {
+                info!(
+                    "Knowledge-base table '{}' created on first use ({} dimensions, model '{}')",
+                    tablename,
+                    table.dimension,
+                    table
+                        .embedding
+                        .as_ref()
+                        .map(|e| e.model.as_str())
+                        .unwrap_or("")
+                );
+                Ok(())
+            }
+            Err(crate::Error::TableAlreadyExists(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The model a table gets when it is created with neither a dimension nor a model.
+    pub fn default_embedding(&self) -> Option<crate::types::table::EmbeddingConfig> {
+        self.default_embedding.lock().ok().and_then(|e| e.clone())
+    }
+
+    pub fn set_default_embedding(&self, embedding: Option<crate::types::table::EmbeddingConfig>) {
+        if let Ok(mut slot) = self.default_embedding.lock() {
+            *slot = embedding;
+        }
+    }
+
+    /// The directory this store lives in, when it has one.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.wal_dir.as_deref()
     }
 
     /// Where backups may be written for this store: `DXMT_BACKUP_ROOT`, or beside the store.
@@ -6364,6 +6444,38 @@ impl IntelligentIndexedStorage {
     /// The embedding has to be the table's, not the caller's choice, and not a server default:
     /// a query vector from a different model than the corpus is not a worse answer, it is a
     /// meaningless one, and it comes back looking like a normal ranked page.
+    /// The dense half of a hybrid search from its `text`, when the body has text and no
+    /// vector and the table has a model -- as `/search` does with `text`. Without this a
+    /// text-only hybrid search on a table with a model ran the keyword half alone: a question
+    /// sharing no word with the note that answers it came back empty, which on the knowledge
+    /// base table is most questions. A table without a model, or a body with a vector, is left
+    /// as it was.
+    async fn embed_hybrid_text(
+        &self,
+        tablename: &str,
+        mut request: HybridSearchRequest,
+    ) -> crate::Result<HybridSearchRequest> {
+        if request.vector.is_some() {
+            return Ok(request);
+        }
+        let Some(text) = request.text.clone().filter(|t| !t.trim().is_empty()) else {
+            return Ok(request);
+        };
+        let model = self
+            .read_tables("embed_hybrid_text")
+            .await
+            .get(tablename)
+            .and_then(|data| data.table.embedding.clone());
+        let Some(config) = model else {
+            return Ok(request);
+        };
+        request.vector = Self::embed(&config, &[text], None)
+            .await?
+            .into_iter()
+            .next();
+        Ok(request)
+    }
+
     async fn embed_query(
         &self,
         tablename: &str,
@@ -6414,6 +6526,7 @@ impl IntelligentIndexedStorage {
         tablename: &str,
         requests: Vec<CreateRecordRequest>,
     ) -> crate::Result<Vec<Record>> {
+        self.ensure_kb_table(&self.resolve(tablename)).await?;
         self.insert_records_with_rows(tablename, requests, Vec::new())
             .await
     }
@@ -6608,6 +6721,7 @@ impl IntelligentIndexedStorage {
     }
 
     pub async fn search(&self, tablename: &str, query: SearchQuery) -> crate::Result<SearchResult> {
+        self.ensure_kb_table(&self.resolve(tablename)).await?;
         self.search_with_budget(tablename, query, None).await
     }
 
@@ -8423,6 +8537,7 @@ impl IntelligentIndexedStorage {
         request: FullTextSearchRequest,
     ) -> crate::Result<FullTextSearchResult> {
         let tablename = &*self.resolve(tablename);
+        self.ensure_kb_table(tablename).await?;
         let plan = self
             .rerank_plan(
                 tablename,
@@ -8758,13 +8873,15 @@ impl IntelligentIndexedStorage {
         combined_scores
     }
 
-    /// 混合搜索（稠密向量 + 稀疏向量 + 文本，三路 DBSF 融合）
+    /// 混合搜索（稠密向量 + 稀疏向量 + 文本）；融合方式见 `HybridSearchRequest::fusion`
     pub async fn hybrid_search(
         &self,
         tablename: &str,
         request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
         let tablename = &*self.resolve(tablename);
+        self.ensure_kb_table(tablename).await?;
+        let request = self.embed_hybrid_text(tablename, request).await?;
         let plan = self
             .rerank_plan(
                 tablename,
@@ -8917,7 +9034,7 @@ impl IntelligentIndexedStorage {
             .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
         // 4. Fuse results using the selected method
-        let combined_scores = match request.fusion_method {
+        let combined_scores = match request.fusion() {
             FusionMethod::WeightedSum => {
                 // Legacy two-path weighted sum; sparse is included as part of vector weight
                 let mut merged_vec = vector_results.clone();
@@ -9038,6 +9155,9 @@ impl IntelligentIndexedStorage {
     /// 获取表信息
     pub async fn get_table(&self, name: &str) -> crate::Result<Table> {
         let name = &*self.resolve(name);
+        // Every route checks its table here first, so this is where the knowledge-base table
+        // is made on first use, for REST, MCP and gRPC alike.
+        self.ensure_kb_table(name).await?;
         self.ensure_resident(name).await?;
         let tables = self.read_tables("get_table").await;
 
@@ -12822,8 +12942,18 @@ mod tests {
 
         // And the size-based selector still answers what it always did, so the assertion above
         // is about the routing rather than about a selector that stopped choosing DiskANN.
+        // A billion rows, not 25M: the selector's line is half the machine's memory, and 25M
+        // x 768 is about 80 GB -- past half of the 62 GB box this was written on and well
+        // short of half of a 503 GB one, where this failed. A billion rows is 3 TB.
         let sized = storage
-            .decide_algorithm(25_000_000, 768, DistanceMetric::Cosine, false, None, None)
+            .decide_algorithm(
+                1_000_000_000,
+                768,
+                DistanceMetric::Cosine,
+                false,
+                None,
+                None,
+            )
             .await?
             .selected_algorithm;
         assert!(

@@ -37,6 +37,9 @@ pub enum Behaviour {
     /// Answers in reverse order with `index` set, which is legal and which a client that
     /// trusts array position gets silently wrong.
     Reversed,
+    /// Refuses, as ollama does, any request holding an input longer than this many
+    /// characters: a model with a context limit.
+    ContextLimit(usize),
 }
 
 #[derive(Clone)]
@@ -102,6 +105,12 @@ async fn embeddings(
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 Json(json!({"error": {"message": "invalid api key"}})),
+            );
+        }
+        Behaviour::ContextLimit(limit) if inputs.iter().any(|t| t.chars().count() > limit) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "the input length exceeds the context length"}})),
             );
         }
         _ => {}

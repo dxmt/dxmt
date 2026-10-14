@@ -152,7 +152,8 @@ export interface FullTextQuery {
 }
 
 /**
- * How the server fuses the rankings. `dbsf` is the server's default when the field is omitted.
+ * How the server fuses the rankings. Omitted, it is `weighted_sum` at `vector_weight` 0.6, or
+ * `dbsf` when the request carries a sparse vector (since 2026-10-13; `dbsf` always, before).
  *
  * `vector_weight` applies to two of the three, which is not what their names suggest:
  * `weighted_sum` normalises each side and sums them weighted, and `reciprocal_rank_fusion` is
