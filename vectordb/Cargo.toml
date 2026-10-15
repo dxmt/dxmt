@@ -449,6 +449,10 @@ name = "knowledge_base_test"
 path = "tests/interfaces/knowledge_base_test.rs"
 
 [[test]]
+name = "documents_test"
+path = "tests/interfaces/documents_test.rs"
+
+[[test]]
 name = "rerank_test"
 path = "tests/interfaces/rerank_test.rs"
 

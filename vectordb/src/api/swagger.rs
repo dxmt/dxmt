@@ -46,6 +46,10 @@ use crate::types::{
         crate::api::handlers::get_record,
         crate::api::handlers::update_record,
         crate::api::handlers::delete_records,
+        // documents
+        crate::api::handlers::put_document,
+        crate::api::handlers::get_document,
+        crate::api::handlers::delete_document,
         // search
         crate::api::handlers::search_vectors,
         crate::api::handlers::search_groups,
@@ -81,6 +85,7 @@ use crate::types::{
             UpdateRecordRequest, BatchDeleteRequest, PaginationQuery,
             crate::api::handlers::ListRecordsRequest,
             crate::api::handlers::CountRecordsRequest,
+            crate::storage::documents::PutDocumentRequest,
             crate::api::handlers::SearchGroupsRequest,
             crate::types::record::SparseSearchQuery,
             crate::types::record::SearchGroup,
@@ -143,6 +148,11 @@ use crate::types::{
             "Nearest neighbours, full-text, and the two hybrid routes. /search/hybrid fuses \
              vector and text; /hybrid_search is dense-only and refuses sparse fusion by name \
              rather than discarding half the query."),
+        (name = "documents", description =
+            "A long text as one document: split into overlapping chunks on paragraph and \
+             sentence boundaries, one record each (id `{doc_id}#{n}`, payload `doc_id`, \
+             `chunk_index`, `chunk_count`), embedded with the table's model. Search returns \
+             chunks; `group_by: \"doc_id\"` returns documents."),
         (name = "index", description =
             "Rebuild or drop a table's index. Dropping one leaves searches answering by brute \
              force -- exactly, and slowly."),

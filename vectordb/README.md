@@ -78,6 +78,21 @@ curl -X POST localhost:9999/api/v1/tables/kb/search/hybrid -H 'content-type: app
      -d '{"text":"为什么 Python 跑不满多核","limit":3}'
 ```
 
+A whole file is a document: it is split into overlapping chunks (500 characters, 50 shared)
+on paragraph and sentence boundaries, each embedded and searchable on its own, and writing the
+same id again replaces it. A hit's payload says which document and which chunk it is.
+
+```bash
+curl -X PUT localhost:9999/api/v1/tables/kb/documents/notes%2Frust.md \
+     -H 'content-type: application/json' \
+     -d "$(jq -n --rawfile text notes/rust.md '{text: $text, metadata: {path: "notes/rust.md"}}')"
+curl localhost:9999/api/v1/tables/kb/documents/notes%2Frust.md          # its chunks, in order
+curl -X DELETE localhost:9999/api/v1/tables/kb/documents/notes%2Frust.md
+```
+
+The MCP server (`vectordb mcp`) has the same as `add_document` and `delete_document`, and
+`hybrid_search` takes text alone, so an assistant can file and find notes with no vectors.
+
 Any OpenAI-compatible endpoint works instead: `DXMT_EMBEDDING_MODEL=text-embedding-3-small`
 with `OPENAI_API_KEY` set, or `DXMT_EMBEDDING_BASE_URL` for another provider. A table created
 with neither a `dimension` nor an `embedding` takes the server's model.

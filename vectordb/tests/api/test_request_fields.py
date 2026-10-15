@@ -1779,3 +1779,84 @@ def _(table):
         assert page["distinct_values"] == 2, page
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+
+# ---- PUT /tables/{t}/documents/{doc_id} --------------------------------------------------------
+#
+# A document is chunked and embedded with the table's model, so these run on a table whose
+# model is the provider above. Each probe compares two writes that differ in one field.
+
+def document_table():
+    name = f"docs_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4, "distance_metric": "cosine",
+                     "embedding": {"model": "bag-of-words", "base_url": provider_url(),
+                                   "api_key_env": "DXMT_PROBE_KEY_UNSET"}})
+    return name
+
+
+def put_document(table, doc, **body):
+    return put(f"/tables/{table}/documents/{doc}", body).json()["data"]
+
+
+def document(table, doc):
+    return get(f"/tables/{table}/documents/{doc}").json()["data"]
+
+
+# Thirty numbered sentences of about 33 characters: a thousand characters in all.
+SENTENCES = "".join(f"Sentence {i} is about widgets and gadgets. " for i in range(30))
+
+
+@probe("PutDocumentRequest", "text")
+def _(table):
+    t = document_table()
+    try:
+        put_document(t, "d", text="alpha beta. gamma delta.")
+        stored = " ".join(c["text"] for c in document(t, "d")["chunks"])
+        assert "alpha" in stored and "delta" in stored, stored
+    finally:
+        delete(f"/tables/{t}", expect_ok=False)
+
+
+@probe("PutDocumentRequest", "metadata")
+def _(table):
+    t = document_table()
+    try:
+        put_document(t, "with", text=SENTENCES, metadata={"title": "Widgets"})
+        put_document(t, "without", text=SENTENCES)
+        assert document(t, "with")["metadata"] == {"title": "Widgets"}
+        assert document(t, "without")["metadata"] == {}
+        # And it is on every chunk, where a filter can select the document by it.
+        n = post(f"/tables/{t}/records/count", {"filter": {"must": [
+            {"key": "title", "operation": {"type": "Equal", "value": "Widgets"}}]}}).json()
+        assert n["data"]["count"] == len(document(t, "with")["chunks"]), n
+    finally:
+        delete(f"/tables/{t}", expect_ok=False)
+
+
+@probe("PutDocumentRequest", "chunk_size")
+def _(table):
+    t = document_table()
+    try:
+        small = put_document(t, "small", text=SENTENCES, chunk_size=100, chunk_overlap=0)
+        large = put_document(t, "large", text=SENTENCES, chunk_size=400, chunk_overlap=0)
+        assert small["chunks"] > large["chunks"] > 1, (small, large)
+        assert all(len(c["text"]) <= 100 for c in document(t, "small")["chunks"])
+    finally:
+        delete(f"/tables/{t}", expect_ok=False)
+
+
+@probe("PutDocumentRequest", "chunk_overlap")
+def _(table):
+    t = document_table()
+    try:
+        put_document(t, "none", text=SENTENCES, chunk_size=200, chunk_overlap=0)
+        put_document(t, "some", text=SENTENCES, chunk_size=200, chunk_overlap=60)
+
+        def shared(doc):
+            chunks = [c["text"] for c in document(t, doc)["chunks"]]
+            last_sentence = chunks[0].rsplit("Sentence", 1)[1]
+            return last_sentence in chunks[1]
+
+        assert not shared("none") and shared("some")
+    finally:
+        delete(f"/tables/{t}", expect_ok=False)

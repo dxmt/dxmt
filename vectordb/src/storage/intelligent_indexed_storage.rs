@@ -12336,6 +12336,19 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         IntelligentIndexedStorage::hybrid_search(self, tablename, request).await
     }
 
+    async fn put_document(
+        &self,
+        tablename: &str,
+        doc_id: &str,
+        request: crate::storage::documents::PutDocumentRequest,
+    ) -> crate::Result<crate::storage::documents::DocumentWritten> {
+        IntelligentIndexedStorage::put_document(self, tablename, doc_id, request).await
+    }
+
+    async fn delete_document(&self, tablename: &str, doc_id: &str) -> crate::Result<usize> {
+        IntelligentIndexedStorage::delete_document(self, tablename, doc_id).await
+    }
+
     async fn get_table(&self, name: &str) -> crate::Result<Table> {
         IntelligentIndexedStorage::get_table(self, name).await
     }

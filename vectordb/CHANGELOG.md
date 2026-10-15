@@ -19,6 +19,22 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Documents: a long text in, overlapping chunks out.** `PUT /tables/{t}/documents/{doc_id}`
+  splits a text on paragraph and sentence boundaries into chunks (500 characters, 50 shared, by
+  default; `chunk_size`, `chunk_overlap`), stores each as a record `{doc_id}#{n}` carrying
+  `doc_id`, `chunk_index`, `chunk_count` and the caller's `metadata`, and embeds it with the
+  table's model; writing the id again replaces the document and deletes the chunks it no longer
+  has. `GET` returns the chunks in order, `DELETE` removes them all. A record has one vector,
+  and a long text used to be represented by its beginning alone: on a 20,530-character note of
+  40 encyclopedia paragraphs (52 chunks, bge-m3), questions about its second half now find the
+  chunk holding the answer first 98% of the time with hybrid search, 91% by vector alone, and
+  in the top three every time. In the Python and JavaScript SDKs as
+  `put_document`/`get_document`/`delete_document` (`putDocument`, ...), and over MCP as
+  `add_document`/`delete_document`.
+- **The MCP `hybrid_search` tool fuses text and vectors.** It ran a plain vector search under
+  the name and answered text alone with an empty page; a table `create_table` made with an
+  embedding model now gets keyword search over its text, as `kb` does.
+
 - **A first run needs no configuration to store and search text.** `serve` prints where
   everything is (API, console, data directory, the embedding model in use) on stdout, with the
   two requests that store and find a note; it printed nothing at all before unless `RUST_LOG`

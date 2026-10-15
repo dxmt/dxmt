@@ -75,6 +75,11 @@ NOT_RUN = {
     # `tests/table_export_test.rs` runs both ends against a root it owns.
     ("POST", "/tables/{t}/export"),
     ("POST", "/tables/import"),
+    # A document is chunked and embedded with the table's model, and the walkthrough's `demo`
+    # holds caller-computed vectors with no model to embed with. `tests/api/test_request_fields.py`
+    # probes every field of the body against a table that has one, and
+    # `tests/interfaces/documents_test.rs` runs the endpoint end to end.
+    ("PUT", "/tables/{t}/documents/{doc_id}"),
 }
 #: Examples whose *documented body* needs an optional feature, so `FEATURE_DISABLED` is a
 #: correct answer rather than a refusal. `disabled_feature()` still fails the run when

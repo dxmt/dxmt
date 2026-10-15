@@ -331,3 +331,76 @@ fn hybrid_search_from_text_alone_uses_both_halves() {
         assert_eq!(hits["hits"][0]["id"], "z_graph", "call {n}: {hits}");
     }
 }
+
+#[test]
+fn an_agent_can_add_a_long_note_find_a_passage_in_it_and_delete_it() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let note: String = (0..30)
+        .map(|i| {
+            if i == 22 {
+                format!("Sentence {i} is the only one about zebras. ")
+            } else {
+                format!("Sentence {i} says ownership keeps memory safe. ")
+            }
+        })
+        .collect();
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"create_table","arguments":{{"name":"notes","embedding":{{"model":"bag-of-words","base_url":"{base_url}","api_key_env":"DXMT_TEST_KEY_UNSET"}}}}}}}}"#
+    );
+    let add = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "add_document", "arguments": {
+            "table": "notes", "id": "rust.md", "text": note, "chunk_size": 300,
+            "metadata": {"title": "Rust"}
+        }}
+    })
+    .to_string();
+    let added = exchange(&wal, &[initialize(), &create, &add]);
+    for r in &added[1..] {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+    }
+    let written: serde_json::Value =
+        serde_json::from_str(added[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let chunks = written["chunks"].as_u64().unwrap();
+    assert!(chunks >= 4, "{written}");
+
+    let searched = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"zebras","limit":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete_document","arguments":{"table":"notes","id":"rust.md"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"zebras","limit":1}}}"#,
+        ],
+    );
+    let hit: serde_json::Value = serde_json::from_str(
+        searched[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let top = &hit["hits"][0];
+    assert!(
+        top["payload"]["text"].as_str().unwrap().contains("zebras"),
+        "{hit}"
+    );
+    assert_eq!(top["payload"]["doc_id"], "rust.md");
+    assert_eq!(top["payload"]["title"], "Rust");
+    let deleted = searched[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        deleted.contains(&format!("\"deleted_chunks\":{chunks}")),
+        "{deleted}"
+    );
+    let after: serde_json::Value = serde_json::from_str(
+        searched[3]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after["hits"], serde_json::json!([]), "{after}");
+}

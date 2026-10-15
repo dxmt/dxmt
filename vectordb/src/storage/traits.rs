@@ -142,6 +142,26 @@ pub trait _Storage: Send + Sync {
         }
     }
 
+    /// Store a long text as chunks; see `storage::documents`. Only a storage with server-side
+    /// embedding can, and the others say so.
+    async fn put_document(
+        &self,
+        _tablename: &str,
+        _doc_id: &str,
+        _request: crate::storage::documents::PutDocumentRequest,
+    ) -> crate::Result<crate::storage::documents::DocumentWritten> {
+        Err(crate::Error::NotImplemented(
+            "this storage does not chunk and embed documents".to_string(),
+        ))
+    }
+
+    /// Delete every chunk of a document; how many there were.
+    async fn delete_document(&self, _tablename: &str, _doc_id: &str) -> crate::Result<usize> {
+        Err(crate::Error::NotImplemented(
+            "this storage does not chunk and embed documents".to_string(),
+        ))
+    }
+
     /// Get table schema (stub implementation)
     async fn get_table_schema(&self, tablename: &str) -> crate::Result<serde_json::Value> {
         let table = self.get_table(tablename).await?;

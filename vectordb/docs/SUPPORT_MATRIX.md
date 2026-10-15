@@ -66,6 +66,7 @@ feature -- every capability below is in the HTTP API.
 | Payload index management | yes | yes | — | — | — | — |
 | Aliases, per-table export/import | yes | yes | — | — | — | — |
 | Full-text and hybrid search | yes | yes | — | — | — | — |
+| Documents (chunked long texts) | yes | yes | — | — | — | — |
 | DXQL (`POST /query`) | yes | — | — | — | — | — |
 
 | Table aliases | `aliases` | Another name for a table, usable anywhere a table name is. Moving one is the zero-downtime half of a rebuild. Stored in `{DXMT_WAL_DIR}/aliases`, so a backup that copies the WAL directory carries them. |
@@ -86,6 +87,7 @@ They can change or be removed in a minor release:
 
 | Area | Current status | Required before promotion |
 | --- | --- | --- |
+| Documents (chunked long texts) | `PUT`/`GET`/`DELETE /tables/{t}/documents/{doc_id}`; SDKs `put_document`/`get_document`/`delete_document`; MCP `add_document`/`delete_document`. Since 2026-10-15. A text is split on paragraph and sentence boundaries into overlapping chunks (500/50 characters by default), each a record `{doc_id}#{n}` with `doc_id`, `chunk_index`, `chunk_count` in its payload, embedded with the table's model; a rewrite upserts the new chunks, then deletes the old ones past the new count, so a failure between the two leaves both until the next write. Measured once: questions about the second half of a 20,530-character note find the chunk holding the answer first 98% of the time (hybrid, bge-m3). | Measured on more corpora and chunk sizes, a chosen default per language, and a rewrite that cannot be left half-done. |
 | HNSW-PQ below 65,536 rows | Exact graph; the codebooks are not trained until then | Nothing — it is the same graph HNSW builds. Listed so nobody expects a 10,000-row table to be smaller than under HNSW. |
 | Object storage | Snapshot and WAL mirroring can be enabled | Recovery, failure injection and multi-process safety tests. |
 | Partitioned IVF | Implemented behind the adaptive path | Long-running maintenance and remote-segment recovery tests. |

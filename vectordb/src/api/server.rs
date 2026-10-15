@@ -10,13 +10,14 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::{
     api::handlers::{
         alter_table, branch_table, calibrate_recall, count_records, create_backup, create_snapshot,
-        create_table, delete_alias, delete_records, delete_table, drop_index,
-        drop_payload_index_field, execute_dxql, export_table, facets, full_text_search, get_record,
-        get_status, get_table, get_table_stats, health_check, health_metrics, hybrid_search,
-        hybrid_search_combined, import_table, index_payload_field, insert_records,
-        insert_records_optimized, knn_graph, list_aliases, list_records, list_tables, liveness,
-        payload_index_report, prometheus_metrics, readiness, rebuild_index, repair_reachability,
-        search_groups, search_vectors, set_alias, sparse_search, update_record, AppState,
+        create_table, delete_alias, delete_document, delete_records, delete_table, drop_index,
+        drop_payload_index_field, execute_dxql, export_table, facets, full_text_search,
+        get_document, get_record, get_status, get_table, get_table_stats, health_check,
+        health_metrics, hybrid_search, hybrid_search_combined, import_table, index_payload_field,
+        insert_records, insert_records_optimized, knn_graph, list_aliases, list_records,
+        list_tables, liveness, payload_index_report, prometheus_metrics, put_document, readiness,
+        rebuild_index, repair_reachability, search_groups, search_vectors, set_alias,
+        sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -494,6 +495,10 @@ pub async fn create_app_with_storage(
             get(get_record).put(update_record),
         )
         .route("/tables/:table_name/records", delete(delete_records))
+        .route(
+            "/tables/:table_name/documents/:doc_id",
+            get(get_document).put(put_document).delete(delete_document),
+        )
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))
         .route("/tables/:table_name/facets", post(facets))

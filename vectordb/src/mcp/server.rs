@@ -258,6 +258,45 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
 
+        // Documents: what a note-taking agent has is a whole text, often longer than a model
+        // reads, and `insert_vector` stores one vector for it.
+        tools.push(Tool {
+            name: "add_document".to_string(),
+            description: Some(
+                "Store a long text (a note, an article, a file's contents) as one document: it \
+                 is split into overlapping chunks and each is embedded with the table's model. \
+                 Adding a document id again replaces it. Search results are chunks whose payload \
+                 names the document (`doc_id`). Use the `kb` table unless told otherwise."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "Table name, with an embedding model (`kb` has one)"},
+                    "id": {"type": "string", "description": "Document id, e.g. a file path"},
+                    "text": {"type": "string", "description": "The whole document"},
+                    "metadata": {"type": "object", "description": "Fields copied onto every chunk, e.g. title, path, tags"},
+                    "chunk_size": {"type": "integer", "description": "Characters per chunk, default 500"},
+                    "chunk_overlap": {"type": "integer", "description": "Characters repeated between chunks, default 50"}
+                },
+                "required": ["table", "id", "text"]
+            }),
+        });
+        tools.push(Tool {
+            name: "delete_document".to_string(),
+            description: Some(
+                "Delete every chunk of a document added with add_document".to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "Table name"},
+                    "id": {"type": "string", "description": "Document id"}
+                },
+                "required": ["table", "id"]
+            }),
+        });
+
         // Hybrid search tool
         tools.push(Tool {
             name: "hybrid_search".to_string(),
@@ -611,6 +650,8 @@ impl<S: Storage + 'static> McpServer<S> {
             "get_table_info" => self.handle_get_table_info(params.arguments).await,
             "delete_vectors" => self.handle_delete_vectors(params.arguments).await,
             "hybrid_search" => self.handle_hybrid_search(params.arguments).await,
+            "add_document" => self.handle_add_document(params.arguments).await,
+            "delete_document" => self.handle_delete_document(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
     }
@@ -859,6 +900,47 @@ impl<S: Storage + 'static> McpServer<S> {
         } else {
             Err("Must provide either 'ids' or 'filter'".into())
         }
+    }
+
+    async fn handle_add_document(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let table = args["table"].as_str().ok_or("Missing table name")?;
+        let id = args["id"].as_str().ok_or("Missing document id")?;
+        let mut body = serde_json::Map::new();
+        for key in ["text", "metadata", "chunk_size", "chunk_overlap"] {
+            if let Some(value) = args.get(key) {
+                body.insert(key.to_string(), value.clone());
+            }
+        }
+        let request: crate::storage::documents::PutDocumentRequest =
+            serde_json::from_value(serde_json::Value::Object(body))
+                .map_err(|e| format!("Invalid add_document arguments: {e}"))?;
+        let written = self.storage.put_document(table, id, request).await?;
+        Ok(CallToolResult {
+            content: vec![ToolContent::Text {
+                text: serde_json::to_string_pretty(&written)?,
+            }],
+            is_error: Some(false),
+        })
+    }
+
+    async fn handle_delete_document(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let table = args["table"].as_str().ok_or("Missing table name")?;
+        let id = args["id"].as_str().ok_or("Missing document id")?;
+        let deleted = self.storage.delete_document(table, id).await?;
+        Ok(CallToolResult {
+            content: vec![ToolContent::Text {
+                text: serde_json::json!({ "deleted_chunks": deleted }).to_string(),
+            }],
+            is_error: Some(false),
+        })
     }
 
     /// Handle hybrid search tool
