@@ -1423,6 +1423,7 @@ mod insert_stages {
     pub const ROW_FILE: usize = 1;
     pub const MAP: usize = 2;
     pub const GRAPH: usize = 3;
+    #[cfg_attr(not(feature = "text-bm25"), allow(dead_code))]
     pub const TEXT: usize = 4;
     pub const WAL: usize = 5;
     pub const PREPARE: usize = 6;
@@ -8982,6 +8983,27 @@ impl IntelligentIndexedStorage {
             )
         };
 
+        // A text half that cannot be answered is refused here rather than dropped. The HTTP
+        // handler checks the same thing first (it has its own error codes for it), but MCP and
+        // anything else that reaches this method did not: a hybrid query with text on a table
+        // with no keyword index ran the dense half and returned it shaped like a fusion.
+        if request.text.is_some() {
+            #[cfg(not(feature = "text-bm25"))]
+            return Err(crate::Error::NotImplemented(
+                "this build has no full-text index, so the text half of a hybrid query \
+                 cannot be answered; send the vector alone"
+                    .to_string(),
+            ));
+            #[cfg(feature = "text-bm25")]
+            if !text_enabled || text_engine.is_none() {
+                return Err(crate::Error::InvalidInput(format!(
+                    "table '{tablename}' has no full-text index, so the text half of a hybrid \
+                     query cannot be answered; declare `text_fields` at creation, or search \
+                     by vector alone"
+                )));
+            }
+        }
+
         // 1. Dense vector search — no map lock held.
         //
         // The index answers in distances, and the sparse and text lists that this is about to be
@@ -9019,9 +9041,14 @@ impl IntelligentIndexedStorage {
                         filters: None,
                         sort_by: None,
                     };
-                    if let Ok(results) = engine.search(&text_request).await {
-                        text_results = results.into_iter().map(|r| (r.id, r.score)).collect();
-                    }
+                    // An engine error fails the query: swallowed, it left the dense half alone
+                    // behind a fusion-shaped answer.
+                    text_results = engine
+                        .search(&text_request)
+                        .await?
+                        .into_iter()
+                        .map(|r| (r.id, r.score))
+                        .collect();
                 }
             }
         }

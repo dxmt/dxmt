@@ -404,3 +404,34 @@ fn an_agent_can_add_a_long_note_find_a_passage_in_it_and_delete_it() {
     .unwrap();
     assert_eq!(after["hits"], serde_json::json!([]), "{after}");
 }
+
+#[test]
+fn hybrid_search_with_text_on_a_table_without_keyword_search_says_so() {
+    // The HTTP route refused this with FULL_TEXT_NOT_ENABLED; the check lived in the handler,
+    // so through MCP the text was dropped and the vector ranking came back as the "fusion".
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let replies = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_table","arguments":{"name":"t","dimension":4}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"t","id":"a","vector":[1,0,0,0]}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"t","vector":[1,0,0,0],"text":"anything"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"t","vector":[1,0,0,0]}}}"#,
+        ],
+    );
+    let refused = serde_json::to_string(&replies[3]).unwrap();
+    assert!(
+        refused.contains("full-text index")
+            && replies[3]["result"]["isError"] != serde_json::json!(false),
+        "{refused}"
+    );
+    // A vector alone has nothing to drop, and still works.
+    assert_eq!(
+        replies[4]["result"]["isError"],
+        serde_json::json!(false),
+        "{}",
+        replies[4]
+    );
+}
