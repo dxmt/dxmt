@@ -311,8 +311,14 @@ async fn the_first_filtered_query_does_not_hold_the_table_lock_through_the_build
     let held = dxmt_vectordb::storage::intelligent_indexed_storage::max_table_lock_hold();
 
     assert_eq!(n, (0..ROWS).filter(|i| i % 97 == 42).count());
+    // Two fifths, not a quarter. The build decodes 16,384 rows at a time under a short read
+    // lock, so the longest hold is one chunk's decode -- at 40,000 rows a third of the
+    // decoding -- and on four cores that is 22.5% of the query (median of 25, max 27.5%), the
+    // same before and after 08dc275; a quarter failed about one run in ten there and on CI's
+    // runners. Decoding every row under one lock measured 49-56%, and a build under the lock
+    // is nearly all of it, so 40% separates both from the shipped behaviour.
     assert!(
-        held * 4 < took,
+        held * 5 < took * 2,
         "the first filtered query held the table map's lock for {held:?} of the {took:?} it \
          took; the build has to happen outside it"
     );
