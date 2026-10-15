@@ -1,5 +1,5 @@
 use crate::types::{
-    record::{CreateRecordRequest, Record, SearchQuery, SearchResult},
+    record::{CreateRecordRequest, HybridSearchRequest, Record, SearchQuery, SearchResult},
     table::{Table, TableAlterRequest, TableConfig},
     vector::RecordId,
 };
@@ -108,13 +108,38 @@ pub trait _Storage: Send + Sync {
         ))
     }
 
-    /// Hybrid search (stub implementation)
+    /// Hybrid search: dense, sparse and text, fused.
+    ///
+    /// This took a `SearchQuery` and ran `search` on it, so the one caller -- the MCP
+    /// `hybrid_search` tool -- ran a plain vector search under the name, and answered a
+    /// text-only call with an empty page and a note. `IntelligentIndexedStorage` overrides it
+    /// with the real fusion. A storage without text or sparse search answers a request that
+    /// needs either with `NotImplemented`, rather than the dense half dressed up as a fusion.
     async fn hybrid_search(
         &self,
         tablename: &str,
-        query: SearchQuery,
+        request: HybridSearchRequest,
     ) -> crate::Result<SearchResult> {
-        self.search(tablename, query).await
+        match &request.vector {
+            Some(vector) if request.text.is_none() && request.sparse_vector.is_none() => {
+                self.search(
+                    tablename,
+                    SearchQuery {
+                        vector: vector.clone(),
+                        top_k: request.limit,
+                        limit: request.limit,
+                        filter: request.filter.clone(),
+                        with_payload: request.with_payload,
+                        with_vector: request.with_vector,
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+            _ => Err(crate::Error::NotImplemented(
+                "this storage has no text or sparse search to fuse with".to_string(),
+            )),
+        }
     }
 
     /// Get table schema (stub implementation)

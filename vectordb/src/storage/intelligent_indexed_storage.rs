@@ -12328,6 +12328,14 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         IntelligentIndexedStorage::create_table(self, config).await
     }
 
+    async fn hybrid_search(
+        &self,
+        tablename: &str,
+        request: HybridSearchRequest,
+    ) -> crate::Result<SearchResult> {
+        IntelligentIndexedStorage::hybrid_search(self, tablename, request).await
+    }
+
     async fn get_table(&self, name: &str) -> crate::Result<Table> {
         IntelligentIndexedStorage::get_table(self, name).await
     }

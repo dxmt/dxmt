@@ -281,3 +281,53 @@ fn a_tool_call_with_neither_a_vector_nor_text_says_which_to_send() {
         );
     }
 }
+
+#[test]
+fn hybrid_search_from_text_alone_uses_both_halves() {
+    // The tool ran a plain vector search under this name, and answered text alone with an
+    // empty page and a note -- and a table `create_table` made had no keyword index to fuse
+    // with anyway. An agent has text; this is the call it makes.
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"create_table","arguments":{{"name":"notes","embedding":{{"model":"bag-of-words","base_url":"{base_url}","api_key_env":"DXMT_TEST_KEY_UNSET"}}}}}}}}"#
+    );
+    let loaded = exchange(
+        &wal,
+        &[
+            initialize(),
+            &create,
+            // Ids chosen so that a tie, which is what a fusion with no text half produces at
+            // vector_weight 0, ranks the wrong one first.
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"a_dinner","text":"tomato and egg for dinner tonight"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"z_graph","text":"hnsw builds a graph index for vector search"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_table_info","arguments":{"name":"notes"}}}"#,
+        ],
+    );
+    for r in &loaded[1..] {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+    }
+    let info = loaded[4]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        info.contains("\"enable_full_text_search\": true"),
+        "a table that stores text has no keyword index: {info}"
+    );
+
+    // A second process: the keyword index is read back from disk, as after any restart.
+    let searched = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"graph index","limit":2}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"graph index","limit":2,"vector_weight":0.0,"fusion_method":"weighted_sum"}}}"#,
+        ],
+    );
+    for (n, r) in searched[1..].iter().enumerate() {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+        let hits: serde_json::Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(hits["hits"][0]["id"], "z_graph", "call {n}: {hits}");
+    }
+}
