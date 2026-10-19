@@ -453,6 +453,10 @@ name = "documents_test"
 path = "tests/interfaces/documents_test.rs"
 
 [[test]]
+name = "embedding_timeout_test"
+path = "tests/interfaces/embedding_timeout_test.rs"
+
+[[test]]
 name = "rerank_test"
 path = "tests/interfaces/rerank_test.rs"
 

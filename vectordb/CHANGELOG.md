@@ -81,6 +81,13 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A slow embedding model no longer fails a large write.** A batch the provider could not
+  embed within the timeout was sent again, three times, and the write failed: bge-m3 on a
+  CPU took over 60 s for 32 paragraphs. A batch that times out is now split in half until it
+  fits, and the size that fit is used for that model from then on; one text too slow on its own
+  fails with a message naming `DXMT_EMBEDDING_TIMEOUT_SECS`, the new setting for the timeout
+  (default 60). Measured: 128 CMRC paragraphs in one request against bge-m3 on 8 CPU cores with
+  a 20 s timeout went in, the batch settling from 64 to 16.
 - **A question with punctuation is searched, not refused.** `/search/text` parsed the query
   strictly as Tantivy syntax, so prose with an apostrophe (`Crohn's Disease`) or a colon read
   as a field (`proteins : UreD`) got a 400 -- 7 of BEIR SciFact's 300 questions -- and a hybrid

@@ -30,8 +30,21 @@ use serde::{Deserialize, Serialize};
 use crate::types::table::EmbeddingConfig;
 use crate::{Error, Result};
 
-/// Total budget for one call to the provider, retries included.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one call to a provider may take, from `DXMT_EMBEDDING_TIMEOUT_SECS` (default 60).
+/// It bounds rerank calls too, which share the client.
+///
+/// Sixty seconds is generous for a hosted API and short for a local model on a CPU: bge-m3
+/// through ollama on 16 cores took ~2 s a 500-character paragraph, so the default batch of 64
+/// could not finish. A batch that times out is split rather than retried (`embed_fitting`), so
+/// this is the budget for the smallest batch that still makes progress, not for the whole load.
+fn request_timeout() -> Duration {
+    let secs = crate::config::env::var("DXMT_EMBEDDING_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(60);
+    Duration::from_secs(secs)
+}
 /// Attempts per batch. Three covers a rate-limit window and a restarting local server; more
 /// than that turns a provider outage into a request that hangs instead of one that fails.
 const MAX_ATTEMPTS: u32 = 3;
@@ -43,7 +56,7 @@ pub(crate) fn http() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout())
             .pool_idle_timeout(Duration::from_secs(90))
             .build()
             .expect("a reqwest client with no proxy or TLS override cannot fail to build")
@@ -100,7 +113,8 @@ pub async fn embed_texts(
     let url = format!("{}/embeddings", config.base_url());
 
     let mut out = Vec::with_capacity(texts.len());
-    for chunk in texts.chunks(config.batch_size()) {
+    let batch = config.batch_size().min(learned_batch(&url, &config.model));
+    for chunk in texts.chunks(batch) {
         let mut vectors = embed_fitting(&url, config, api_key.as_deref(), chunk).await?;
         if vectors.len() != chunk.len() {
             return Err(Error::Internal(format!(
@@ -151,6 +165,17 @@ async fn embed_fitting(
 ) -> Result<Vec<Vec<f32>>> {
     match embed_chunk(url, config, api_key, texts).await {
         Err(e) if is_too_long(&e) => {}
+        // A batch the provider could not finish in time is split, not resent: the same batch
+        // times out the same way, and three attempts at it turned a slow local model into a
+        // three-minute wait for a failure. Each half goes through this function again, so it
+        // halves until it fits, and the size that fitted is remembered for this provider.
+        Err(crate::Error::Timeout(_)) if texts.len() > 1 => {
+            let half = texts.len() / 2;
+            remember_batch(url, &config.model, half);
+            let mut first = Box::pin(embed_fitting(url, config, api_key, &texts[..half])).await?;
+            first.extend(Box::pin(embed_fitting(url, config, api_key, &texts[half..])).await?);
+            return Ok(first);
+        }
         other => return other,
     }
     let mut out = Vec::with_capacity(texts.len());
@@ -196,6 +221,38 @@ async fn embed_fitting(
         out.push(vector);
     }
     Ok(out)
+}
+
+/// The largest batch each provider (base URL and model) has been seen to finish in time, once
+/// one has timed out; unbounded until then. Shrinks only, for the life of the process: a
+/// provider that was slow once -- a CPU, a busy GPU -- is slow again, and a batch that times
+/// out costs the whole timeout before it is split.
+static LEARNED_BATCH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn learned_batch(url: &str, model: &str) -> usize {
+    LEARNED_BATCH
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&format!("{url} {model}")).copied())
+        .unwrap_or(usize::MAX)
+}
+
+fn remember_batch(url: &str, model: &str, size: usize) {
+    if let Ok(mut m) = LEARNED_BATCH.lock() {
+        let entry = m.entry(format!("{url} {model}")).or_insert(usize::MAX);
+        if size < *entry {
+            *entry = size;
+            tracing::warn!(
+                model = %model,
+                batch = size,
+                "the embedding provider did not finish a batch within DXMT_EMBEDDING_TIMEOUT_SECS \
+                 ({}s); sending at most {size} texts a request from now on",
+                request_timeout().as_secs()
+            );
+        }
+    }
 }
 
 /// Below this a refusal for length is not about length, and cutting further would embed
@@ -250,7 +307,15 @@ async fn embed_chunk(
         }
         let outcome = match request.send().await {
             Ok(response) => classify(response, url, &config.model).await,
-            // A transport error is a provider that is not there: DNS, refused, TLS, timeout.
+            // A timeout is a provider that is there and slow: resending the same batch gets the
+            // same answer, so it goes back to `embed_fitting`, which splits it.
+            Err(e) if e.is_timeout() => Err(Retryable::No(Error::Timeout(format!(
+                "embedding provider at {url} did not answer {} text(s) within {}s; a local model \
+                 on a CPU may need a longer DXMT_EMBEDDING_TIMEOUT_SECS",
+                texts.len(),
+                request_timeout().as_secs()
+            )))),
+            // Any other transport error is a provider that is not there: DNS, refused, TLS.
             Err(e) => Err(Retryable::Yes(Error::ServiceUnavailable {
                 message: format!("embedding provider at {url} is unreachable: {e}"),
             })),
