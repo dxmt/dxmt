@@ -67,6 +67,22 @@ const CONTRACTS: &[Contract] = &[
         path: "/tables/{t}/records/{r}",
         caller: "python",
     },
+    // Documents: put_document / get_document / delete_document in both SDKs.
+    Contract {
+        method: "PUT",
+        path: "/tables/{t}/documents/{r}",
+        caller: "sdk",
+    },
+    Contract {
+        method: "GET",
+        path: "/tables/{t}/documents/{r}",
+        caller: "sdk",
+    },
+    Contract {
+        method: "DELETE",
+        path: "/tables/{t}/documents/{r}",
+        caller: "sdk",
+    },
     Contract {
         method: "POST",
         path: "/tables/{t}/search",

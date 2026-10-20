@@ -541,3 +541,30 @@ export interface FacetResult {
   /** How many records the filter selected; the whole table when there is no filter. */
   matched: number;
 }
+
+/** `putDocument`: a long text stored as overlapping chunks, one record each. */
+export interface PutDocumentParams {
+  table_name: string;
+  doc_id: string;
+  text: string;
+  /** Payload fields copied onto every chunk: title, path, tags. */
+  metadata?: Metadata;
+  /** Characters per chunk, at most. Server default 500. */
+  chunk_size?: number;
+  /** Characters repeated between neighbouring chunks. Server default 50. */
+  chunk_overlap?: number;
+}
+
+export interface DocumentWritten {
+  doc_id: string;
+  /** Chunks the document is now stored as. */
+  chunks: number;
+  /** Chunks of the previous version the new one no longer has, now deleted. */
+  removed: number;
+}
+
+export interface DocumentChunks {
+  doc_id: string;
+  metadata: Metadata;
+  chunks: Array<{ id: string; chunk_index: number; text: string }>;
+}

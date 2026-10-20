@@ -1645,6 +1645,150 @@ class DXMTClient:
                 raise DXMTConnectionError(msg) from e
         return records
 
+    # Documents: a long text stored as overlapping chunks, one record each
+
+    @staticmethod
+    def _document_body(text, metadata, chunk_size, chunk_overlap) -> dict[str, Any]:
+        body: dict[str, Any] = {"text": text}
+        if metadata is not None:
+            body["metadata"] = metadata
+        if chunk_size is not None:
+            body["chunk_size"] = chunk_size
+        if chunk_overlap is not None:
+            body["chunk_overlap"] = chunk_overlap
+        return body
+
+    def put_document(
+        self,
+        table_name: str,
+        doc_id: str,
+        text: str,
+        metadata: Optional[dict[str, Any]] = None,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Store ``text`` as the document ``doc_id``, replacing any previous version.
+
+        The server splits it into overlapping chunks (500 characters, 50 shared, by default)
+        on paragraph and sentence boundaries and embeds each with the table's model, so the
+        table needs one -- the ``kb`` table has the server's default. Each chunk is a record
+        ``{doc_id}#{n}`` whose payload carries ``doc_id``, ``chunk_index``, ``chunk_count``
+        and ``metadata``; search returns chunks.
+
+        Returns:
+            ``{"doc_id", "chunks", "removed"}``: chunks stored, and chunks of the previous
+            version the new one no longer has.
+        """
+        try:
+            response = self._client.put(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}",
+                json=self._document_body(text, metadata, chunk_size, chunk_overlap),
+            )
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to store document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error storing document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    async def aput_document(
+        self,
+        table_name: str,
+        doc_id: str,
+        text: str,
+        metadata: Optional[dict[str, Any]] = None,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Async version of :meth:`put_document`."""
+        try:
+            response = await self.async_client.put(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}",
+                json=self._document_body(text, metadata, chunk_size, chunk_overlap),
+            )
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to store document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error storing document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    def get_document(self, table_name: str, doc_id: str) -> Optional[dict[str, Any]]:
+        """A document's chunks in order, with its metadata; ``None`` if there is none.
+
+        Returns:
+            ``{"doc_id", "metadata", "chunks": [{"id", "chunk_index", "text"}, ...]}``.
+        """
+        try:
+            response = self._client.get(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}"
+            )
+            # Both a missing table and a missing document are 404 NOT_FOUND; only the second
+            # is an answer. The server says "no document '<id>'" for it.
+            if response.status_code == 404 and "no document" in response.text:
+                return None
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to get document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error getting document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    async def aget_document(self, table_name: str, doc_id: str) -> Optional[dict[str, Any]]:
+        """Async version of :meth:`get_document`."""
+        try:
+            response = await self.async_client.get(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}"
+            )
+            # Both a missing table and a missing document are 404 NOT_FOUND; only the second
+            # is an answer. The server says "no document '<id>'" for it.
+            if response.status_code == 404 and "no document" in response.text:
+                return None
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to get document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error getting document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    def delete_document(self, table_name: str, doc_id: str) -> int:
+        """Delete every chunk of ``doc_id``; returns how many there were (0 if none)."""
+        try:
+            response = self._client.delete(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}"
+            )
+            response.raise_for_status()
+            return int(self._response_data(response.json())["deleted_chunks"])
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to delete document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error deleting document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
+    async def adelete_document(self, table_name: str, doc_id: str) -> int:
+        """Async version of :meth:`delete_document`."""
+        try:
+            response = await self.async_client.delete(
+                f"/tables/{_seg(table_name)}/documents/{_seg(doc_id)}"
+            )
+            response.raise_for_status()
+            return int(self._response_data(response.json())["deleted_chunks"])
+        except httpx.HTTPStatusError as e:
+            msg = f"Failed to delete document {doc_id}: {e.response.text}"
+            raise DXMTRecordError(msg) from e
+        except httpx.RequestError as e:
+            msg = f"Connection error deleting document {doc_id}: {e}"
+            raise DXMTConnectionError(msg) from e
+
     # Search Operations
 
     def search(

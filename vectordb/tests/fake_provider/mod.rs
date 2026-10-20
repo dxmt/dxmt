@@ -40,6 +40,8 @@ pub enum Behaviour {
     /// Refuses, as ollama does, any request holding an input longer than this many
     /// characters: a model with a context limit.
     ContextLimit(usize),
+    /// Takes this many milliseconds per input before answering: a local model on a CPU.
+    SlowPerInput(u64),
 }
 
 #[derive(Clone)]
@@ -50,6 +52,8 @@ pub struct Provider {
     /// Every text the provider was asked to embed, in order, so a test can assert what the
     /// server sent rather than inferring it from the result.
     pub seen: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The size of every batch a `SlowPerInput` provider was sent, in order.
+    pub batches: Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 impl Provider {
@@ -116,6 +120,10 @@ async fn embeddings(
         _ => {}
     }
 
+    if let Behaviour::SlowPerInput(ms) = provider.behaviour {
+        provider.batches.lock().unwrap().push(inputs.len());
+        tokio::time::sleep(std::time::Duration::from_millis(ms * inputs.len() as u64)).await;
+    }
     let width = provider.dimension + usize::from(provider.behaviour == Behaviour::WrongDimension);
     let mut data: Vec<Value> = inputs
         .iter()
@@ -137,6 +145,7 @@ fn bind(behaviour: Behaviour, dimension: usize) -> (std::net::TcpListener, Strin
         dimension,
         calls: Arc::new(AtomicUsize::new(0)),
         seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+        batches: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

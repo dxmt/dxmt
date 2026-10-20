@@ -1,5 +1,6 @@
 use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
+use crate::storage::documents::PutDocumentRequest;
 use axum::{
     extract::{Path, State},
     http::{
@@ -1181,6 +1182,97 @@ pub async fn get_record(
         Ok(record) => {
             let value = serde_json::to_value(record).unwrap_or(serde_json::Value::Null);
             ApiResponse::success(value).into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Store a long text as a document: split into overlapping chunks, one record each, embedded
+/// with the table's model. Writing a document again replaces it. See `storage::documents`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    put,
+    path = "/api/v1/tables/{table_name}/documents/{doc_id}",
+    params(
+        ("table_name" = String, Path, description = "表名；需要有 embedding 模型，`kb` 表即可", example = "kb"),
+        ("doc_id" = String, Path, description = "文档ID", example = "notes/rust.md")
+    ),
+    request_body(content = PutDocumentRequest, example = json!({
+        "text": "Rust 用所有权管理内存。\n\n借用检查器在编译期保证引用有效……",
+        "metadata": {"title": "Rust 笔记", "path": "notes/rust.md"}
+    })),
+    responses(
+        (status = 200, description = "写入成功：分成了几段、删掉了旧版本的几段", body = ApiResponse),
+        (status = 400, description = "表没有 embedding 模型，或文本为空，或参数不合法", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse)
+    ),
+    tag = "documents"
+))]
+pub async fn put_document(
+    State(state): State<AppState>,
+    Path((table_name, doc_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<PutDocumentRequest>,
+) -> impl IntoResponse {
+    match state
+        .storage
+        .put_document(&table_name, &doc_id, request)
+        .await
+    {
+        Ok(written) => {
+            ApiResponse::success(serde_json::to_value(written).unwrap_or(serde_json::Value::Null))
+                .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// A document's chunks, in order, with the metadata they carry.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/tables/{table_name}/documents/{doc_id}",
+    params(
+        ("table_name" = String, Path, description = "表名", example = "kb"),
+        ("doc_id" = String, Path, description = "文档ID", example = "notes/rust.md")
+    ),
+    responses(
+        (status = 200, description = "文档的各段", body = ApiResponse),
+        (status = 404, description = "表或文档不存在", body = ApiResponse)
+    ),
+    tag = "documents"
+))]
+pub async fn get_document(
+    State(state): State<AppState>,
+    Path((table_name, doc_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.storage.get_document(&table_name, &doc_id).await {
+        Ok(chunks) => {
+            ApiResponse::success(serde_json::to_value(chunks).unwrap_or(serde_json::Value::Null))
+                .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Delete every chunk of a document.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    delete,
+    path = "/api/v1/tables/{table_name}/documents/{doc_id}",
+    params(
+        ("table_name" = String, Path, description = "表名", example = "kb"),
+        ("doc_id" = String, Path, description = "文档ID", example = "notes/rust.md")
+    ),
+    responses(
+        (status = 200, description = "删除了几段；文档不存在时为 0", body = ApiResponse),
+        (status = 404, description = "表不存在", body = ApiResponse)
+    ),
+    tag = "documents"
+))]
+pub async fn delete_document(
+    State(state): State<AppState>,
+    Path((table_name, doc_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.storage.delete_document(&table_name, &doc_id).await {
+        Ok(deleted) => {
+            ApiResponse::success(serde_json::json!({ "deleted_chunks": deleted })).into_response()
         }
         Err(e) => error_response(e),
     }

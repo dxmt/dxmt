@@ -258,10 +258,54 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
 
+        // Documents: what a note-taking agent has is a whole text, often longer than a model
+        // reads, and `insert_vector` stores one vector for it.
+        tools.push(Tool {
+            name: "add_document".to_string(),
+            description: Some(
+                "Store a long text (a note, an article, a file's contents) as one document: it \
+                 is split into overlapping chunks and each is embedded with the table's model. \
+                 Adding a document id again replaces it. Search results are chunks whose payload \
+                 names the document (`doc_id`). Use the `kb` table unless told otherwise."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "Table name, with an embedding model (`kb` has one)"},
+                    "id": {"type": "string", "description": "Document id, e.g. a file path"},
+                    "text": {"type": "string", "description": "The whole document"},
+                    "metadata": {"type": "object", "description": "Fields copied onto every chunk, e.g. title, path, tags"},
+                    "chunk_size": {"type": "integer", "description": "Characters per chunk, default 500"},
+                    "chunk_overlap": {"type": "integer", "description": "Characters repeated between chunks, default 50"}
+                },
+                "required": ["table", "id", "text"]
+            }),
+        });
+        tools.push(Tool {
+            name: "delete_document".to_string(),
+            description: Some(
+                "Delete every chunk of a document added with add_document".to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "Table name"},
+                    "id": {"type": "string", "description": "Document id"}
+                },
+                "required": ["table", "id"]
+            }),
+        });
+
         // Hybrid search tool
         tools.push(Tool {
             name: "hybrid_search".to_string(),
-            description: Some("Perform hybrid vector + text search".to_string()),
+            description: Some(
+                "Search a table by meaning and by keywords at once, and fuse the two rankings. \
+                 Give `text` (embedded with the table's model and matched by BM25), a `vector`, \
+                 or both."
+                    .to_string(),
+            ),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -280,8 +324,16 @@ impl<S: Storage + 'static> McpServer<S> {
                     },
                     "vector_weight": {
                         "type": "number",
-                        "description": "Weight for vector similarity (0-1)",
-                        "default": 0.7
+                        "description": "Share of the score from the vector side (0-1); the server's default is 0.6"
+                    },
+                    "fusion_method": {
+                        "type": "string",
+                        "enum": ["weighted_sum", "reciprocal_rank_fusion", "dbsf"],
+                        "description": "How to fuse the two rankings; the server's default is weighted_sum"
+                    },
+                    "filter": {
+                        "type": "object",
+                        "description": "Payload filter, as in vector_search"
                     },
                     "limit": {
                         "type": "integer",
@@ -598,6 +650,8 @@ impl<S: Storage + 'static> McpServer<S> {
             "get_table_info" => self.handle_get_table_info(params.arguments).await,
             "delete_vectors" => self.handle_delete_vectors(params.arguments).await,
             "hybrid_search" => self.handle_hybrid_search(params.arguments).await,
+            "add_document" => self.handle_add_document(params.arguments).await,
+            "delete_document" => self.handle_delete_document(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
     }
@@ -729,7 +783,12 @@ impl<S: Storage + 'static> McpServer<S> {
         // The rules `POST /tables` applies. The name becomes a file name in disk mode, and this
         // tool accepted any string.
         crate::utils::validate_table_name(name)?;
-        // Create table
+        // A table that stores text gets keyword search over it, as the knowledge-base table
+        // does: without it `hybrid_search` on a table this tool made had no text half, and the
+        // fusion was the vector ranking alone.
+        let text_fields = embedding
+            .as_ref()
+            .and_then(|e| crate::storage::knowledge_base::text_search_fields(e.field()));
         let table_config = crate::types::table::TableConfig {
             name: name.to_string(),
             dimension,
@@ -744,8 +803,8 @@ impl<S: Storage + 'static> McpServer<S> {
                 "lsh" => Some(crate::types::table::IndexType::Lsh),
                 _ => Some(crate::types::table::IndexType::Hnsw),
             },
-            text_fields: None,
-            enable_full_text_search: false,
+            enable_full_text_search: text_fields.is_some(),
+            text_fields,
             memory_optimization: None, // Use global config
             payload_schema: None,
             schema_version: 1,
@@ -843,6 +902,47 @@ impl<S: Storage + 'static> McpServer<S> {
         }
     }
 
+    async fn handle_add_document(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let table = args["table"].as_str().ok_or("Missing table name")?;
+        let id = args["id"].as_str().ok_or("Missing document id")?;
+        let mut body = serde_json::Map::new();
+        for key in ["text", "metadata", "chunk_size", "chunk_overlap"] {
+            if let Some(value) = args.get(key) {
+                body.insert(key.to_string(), value.clone());
+            }
+        }
+        let request: crate::storage::documents::PutDocumentRequest =
+            serde_json::from_value(serde_json::Value::Object(body))
+                .map_err(|e| format!("Invalid add_document arguments: {e}"))?;
+        let written = self.storage.put_document(table, id, request).await?;
+        Ok(CallToolResult {
+            content: vec![ToolContent::Text {
+                text: serde_json::to_string_pretty(&written)?,
+            }],
+            is_error: Some(false),
+        })
+    }
+
+    async fn handle_delete_document(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let table = args["table"].as_str().ok_or("Missing table name")?;
+        let id = args["id"].as_str().ok_or("Missing document id")?;
+        let deleted = self.storage.delete_document(table, id).await?;
+        Ok(CallToolResult {
+            content: vec![ToolContent::Text {
+                text: serde_json::json!({ "deleted_chunks": deleted }).to_string(),
+            }],
+            is_error: Some(false),
+        })
+    }
+
     /// Handle hybrid search tool
     async fn handle_hybrid_search(
         &self,
@@ -851,64 +951,33 @@ impl<S: Storage + 'static> McpServer<S> {
         let args = args.ok_or("Missing arguments")?;
         let table_name = args["table"].as_str().ok_or("Missing table name")?;
 
-        let vector = args
-            .get("vector")
-            .map(|v| serde_json::from_value::<Vec<f32>>(v.clone()))
-            .transpose()?;
-        let text = args.get("text").and_then(|t| t.as_str());
-        let vector_weight = args
-            .get("vector_weight")
-            .and_then(|w| w.as_f64())
-            .unwrap_or(0.7) as f32;
-        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
-
-        if vector.is_none() && text.is_none() {
+        if args.get("vector").is_none() && args.get("text").is_none() {
             return Err("Must provide either 'vector' or 'text' for hybrid search".into());
         }
-
-        // Parse filter if provided
-        let filter = if let Some(filter_json) = args.get("filter") {
-            Some(
-                serde_json::from_value::<Filter>(filter_json.clone())
-                    .map_err(|e| format!("Invalid filter format: {}", e))?,
-            )
-        } else {
-            None
-        };
-
-        // For text-only queries, perform a metadata-only scan by using a zero vector
-        // with a large top_k and then filter results by payload relevance (best effort).
-        // Full BM25 text search requires the full_text_search() method on
-        // IntelligentIndexedStorage, which is not accessible through the generic Storage trait.
-        let query = if let Some(v) = vector {
-            crate::types::record::SearchQuery {
-                vector: DenseVector::from(v),
-                top_k: limit,
-                filter,
-                with_payload: true,
-                with_vector: false,
-                limit,
-                ..Default::default()
+        // The REST body, built from the arguments it shares with this tool, so the defaults
+        // (fusion, weight) are the server's and an argument of the wrong type is refused the
+        // way the endpoint refuses it. Text-only was answered with an empty page and a note
+        // until 2026-10-14, and a vector with a plain vector search: the tool searched
+        // nothing by keyword at all. MCP callers are language models, and text is what they
+        // have.
+        let mut body = serde_json::Map::new();
+        for key in [
+            "vector",
+            "text",
+            "vector_weight",
+            "fusion_method",
+            "limit",
+            "filter",
+        ] {
+            if let Some(value) = args.get(key) {
+                body.insert(key.to_string(), value.clone());
             }
-        } else {
-            // Text-only: return an empty result set with a note — the storage trait
-            // does not expose full-text search generically.
-            let result = serde_json::json!({
-                "hits": [],
-                "total": 0,
-                "note": format!(
-                    "Text-only search for '{}' requires full-text search to be enabled on table '{}'. Use the REST API endpoint POST /tables/{}/search/text instead.",
-                    text.unwrap_or(""), table_name, table_name
-                )
-            });
-            return Ok(CallToolResult {
-                content: vec![ToolContent::Text {
-                    text: serde_json::to_string_pretty(&result)?,
-                }],
-                is_error: Some(false),
-            });
-        };
-        let results = self.storage.hybrid_search(table_name, query).await?;
+        }
+        body.entry("limit").or_insert(serde_json::json!(10));
+        let request: crate::types::record::HybridSearchRequest =
+            serde_json::from_value(serde_json::Value::Object(body))
+                .map_err(|e| format!("Invalid hybrid search arguments: {e}"))?;
+        let results = self.storage.hybrid_search(table_name, request).await?;
 
         let response_text = serde_json::to_string_pretty(&results)?;
 

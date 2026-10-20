@@ -224,60 +224,68 @@ async fn a_warm_up_under_writes_is_kept_and_answers_as_the_rows_do() {
         }
         storage.snapshot().await.unwrap();
     }
-    let storage = Arc::new(open(&wal).await);
+    // Up to five rounds, each a fresh open of the same store, until one has writes landing
+    // during the build.
+    for _round in 0..5 {
+        let storage = Arc::new(open(&wal).await);
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let writes = Arc::new(AtomicUsize::new(0));
-    let writer = {
-        let (storage, stop, writes) =
-            (Arc::clone(&storage), Arc::clone(&stop), Arc::clone(&writes));
-        tokio::spawn(async move {
-            let mut n = 0usize;
-            while !stop.load(Ordering::Relaxed) {
-                // A new row; an existing row moved to tag 42 (an upsert changing the filtered
-                // field); an existing row deleted.
-                storage
-                    .insert_records("t", vec![row(ROWS + n)])
-                    .await
-                    .unwrap();
-                writes.fetch_add(1, Ordering::Relaxed);
-                let mut moved = row(n * 7 % ROWS);
-                moved.payload = Some(serde_json::json!({ "tags": [42, 1000], "lang": "en" }));
-                storage.insert_records("t", vec![moved]).await.unwrap();
-                writes.fetch_add(1, Ordering::Relaxed);
-                storage
-                    .delete_records("t", vec![format!("r{}", (n * 11 + 3) % ROWS)])
-                    .await
-                    .unwrap();
-                writes.fetch_add(1, Ordering::Relaxed);
-                n += 1;
-                tokio::task::yield_now().await;
-            }
-        })
-    };
+        let stop = Arc::new(AtomicBool::new(false));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let (storage, stop, writes) =
+                (Arc::clone(&storage), Arc::clone(&stop), Arc::clone(&writes));
+            tokio::spawn(async move {
+                let mut n = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    // A new row; an existing row moved to tag 42 (an upsert changing the filtered
+                    // field); an existing row deleted.
+                    storage
+                        .insert_records("t", vec![row(ROWS + n)])
+                        .await
+                        .unwrap();
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    let mut moved = row(n * 7 % ROWS);
+                    moved.payload = Some(serde_json::json!({ "tags": [42, 1000], "lang": "en" }));
+                    storage.insert_records("t", vec![moved]).await.unwrap();
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    storage
+                        .delete_records("t", vec![format!("r{}", (n * 11 + 3) % ROWS)])
+                        .await
+                        .unwrap();
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    n += 1;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
 
-    // The writer is running before the build starts, so writes land throughout it.
-    while writes.load(Ordering::Relaxed) == 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        // The writer is running before the build starts, so writes land throughout it.
+        while writes.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let before = writes.load(Ordering::Relaxed);
+        let installed = storage.warm_derived("t").await.unwrap();
+        let during = writes.load(Ordering::Relaxed) - before;
+        stop.store(true, Ordering::Relaxed);
+        writer.await.unwrap();
+
+        assert!(
+            installed,
+            "{during} writes landed during the warm-up and it was not installed"
+        );
+        if during == 0 {
+            // The build beat the writer -- a busy machine can delay a write past the whole build
+            // -- so this round tested nothing. Reopen, which leaves the indexes unbuilt again,
+            // and go again rather than pass vacuously or fail on scheduling.
+            continue;
+        }
+        for t in [42, 7, 96, 1000, 1003] {
+            let indexed = storage.count_records("t", Some(&tag(t))).await.unwrap();
+            assert_eq!(indexed, truth(&storage, t).await, "tag {t}");
+        }
+        return;
     }
-    let before = writes.load(Ordering::Relaxed);
-    let installed = storage.warm_derived("t").await.unwrap();
-    let during = writes.load(Ordering::Relaxed) - before;
-    stop.store(true, Ordering::Relaxed);
-    writer.await.unwrap();
-
-    assert!(
-        installed,
-        "{during} writes landed during the warm-up and it was not installed"
-    );
-    assert!(
-        during > 0,
-        "nothing wrote during the build, so this tests nothing"
-    );
-    for t in [42, 7, 96, 1000, 1003] {
-        let indexed = storage.count_records("t", Some(&tag(t))).await.unwrap();
-        assert_eq!(indexed, truth(&storage, t).await, "tag {t}");
-    }
+    panic!("nothing wrote during the build in five rounds, so this tests nothing");
 }
 
 /// The first filtered query on a cold table builds the index without holding the table map's
@@ -311,8 +319,14 @@ async fn the_first_filtered_query_does_not_hold_the_table_lock_through_the_build
     let held = dxmt_vectordb::storage::intelligent_indexed_storage::max_table_lock_hold();
 
     assert_eq!(n, (0..ROWS).filter(|i| i % 97 == 42).count());
+    // Two fifths, not a quarter. The build decodes 16,384 rows at a time under a short read
+    // lock, so the longest hold is one chunk's decode -- at 40,000 rows a third of the
+    // decoding -- and on four cores that is 22.5% of the query (median of 25, max 27.5%), the
+    // same before and after 08dc275; a quarter failed about one run in ten there and on CI's
+    // runners. Decoding every row under one lock measured 49-56%, and a build under the lock
+    // is nearly all of it, so 40% separates both from the shipped behaviour.
     assert!(
-        held * 4 < took,
+        held * 5 < took * 2,
         "the first filtered query held the table map's lock for {held:?} of the {took:?} it \
          took; the build has to happen outside it"
     );

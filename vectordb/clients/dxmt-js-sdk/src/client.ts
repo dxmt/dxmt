@@ -22,6 +22,9 @@ import {
   FullTextSearchParams,
   HybridSearchParams,
   Metadata,
+  PutDocumentParams,
+  DocumentWritten,
+  DocumentChunks,
   Filter,
   ScrollOptions,
   UploadOptions,
@@ -955,6 +958,53 @@ export class DXMTClient {
         `Failed to get record: ${(error as Error).message}`
       );
     }
+  }
+
+  /**
+   * Store `text` as the document `docId`, replacing any previous version.
+   *
+   * The server splits it into overlapping chunks (500 characters, 50 shared, by default) on
+   * paragraph and sentence boundaries and embeds each with the table's model, so the table
+   * needs one -- `kb` has the server's default. Each chunk is a record `{docId}#{n}` whose
+   * payload carries `doc_id`, `chunk_index`, `chunk_count` and `metadata`.
+   */
+  async putDocument(params: PutDocumentParams): Promise<DocumentWritten> {
+    const { table_name, doc_id, text, metadata, chunk_size, chunk_overlap } = params;
+    if (!table_name) throw new DXMTValidationError('Table name is required');
+    if (!doc_id) throw new DXMTValidationError('Document id is required');
+    const body: Record<string, unknown> = { text };
+    if (metadata !== undefined) body.metadata = metadata;
+    if (chunk_size !== undefined) body.chunk_size = chunk_size;
+    if (chunk_overlap !== undefined) body.chunk_overlap = chunk_overlap;
+    return this.request<DocumentWritten>(
+      'PUT',
+      `/tables/${encodeURIComponent(table_name)}/documents/${encodeURIComponent(doc_id)}`,
+      body
+    );
+  }
+
+  /** A document's chunks in order, with its metadata; `null` when there is no such document. */
+  async getDocument(tableName: string, docId: string): Promise<DocumentChunks | null> {
+    try {
+      return await this.request<DocumentChunks>(
+        'GET',
+        `/tables/${encodeURIComponent(tableName)}/documents/${encodeURIComponent(docId)}`
+      );
+    } catch (error) {
+      // A missing table and a missing document are both 404 NOT_FOUND; only the second is an
+      // answer, and the server says "no document '<id>'" for it.
+      if (error instanceof DXMTError && error.message.includes('no document')) return null;
+      throw error;
+    }
+  }
+
+  /** Delete every chunk of a document; how many there were (0 if none). */
+  async deleteDocument(tableName: string, docId: string): Promise<number> {
+    const answer = await this.request<{ deleted_chunks: number }>(
+      'DELETE',
+      `/tables/${encodeURIComponent(tableName)}/documents/${encodeURIComponent(docId)}`
+    );
+    return answer.deleted_chunks;
   }
 
   /** Update a record's vector and/or metadata without losing auxiliary vectors. */

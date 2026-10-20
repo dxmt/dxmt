@@ -281,3 +281,157 @@ fn a_tool_call_with_neither_a_vector_nor_text_says_which_to_send() {
         );
     }
 }
+
+#[test]
+fn hybrid_search_from_text_alone_uses_both_halves() {
+    // The tool ran a plain vector search under this name, and answered text alone with an
+    // empty page and a note -- and a table `create_table` made had no keyword index to fuse
+    // with anyway. An agent has text; this is the call it makes.
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"create_table","arguments":{{"name":"notes","embedding":{{"model":"bag-of-words","base_url":"{base_url}","api_key_env":"DXMT_TEST_KEY_UNSET"}}}}}}}}"#
+    );
+    let loaded = exchange(
+        &wal,
+        &[
+            initialize(),
+            &create,
+            // Ids chosen so that a tie, which is what a fusion with no text half produces at
+            // vector_weight 0, ranks the wrong one first.
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"a_dinner","text":"tomato and egg for dinner tonight"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"notes","id":"z_graph","text":"hnsw builds a graph index for vector search"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_table_info","arguments":{"name":"notes"}}}"#,
+        ],
+    );
+    for r in &loaded[1..] {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+    }
+    let info = loaded[4]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        info.contains("\"enable_full_text_search\": true"),
+        "a table that stores text has no keyword index: {info}"
+    );
+
+    // A second process: the keyword index is read back from disk, as after any restart.
+    let searched = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"graph index","limit":2}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"graph index","limit":2,"vector_weight":0.0,"fusion_method":"weighted_sum"}}}"#,
+        ],
+    );
+    for (n, r) in searched[1..].iter().enumerate() {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+        let hits: serde_json::Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(hits["hits"][0]["id"], "z_graph", "call {n}: {hits}");
+    }
+}
+
+#[test]
+fn an_agent_can_add_a_long_note_find_a_passage_in_it_and_delete_it() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let note: String = (0..30)
+        .map(|i| {
+            if i == 22 {
+                format!("Sentence {i} is the only one about zebras. ")
+            } else {
+                format!("Sentence {i} says ownership keeps memory safe. ")
+            }
+        })
+        .collect();
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"create_table","arguments":{{"name":"notes","embedding":{{"model":"bag-of-words","base_url":"{base_url}","api_key_env":"DXMT_TEST_KEY_UNSET"}}}}}}}}"#
+    );
+    let add = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "add_document", "arguments": {
+            "table": "notes", "id": "rust.md", "text": note, "chunk_size": 300,
+            "metadata": {"title": "Rust"}
+        }}
+    })
+    .to_string();
+    let added = exchange(&wal, &[initialize(), &create, &add]);
+    for r in &added[1..] {
+        assert_eq!(r["result"]["isError"], serde_json::json!(false), "{r}");
+    }
+    let written: serde_json::Value =
+        serde_json::from_str(added[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let chunks = written["chunks"].as_u64().unwrap();
+    assert!(chunks >= 4, "{written}");
+
+    let searched = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"zebras","limit":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete_document","arguments":{"table":"notes","id":"rust.md"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"notes","text":"zebras","limit":1}}}"#,
+        ],
+    );
+    let hit: serde_json::Value = serde_json::from_str(
+        searched[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let top = &hit["hits"][0];
+    assert!(
+        top["payload"]["text"].as_str().unwrap().contains("zebras"),
+        "{hit}"
+    );
+    assert_eq!(top["payload"]["doc_id"], "rust.md");
+    assert_eq!(top["payload"]["title"], "Rust");
+    let deleted = searched[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        deleted.contains(&format!("\"deleted_chunks\":{chunks}")),
+        "{deleted}"
+    );
+    let after: serde_json::Value = serde_json::from_str(
+        searched[3]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after["hits"], serde_json::json!([]), "{after}");
+}
+
+#[test]
+fn hybrid_search_with_text_on_a_table_without_keyword_search_says_so() {
+    // The HTTP route refused this with FULL_TEXT_NOT_ENABLED; the check lived in the handler,
+    // so through MCP the text was dropped and the vector ranking came back as the "fusion".
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let replies = exchange(
+        &wal,
+        &[
+            initialize(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_table","arguments":{"name":"t","dimension":4}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"insert_vector","arguments":{"table":"t","id":"a","vector":[1,0,0,0]}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"t","vector":[1,0,0,0],"text":"anything"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"hybrid_search","arguments":{"table":"t","vector":[1,0,0,0]}}}"#,
+        ],
+    );
+    let refused = serde_json::to_string(&replies[3]).unwrap();
+    assert!(
+        refused.contains("full-text index")
+            && replies[3]["result"]["isError"] != serde_json::json!(false),
+        "{refused}"
+    );
+    // A vector alone has nothing to drop, and still works.
+    assert_eq!(
+        replies[4]["result"]["isError"],
+        serde_json::json!(false),
+        "{}",
+        replies[4]
+    );
+}

@@ -23,7 +23,7 @@ pub fn kb_table_name() -> Option<String> {
 /// over the same `text` field with the Chinese analyzer, so `/search/hybrid` has both halves.
 /// jieba keeps runs of Latin letters together, so English notes are searchable too.
 pub fn kb_table_config(name: &str, embedding: EmbeddingConfig) -> TableConfig {
-    let text_search = cfg!(feature = "text-bm25");
+    let text_fields = text_search_fields(embedding.field());
     TableConfig {
         name: name.to_string(),
         dimension: 0,
@@ -32,18 +32,8 @@ pub fn kb_table_config(name: &str, embedding: EmbeddingConfig) -> TableConfig {
             "Notes and documents: insert records with `text`, search with `text`".to_string(),
         ),
         index_type: None,
-        text_fields: text_search.then(|| {
-            // `name` is the text index's own field, which knows `content` (and title,
-            // description, tags), not the payload key: named `text` here, nothing was indexed
-            // and text search answered empty -- the trap `tests/api/test_full_text.py` warns of.
-            vec![TextFieldConfig {
-                name: "content".to_string(),
-                source: TextSource::MetadataField("text".to_string()),
-                analyzer: TextAnalyzer::Chinese,
-                boost: 1.0,
-            }]
-        }),
-        enable_full_text_search: text_search,
+        enable_full_text_search: text_fields.is_some(),
+        text_fields,
         memory_optimization: None,
         payload_schema: None,
         schema_version: 1,
@@ -54,6 +44,26 @@ pub fn kb_table_config(name: &str, embedding: EmbeddingConfig) -> TableConfig {
         embedding: Some(embedding),
         rerank: None,
     }
+}
+
+/// Keyword search over the payload field a table's model embeds, for a table that stores
+/// text: what makes `/search/hybrid` (and the MCP `hybrid_search` tool) fuse two rankings
+/// rather than return the dense one alone. `None` in a build without `text-bm25`.
+///
+/// The Chinese analyzer, because jieba keeps runs of Latin letters together, so it serves
+/// English notes as well as Chinese ones.
+pub fn text_search_fields(payload_field: &str) -> Option<Vec<TextFieldConfig>> {
+    cfg!(feature = "text-bm25").then(|| {
+        // `name` is the text index's own field, which knows `content` (and title,
+        // description, tags), not the payload key: named `text` here, nothing was indexed
+        // and text search answered empty -- the trap `tests/api/test_full_text.py` warns of.
+        vec![TextFieldConfig {
+            name: "content".to_string(),
+            source: TextSource::MetadataField(payload_field.to_string()),
+            analyzer: TextAnalyzer::Chinese,
+            boost: 1.0,
+        }]
+    })
 }
 
 #[cfg(test)]

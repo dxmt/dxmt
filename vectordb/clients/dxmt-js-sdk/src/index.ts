@@ -95,6 +95,11 @@ export type {
   PayloadIndexField,
   PayloadIndexReport,
 
+  // Documents
+  PutDocumentParams,
+  DocumentWritten,
+  DocumentChunks,
+
   // Utility
   HealthCheckResponse,
   ErrorResponse,
