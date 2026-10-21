@@ -805,6 +805,9 @@ pub struct IntelligentIndexedStorage {
     /// present after recovery, depending on how far the filesystem write got.
     /// Refuses writes before the machine runs out of memory; see `memory_guard`.
     memory_guard: crate::storage::memory_guard::MemoryGuard,
+    /// Refuses writes before the data directory's disk fills; see `disk_guard`. No directory
+    /// (in-memory storage), no guard.
+    disk_guard: crate::storage::disk_guard::DiskGuard,
     durability_error: Arc<StdMutex<Option<String>>>,
 
     /// Operational durability telemetry. These fields are intentionally process-local: a
@@ -1991,6 +1994,7 @@ impl IntelligentIndexedStorage {
             let manager = WalManager::new(&dir)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
+            storage.disk_guard = crate::storage::disk_guard::DiskGuard::from_env(Some(&dir));
 
             // Before anything reads chunks: the manifest is how they are found.
             if storage.object_storage_enabled {
@@ -2192,6 +2196,7 @@ impl IntelligentIndexedStorage {
             filter_eval_ns: AtomicU64::new(0),
             filter_node_map_misses: AtomicU64::new(0),
             memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
+            disk_guard: crate::storage::disk_guard::DiskGuard::from_env(None),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         })
@@ -2217,7 +2222,8 @@ impl IntelligentIndexedStorage {
     /// a server that cannot replay its log or write its snapshot after a memory event cannot
     /// come back from one. Only the paths that take new data from a caller consult this.
     fn ensure_memory_headroom(&self) -> crate::Result<()> {
-        self.memory_guard.check()
+        self.memory_guard.check()?;
+        self.disk_guard.check()
     }
 
     fn mark_durability_failed(&self, error: &crate::Error) {

@@ -690,6 +690,10 @@ name = "memory_backpressure_test"
 path = "tests/storage/memory_backpressure_test.rs"
 
 [[test]]
+name = "disk_backpressure_test"
+path = "tests/storage/disk_backpressure_test.rs"
+
+[[test]]
 name = "memory_optimization_config_test"
 path = "tests/storage/memory_optimization_config_test.rs"
 
