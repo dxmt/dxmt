@@ -36,8 +36,11 @@ file is a landing page, not a second copy of it.
 git clone https://github.com/dxmt/dxmt.git
 cd dxmt/vectordb
 cargo build --release
-./target/release/vectordb serve --host 0.0.0.0 --port 9999
+./target/release/vectordb serve          # http://127.0.0.1:9999
 ```
+
+It listens on this machine only. To serve other machines, add `--host 0.0.0.0` and set
+`DXMT_API_KEY` first: without a key every route is open.
 
 Then see [`vectordb/README.md`](vectordb/README.md#quick-start) for the API reference, the web
 console, and the client SDKs.

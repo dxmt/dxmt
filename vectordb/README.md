@@ -53,8 +53,8 @@ rustup installs it the first time you run `cargo` in `vectordb/`.
 # Build
 cargo build --release
 
-# Run
-./target/release/vectordb serve --host 0.0.0.0 --port 9999
+# Run -- on this machine only; `--host 0.0.0.0` serves the network (set DXMT_API_KEY first)
+./target/release/vectordb serve --port 9999
 ```
 
 It prints where everything is -- the API, the console, the data directory -- and which
@@ -415,7 +415,7 @@ over it, and a flag (`--host`, `--port`, `--grpc-port`) wins over both. Copy `.e
 and adjust:
 
 ```bash
-DXMT_HOST=0.0.0.0
+DXMT_HOST=127.0.0.1             # the default; 0.0.0.0 to serve other machines
 DXMT_PORT=9999
 DXMT_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DXMT_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
