@@ -462,6 +462,22 @@ impl FullTextSearchEngine {
     ) -> crate::Result<Vec<FullTextSearchResult>> {
         let start_time = std::time::Instant::now();
 
+        // Tantivy's `TopDocs::with_limit` asserts a limit of at least one and sizes its heap
+        // from `limit + offset` up front, so `limit: 0` panicked and a huge one tried to
+        // allocate it -- and the release build aborts on a panic, so one request took the
+        // server down. Every path to the engine (text, hybrid, MCP) comes through here.
+        if request.limit == 0 {
+            return Err(crate::Error::InvalidInput(
+                "limit must be at least 1".to_string(),
+            ));
+        }
+        if request.limit.saturating_add(request.offset) > MAX_RESULT_WINDOW {
+            return Err(crate::Error::InvalidInput(format!(
+                "limit + offset may be at most {MAX_RESULT_WINDOW} (got {} + {})",
+                request.limit, request.offset
+            )));
+        }
+
         // Get searcher
         let searcher = self.reader.searcher();
 
@@ -824,22 +840,14 @@ impl FullTextSearchEngine {
     }
 
     /// Simple text highlighting
+    /// `text` with the first case-insensitive occurrence of `query` wrapped in the tags.
+    ///
+    /// In characters, like `snippet_around`. This found the match in `text.to_lowercase()` and
+    /// sliced `text` at that byte offset plus `query.len()`, and lowercasing changes byte
+    /// lengths (`İ` is two bytes and lowercases to three), so the slice could fall inside a
+    /// character or past the end -- a panic, reachable with `highlight: true`.
     fn highlight_text(&self, text: &str, query: &str, pre_tag: &str, post_tag: &str) -> String {
-        // Simple case-insensitive highlighting
-        let query_lower = query.to_lowercase();
-        let text_lower = text.to_lowercase();
-
-        if let Some(pos) = text_lower.find(&query_lower) {
-            let mut result = String::new();
-            result.push_str(&text[..pos]);
-            result.push_str(pre_tag);
-            result.push_str(&text[pos..pos + query.len()]);
-            result.push_str(post_tag);
-            result.push_str(&text[pos + query.len()..]);
-            result
-        } else {
-            text.to_string()
-        }
+        highlight_first(text, query, pre_tag, post_tag)
     }
 
     /// How many documents the index on disk actually holds.
@@ -1202,24 +1210,50 @@ mod tests {
     }
 }
 
+/// The most a text search may rank: `limit + offset`. Tantivy allocates a heap of this size
+/// before it looks at a document.
+pub const MAX_RESULT_WINDOW: usize = 100_000;
+
+/// The first case-insensitive occurrence of `query` in `chars`, as a range of characters.
+/// Each character is folded on its own, so the range is in the original's characters.
+fn find_folded(chars: &[char], query: &str) -> Option<(usize, usize)> {
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let folded: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
+    let needle: Vec<char> = query.chars().map(fold).collect();
+    if needle.is_empty() || needle.len() > folded.len() {
+        return None;
+    }
+    folded
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+        .map(|pos| (pos, pos + needle.len()))
+}
+
+/// See `FullTextSearchEngine::highlight_text`.
+fn highlight_first(text: &str, query: &str, pre_tag: &str, post_tag: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    match find_folded(&chars, query) {
+        Some((start, end)) => {
+            let mut result = String::with_capacity(text.len() + pre_tag.len() + post_tag.len());
+            result.extend(&chars[..start]);
+            result.push_str(pre_tag);
+            result.extend(&chars[start..end]);
+            result.push_str(post_tag);
+            result.extend(&chars[end..]);
+            result
+        }
+        None => text.to_string(),
+    }
+}
+
 /// See `FullTextSearchEngine::generate_snippet`.
 fn snippet_around(content: &str, query: &str, max_length: usize) -> String {
     const CONTEXT: usize = 50;
-    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
     let chars: Vec<char> = content.chars().collect();
-    let folded: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
-    let needle: Vec<char> = query.chars().map(fold).collect();
-    let found = (!needle.is_empty() && needle.len() <= folded.len())
-        .then(|| {
-            folded
-                .windows(needle.len())
-                .position(|w| w == needle.as_slice())
-        })
-        .flatten();
-    let (start, end) = match found {
-        Some(pos) => (
+    let (start, end) = match find_folded(&chars, query) {
+        Some((pos, after)) => (
             pos.saturating_sub(CONTEXT),
-            (pos + needle.len() + CONTEXT).min(chars.len()),
+            (after + CONTEXT).min(chars.len()),
         ),
         None => (0, max_length.min(chars.len())),
     };
@@ -1236,7 +1270,20 @@ fn snippet_around(content: &str, query: &str, max_length: usize) -> String {
 
 #[cfg(test)]
 mod snippet_tests {
-    use super::snippet_around;
+    use super::{highlight_first, snippet_around};
+
+    /// `İ` is two bytes and lowercases to three; the byte-offset version sliced past it.
+    #[test]
+    fn highlighting_survives_characters_whose_lowercase_is_longer() {
+        let text = "İİİİ istanbul İstanbul";
+        assert_eq!(
+            highlight_first(text, "istanbul", "<b>", "</b>"),
+            "İİİİ <b>istanbul</b> İstanbul"
+        );
+        assert_eq!(highlight_first("İİ x", "İİ", "[", "]"), "[İİ] x");
+        assert_eq!(highlight_first("abc", "zz", "[", "]"), "abc");
+        assert_eq!(highlight_first("向量检索", "检索", "[", "]"), "向量[检索]");
+    }
 
     /// The paragraph and the cut that crashed the server: 150 bytes into Chinese text.
     #[test]

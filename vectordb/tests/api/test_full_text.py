@@ -341,3 +341,37 @@ def test_rrf_is_weighted_here_despite_what_the_name_suggests(text_table):
     assert fuse("dbsf", 0.95) == fuse("dbsf", 0.05), (
         "dbsf normalises each list by its own distribution and should not read vector_weight"
     )
+
+
+@pytest.mark.parametrize("body", [
+    {"query": "vector", "limit": 0},
+    {"query": "vector", "limit": 10_000_000_000},
+    {"query": "vector", "limit": 5, "offset": 100_000},
+])
+def test_a_window_the_engine_cannot_rank_is_a_400_not_a_dead_server(text_table, body):
+    # `limit: 0` reached Tantivy's `assert!(limit >= 1)` and a huge limit its up-front heap
+    # allocation; the release build aborts on a panic, so either took the server down.
+    r = text_search(text_table, body)
+    if feature_is_absent(r):
+        absent("text-bm25")
+    assert r.status_code == 400, r.text[:300]
+    assert "limit" in r.text, r.text[:300]
+    if "offset" not in body:  # hybrid has no offset; its window is the limit
+        hybrid = post(f"/tables/{text_table}/search/hybrid",
+                      {"text": "vector", "limit": body["limit"]}, expect_ok=False)
+        assert hybrid.status_code == 400, hybrid.text[:300]
+    # Still serving.
+    assert text_search(text_table, {"query": "vector", "limit": 2}).status_code == 200
+
+
+def test_highlighting_text_whose_lowercase_is_longer_answers(text_table):
+    # The highlighter sliced the original text at offsets found in its lowercase, and `İ`
+    # lowercases to more bytes than it is, so this panicked the request thread.
+    post(f"/tables/{text_table}/records", {"records": [
+        {"id": "dotted", "vector": [0.5, 0.5, 0.0, 0.0],
+         "payload": {"text": "İİİİ İstanbul vector"}}]})
+    time.sleep(1.5)  # the text index commits asynchronously
+    r = text_search(text_table, {"query": "vector", "limit": 10, "highlight": True})
+    if feature_is_absent(r):
+        absent("text-bm25")
+    assert r.status_code == 200, r.text[:300]
