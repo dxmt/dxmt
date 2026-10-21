@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod auth;
 #[cfg(feature = "api-dashboard")]
 pub mod dashboard;

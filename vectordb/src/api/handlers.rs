@@ -3035,6 +3035,34 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         let _ = writeln!(out, "dxmt_last_snapshot_duration_seconds {:.6}", secs(ns));
     }
 
+    if let Some(admission) = crate::api::admission::Admission::global() {
+        let (running, waiting, rejected, limit) = admission.snapshot();
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_queries_running Queries holding an admission slot (DXMT_MAX_CONCURRENT_QUERIES)."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_queries_running gauge");
+        let _ = writeln!(out, "dxmt_queries_running {running}");
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_queries_limit The admission limit on queries running at once."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_queries_limit gauge");
+        let _ = writeln!(out, "dxmt_queries_limit {limit}");
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_queries_waiting Queries waiting for an admission slot."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_queries_waiting gauge");
+        let _ = writeln!(out, "dxmt_queries_waiting {waiting}");
+        let _ = writeln!(
+            out,
+            "# HELP dxmt_queries_rejected_total Queries answered 429 because no slot or place in the queue was free."
+        );
+        let _ = writeln!(out, "# TYPE dxmt_queries_rejected_total counter");
+        let _ = writeln!(out, "dxmt_queries_rejected_total {rejected}");
+    }
+
     let _ = writeln!(
         out,
         "# HELP dxmt_operations_total Operations completed since process start."
