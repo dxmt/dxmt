@@ -1885,3 +1885,17 @@ def test_a_query_of_the_wrong_width_for_its_named_space_is_a_400():
         assert ids(ok) == ["a"]
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+
+@pytest.mark.parametrize("quantization", [{"num_centroids": 300}, {"num_centroids": 1}, {"num_subvectors": 0}])
+def test_quantization_a_code_cannot_hold_is_refused_at_creation(quantization):
+    # Centroid indices are stored as one byte; 300 centroids wrapped every index above 255 onto
+    # the wrong centroid and search quality fell with no error.
+    name = f"pq_{uuid.uuid4().hex[:8]}"
+    r = post("/tables", {"name": name, "dimension": 8, "quantization": quantization},
+             expect_ok=False)
+    try:
+        assert r.status_code == 400, r.text[:300]
+        assert "quantization" in r.text, r.text[:300]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)

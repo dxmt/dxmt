@@ -6106,6 +6106,24 @@ impl IntelligentIndexedStorage {
                 config.name
             )));
         }
+        if let Some(q) = &config.quantization {
+            // A PQ code is one byte per subspace: centroid indices are stored `as u8`, so more
+            // than 256 wrapped silently and every code above 255 named the wrong centroid --
+            // search quality fell with no error anywhere. And zero subspaces divides by zero.
+            if let Some(k) = q.num_centroids {
+                if !(2..=256).contains(&k) {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "quantization.num_centroids must be between 2 and 256 (got {k}): a code \
+                         is one byte per subspace"
+                    )));
+                }
+            }
+            if q.num_subvectors == Some(0) {
+                return Err(crate::Error::InvalidInput(
+                    "quantization.num_subvectors must be at least 1".to_string(),
+                ));
+            }
+        }
         let config = self.dimension_from_the_model(config).await?;
         self.create_table_inner(config, true).await
     }
