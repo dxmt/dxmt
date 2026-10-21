@@ -457,6 +457,10 @@ name = "embedding_timeout_test"
 path = "tests/interfaces/embedding_timeout_test.rs"
 
 [[test]]
+name = "provider_policy_test"
+path = "tests/interfaces/provider_policy_test.rs"
+
+[[test]]
 name = "rerank_test"
 path = "tests/interfaces/rerank_test.rs"
 
