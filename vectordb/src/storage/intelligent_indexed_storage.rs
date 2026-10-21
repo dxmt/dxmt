@@ -7007,16 +7007,28 @@ impl IntelligentIndexedStorage {
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-            // Validate query vector dimension against the default space only when no named vector
-            // space is requested (named spaces may have different dimensions).
-            if query.vector_name.is_none() {
-                let expected_dim = table_data.table.dimension;
-                if !query.vector.is_empty() && query.vector.len() != expected_dim {
-                    return Err(crate::Error::DimensionMismatch {
-                        expected: expected_dim,
-                        actual: query.vector.len(),
-                    });
-                }
+            // The query's width against the space that will answer it: the named space's when
+            // one is named and exists, else the table's (a name the table does not have falls
+            // through to the default index below). This skipped every query naming a space,
+            // and the index does not check either, so a short vector reached the SIMD kernels,
+            // which read `a.len()` floats from both sides -- past the end of the query.
+            let expected_dim = query
+                .vector_name
+                .as_ref()
+                .and_then(|name| {
+                    table_data
+                        .table
+                        .named_vectors
+                        .as_ref()?
+                        .iter()
+                        .find(|space| &space.name == name)
+                })
+                .map_or(table_data.table.dimension, |space| space.dimension);
+            if !query.vector.is_empty() && query.vector.len() != expected_dim {
+                return Err(crate::Error::DimensionMismatch {
+                    expected: expected_dim,
+                    actual: query.vector.len(),
+                });
             }
 
             // Resolve named index (if vector_name is specified in the query).

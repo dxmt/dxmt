@@ -1860,3 +1860,28 @@ def _(table):
         assert not shared("none") and shared("some")
     finally:
         delete(f"/tables/{t}", expect_ok=False)
+
+
+def test_a_query_of_the_wrong_width_for_its_named_space_is_a_400():
+    # The width check ran only when no `vector_name` was given, and the index does not check
+    # either: a 4-wide query against an 8-wide space reached the SIMD kernels, which read 8
+    # floats from each side -- past the end of the query.
+    name = f"widths_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4, "distance_metric": "cosine",
+                     "named_vectors": [{"name": "wide", "dimension": 8,
+                                        "distance_metric": "cosine"}]})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "a", "vector": [1, 0, 0, 0], "named_vectors": {"wide": [1, 0, 0, 0, 0, 0, 0, 0]}}]})
+        for body in (
+            {"vector": [1, 0, 0, 0], "top_k": 1, "vector_name": "wide"},
+            # A name the table does not have falls through to the default space: its width.
+            {"vector": [1, 0, 0], "top_k": 1, "vector_name": "nonesuch"},
+        ):
+            r = post(f"/tables/{name}/search", body, expect_ok=False)
+            assert r.status_code == 400, (body, r.text[:300])
+        ok = post(f"/tables/{name}/search",
+                  {"vector": [1, 0, 0, 0, 0, 0, 0, 0], "top_k": 1, "vector_name": "wide"})
+        assert ids(ok) == ["a"]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)

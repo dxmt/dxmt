@@ -27,7 +27,22 @@ pub trait SimdDistance {
 /// construction, keeps it off every comparison.
 type DotProductFn = fn(&[f32], &[f32]) -> f32;
 
+/// The kernels behind these functions read `a.len()` floats from *both* slices through raw
+/// pointers, so unequal lengths were an out-of-bounds read -- guarded only by a
+/// `debug_assert`, i.e. not at all in a release build. A named-vector search with a short
+/// query reached them that way. The callers check widths at the API; this makes a missed check
+/// a panic instead of a read of whatever follows the shorter vector. One comparison per call.
+#[inline]
+fn check_lengths(a: &[f32], b: &[f32]) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "distance between vectors of different lengths"
+    );
+}
+
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    check_lengths(a, b);
     static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
     DISPATCH.get_or_init(resolve_dot_product)(a, b)
 }
@@ -52,6 +67,7 @@ fn resolve_dot_product() -> DotProductFn {
 /// metric's own path takes is a cost and nothing else when the caller only ranks -- the
 /// quantized graph compares decoded codes with this, thousands of times per insert.
 pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
+    check_lengths(a, b);
     static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
     DISPATCH.get_or_init(resolve_squared_euclidean)(a, b)
 }
@@ -70,6 +86,7 @@ fn resolve_squared_euclidean() -> DotProductFn {
 /// path re-runs the feature check and two levels of dispatch on every call, which at 25
 /// dimensions was a third as much time as the arithmetic itself.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
+    check_lengths(a, b);
     static DISPATCH: std::sync::OnceLock<DotProductFn> = std::sync::OnceLock::new();
     DISPATCH.get_or_init(resolve_euclidean_distance)(a, b)
 }
