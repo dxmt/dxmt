@@ -3452,7 +3452,11 @@ impl IntelligentIndexedStorage {
     /// copy of a table anywhere the process can write, and an import is a read primitive that
     /// will happily try to parse `/etc/shadow`. The root is the same one `POST /backup` is held
     /// to, so an operator configures one directory and both obey it.
-    fn resolve_export_path(&self, path: &std::path::Path) -> crate::Result<PathBuf> {
+    /// `writing`: the path is an export's destination, which must also not be inside the
+    /// store. The backup root defaults to the WAL directory's parent, so without that an export
+    /// to `<store>/wal.log` -- or a snapshot, a row file -- replaced the database's own file
+    /// with a table export. `backup_to_inner` already refused this for backups.
+    fn resolve_export_path(&self, path: &std::path::Path, writing: bool) -> crate::Result<PathBuf> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(
                 "export and import need WAL-backed storage; this instance has no durable state"
@@ -3469,6 +3473,17 @@ impl IntelligentIndexedStorage {
                 path.display(),
                 root.display()
             )));
+        }
+        if writing {
+            let store = std::fs::canonicalize(wal_dir).unwrap_or_else(|_| wal_dir.clone());
+            if resolved.starts_with(&store) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "{} is inside the data directory {}; an export there could overwrite the \
+                     database's own files",
+                    path.display(),
+                    store.display()
+                )));
+            }
         }
         Ok(resolved)
     }
@@ -3654,7 +3669,7 @@ impl IntelligentIndexedStorage {
         dest: &std::path::Path,
     ) -> crate::Result<serde_json::Value> {
         let name = &*self.resolve(name);
-        let path = self.resolve_export_path(dest)?;
+        let path = self.resolve_export_path(dest, true)?;
         self.ensure_resident(name).await?;
 
         // Copied out under the read lock so the export is a point in time, and the vectors are
@@ -3752,7 +3767,7 @@ impl IntelligentIndexedStorage {
         overwrite: bool,
     ) -> crate::Result<serde_json::Value> {
         self.ensure_writable()?;
-        let path = self.resolve_export_path(src)?;
+        let path = self.resolve_export_path(src, false)?;
         if !path.is_file() {
             return Err(crate::Error::InvalidInput(format!(
                 "{} is not a file written by POST /tables/{{t}}/export",
