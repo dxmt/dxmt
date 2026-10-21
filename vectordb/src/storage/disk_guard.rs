@@ -19,12 +19,15 @@ const CACHE: Duration = Duration::from_secs(1);
 const MIN_DEFAULT: u64 = 256 * 1024 * 1024;
 const MAX_DEFAULT: u64 = 10 * 1024 * 1024 * 1024;
 
+/// `(available, total)` bytes, or `None` when the disk could not be read.
+type Space = Option<(u64, u64)>;
+
 pub(crate) struct DiskGuard {
     path: Option<PathBuf>,
     /// `None` until the first reading, when the default floor needs the disk's size.
     floor: Mutex<Option<u64>>,
     configured: Option<u64>,
-    cached: Mutex<Option<(Instant, Option<(u64, u64)>)>>,
+    cached: Mutex<Option<(Instant, Space)>>,
 }
 
 /// `(available, total)` bytes on the disk holding `path`: the mount point that is the
@@ -60,7 +63,7 @@ impl DiskGuard {
         }
     }
 
-    fn reading(&self) -> Option<(u64, u64)> {
+    fn reading(&self) -> Space {
         let path = self.path.as_ref()?;
         let mut cached = self.cached.lock().ok()?;
         match *cached {
