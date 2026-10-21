@@ -29,6 +29,14 @@ Official Python SDK for DXMT VectorDB - a lightweight single-node vector databas
 pip install dxmt-python-sdk
 ```
 
+The package is not on PyPI yet. Until the packages are published, install from source:
+
+```bash
+pip install "git+https://github.com/dxmt/dxmt#subdirectory=vectordb/clients/dxmt-python-sdk"
+# or, from a checkout of the repository:
+pip install ./vectordb/clients/dxmt-python-sdk
+```
+
 ## Quick Start
 
 ### Basic Usage
@@ -432,7 +440,7 @@ DXMT can be used as a vector storage backend for [mem0](https://mem0.ai), an int
 
 **Installation:**
 ```bash
-pip install mem0ai dxmt-python-sdk
+pip install mem0ai dxmt-python-sdk   # until published: pip install mem0ai ./vectordb/clients/dxmt-python-sdk
 ```
 
 **Usage:**

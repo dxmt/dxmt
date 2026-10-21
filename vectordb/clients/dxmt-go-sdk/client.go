@@ -2,7 +2,7 @@
 // the server's HTTP API.
 //
 //	db, err := dxmt.New("http://127.0.0.1:9999")
-//	err = db.CreateTable(ctx, dxmt.CreateTable{Name: "docs", Dimension: 768, DistanceMetric: dxmt.Cosine})
+//	_, err = db.CreateTable(ctx, dxmt.CreateTable{Name: "docs", Dimension: 768, DistanceMetric: dxmt.Cosine})
 //	_, err = db.Insert(ctx, "docs", []dxmt.Record{{ID: "a", Vector: embedding}})
 //	hits, err := db.Search(ctx, "docs", dxmt.NewSearch(query, 10))
 //

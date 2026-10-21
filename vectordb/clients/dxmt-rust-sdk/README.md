@@ -10,9 +10,14 @@ never reach the server binary.
 
 ## Use
 
+The crate is not on crates.io yet. Until the packages are published, install from source —
+from the repository by git, or from a local checkout by path:
+
 ```toml
 [dependencies]
-dxmt-client = { path = "../dxmt-rust-sdk" }
+dxmt-client = { git = "https://github.com/dxmt/dxmt", package = "dxmt-client" }
+# or: dxmt-client = { path = "/path/to/dxmt/vectordb/clients/dxmt-rust-sdk" }
+serde_json = "1"   # for json!, as below
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

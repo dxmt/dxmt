@@ -38,6 +38,15 @@ Or with pnpm:
 pnpm add dxmt-js-sdk
 ```
 
+The package is not on npm yet. Until the packages are published, install from source:
+
+```bash
+git clone https://github.com/dxmt/dxmt
+cd dxmt/vectordb/clients/dxmt-js-sdk && npm install && npm run build
+# then, in your project:
+npm install /path/to/dxmt/vectordb/clients/dxmt-js-sdk
+```
+
 ## Quick Start
 
 ```typescript

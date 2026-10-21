@@ -4,8 +4,7 @@
 # exists to run `cargo build` / `cargo test` somewhere reproducible.
 FROM rust:latest
 
-# Build dependencies. `librocksdb-dev` used to be here and is gone: the RocksDB backend moved
-# to `planning/` in 2026-09-11 and no code has linked against it since.
+# Build dependencies. There is no RocksDB or LMDB backend, so neither library is installed.
 RUN apt-get update && apt-get install -y \
     build-essential \
     clang \
@@ -18,12 +17,11 @@ WORKDIR /workspace
 
 # Explicit paths, not `COPY . .`.
 #
-# `COPY . .` copied whatever happened to be in the working directory, which on a developer
-# machine is `.env` with live provider keys, 64 GB of `target/`, and `planning/`. A key copied
-# into a layer cannot be removed by deleting the file in a later layer -- it stays in
-# `docker history` and in every registry the image reached. `.dockerignore` now excludes those
-# as well; naming what goes in is the half that still holds when someone builds this without
-# the context this repository provides.
+# `COPY . .` copies whatever happens to be in the build context, which can include a local
+# `.env` holding provider keys and a `target/` directory of many gigabytes. A key copied into a
+# layer cannot be removed by deleting the file in a later layer -- it stays in `docker history`
+# and in every registry the image reached. `.dockerignore` excludes those as well; naming what
+# goes in is the half that still holds when someone builds this without that file.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY benches ./benches

@@ -1,7 +1,9 @@
 # =============================================================================
-# DXMT VectorDB - 优化的多架构 Docker 镜像
-# 支持平台: linux/amd64, linux/arm64
-# 针对Docker Hub自动构建优化
+# DXMT VectorDB - multi-architecture Docker image
+# Platforms: linux/amd64, linux/arm64 (cross-compiled on the build platform)
+# Build context: the `vectordb/` directory, e.g.
+#   docker buildx build -f docker/Dockerfile.multiarch --platform linux/amd64,linux/arm64 \
+#     -t dxmt/vectordb:latest .
 # =============================================================================
 
 # Builder and runtime on the same Debian release, so the binary's glibc is the runtime's.
@@ -20,11 +22,11 @@ COPY dashboard/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------------
-# 第一阶段：构建环境
+# Stage 1: build environment
 # -----------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
 
-# 构建参数
+# Build arguments
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 ARG TARGETOS
@@ -33,12 +35,12 @@ ARG BUILD_DATE
 ARG VCS_REF
 ARG VERSION
 
-# 显示构建信息
+# Print what is being built for
 RUN echo "Building for: $TARGETPLATFORM" && \
     echo "Building on: $BUILDPLATFORM" && \
     echo "Target arch: $TARGETARCH"
 
-# 安装构建依赖
+# Build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -54,11 +56,10 @@ RUN apt-get update && apt-get install -y \
     libzstd-dev \
     zstd \
     liblz4-dev \
-    liblmdb-dev \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-# 根据目标架构设置交叉编译工具
+# Cross-compilation toolchain for the target architecture
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         apt-get update && \
         apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu && \
@@ -66,12 +67,12 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
-# 设置Cargo环境
+# Cargo settings
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
     RUST_BACKTRACE=1
 
-# 工作目录
+# Working directory
 WORKDIR /build
 
 # The whole crate, not placeholders: the placeholder stage stubbed two of the five `[[bin]]`
@@ -84,7 +85,7 @@ COPY examples ./examples
 COPY proto ./proto
 COPY --from=dashboard-builder /dashboard/dist ./dashboard/dist
 
-# 根据架构设置目标和构建
+# Build for the target architecture
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
         export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc && \
         export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ && \
@@ -98,22 +99,22 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         cp target/release/vectordb /build/vectordb; \
     fi
 
-# 验证二进制文件
+# Check the binary
 RUN file /build/vectordb && \
     ls -lh /build/vectordb
 
 # -----------------------------------------------------------------------------
-# 第二阶段：运行时镜像
+# Stage 2: runtime image
 # -----------------------------------------------------------------------------
-# 使用与构建阶段相同的 Debian 版本以确保 GLIBC 兼容性
+# The same Debian release as the build stage, so the binary's glibc matches
 FROM --platform=$TARGETPLATFORM debian:${DEBIAN_VERSION}-slim AS runtime
 
-# 运行时标签
+# Labels
 ARG BUILD_DATE
 ARG VCS_REF
 ARG VERSION
 
-# 添加OCI标签
+# OCI labels
 LABEL org.opencontainers.image.title="DXMT VectorDB" \
       org.opencontainers.image.description="Lightweight single-node vector database for AI applications" \
       org.opencontainers.image.authors="DXMT Team" \
@@ -126,51 +127,53 @@ LABEL org.opencontainers.image.title="DXMT VectorDB" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
 
-# 安装运行时依赖
+# Runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     libzstd1 \
     liblz4-1 \
-    liblmdb0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建非root用户
+# Non-root user
 RUN groupadd -r vectordb && \
     useradd -r -g vectordb -s /bin/false vectordb && \
     mkdir -p /data /config /logs && \
     chown -R vectordb:vectordb /data /config /logs
 
-# 复制二进制文件
+# The binary
 COPY --from=builder --chown=vectordb:vectordb /build/vectordb /usr/local/bin/vectordb
 
-# 复制配置文件
+# Default configuration
 COPY --chown=vectordb:vectordb config /config
 
-# 切换到非root用户
+# Switch to the non-root user
 USER vectordb
 
-# 暴露端口
+# Port
 EXPOSE 9999
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:9999/health || exit 1
+# Health check: /ready answers 503 while durability is degraded
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:${PORT}/ready || exit 1
 
-# 数据卷
+# Volumes
 VOLUME ["/data", "/config", "/logs"]
 
-# 工作目录
+# Working directory
 WORKDIR /data
 
-# 环境变量
-ENV VECTORDB_DATA_DIR=/data \
-    VECTORDB_CONFIG_DIR=/config \
-    VECTORDB_LOG_DIR=/logs \
+# Environment. `DXMT_ROOT_DIR` is the variable the server reads; the store goes to /data/store
+# and backups to /data/backups.
+ENV DXMT_ROOT_DIR=/data \
     RUST_LOG=info \
     PORT=9999
 
-# 启动命令
+# Give the process a chance to flush its WAL and snapshot before the container is killed.
+STOPSIGNAL SIGTERM
+
+# Start command. `--host 0.0.0.0` is needed inside a container; set DXMT_API_KEY before
+# publishing the port anywhere you do not control.
 ENTRYPOINT ["/usr/local/bin/vectordb"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "9999"]

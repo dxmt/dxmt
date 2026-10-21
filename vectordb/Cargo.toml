@@ -2,7 +2,7 @@
 name = "dxmt-vectordb"
 version = "1.3.2"
 edition = "2021"
-authors = ["DXMT Team"]
+authors = ["DXMT Team <contact@dxmt.online>"]
 description = "A lightweight single-node vector database written in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"

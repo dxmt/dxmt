@@ -381,12 +381,10 @@ cat RELEASE_CHECKLIST.md
 
 ## CI/CD Integration
 
-These scripts are also used in GitHub Actions:
-
-- `.github/workflows/test.yml` uses `run_tests.sh`
-- `.github/workflows/publish.yml` uses `release.sh`
-
-Local results should match CI/CD results.
+CI does not call these scripts. This package is tested by the `sdk-live` job of the
+repository's `.github/workflows/ci.yml` (at the repository root), which installs it with
+`pip install -e . langchain-tests` and runs its suite against a live server. There is no
+publishing workflow yet.
 
 ---
 

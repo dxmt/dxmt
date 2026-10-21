@@ -1,52 +1,70 @@
-# 备份与恢复
+# Backup and restore
 
-**先记住一件事：`data/wal/snapshot/` 是数据，不是缓存。**
+Chinese version: [backup-restore.zh.md](backup-restore.zh.md). Where the two differ, this one
+is authoritative.
 
-WAL 会被截断——快照校验通过后，它所覆盖的那段日志会被删掉。所以从那一刻起，
-快照是那段数据的**唯一副本**。把 `snapshot/` 当缓存清理掉，等于删数据。
+**Remember one thing first: `$DXMT_WAL_DIR/snapshot/` (by default `~/.dxmt/store/snapshot/`)
+is data, not a cache.**
+
+The WAL is truncated: once a snapshot has been verified, the part of the log it covers is
+deleted. From that moment the snapshot is the **only copy** of that data. Cleaning up
+`snapshot/` as if it were a cache deletes data.
 
 ---
 
-## 该备份什么
+## What to back up
 
-| 路径 | 内容 | 必须备份 |
+| Path | Contents | Must back up |
 |---|---|---|
-| `$DXMT_WAL_DIR/snapshot/` | 表元数据、索引段;内存表的记录 | **是** |
-| `$DXMT_WAL_DIR/records/` | 盘表的记录(`<表>.rec` + `.rec.log`),默认每张表都是盘表 | **是** |
-| `$DXMT_WAL_DIR/vectors/` | 盘表的全量向量(`<表>.f32` 或 `.f16` + `.rows`) | **是** |
-| `$DXMT_WAL_DIR/wal.log` | 上次快照之后的写入 | **是** |
-| `$DXMT_WAL_DIR/diskann/` | EnhancedDiskANN 的索引目录 | 否（可从记录重建） |
-| `$DXMT_WAL_DIR/derived/` | 正常关机时写下的筛选/稀疏索引，下次启动读一次即删 | 否（可从记录重建） |
-| 对象存储的 `snapshot/` `wal/` `partitions/` 前缀 | 配了对象存储时的持久归宿 | **是**(等价于上面几项:配了对象存储时,盘表的快照会把记录连同向量一起带上,所以一台没有行文件的新机器也能从它恢复;代价是快照又回到按记录数计时) |
+| `$DXMT_WAL_DIR/snapshot/` | Table metadata and index segments; the records of in-memory tables | **Yes** |
+| `$DXMT_WAL_DIR/records/` | Records of disk-backed tables (`<table>.rec` + `.rec.log`); every table is disk-backed by default | **Yes** |
+| `$DXMT_WAL_DIR/vectors/` | Full vectors of disk-backed tables (`<table>.f32` or `.f16`, plus `.rows`) | **Yes** |
+| `$DXMT_WAL_DIR/wal.log` | Writes since the last snapshot | **Yes** |
+| `$DXMT_WAL_DIR/aliases` | Table aliases | **Yes** |
+| `$DXMT_WAL_DIR/fulltext/` | Full-text (Tantivy) indexes | No (rebuilt from the records after a restore) |
+| `$DXMT_WAL_DIR/diskann/` | EnhancedDiskANN index directories | No (rebuildable from the records) |
+| `$DXMT_WAL_DIR/derived/` | Filter and sparse indexes written at a clean shutdown, read once at the next start and then deleted | No (rebuildable from the records) |
+| The `snapshot/`, `wal/` and `partitions/` prefixes in object storage | The durable home of the data when object storage is configured | **Yes** (equivalent to the rows above: with object storage configured, a disk-backed table's snapshot carries its records and vectors, so a new machine with no row files can recover from it; the cost is that a snapshot again takes time proportional to the record count) |
 
-服务器写的所有东西都在一个根下面，`DXMT_ROOT_DIR`，默认 `~/.dxmt`：
+Everything the server writes lives under one root, `DXMT_ROOT_DIR`, which defaults to
+`~/.dxmt` (`$HOME/.dxmt`):
 
 ```text
 ~/.dxmt/
-├── store/      数据本身。备份指的就是这个目录        DXMT_WAL_DIR
-├── backups/    POST /backup 只能写这里面             DXMT_BACKUP_ROOT
-└── cache/      派生物，整个删掉只会变慢              DXMT_CACHE_DIR
+├── store/      the data itself; this is what "backup" means        DXMT_WAL_DIR
+├── backups/    the only place POST /backup may write               DXMT_BACKUP_ROOT
+└── cache/      derived; deleting it only costs time                DXMT_CACHE_DIR
 ```
 
-三个子目录的生命周期不同，所以是三个目录 —— 看名字就知道哪个能删。每个可以单独搬，设根则一次搬完。
-四个目录在启动时统一创建并做一次可写性探测，所以"`backups/` 不可写"是一次拒绝启动，而不是留给第一个做备份的人去发现。
+The three children have different lifetimes, which is why they are three directories: the name
+says which one can be deleted. Each can be moved on its own; setting the root moves all of them.
+`store/` and `backups/` are created at startup and probed for writability, so an unwritable
+`backups/` is a refusal to start rather than a surprise for whoever takes the first backup.
+`cache/` is created by whatever first writes to it.
 
-放在家目录下而不是工作目录下，否则换个目录启动就会打开另一个空数据库。
+The default is under the home directory rather than the working directory; otherwise starting
+the server from a different directory would open a different, empty database.
 
-**生产环境请显式设 `DXMT_WAL_DIR`**，有两个理由，都和"家目录在哪"有关：
+**In production, set `DXMT_ROOT_DIR` (or `DXMT_WAL_DIR`) explicitly**, for two reasons, both
+about where the home directory lives:
 
-- 家目录通常在根分区上。这个库在 1 亿行时实测 44.7 GB，撑满的是 `/` 而不只是数据库。
-- 家目录常常是 NFS。行文件走 `mmap`、WAL 每批 `fsync`，这两样在 NFS 上的语义都不可靠——
-  是正确性问题，不是快慢问题。
+- The home directory is usually on the root partition. This database measured 44.7 GB at 100
+  million rows; filling it fills `/`, not only the database.
+- The home directory is often on NFS. Row files are read through `mmap` and the WAL is
+  `fsync`ed after every batch, and neither has reliable semantics on NFS. That is a correctness
+  problem, not a performance one.
 
-启动日志里有一行 `data directory: …`，说的就是这个进程实际打开的是哪一个。
+The startup log has a line `data directory: …` naming the directory this process actually
+opened.
 
-**配了对象存储的部署**，快照段和 WAL 分块都已经在桶里了——备份桶即可，本地目录是缓存。
-`partitions/` 前缀下是分区索引的段文件，同样要备份：分区索引只在内存里保留质心。
+**For deployments with object storage configured**, snapshot segments and WAL chunks are
+already in the bucket: back up the bucket, and treat the local directory as a cache. The
+`partitions/` prefix holds the segment files of partitioned indexes and must be backed up as
+well: a partitioned index keeps only its centroids in memory.
 
 ---
 
-## 备份
+## Taking a backup
 
 ```bash
 curl -sX POST http://localhost:9999/api/v1/backup \
@@ -54,7 +72,7 @@ curl -sX POST http://localhost:9999/api/v1/backup \
      -d '{"path":"/backups/dxmt-2026-08-15"}'
 ```
 
-返回一份清单：
+It returns a manifest:
 
 ```json
 {
@@ -68,100 +86,116 @@ curl -sX POST http://localhost:9999/api/v1/backup \
 }
 ```
 
-**这个端点会先强制做一次快照**，顺序不能反：快照把内存里尚未落盘的写入固定下来，并把日志
-压到快照点。反过来拷的话，拿到的是一份旧快照配一段与之不匹配的日志。
+**The endpoint forces a snapshot first**, and the order matters: the snapshot pins writes not
+yet on disk and compacts the log to the snapshot point. Copying the other way round yields an
+old snapshot paired with a log that does not match it.
 
-目录由**服务进程**写，所以路径要对服务端可写，不是对调用方。
+The destination must be inside `DXMT_BACKUP_ROOT`. It is written by the **server process**, so
+the path must be writable by the server, not by the caller.
 
 ---
 
-## 定时备份
+## Scheduled backups
 
 ```bash
-DXMT_BACKUP_INTERVAL_SECS=86400   # 每天一次；默认 0，关闭
-DXMT_BACKUP_KEEP=7                # 保留最近 7 份，默认 7
+DXMT_BACKUP_INTERVAL_SECS=86400   # once a day; the default is 0, off
+DXMT_BACKUP_KEEP=7                # keep the latest 7; the default is 7
 ```
 
-写到 `$DXMT_BACKUP_ROOT/auto-<UTC 时间>`，和手动 `POST /backup` 是同一份东西。超过保留份数时删最旧的——
-**只删名字以 `auto-` 开头、且有 `BACKUP.json` 的目录**：手动备份、写到一半的备份、你放在那里的
-其他东西都不会碰。默认关闭，因为每份都是完整拷贝，默认打开会在不知情时占掉几倍的磁盘。
+Each is written to `$DXMT_BACKUP_ROOT/auto-<UTC time>` and is the same thing a manual
+`POST /backup` produces. Beyond the retention count the oldest are deleted, **but only
+directories whose name starts with `auto-` and which hold a `BACKUP.json`**: manual backups,
+half-written backups and anything else you keep there are never touched. Off by default,
+because every backup is a full copy, and turning it on by default would quietly consume
+several times the disk.
 
-是否成功看 `/metrics` 的 `dxmt_last_backup_timestamp_seconds` 和 `dxmt_backup_failures_total`
-（手动备份也计入）。失败只记日志和计数，下一轮再试，不影响服务。
+Success shows on `/metrics` as `dxmt_last_backup_timestamp_seconds` and
+`dxmt_backup_failures_total` (manual backups count too). A failure is logged and counted and
+retried at the next interval; it does not affect serving.
 
 ---
 
-## 恢复
+## Restoring
 
-恢复是离线操作，服务要先停：
+Restore is an offline operation; stop the server first:
 
 ```bash
-systemctl stop dxmt-vectordb          # 或 kill -TERM
-vectordb restore /backups/dxmt-2026-08-15            # 恢复到 serve 会打开的那个数据目录
-vectordb restore /backups/dxmt-2026-08-15 --wal-dir /var/lib/dxmt/store   # 或明确指定
+systemctl stop dxmt-vectordb          # or kill -TERM
+vectordb restore /backups/dxmt-2026-08-15            # into the data directory serve would open
+vectordb restore /backups/dxmt-2026-08-15 --wal-dir /var/lib/dxmt/store   # or name it
 systemctl start dxmt-vectordb
 ```
 
-它会：
+It:
 
-1. 按备份里的 `BACKUP.json` 核对文件都在，缺一个就拒绝，什么都不动；
-2. 拿数据目录的 `LOCK`——服务没停就拒绝；
-3. 把数据目录原有的内容**移到** `<目录名>.before-restore-<时间>`，不删除——恢复错了可以搬回来；
-4. 拷入备份，然后实际打开一次、跑完恢复，打印每张表和记录数。
+1. checks that every file listed in the backup's `BACKUP.json` is present, and refuses,
+   changing nothing, if one is missing;
+2. takes the data directory's `LOCK`, and refuses if the server is still running;
+3. **moves** the data directory's existing contents to `<directory>.before-restore-<time>`
+   rather than deleting them, so a wrong restore can be moved back;
+4. copies the backup in, then opens it once and runs recovery, printing each table and its
+   record count.
 
-手工拷贝也仍然可以（`snapshot/`、`records/`、`vectors/`、`wal.log`、`aliases` 拷进数据目录），
-但容易漏——这份文档的旧版本就漏过 `vectors/`。
+Copying by hand still works (`snapshot/`, `records/`, `vectors/`, `wal.log` and `aliases` into
+the data directory), but it is easy to miss something: an earlier version of this document
+left out `vectors/`.
 
-**故意不做成 API**：往一个正在跑的服务里灌恢复数据，需要先停掉写入、清空内存状态、
-再重放——那是一个比"停机拷文件"复杂得多、也更容易出错的路径，而收益只是省一次重启。
+**Restore is deliberately not an API.** Loading restored data into a running server would mean
+stopping writes, clearing in-memory state and replaying, which is a far more complex and
+error-prone path than stopping and copying files, and all it would save is one restart.
 
 ---
 
-## 快照什么时候发生
+## When snapshots happen
 
-| 触发 | 配置 |
+| Trigger | Configuration |
 |---|---|
-| 定期 | `DXMT_SNAPSHOT_INTERVAL_SECS`，默认 300 秒，0 关闭 |
-| 优雅停机 | SIGTERM / Ctrl-C，drain 之后 |
-| `POST /api/v1/tables/{name}/index/rebuild` 之后 | 自动 |
-| `POST /api/v1/snapshot` | 手动 |
-| 冷表驱逐前 | `DXMT_EVICTION_INTERVAL_SECS`，默认 600 秒 |
+| Periodically | `DXMT_SNAPSHOT_INTERVAL_SECS`, default 300 seconds, 0 disables |
+| Graceful shutdown | SIGTERM / Ctrl-C, after draining |
+| After `POST /api/v1/tables/{name}/index/rebuild` | Automatic |
+| `POST /api/v1/snapshot` | Manual |
+| Before a cold table is evicted | `DXMT_EVICTION_INTERVAL_SECS`, default 600 seconds |
 
-快照间隔决定了**最坏情况下需要回放多少 WAL**，也决定了单机部署（没配对象存储时）
-一次崩溃可能丢多少——不会丢已确认的写入，但恢复要多花时间。
+The snapshot interval bounds **how much WAL has to be replayed in the worst case**. Without
+object storage it does not change what a crash can lose (no acknowledged write is lost), only
+how long recovery takes.
 
 ---
 
-## 快照读不出来会怎样
+## When a snapshot cannot be read
 
-**服务拒绝启动**，并打印类似：
+**The server refuses to start**, and prints something like:
 
 ```
-snapshot at ./data/wal/snapshot is unreadable (…). The WAL no longer covers the entries it
+snapshot at /home/you/.dxmt/store/snapshot is unreadable (…). The WAL no longer covers the entries it
 holds, so starting would lose data. Restore it from backup, or delete the directory to accept
 the loss and start from whatever the WAL still has.
 ```
 
-这是有意的。原来的行为是告警一句然后空库启动——在日志已被截断的前提下，那等于静默丢数据。
+This is intentional. The earlier behaviour was to log a warning and start with an empty
+database, which, with the log already truncated, was silent data loss.
 
-两个选择：
+Two choices:
 
-1. **从备份恢复**（推荐）——按上面的步骤。
-2. **接受损失**：`rm -rf $DXMT_WAL_DIR/snapshot`，然后启动。剩下的日志能回放多少算多少。
+1. **Restore from a backup** (recommended), as described above.
+2. **Accept the loss**: `rm -rf $DXMT_WAL_DIR/snapshot`, then start. Whatever the remaining log
+   holds is replayed.
 
-写快照时会先完整读回来校验（manifest、每个 `.meta`、每个声称有索引的 `.idx`），
-校验不过就不替换、也不截断日志，所以正常情况下不该出现这个错误。
+A snapshot is read back in full and verified as it is written (the manifest, every `.meta`,
+and every `.idx` it claims to have); if verification fails it does not replace the previous
+snapshot and the log is not truncated, so in normal operation this error should not occur.
 
 ---
 
-## 有意不提供的东西
+## Deliberately not provided
 
-- **增量备份**。没有备份目录（catalogue），也没有备份 ID。
-- **备份列表 / 删除 / 状态查询**。
-- **通过 API 恢复**。
+- **Incremental backups.** There is no backup catalogue and no backup id.
+- **Listing, deleting or querying the status of backups.**
+- **Restore through the API.**
 
-`/backup/full`、`/backup/incremental`、`/backup/manual`、`/backup/status`、`/backup/list`、
-`/backup/restore`、`DELETE /backup/{id}` 这七个端点曾经存在，但**无条件返回 500**：
-`backup_manager` 在 `server.rs` 里写死 `None`。而它们背后的 `BackupManager` 收集的是
-`tables/` 前缀下的对象——**没有任何代码写过那个前缀**，所以就算接上，产出的也是空备份。
-比报错更糟。已经删掉，换成上面这一个能用的端点。
+Seven endpoints — `/backup/full`, `/backup/incremental`, `/backup/manual`, `/backup/status`,
+`/backup/list`, `/backup/restore` and `DELETE /backup/{id}` — used to exist and **returned 500
+unconditionally**: `backup_manager` was hardcoded to `None` in `server.rs`. And the
+`BackupManager` behind them collected objects under a `tables/` prefix that **no code ever
+wrote to**, so even wired up it would have produced empty backups, which is worse than an
+error. They were removed in favour of the one working endpoint above.

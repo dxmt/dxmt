@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "DXMT Team", email = "team@dxmt.online"}
+    {name = "DXMT Team", email = "contact@dxmt.online"}
 ]
 keywords = [
     "langchain",

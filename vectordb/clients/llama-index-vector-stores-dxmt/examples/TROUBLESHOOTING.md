@@ -338,9 +338,9 @@ This shouldn't happen with DXMT! Server persists data automatically.
 
 3. Check table contents:
    ```python
-   # Get table stats
-   stats = client.get_table_stats("your_table_name")
-   print(stats)
+   # Table definition and record count
+   print(client.get_table("your_table_name"))
+   print(client.count("your_table_name"))
    ```
 
 ---

@@ -70,6 +70,15 @@ pip install langchain-dxmt
 
 This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/dxmt/tree/main/vectordb/clients/dxmt-python-sdk) as a dependency.
 
+Neither package is on PyPI yet. Until the packages are published, install from source: the SDK first, because this package's
+dependency on `dxmt-python-sdk` would otherwise be looked up on PyPI and fail.
+
+```bash
+# from a checkout of the repository
+pip install ./vectordb/clients/dxmt-python-sdk
+pip install ./vectordb/clients/langchain-dxmt
+```
+
 ### Requirements
 
 - Python 3.9+
@@ -81,7 +90,7 @@ This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/dxmt
 If you don't need LangChain integration, you can use the SDK directly:
 
 ```bash
-pip install dxmt-python-sdk
+pip install dxmt-python-sdk   # until published: pip install ./vectordb/clients/dxmt-python-sdk
 ```
 
 ```python
@@ -252,16 +261,27 @@ retriever = vector_store.as_retriever(
     search_kwargs={"k": 5, "filter": {"source": "documentation"}}
 )
 
-# Use in chains
-from langchain.chains import RetrievalQA
+# Use in an LCEL chain
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 
-qa_chain = RetrievalQA.from_chain_type(
-    llm=ChatOpenAI(),
-    retriever=retriever,
+prompt = ChatPromptTemplate.from_template(
+    "Answer from the context only.\n\nContext:\n{context}\n\nQuestion: {question}"
 )
 
-answer = qa_chain.invoke("What is DXMT VectorDB?")
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+chain = (
+    {"context": retriever | format_docs, "question": RunnablePassthrough()}
+    | prompt
+    | ChatOpenAI()
+    | StrOutputParser()
+)
+
+answer = chain.invoke("What is DXMT VectorDB?")
 ```
 
 ## Configuration Options
@@ -373,7 +393,6 @@ Apache License 2.0 - see LICENSE file for details
 
 - [GitHub Issues](https://github.com/dxmt/dxmt/issues)
 - [Documentation](https://github.com/dxmt/dxmt)
-- [Community Discord](https://discord.gg/dxmt)
 
 ## Contributing
 

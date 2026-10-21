@@ -318,7 +318,7 @@ is exactly the condition that makes the match set small, so the exhaustive path 
 precisely when it is used.
 
 **What makes this worth its own section is not that filtering was slow. It is that filtering
-had no bound when it failed.** `tests/filter_escalation_test.rs` reproduces it in 20,000 rows.
+had no bound when it failed.** `tests/filters/filter_escalation_test.rs` reproduces it in 20,000 rows.
 
 ### A related correction, kept because the correction is the lesson
 
@@ -395,8 +395,8 @@ Memory said the same thing: 4,659 MB without the payload, 7,149 MB with one inte
 | phase 3, the record row file | `src/storage/record_store.rs` |
 | rerank, `ef` scaling, the filter paths | `src/storage/intelligent_indexed_storage.rs` |
 | `rerank_candidates`, `scan_ids` | `src/search/index_traits.rs` |
-| the escalation defect, reproduced | `tests/filter_escalation_test.rs` |
-| a filter on a field no record has | `tests/filter_absent_field_test.rs` |
+| the escalation defect, reproduced | `tests/filters/filter_escalation_test.rs` |
+| a filter on a field no record has | `tests/filters/filter_absent_field_test.rs` |
 
 `docs/SUPPORT_MATRIX.md` is the separate question of which of this is safe to depend on.
 Recall figures measured against published ground truth, on nine `ann-benchmarks` datasets this

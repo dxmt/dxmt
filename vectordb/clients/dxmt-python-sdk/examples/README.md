@@ -740,6 +740,5 @@ These examples are part of the DXMT VectorDB project and are released under the 
 
 **Need Help?**
 - 📧 Email: support@dxmt.online
-- 💬 Discord: [DXMT Community](https://discord.gg/dxmt)
 - 📚 Docs: [docs.dxmt.online](https://docs.dxmt.online)
 - 🐛 Issues: [GitHub Issues](https://github.com/dxmt/dxmt/issues)

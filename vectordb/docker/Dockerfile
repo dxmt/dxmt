@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# DXMT VectorDB - 通用多阶段 Docker 构建
-# 支持多平台: linux/amd64, linux/arm64
-# 解决所有编译依赖问题
+# DXMT VectorDB - multi-stage Docker build
+# Platforms: linux/amd64, linux/arm64
+# Build context: the `vectordb/` directory (see the build instructions at the end).
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# 第一阶段：基础构建环境
+# Stage 1: base build environment
 # -----------------------------------------------------------------------------
 # Pinned to bookworm, the same Debian the runtime stage is: `rust:latest` follows Debian's
 # newest release, and a binary linked against a newer glibc than the runtime image's does not
@@ -17,21 +17,21 @@ FROM rust:${RUST_VERSION}-bookworm AS base-builder
 # Install only dependencies needed by the default single-node build. Optional LMDB/RocksDB,
 # CUDA and ONNX integrations are built in dedicated images/jobs rather than silently ignored.
 RUN apt-get update && apt-get install -y \
-    # 基础构建工具
+    # Basic build tools
     build-essential \
     pkg-config \
     cmake \
     git \
     curl \
-    # C/C++ 编译器和工具
+    # C/C++ compilers and tools
     gcc \
     g++ \
     clang \
     libclang-dev \
     llvm-dev \
-    # SSL 和加密库
+    # SSL and crypto libraries
     libssl-dev \
-    # 压缩库
+    # Compression libraries
     libzstd-dev \
     zstd \
     liblz4-dev \
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置环境变量解决编译问题
+# Compiler and cargo settings for a reproducible, low-memory build
 ENV CC=clang \
     CXX=clang++ \
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
@@ -89,11 +89,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/vectordb /usr/local/bin/vectordb
 
 # -----------------------------------------------------------------------------
-# 第四阶段：最小运行时镜像
+# Stage 4: minimal runtime image
 # -----------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# 安装运行时依赖
+# Runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
@@ -102,23 +102,23 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建非 root 用户
+# Non-root user
 RUN groupadd -r vectordb && \
     useradd -r -g vectordb -u 1000 -m -s /bin/bash vectordb && \
     mkdir -p /data /config /logs && \
     chown -R vectordb:vectordb /data /config /logs
 
-# 复制二进制文件
+# The binary
 COPY --from=final-builder /usr/local/bin/vectordb /usr/local/bin/vectordb
 
-# 复制默认配置（如果存在）
+# Default configuration (if present)
 COPY --chown=vectordb:vectordb config/ /config/
 
-# 切换到非 root 用户
+# Switch to the non-root user
 USER vectordb
 WORKDIR /data
 
-# 设置环境变量
+# Environment
 # `VECTORDB_ROOT_DIR`, `VECTORDB_CONFIG_DIR` and `VECTORDB_LOG_DIR` used to be set here and
 # were read by no code at all -- three variables that looked like configuration and were
 # decoration. `DXMT_ROOT_DIR` is the one the server actually reads; everything else hangs off it.
@@ -126,29 +126,30 @@ ENV DXMT_ROOT_DIR=/data \
     RUST_LOG=info \
     PORT=9999
 
-# 健康检查
+# Health check: /ready answers 503 while durability is degraded
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:${PORT}/ready || exit 1
 
-# 暴露端口
+# Port
 EXPOSE 9999
 
-# 数据卷
+# Volumes
 VOLUME ["/data", "/config", "/logs"]
 
 # Give the process a chance to flush its WAL/snapshot before the container is killed.
 STOPSIGNAL SIGTERM
 
-# 启动命令
+# Start command. `--host 0.0.0.0` is needed inside a container; set DXMT_API_KEY before
+# publishing the port anywhere you do not control.
 ENTRYPOINT ["/usr/local/bin/vectordb"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "9999"]
 
 # -----------------------------------------------------------------------------
-# 开发阶段（可选）
+# Development stage (optional)
 # -----------------------------------------------------------------------------
 FROM base-builder AS development
 
-# 安装额外的开发工具
+# Extra development tools
 RUN cargo install \
     cargo-watch \
     cargo-edit \
@@ -158,60 +159,59 @@ RUN cargo install \
 
 WORKDIR /workspace
 
-# 开发环境变量
+# Development environment
 ENV RUST_BACKTRACE=full \
     RUST_LOG=debug \
     CARGO_WATCH_CLEAR=true
 
-# 开发模式启动
+# Start in watch mode
 CMD ["cargo", "watch", "-x", "run", "-w", "src"]
 
 # -----------------------------------------------------------------------------
-# 测试阶段（可选）
+# Test stage (optional)
 # -----------------------------------------------------------------------------
 FROM final-builder AS test
 
 WORKDIR /build
 
-# 运行测试（仅在显式指定 --target test 时执行）
+# Runs the tests (only when built with --target test)
 RUN cargo test --release
 
 # -----------------------------------------------------------------------------
-# 构建说明
+# Build instructions. Run every command from `vectordb/`, which is the build context.
 # -----------------------------------------------------------------------------
-# 生产镜像构建:
+# Production image:
 #   docker build -f docker/Dockerfile -t dxmt/vectordb:latest .
 #
-# 开发镜像构建:
-#   docker build --target development -t dxmt/vectordb:dev .
+# Development image:
+#   docker build -f docker/Dockerfile --target development -t dxmt/vectordb:dev .
 #
-# 测试镜像构建:
-#   docker build --target test -t dxmt/vectordb:test .
+# Test image:
+#   docker build -f docker/Dockerfile --target test -t dxmt/vectordb:test .
 #
-# 多平台构建 (需要 docker buildx):
+# Multi-platform (needs docker buildx):
 #   docker buildx create --use
-#   docker buildx build --platform linux/amd64,linux/arm64 \
+#   docker buildx build -f docker/Dockerfile --platform linux/amd64,linux/arm64 \
 #     -t dxmt/vectordb:latest --push .
 #
-# 运行容器:
+# Run a container (the data lives under /data/store):
 #   docker run -d \
 #     --name vectordb \
-#     -p 9999:9999 \
-#     -v $(pwd)/data:/data \
-#     -v $(pwd)/config:/config \
-#     -v $(pwd)/logs:/logs \
+#     -p 127.0.0.1:9999:9999 \
+#     -e DXMT_API_KEY="$DXMT_API_KEY" \
+#     -v "$(pwd)/data:/data" \
 #     dxmt/vectordb:latest
 #
-# 使用 docker-compose:
-#   docker-compose up -d
+# With compose:
+#   docker compose -f docker/docker-compose.yml up -d
 #
-# 调试模式:
+# Debug logging:
 #   docker run -it --rm \
-#     -p 9999:9999 \
+#     -p 127.0.0.1:9999:9999 \
 #     -e RUST_LOG=debug \
 #     dxmt/vectordb:latest
 #
 # -----------------------------------------------------------------------------
-# 最终生产镜像（默认构建目标）
+# Final production image (the default build target)
 # -----------------------------------------------------------------------------
 FROM runtime AS final
