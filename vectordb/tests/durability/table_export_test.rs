@@ -35,13 +35,17 @@ fn free_port() -> u16 {
 }
 
 fn start(dir: &std::path::Path, port: u16) -> Server {
-    std::fs::create_dir_all(dir.join("exports")).unwrap();
+    start_with_root(dir, port, &dir.join("exports"))
+}
+
+fn start_with_root(dir: &std::path::Path, port: u16, root: &std::path::Path) -> Server {
+    std::fs::create_dir_all(root).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
         .env("DXMT_WAL_DIR", dir.join("wal"))
-        .env("DXMT_BACKUP_ROOT", dir.join("exports"))
+        .env("DXMT_BACKUP_ROOT", root)
         .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
         .env("DXMT_EVICTION_INTERVAL_SECS", "0")
         .env_remove("DXMT_API_KEY")
@@ -344,4 +348,41 @@ fn a_path_outside_the_backup_root_is_refused_in_both_directions() {
     )
     .expect("import answered");
     assert_eq!(garbage["success"], false, "import of junk: {garbage}");
+}
+
+#[test]
+fn an_export_cannot_be_written_into_the_data_directory() {
+    // The backup root defaults to the WAL directory's parent, which puts the store inside it.
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let _server = start_with_root(dir.path(), port, dir.path());
+    seed(port, "src");
+    let wal_log = dir.path().join("wal").join("wal.log");
+    let before = std::fs::read(&wal_log).expect("the WAL exists");
+
+    let export = call(
+        port,
+        "POST",
+        "/api/v1/tables/src/export",
+        Some(&serde_json::json!({"path": wal_log.display().to_string()}).to_string()),
+    )
+    .expect("export answered");
+    assert_eq!(export["success"], false, "export over the WAL: {export}");
+    assert!(export.to_string().contains("data directory"), "{export}");
+    assert_eq!(
+        std::fs::read(&wal_log).unwrap(),
+        before,
+        "the WAL was rewritten"
+    );
+
+    // Beside the store, inside the root: still allowed.
+    let beside = dir.path().join("src.dxmt");
+    let ok = call(
+        port,
+        "POST",
+        "/api/v1/tables/src/export",
+        Some(&serde_json::json!({"path": beside.display().to_string()}).to_string()),
+    )
+    .expect("export answered");
+    assert_eq!(ok["success"], true, "{ok}");
 }

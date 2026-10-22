@@ -621,6 +621,11 @@ pub async fn create_app_with_storage(
     let app = app
         // 增加请求体大小限制到500MB
         .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+        // Query admission, inside authentication: a request that is refused for its key does
+        // not take a query slot or a place in the queue. See `admission`.
+        .layer(axum::middleware::from_fn(
+            crate::api::admission::admit_queries,
+        ))
         // Authentication, and the position is the whole of it. `layer` wraps inward-out, so
         // the last one applied is the outermost: written after `CorsLayer` this ran *before*
         // it, and a browser's `OPTIONS` preflight got a bare 401 with no CORS headers on it.

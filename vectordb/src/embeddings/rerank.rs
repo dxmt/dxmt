@@ -60,10 +60,8 @@ pub async fn rerank(
     if documents.is_empty() || top_n == 0 {
         return Ok(Vec::new());
     }
-    let api_key = crate::config::env::var(config.api_key_env())
-        .ok()
-        .filter(|k| !k.is_empty());
     let url = format!("{}/rerank", config.base_url.trim_end_matches('/'));
+    let api_key = super::policy::provider_key(config.api_key_env(), &url)?;
     let top_n = top_n.min(documents.len());
     let mut backoff = FIRST_BACKOFF;
     let mut last: Option<Error> = None;

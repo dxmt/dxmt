@@ -49,7 +49,9 @@ enum Commands {
     /// Start the VectorDB server
     Serve {
         /// Host to bind
-        #[arg(long, default_value = "0.0.0.0", env = "DXMT_HOST")]
+        /// This machine only by default. Every route is open unless DXMT_API_KEY is set, so
+        /// serving the network (`0.0.0.0`) is a choice to make with a key in place.
+        #[arg(long, default_value = "127.0.0.1", env = "DXMT_HOST")]
         host: String,
         /// Port to bind
         #[arg(long, default_value = "9999", env = "DXMT_PORT")]
@@ -432,7 +434,7 @@ mod tests {
         std::env::remove_var("DXMT_PORT");
         assert_eq!(
             address(&["vectordb", "serve"]),
-            ("0.0.0.0".to_string(), 9999)
+            ("127.0.0.1".to_string(), 9999)
         );
     }
 }

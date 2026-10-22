@@ -663,16 +663,24 @@ retriever = vectorstore.as_retriever(
     search_kwargs={"k": 3}
 )
 
-# Use with LangChain chains
-from langchain.chains import RetrievalQA
+# Use in an LCEL chain (see lcel_chains.py for more)
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 
-qa_chain = RetrievalQA.from_chain_type(
-    llm=ChatOpenAI(),
-    retriever=retriever
+prompt = ChatPromptTemplate.from_template(
+    "Answer from the context only.\n\nContext:\n{context}\n\nQuestion: {question}"
+)
+chain = (
+    {"context": retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)),
+     "question": RunnablePassthrough()}
+    | prompt
+    | ChatOpenAI()
+    | StrOutputParser()
 )
 
-result = qa_chain.invoke({"query": "Your question"})
+result = chain.invoke("Your question")
 ```
 
 ---

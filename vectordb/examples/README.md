@@ -35,7 +35,7 @@ Six read `DXMT_URL` or `DXMT_HOST`/`DXMT_PORT` and will follow a server elsewher
 | --- | --- | --- | --- |
 | `rag_minimal.py` | `httpx`, optionally `sentence-transformers` | — | works offline; see below |
 | `standard_dataset_recall.py` | `pyarrow httpx` | — | a VectorDBBench dataset on disk |
-| `full_text_search_example.py` | — | — | server built `--features text-bm25` |
+| `full_text_search_example.py` | — | — | nothing extra: `text-bm25` is in the default build |
 | `query_pdf_docs.py` | `sentence-transformers` | — | run `pdf_rag_simple.py` first |
 | `pdf_rag_simple.py` | `sentence-transformers PyPDF2` | — | a PDF, see below |
 | `pdf_rag_demo.py` | `sentence-transformers PyPDF2` | optional | a PDF; without a key it retrieves but does not generate |
@@ -128,7 +128,9 @@ network.
 
 ## Embeddings
 
-None of these get embeddings from the database; the server stores vectors the caller supplies.
+These examples compute their vectors on the client side and send them. The server can also
+embed for you -- a table that names a model takes `text` in records and searches, and the `kb`
+table does so with the server's default model; `02_embeddings.md` covers that.
 `clients/dxmt-python-sdk/examples/common_utils.py` has an `embed()` that uses `all-MiniLM-L6-v2` when
 `sentence-transformers` is installed and falls back to a deterministic md5-derived vector when
 it is not, which is what makes an example runnable offline. The fallback vectors are not
@@ -136,24 +138,26 @@ semantically meaningful -- they exercise the plumbing, not the retrieval quality
 
 ## Rust examples
 
-Declared in `Cargo.toml`, so `cargo clippy --all-targets` compiles them and a break shows up in
-CI rather than the next time somebody opens the file:
+Declared as `[[example]]` in `Cargo.toml`, so `cargo clippy --all-targets` compiles them and a
+break shows up in CI rather than the next time somebody opens the file. `grpc_client` needs a
+non-default feature, so only CI's `optional-features` job builds it.
 
-| example | needs |
-| --- | --- |
-| `quickstart.rs` | nothing -- create, insert, search, filter, list, delete, drop, embedded |
-| `mcp_demo.rs` | nothing |
-| `dxql_demo.rs` | nothing |
-| `hnsw_build_scaling.rs` | nothing |
-| `chinese_tokenizer_demo.rs` | nothing |
-| `adaptive_index_demo.rs` | `--features adaptive-index` |
-| `full_text_search_example.rs` | `--features text-bm25` |
+| `--example` | file | needs |
+| --- | --- | --- |
+| `quickstart` | `quickstart.rs` | nothing -- create, insert, search, list, delete, drop, embedded |
+| `mcp_demo` | `mcp_demo.rs` | nothing |
+| `dxql_demo` | `dxql_demo.rs` | nothing |
+| `hnsw_build_scaling` | `hnsw_build_scaling.rs` | nothing |
+| `full_text_search` | `full_text_search_example.rs` | `text-bm25` (default) |
+| `chinese_tokenizer_demo` | `chinese_tokenizer_demo.rs` | `text-bm25` (default) |
+| `grpc_client` | `grpc_client.rs` | `--features api-grpc`, and a server started with `--grpc-port` |
 
     cargo run --example quickstart
 
 `quickstart.rs` is the shortest answer to "how do I put vectors in and get them out". It uses
-the crate directly rather than HTTP, which is the embedded shape -- there is no Rust client SDK
-in this repository; the four SDKs are Python, JavaScript, LangChain and LlamaIndex.
+the crate directly rather than HTTP, which is the embedded shape. To talk to a server instead,
+use one of the six clients under `clients/`: Python, JavaScript, Go, Rust (`dxmt-client`),
+LangChain and LlamaIndex.
 
 ## Tutorials and other files
 

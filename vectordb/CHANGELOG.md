@@ -17,7 +17,39 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Security
+
+- **A table's provider settings can no longer send the server's environment to a URL.** A
+  table names its embedding and rerank provider by `base_url` and the name of an environment
+  variable holding the key, both from the caller; the server read whatever variable was named
+  and sent its value to whatever URL was named, so one table and one insert could hand any
+  server secret to anyone who could reach the port. The variable must now be a provider key
+  (a known provider's, `DXMT_EMBEDDING_API_KEY_ENV`'s, or one in `DXMT_ALLOWED_KEY_ENVS`;
+  never `DXMT_API_KEY`), a key goes only to a known provider host, loopback, the host of
+  `DXMT_EMBEDDING_BASE_URL` or one in `DXMT_ALLOWED_PROVIDER_HOSTS`, and link-local and cloud
+  metadata URLs are refused. A keyless local provider is unaffected.
+- **One request could stop the server.** `/search/text` (and the text half of
+  `/search/hybrid`) with `limit: 0` or a huge `limit` panicked in Tantivy, and highlighting text
+  whose lowercase is longer than itself (`İ`) sliced outside it; the release build aborts on a
+  panic. Both are 400s or handled now. A query of the wrong width for a named vector space
+  reached SIMD kernels that read past the shorter vector; it is a 400, and the kernels assert
+  equal lengths in every build.
+- **An export could overwrite the database's own files.** It was kept inside
+  `DXMT_BACKUP_ROOT`, which defaults to the parent of the data directory, but not outside the
+  store: an export to `<store>/wal.log` replaced it. Refused now, as backups already were.
+- **`serve` listens on 127.0.0.1 by default** (was 0.0.0.0). Every route is open unless
+  `DXMT_API_KEY` is set; `--host 0.0.0.0` serves the network. The Docker image is unchanged.
+
 ### Added
+
+- **Query admission.** At most `DXMT_MAX_CONCURRENT_QUERIES` searches run at once (default
+  twice the cores), `DXMT_QUERY_QUEUE` more wait up to `DXMT_QUERY_QUEUE_TIMEOUT_MS`, and the
+  rest are answered `429 TOO_MANY_REQUESTS` with `Retry-After: 1` instead of slowing every query
+  down together. Reads only; `/metrics` exports `dxmt_queries_running`, `_limit`, `_waiting`
+  and `dxmt_queries_rejected_total`.
+- **A disk floor.** Writes are refused (503) while the data directory's disk has less free
+  space than `DXMT_MIN_FREE_DISK_MB` (default a twentieth of the disk, 256 MB to 10 GB), so a
+  full disk cannot fail the WAL mid-write; deletes and snapshots still run.
 
 - **Documents: a long text in, overlapping chunks out.** `PUT /tables/{t}/documents/{doc_id}`
   splits a text on paragraph and sentence boundaries into chunks (500 characters, 50 shared, by
@@ -68,6 +100,12 @@ release, and the first commit that was ever pushed anywhere.
   a second `serve`, or `vectordb mcp` beside a running server, is refused with the directory
   it found in use, instead of both appending to one log. The OS releases the lock however the
   process exits.
+- **A storage fixture written by 1.3.2** (`tests/compat/fixtures/1.3.2/`), which every later
+  build has to open, write to and recover after a crash. The only fixture until now was
+  0.2.0's, so nothing checked that a release could read what 1.x wrote. The generator now also
+  writes a table with the 1.x table settings -- a payload-index policy, fast-scan off, a rerank
+  provider and a recall target -- and alters it after the snapshot, so the log has to replay
+  those fields; the test checks each one, and that a filter on the unindexed field is refused.
 
 ### Changed
 
@@ -81,6 +119,9 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **PQ parameters a one-byte code cannot hold are refused.** `quantization.num_centroids`
+  above 256 wrapped centroid indices silently and degraded search; it is a 400 at creation,
+  as is `num_subvectors: 0`.
 - **A slow embedding model no longer fails a large write.** A batch the provider could not
   embed within the timeout was sent again, three times, and the write failed: bge-m3 on a
   CPU took over 60 s for 32 paragraphs. A batch that times out is now split in half until it
@@ -198,15 +239,6 @@ release, and the first commit that was ever pushed anywhere.
   are gone from the dependencies.
 - **`DXMT_COMPRESSION`**, and the `compression` field of `config::SsdConfig` it filled. It
   selected nothing; the WAL and row files are not compressed.
-
-### Added
-
-- **A storage fixture written by 1.3.2** (`tests/compat/fixtures/1.3.2/`), which every later
-  build has to open, write to and recover after a crash. The only fixture until now was
-  0.2.0's, so nothing checked that a release could read what 1.x wrote. The generator now also
-  writes a table with the 1.x table settings -- a payload-index policy, fast-scan off, a rerank
-  provider and a recall target -- and alters it after the snapshot, so the log has to replay
-  those fields; the test checks each one, and that a filter on the unindexed field is refused.
 
 ## [1.3.2] - 2026-10-07
 

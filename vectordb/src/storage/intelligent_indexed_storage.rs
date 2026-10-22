@@ -805,6 +805,9 @@ pub struct IntelligentIndexedStorage {
     /// present after recovery, depending on how far the filesystem write got.
     /// Refuses writes before the machine runs out of memory; see `memory_guard`.
     memory_guard: crate::storage::memory_guard::MemoryGuard,
+    /// Refuses writes before the data directory's disk fills; see `disk_guard`. No directory
+    /// (in-memory storage), no guard.
+    disk_guard: crate::storage::disk_guard::DiskGuard,
     durability_error: Arc<StdMutex<Option<String>>>,
 
     /// Operational durability telemetry. These fields are intentionally process-local: a
@@ -1991,6 +1994,7 @@ impl IntelligentIndexedStorage {
             let manager = WalManager::new(&dir)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
+            storage.disk_guard = crate::storage::disk_guard::DiskGuard::from_env(Some(&dir));
 
             // Before anything reads chunks: the manifest is how they are found.
             if storage.object_storage_enabled {
@@ -2192,6 +2196,7 @@ impl IntelligentIndexedStorage {
             filter_eval_ns: AtomicU64::new(0),
             filter_node_map_misses: AtomicU64::new(0),
             memory_guard: crate::storage::memory_guard::MemoryGuard::from_env(),
+            disk_guard: crate::storage::disk_guard::DiskGuard::from_env(None),
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         })
@@ -2217,7 +2222,8 @@ impl IntelligentIndexedStorage {
     /// a server that cannot replay its log or write its snapshot after a memory event cannot
     /// come back from one. Only the paths that take new data from a caller consult this.
     fn ensure_memory_headroom(&self) -> crate::Result<()> {
-        self.memory_guard.check()
+        self.memory_guard.check()?;
+        self.disk_guard.check()
     }
 
     fn mark_durability_failed(&self, error: &crate::Error) {
@@ -3452,7 +3458,11 @@ impl IntelligentIndexedStorage {
     /// copy of a table anywhere the process can write, and an import is a read primitive that
     /// will happily try to parse `/etc/shadow`. The root is the same one `POST /backup` is held
     /// to, so an operator configures one directory and both obey it.
-    fn resolve_export_path(&self, path: &std::path::Path) -> crate::Result<PathBuf> {
+    /// `writing`: the path is an export's destination, which must also not be inside the
+    /// store. The backup root defaults to the WAL directory's parent, so without that an export
+    /// to `<store>/wal.log` -- or a snapshot, a row file -- replaced the database's own file
+    /// with a table export. `backup_to_inner` already refused this for backups.
+    fn resolve_export_path(&self, path: &std::path::Path, writing: bool) -> crate::Result<PathBuf> {
         let Some(ref wal_dir) = self.wal_dir else {
             return Err(crate::Error::InvalidInput(
                 "export and import need WAL-backed storage; this instance has no durable state"
@@ -3469,6 +3479,17 @@ impl IntelligentIndexedStorage {
                 path.display(),
                 root.display()
             )));
+        }
+        if writing {
+            let store = std::fs::canonicalize(wal_dir).unwrap_or_else(|_| wal_dir.clone());
+            if resolved.starts_with(&store) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "{} is inside the data directory {}; an export there could overwrite the \
+                     database's own files",
+                    path.display(),
+                    store.display()
+                )));
+            }
         }
         Ok(resolved)
     }
@@ -3654,7 +3675,7 @@ impl IntelligentIndexedStorage {
         dest: &std::path::Path,
     ) -> crate::Result<serde_json::Value> {
         let name = &*self.resolve(name);
-        let path = self.resolve_export_path(dest)?;
+        let path = self.resolve_export_path(dest, true)?;
         self.ensure_resident(name).await?;
 
         // Copied out under the read lock so the export is a point in time, and the vectors are
@@ -3752,7 +3773,7 @@ impl IntelligentIndexedStorage {
         overwrite: bool,
     ) -> crate::Result<serde_json::Value> {
         self.ensure_writable()?;
-        let path = self.resolve_export_path(src)?;
+        let path = self.resolve_export_path(src, false)?;
         if !path.is_file() {
             return Err(crate::Error::InvalidInput(format!(
                 "{} is not a file written by POST /tables/{{t}}/export",
@@ -6091,6 +6112,24 @@ impl IntelligentIndexedStorage {
                 config.name
             )));
         }
+        if let Some(q) = &config.quantization {
+            // A PQ code is one byte per subspace: centroid indices are stored `as u8`, so more
+            // than 256 wrapped silently and every code above 255 named the wrong centroid --
+            // search quality fell with no error anywhere. And zero subspaces divides by zero.
+            if let Some(k) = q.num_centroids {
+                if !(2..=256).contains(&k) {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "quantization.num_centroids must be between 2 and 256 (got {k}): a code \
+                         is one byte per subspace"
+                    )));
+                }
+            }
+            if q.num_subvectors == Some(0) {
+                return Err(crate::Error::InvalidInput(
+                    "quantization.num_subvectors must be at least 1".to_string(),
+                ));
+            }
+        }
         let config = self.dimension_from_the_model(config).await?;
         self.create_table_inner(config, true).await
     }
@@ -7007,16 +7046,28 @@ impl IntelligentIndexedStorage {
                 .get(tablename)
                 .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
 
-            // Validate query vector dimension against the default space only when no named vector
-            // space is requested (named spaces may have different dimensions).
-            if query.vector_name.is_none() {
-                let expected_dim = table_data.table.dimension;
-                if !query.vector.is_empty() && query.vector.len() != expected_dim {
-                    return Err(crate::Error::DimensionMismatch {
-                        expected: expected_dim,
-                        actual: query.vector.len(),
-                    });
-                }
+            // The query's width against the space that will answer it: the named space's when
+            // one is named and exists, else the table's (a name the table does not have falls
+            // through to the default index below). This skipped every query naming a space,
+            // and the index does not check either, so a short vector reached the SIMD kernels,
+            // which read `a.len()` floats from both sides -- past the end of the query.
+            let expected_dim = query
+                .vector_name
+                .as_ref()
+                .and_then(|name| {
+                    table_data
+                        .table
+                        .named_vectors
+                        .as_ref()?
+                        .iter()
+                        .find(|space| &space.name == name)
+                })
+                .map_or(table_data.table.dimension, |space| space.dimension);
+            if !query.vector.is_empty() && query.vector.len() != expected_dim {
+                return Err(crate::Error::DimensionMismatch {
+                    expected: expected_dim,
+                    actual: query.vector.len(),
+                });
             }
 
             // Resolve named index (if vector_name is specified in the query).

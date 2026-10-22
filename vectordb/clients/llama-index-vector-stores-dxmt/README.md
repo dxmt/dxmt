@@ -51,6 +51,16 @@ Or with poetry:
 poetry add llama-index-vector-stores-dxmt
 ```
 
+Neither this package nor `dxmt-python-sdk` is on PyPI yet. Until the packages are published, install from source: the SDK first,
+because this package's dependency on `dxmt-python-sdk` would otherwise be looked up on PyPI and
+fail.
+
+```bash
+# from a checkout of the repository
+pip install ./vectordb/clients/dxmt-python-sdk
+pip install ./vectordb/clients/llama-index-vector-stores-dxmt
+```
+
 ## Quick Start
 
 ### Basic Usage

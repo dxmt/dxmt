@@ -104,13 +104,10 @@ pub async fn embed_texts(
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    // Through the helper, like every other environment read here: for a name outside the
-    // `DXMT_` namespace -- which this one usually is, since the table names it -- it behaves
-    // exactly as `std::env::var`, and `tests/env_prefix_test.rs` is what keeps that uniform.
-    let api_key = crate::config::env::var(config.api_key_env())
-        .ok()
-        .filter(|k| !k.is_empty());
     let url = format!("{}/embeddings", config.base_url());
+    // The table's settings come from its callers; `policy` decides whether this variable may
+    // be read and its value sent to this URL.
+    let api_key = super::policy::provider_key(config.api_key_env(), &url)?;
 
     let mut out = Vec::with_capacity(texts.len());
     let batch = config.batch_size().min(learned_batch(&url, &config.model));

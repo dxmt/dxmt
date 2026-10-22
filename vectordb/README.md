@@ -10,8 +10,8 @@ single-node server and nothing more.
 > **Status: 1.3**, under the compatibility promise 1.0 made. Durability is a write-ahead log,
 > replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
 > Records and full vectors are **not** held in memory: with a WAL directory, which is the
-> default, they live in row files beside it (`wal/records/<table>.rec`,
-> `wal/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident —
+> default, they live in row files beside it (`store/records/<table>.rec`,
+> `store/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident —
 > about 0.45 KB per 768-dimension row, measured at 100 million, against 8.3 KB when
 > everything was in the map. That figure predates 1.2, which also keeps 4-bit fast-scan codes
 > for filtered search beside the PQ codes (the same bytes again; `quantization.fast_scan:
@@ -34,9 +34,10 @@ single-node server and nothing more.
 > ```
 >
 > The three have three different lifetimes, which is why they are three directories. Each can
-> be moved on its own; the root moves all of them. All four are created and checked for
-> writability at startup, so an unwritable `backups/` is a refusal to start rather than a
-> surprise for whoever takes the first backup. When configured, snapshots, WAL chunks and
+> be moved on its own; the root moves all of them. `store/` and `backups/` are created and
+> checked for writability at startup, so an unwritable `backups/` is a refusal to start rather
+> than a surprise for whoever takes the first backup; `cache/` is created only by whatever
+> first writes to it. When configured, snapshots, WAL chunks and
 > partition segments are mirrored to object storage, but that mirror is still experimental and
 > local WAL remains the readiness boundary. There is no replication or clustering: this is
 > one process on one machine. See [Known Limitations](#known-limitations).
@@ -53,8 +54,8 @@ rustup installs it the first time you run `cargo` in `vectordb/`.
 # Build
 cargo build --release
 
-# Run
-./target/release/vectordb serve --host 0.0.0.0 --port 9999
+# Run -- on this machine only; `--host 0.0.0.0` serves the network (set DXMT_API_KEY first)
+./target/release/vectordb serve --port 9999
 ```
 
 It prints where everything is -- the API, the console, the data directory -- and which
@@ -253,8 +254,15 @@ things — a local GPU box, for instance, with no key and no egress:
 {"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1", "api_key_env": "TEI_KEY"}
 ```
 
-Verified against text-embeddings-inference, Infinity, ollama (`/v1`), vLLM, LM Studio and
-llama.cpp by protocol rather than by testing each: the request is
+With `TEI_KEY` unset no key is sent and that works as written. If the box does need a key,
+the server must be told both names first — `DXMT_ALLOWED_KEY_ENVS=TEI_KEY` and
+`DXMT_ALLOWED_PROVIDER_HOSTS=10.0.0.7` — because a table's settings come from its callers
+(see "Which key goes where" below).
+
+Compatible by protocol with text-embeddings-inference, Infinity, ollama (`/v1`), vLLM, LM
+Studio and llama.cpp; tested against the OpenAI-compatible fake provider in
+`tests/fake_provider/`, which also answers out of order, rate-limits and returns the wrong
+width on purpose. The request is
 `POST {base_url}/embeddings` with `{"model": …, "input": [...]}` and a bearer token, and the
 reply is read by `data[].index`, not by array position.
 
@@ -263,6 +271,7 @@ The details that decide whether this is usable:
 | | |
 | --- | --- |
 | Where the key lives | `api_key_env` names an environment variable **of the server**. No key is in a create-table body, a snapshot, an export, or any response. |
+| Which key goes where | A key is sent only if `api_key_env` is a known provider variable (`OPENAI_API_KEY`, `COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`, `MISTRAL_API_KEY`, ...), the one named in `DXMT_EMBEDDING_API_KEY_ENV`, or listed in `DXMT_ALLOWED_KEY_ENVS`; and only to a known provider's API host, this machine, the host of `DXMT_EMBEDDING_BASE_URL`, or a host listed in `DXMT_ALLOWED_PROVIDER_HOSTS`. Link-local and cloud metadata addresses are refused outright. Otherwise any caller that can create a table could have the server send any of its environment variables to any URL. |
 | What is stored | The text is written into the payload (field `text` by default), so a hit carries the chunk it came from and you are not keeping a second copy of the corpus. |
 | Provider down | The request fails — 503, nothing written. There is no zero-vector or hashed fallback: a wrong vector stores cleanly and ranks wrongly forever. |
 | Wrong width | A model that answers at a width other than the table's is refused naming both, before anything is stored. |
@@ -336,15 +345,16 @@ storage as the HTTP server:
 ./target/release/vectordb mcp --wal-dir ~/.dxmt/store
 ```
 
-Point an MCP client at it — seven tools are exposed (`vector_search`, `insert_vector`,
-`create_table`, `list_tables`, `get_table_info`, `delete_vectors`, `hybrid_search`):
+Point an MCP client at it — nine tools are exposed (`vector_search`, `insert_vector`,
+`create_table`, `list_tables`, `get_table_info`, `delete_vectors`, `add_document`,
+`delete_document`, `hybrid_search`):
 
 ```json
 {
   "mcpServers": {
     "dxmt-vectordb": {
       "command": "/path/to/vectordb",
-      "args": ["mcp", "--wal-dir", "/path/to/data/wal"]
+      "args": ["mcp", "--wal-dir", "/path/to/dxmt/store"]
     }
   }
 }
@@ -415,7 +425,7 @@ over it, and a flag (`--host`, `--port`, `--grpc-port`) wins over both. Copy `.e
 and adjust:
 
 ```bash
-DXMT_HOST=0.0.0.0
+DXMT_HOST=127.0.0.1             # the default; 0.0.0.0 to serve other machines
 DXMT_PORT=9999
 DXMT_MEMORY_OPTIMIZATION=true # index-selection path; see Architecture
 DXMT_SNAPSHOT_INTERVAL_SECS=300 # periodic snapshot; 0 disables
@@ -423,6 +433,8 @@ DXMT_EMBEDDING_MODEL=           # the default model for text; unset, a local oll
 DXMT_EMBEDDING_BASE_URL=        # its OpenAI-compatible endpoint (default https://api.openai.com/v1)
 DXMT_EMBEDDING_API_KEY_ENV=     # the variable holding its key (default OPENAI_API_KEY)
 DXMT_EMBEDDING_AUTODETECT=1     # 0: do not look for a local ollama
+DXMT_ALLOWED_KEY_ENVS=          # comma-separated: more variables a table's api_key_env may name
+DXMT_ALLOWED_PROVIDER_HOSTS=    # comma-separated: more hosts a provider key may be sent to
 DXMT_KB_TABLE=kb                # the notes table made on first write; `off` disables it
 DXMT_BACKUP_INTERVAL_SECS=0     # scheduled backups into DXMT_BACKUP_ROOT/auto-<time>; 0 (default) disables
 DXMT_BACKUP_KEEP=7              # scheduled backups kept; older ones deleted, hand-taken ones never
@@ -583,8 +595,26 @@ All six live under `clients/`.
 | `clients/langchain-dxmt/`                     | LangChain vector store                   |
 | `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
-The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI, MetaGPT,
-and AutoGen. See `clients/dxmt-python-sdk/README.md`.
+The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI and
+MetaGPT. See `clients/dxmt-python-sdk/README.md`.
+
+None of the packages is published to PyPI, npm or crates.io yet. Until the packages are
+published, install from source (paths relative to `vectordb/`):
+
+```bash
+pip install ./clients/dxmt-python-sdk
+pip install ./clients/langchain-dxmt                     # after the SDK above
+pip install ./clients/llama-index-vector-stores-dxmt     # after the SDK above
+cd clients/dxmt-js-sdk && npm install && npm run build   # then `npm install <path>` from your project
+```
+
+```toml
+# Cargo.toml
+dxmt-client = { git = "https://github.com/dxmt/dxmt", package = "dxmt-client" }
+```
+
+For Go, `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk@main` (the module lives in
+this repository's subdirectory and needs no registry).
 
 ## Development
 
@@ -601,7 +631,7 @@ make verify-core        # the same without the full integration suite, for itera
 The broader legacy scripts under `scripts/` are not part of the quality gate.
 
 Note that a default `cargo test` does not run the feature-gated suites — the benchmark,
-dataset, adaptive-index and LMDB tests compile to zero tests without their features. CI's
+dataset and adaptive-index tests compile to zero tests without their features. CI's
 `optional-features` job compiles them; run them locally with, for example,
 `cargo test --features benchmarks --test dataset_test`.
 

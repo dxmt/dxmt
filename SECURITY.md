@@ -35,7 +35,7 @@ If you are unsure which side of that line something falls on, report it and we w
 
 ## Deployment expectations
 
-Two properties of the current release shape are worth stating plainly, because they are design
+Three properties of the current release shape are worth stating plainly, because they are design
 decisions rather than vulnerabilities:
 
 - **Authentication is one optional shared key, and there is no authorization.** Without
@@ -61,6 +61,20 @@ everything, are not treated as vulnerabilities. Reports that a
 route bypasses a boundary the documentation does claim — a filter that returns records it
 should exclude, a path that escapes the configured data directory, a payload that can crash or
 hang the process — are.
+
+### Embedding provider keys
+
+A table that embeds text names its provider by `base_url` and the *name* of a server
+environment variable holding the key (`api_key_env`). Both come from whoever can create or
+alter a table, so the server limits what they can reach: the variable must be a known
+provider's (`OPENAI_API_KEY`, `COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`, ...), the one
+named in `DXMT_EMBEDDING_API_KEY_ENV`, or listed in `DXMT_ALLOWED_KEY_ENVS` — never
+`DXMT_API_KEY`; the key is sent only to a known provider's API host, a loopback address, the
+host of `DXMT_EMBEDDING_BASE_URL`, or a host listed in `DXMT_ALLOWED_PROVIDER_HOSTS`; and a
+provider URL pointing at a link-local or cloud metadata address is refused whether or not a
+key is involved. The rule is applied where the request is made, so it covers tables restored
+from a backup or imported from a file as well as new ones. Widen the two lists only with names
+you control. A way to make the server send a key outside these rules is in scope.
 
 ## Supported versions
 

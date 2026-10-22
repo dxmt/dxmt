@@ -10,6 +10,9 @@
 
 /// The rerank provider client, behind the same feature: it is the same HTTP client and the
 /// same key-in-the-environment contract.
+/// Which key may be sent to which provider URL; both clients ask it.
+#[cfg(feature = "server-embedding")]
+pub mod policy;
 #[cfg(feature = "server-embedding")]
 pub mod rerank;
 #[cfg(feature = "server-embedding")]

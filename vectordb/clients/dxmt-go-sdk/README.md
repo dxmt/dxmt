@@ -8,7 +8,14 @@ no business reaching the server binary.
 ## Use
 
 ```bash
-go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk
+go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk@main
+```
+
+No version is tagged yet, so name a branch or commit. The module lives in a subdirectory of
+the repository and needs no registry; from a local checkout, point at it instead:
+
+```bash
+go mod edit -replace github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk=/path/to/dxmt/vectordb/clients/dxmt-go-sdk
 ```
 
 ```go

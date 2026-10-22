@@ -2,7 +2,7 @@
 name = "dxmt-vectordb"
 version = "1.3.2"
 edition = "2021"
-authors = ["DXMT Team"]
+authors = ["DXMT Team <contact@dxmt.online>"]
 description = "A lightweight single-node vector database written in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"
@@ -457,6 +457,14 @@ name = "embedding_timeout_test"
 path = "tests/interfaces/embedding_timeout_test.rs"
 
 [[test]]
+name = "provider_policy_test"
+path = "tests/interfaces/provider_policy_test.rs"
+
+[[test]]
+name = "admission_test"
+path = "tests/interfaces/admission_test.rs"
+
+[[test]]
 name = "rerank_test"
 path = "tests/interfaces/rerank_test.rs"
 
@@ -680,6 +688,10 @@ path = "tests/search/sparse_search_test.rs"
 [[test]]
 name = "memory_backpressure_test"
 path = "tests/storage/memory_backpressure_test.rs"
+
+[[test]]
+name = "disk_backpressure_test"
+path = "tests/storage/disk_backpressure_test.rs"
 
 [[test]]
 name = "memory_optimization_config_test"

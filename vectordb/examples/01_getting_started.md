@@ -1,429 +1,121 @@
 # Getting Started with DXMT VectorDB
 
-Welcome to DXMT VectorDB! This tutorial will guide you through your first steps with our high-performance vector database.
+This walks through building the server, running it, and doing the four basic things — create a
+table, insert records, search, delete — over HTTP, from Python, and from Rust. The README's
+Quick Start covers the same ground more briefly; this adds the client side.
 
-## Table of Contents
-1. [Installation](#installation)
-2. [Your First Vector Database](#your-first-vector-database)
-3. [Understanding Core Concepts](#understanding-core-concepts)
-4. [Basic Operations](#basic-operations)
-5. [Next Steps](#next-steps)
+## 1. Build and run the server
 
-## Installation
-
-### Prerequisites
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))
-- 4GB RAM minimum (8GB recommended)
-- 10GB free disk space
-
-### Install from Source
+Requires [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml`, and
+rustup installs it the first time you run `cargo` in `vectordb/`.
 
 ```bash
-# Clone the repository
 git clone https://github.com/dxmt/dxmt.git
 cd dxmt/vectordb
-
-# Build the project
 cargo build --release
 
-# Run tests to verify installation
-cargo test
+# Listens on 127.0.0.1 only. `--host 0.0.0.0` serves the network; set DXMT_API_KEY first.
+./target/release/vectordb serve --port 9999
 ```
 
-### Add to Your Project
+Data goes to `$HOME/.dxmt/store` unless `DXMT_ROOT_DIR` says otherwise. The startup log prints
+the data directory, the API address and the embedding model text goes through, if any.
 
-Add DXMT VectorDB to your `Cargo.toml`:
+```bash
+curl http://localhost:9999/health
+curl -f http://localhost:9999/ready    # 503 after a local durability failure
+```
+
+## 2. Over HTTP
+
+Every request body is JSON and needs `Content-Type: application/json`.
+
+```bash
+# A table: name, width, metric
+curl -X POST localhost:9999/api/v1/tables \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "products", "dimension": 4, "distance_metric": "cosine"}'
+
+# Records: id, vector, optional payload
+curl -X POST localhost:9999/api/v1/tables/products/records \
+  -H 'Content-Type: application/json' \
+  -d '{"records": [
+        {"id": "p1", "vector": [0.1, 0.2, 0.3, 0.4], "payload": {"name": "Laptop", "category": "electronics"}},
+        {"id": "p2", "vector": [0.4, 0.3, 0.2, 0.1], "payload": {"name": "Desk", "category": "furniture"}},
+        {"id": "p3", "vector": [0.1, 0.2, 0.3, 0.5], "payload": {"name": "Monitor", "category": "electronics"}}]}'
+
+# Nearest neighbours, optionally filtered on the payload
+curl -X POST localhost:9999/api/v1/tables/products/search \
+  -H 'Content-Type: application/json' \
+  -d '{"vector": [0.1, 0.2, 0.3, 0.4], "top_k": 2,
+       "filter": {"must": [{"key": "category", "operation": {"type": "Equal", "value": "electronics"}}]}}'
+
+# Delete the table
+curl -X DELETE localhost:9999/api/v1/tables/products
+```
+
+The full API, with a runnable example for every operation, is served at
+`http://localhost:9999/api/docs`. `examples/filter_example.md` covers the filter language.
+
+## 3. From Python
+
+The Python SDK is not on PyPI yet; install it from the checkout:
+
+```bash
+pip install ./clients/dxmt-python-sdk
+```
+
+```python
+from dxmt import Client
+
+client = Client(host="localhost", port=9999)   # api_key="..." when DXMT_API_KEY is set
+
+client.create_table(name="products", dimension=4, distance_metric="cosine")
+client.insert_records("products", [
+    {"id": "p1", "vector": [0.1, 0.2, 0.3, 0.4], "payload": {"name": "Laptop"}},
+    {"id": "p2", "vector": [0.4, 0.3, 0.2, 0.1], "payload": {"name": "Desk"}},
+])
+
+for hit in client.search("products", vector=[0.1, 0.2, 0.3, 0.4], k=2):
+    print(hit["id"], hit["score"])
+
+client.delete_records("products", ids=["p2"])
+client.delete_table("products")
+```
+
+`examples/basic_crud.py` is the same as a runnable script. The JavaScript, Go and Rust clients
+are under `clients/`; each README shows how to install it from source.
+
+## 4. In-process from Rust
+
+To embed the engine in a Rust program rather than talk to a server, depend on the crate from
+git (it is not on crates.io yet):
 
 ```toml
 [dependencies]
-dxmt-vectordb = "0.1.0"
-tokio = { version = "1", features = ["full"] }
-serde_json = "1.0"
+dxmt-vectordb = { git = "https://github.com/dxmt/dxmt", package = "dxmt-vectordb" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"
 ```
 
-## Your First Vector Database
+`examples/quickstart.rs` is a complete program — create an in-memory
+`IntelligentIndexedStorage`, create a table, insert, search, list, delete — and is compiled by
+every `cargo build --examples`, so it stays in step with the API:
 
-Let's create a simple application that stores and searches product embeddings:
-
-```rust
-use dxmt_vectordb::{
-    storage::{MemoryStorage, Storage},
-    types::{
-        table::{TableConfig, TableSchema},
-        record::{CreateRecordRequest, SearchQuery},
-        DistanceMetric,
-    },
-    Result,
-};
-use std::sync::Arc;
-use serde_json::json;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Create storage backend
-    let storage = Arc::new(MemoryStorage::new());
-    
-    // 2. Define your table
-    let config = TableConfig {
-        name: "products".to_string(),
-        dimension: 384,  // Embedding dimension
-        distance_metric: DistanceMetric::Cosine,
-        schema: TableSchema::Exploratory,
-        description: Some("Product catalog embeddings".to_string()),
-        metadata: None,
-    };
-    
-    // 3. Create the table
-    storage.create_table(config.clone()).await?;
-    
-    // 4. Insert a vector
-    let product = CreateRecordRequest {
-        id: "product_001".to_string(),
-        vector: vec![0.1; 384],  // Your embedding here
-        sparse_vector: None,
-        payload: Some(json!({
-            "name": "Laptop",
-            "price": 999.99,
-            "category": "Electronics"
-        })),
-    };
-    
-    storage.insert_record(&config.name, product).await?;
-    
-    // 5. Search for similar vectors
-    let query = SearchQuery {
-        vector: vec![0.12; 384],  // Query embedding
-        sparse_vector: None,
-        top_k: 5,
-        filter: None,
-        with_payload: true,
-        with_vector: false,
-    };
-    
-    let results = storage.search(&config.name, query).await?;
-    
-    // 6. Process results
-    for hit in results.hits {
-        println!("Found: {} with score {}", hit.id, hit.score);
-        if let Some(payload) = hit.payload {
-            println!("  Product: {}", payload["name"]);
-        }
-    }
-    
-    Ok(())
-}
-```
-
-## Understanding Core Concepts
-
-### Vectors
-Vectors are numerical representations of data (text, images, audio) that capture semantic meaning:
-- **Dense Vectors**: Regular arrays of floating-point numbers
-- **Sparse Vectors**: Vectors with many zero values (efficient storage)
-- **Dimension**: Number of elements in the vector (e.g., 384, 768, 1536)
-
-### Distance Metrics
-How we measure similarity between vectors:
-- **Cosine Similarity**: Measures angle between vectors (good for text)
-- **Euclidean Distance**: Straight-line distance (good for dense features)
-- **Dot Product**: Fast similarity for normalized vectors
-
-### Tables
-Collections that store vectors with the same dimension:
-```rust
-TableSchema::Exploratory  // Flexible, schema-less
-TableSchema::Structured   // Defined schema, validated
-TableSchema::Enterprise   // Full features, audit trail
-```
-
-### Storage Tiers
-DXMT uses a three-tier architecture:
-1. **Hot (Memory)**: Frequently accessed data, <5ms latency
-2. **Warm (SSD)**: Medium frequency, <50ms latency
-3. **Cold (Object Storage)**: Archive data, <500ms latency
-
-## Basic Operations
-
-### Creating Tables
-
-```rust
-// Simple table
-let simple_table = TableConfig {
-    name: "embeddings".to_string(),
-    dimension: 768,
-    distance_metric: DistanceMetric::Cosine,
-    schema: TableSchema::Exploratory,
-    description: None,
-    metadata: None,
-};
-
-// Advanced table with metadata
-let advanced_table = TableConfig {
-    name: "documents".to_string(),
-    dimension: 1536,
-    distance_metric: DistanceMetric::Euclidean,
-    schema: TableSchema::Structured,
-    description: Some("Document embeddings with metadata".to_string()),
-    metadata: Some(json!({
-        "model": "text-embedding-ada-002",
-        "language": "en",
-        "index_type": "hnsw"
-    })),
-};
-```
-
-### Inserting Data
-
-```rust
-// Single record
-let record = CreateRecordRequest {
-    id: "doc_001".to_string(),
-    vector: embedding_vector,
-    sparse_vector: None,
-    payload: Some(json!({
-        "title": "Introduction to AI",
-        "author": "John Doe",
-        "date": "2024-01-15"
-    })),
-};
-storage.insert_record("documents", record).await?;
-
-// Batch insert
-let records = vec![record1, record2, record3];
-for record in records {
-    storage.insert_record("documents", record).await?;
-}
-```
-
-### Searching
-
-```rust
-// Basic search
-let basic_search = SearchQuery {
-    vector: query_embedding,
-    sparse_vector: None,
-    top_k: 10,
-    filter: None,
-    with_payload: true,
-    with_vector: false,
-};
-
-// Filtered search
-let filtered_search = SearchQuery {
-    vector: query_embedding,
-    sparse_vector: None,
-    top_k: 5,
-    filter: Some(json!({
-        "category": "Electronics",
-        "price": {"$lt": 500}
-    })),
-    with_payload: true,
-    with_vector: false,
-};
-
-// Hybrid search (vector + sparse)
-let hybrid_search = SearchQuery {
-    vector: dense_embedding,
-    sparse_vector: Some(sparse_embedding),
-    top_k: 10,
-    filter: None,
-    with_payload: true,
-    with_vector: true,
-};
-```
-
-### Updating Records
-
-```rust
-// Update vector
-storage.update_record(
-    "documents",
-    "doc_001",
-    UpdateRecordRequest {
-        vector: Some(new_embedding),
-        payload: None,
-    }
-).await?;
-
-// Update metadata
-storage.update_record(
-    "documents",
-    "doc_001",
-    UpdateRecordRequest {
-        vector: None,
-        payload: Some(json!({
-            "status": "reviewed",
-            "last_modified": "2024-01-20"
-        })),
-    }
-).await?;
-```
-
-### Deleting Records
-
-```rust
-// Delete single record
-storage.delete_record("documents", "doc_001").await?;
-
-// Delete multiple records
-let ids = vec!["doc_001", "doc_002", "doc_003"];
-storage.delete_records("documents", ids).await?;
-
-// Delete with filter
-storage.delete_by_filter("documents", json!({
-    "status": "archived"
-})).await?;
-```
-
-## Best Practices
-
-### 1. Choose the Right Dimension
-- Smaller dimensions (384) = faster, less accurate
-- Larger dimensions (1536) = slower, more accurate
-- Match your embedding model's output
-
-### 2. Select Appropriate Distance Metric
-- Text similarity: Cosine
-- Image similarity: Euclidean
-- Normalized vectors: Dot Product
-
-### 3. Optimize for Your Use Case
-```rust
-// High accuracy, slower
-let accurate = SearchQuery {
-    top_k: 100,  // Search more candidates
-    ..Default::default()
-};
-
-// Fast, good enough
-let fast = SearchQuery {
-    top_k: 10,  // Fewer candidates
-    ..Default::default()
-};
-```
-
-### 4. Use Filters Effectively
-```rust
-// Pre-filter for performance
-filter: Some(json!({
-    "timestamp": {"$gte": "2024-01-01"},
-    "status": "active"
-}))
-```
-
-### 5. Monitor Performance
-```rust
-// Enable metrics
-let config = ServerConfig {
-    metrics_enabled: true,
-    metrics_port: 9090,
-    ..Default::default()
-};
-```
-
-## Common Patterns
-
-### Semantic Search
-```rust
-// Store documents with embeddings
-let doc = CreateRecordRequest {
-    id: content_hash,
-    vector: text_embedding,
-    payload: Some(json!({
-        "content": document_text,
-        "url": source_url,
-        "timestamp": created_at
-    })),
-};
-
-// Search by meaning
-let results = storage.search("documents", SearchQuery {
-    vector: query_embedding("What is machine learning?"),
-    top_k: 10,
-    ..Default::default()
-}).await?;
-```
-
-### Recommendation System
-```rust
-// Store user preferences
-let user_embedding = compute_user_embedding(user_history);
-
-// Find similar items
-let recommendations = storage.search("products", SearchQuery {
-    vector: user_embedding,
-    top_k: 20,
-    filter: Some(json!({
-        "in_stock": true,
-        "category": {"$in": user_interests}
-    })),
-    ..Default::default()
-}).await?;
-```
-
-### Duplicate Detection
-```rust
-// Check for similar content
-let similar = storage.search("content", SearchQuery {
-    vector: new_content_embedding,
-    top_k: 1,
-    ..Default::default()
-}).await?;
-
-if similar.hits[0].score > 0.95 {
-    println!("Duplicate detected!");
-}
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue**: Out of memory errors
 ```bash
-# Increase memory limit
-export DXMT_MEMORY_LIMIT=8GB
+cargo run --example quickstart
 ```
 
-**Issue**: Slow searches
-```rust
-// Use indexing
-metadata: Some(json!({
-    "index_type": "hnsw",
-    "index_params": {
-        "m": 16,
-        "ef_construction": 200
-    }
-}))
-```
+An in-process store built with `IntelligentIndexedStorage::new` keeps everything in memory;
+the server is what adds the WAL, snapshots and row files under `DXMT_ROOT_DIR`.
 
-**Issue**: Connection errors
-```rust
-// Retry logic
-use backoff::{retry, ExponentialBackoff};
+## 5. Next
 
-retry(ExponentialBackoff::default(), || {
-    storage.search(table, query).await
-}).await?;
-```
+- `examples/02_embeddings.md` — let the server embed text, so records and queries carry text
+  instead of vectors.
+- `README.md` — configuration, durability, authentication and measured performance.
+- `docs/SUPPORT_MATRIX.md` — what is supported, what is experimental, and what each client
+  covers.
+- `docs/operations/backup-restore.md` — backups and restore.
 
-## Next Steps
-
-Now that you understand the basics:
-
-1. **[Tutorial 2: Working with Embeddings](./02_embeddings.md)** - Learn about different embedding models
-2. **[Filtering](./filter_example.md)** - Metadata filters and the operators behind them
-
-## Resources
-
-- [Community Discord](https://discord.gg/dxmt)
-- [GitHub Issues](https://github.com/dxmt/dxmt/issues)
-
-## Getting Help
-
-If you run into issues:
-1. Search [existing issues](https://github.com/dxmt/dxmt/issues)
-2. Join our [Discord community](https://discord.gg/dxmt)
-3. Create a [new issue](https://github.com/dxmt/dxmt/issues/new)
-
-Happy vector searching! 🚀
+Questions and bug reports: [GitHub issues](https://github.com/dxmt/dxmt/issues).

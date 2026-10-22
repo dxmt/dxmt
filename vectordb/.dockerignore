@@ -48,8 +48,8 @@ logs/
 pdf/
 
 # ── not part of the product ───────────────────────────────────────────────────
-# `planning/` is code kept out of `src/` precisely because nothing reaches it; shipping it in
-# an image would undo that. Both CLAUDE.md files are gitignored working notes.
+# Local working directories and notes that are not part of the source tree, should a checkout
+# have them.
 planning/
 .claude/
 CLAUDE.md

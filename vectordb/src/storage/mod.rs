@@ -2,6 +2,7 @@
 
 pub mod compression;
 pub mod consistency_check; // New: Index consistency verification
+pub(crate) mod disk_guard;
 pub mod documents;
 pub mod index_selector;
 pub mod intelligent_indexed_storage;
