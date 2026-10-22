@@ -3261,3 +3261,149 @@ async fn a_refused_replay_run_leaves_versions_as_logged() {
     assert_eq!(y.version, y_version, "y came back at another version");
     assert!(recovered.get_record("t", &"x".to_string()).await.is_err());
 }
+
+/// Make a directory tree read-only, or writable again, so an upload into it fails.
+#[cfg(unix)]
+fn set_writable(dir: &Path, writable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if writable { 0o755 } else { 0o555 };
+    for entry in walk(dir) {
+        if entry.is_dir() {
+            std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![dir.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.path().is_dir() {
+                out.extend(walk(&e.path()));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+async fn ids_recovered_from_object_storage_alone(
+    config: &StorageConfig,
+    fresh_wal: std::path::PathBuf,
+) -> Vec<String> {
+    let recovered = IntelligentIndexedStorage::new_with_wal(config, Some(fresh_wal))
+        .await
+        .unwrap();
+    let mut ids: Vec<String> = recovered
+        .list_records("t", None, 100, 0, false)
+        .await
+        .unwrap()
+        .0
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// An upload that failed used to be logged and forgotten, leaving the bucket without those
+/// entries for good -- invisible to the manifest's own check, since the chunk was never listed.
+/// The next write now carries them up with its own.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_wal_upload_that_failed_is_carried_up_by_the_next_write() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let bucket_wal = shared.join("ssd").join("test-bucket").join("wal");
+    {
+        let storage =
+            IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("machine-a")))
+                .await
+                .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        assert!(bucket_wal.exists(), "the first chunk was never uploaded");
+
+        set_writable(&bucket_wal, false);
+        storage
+            .insert_records("t", vec![record("b", vec![0.0, 1.0, 0.0, 0.0])])
+            .await
+            .expect("durable locally, so the write succeeds");
+        let lagging = storage.health_snapshot().await;
+        assert!(
+            lagging.wal_mirrored_next_sequence < lagging.wal_next_sequence,
+            "the frontier should show b missing: {:?} vs {:?}",
+            lagging.wal_mirrored_next_sequence,
+            lagging.wal_next_sequence
+        );
+
+        set_writable(&bucket_wal, true);
+        storage
+            .insert_records("t", vec![record("c", vec![0.0, 0.0, 1.0, 0.0])])
+            .await
+            .unwrap();
+        let caught_up = storage.health_snapshot().await;
+        assert_eq!(
+            caught_up.wal_mirrored_next_sequence,
+            caught_up.wal_next_sequence
+        );
+    }
+    assert_eq!(
+        ids_recovered_from_object_storage_alone(&config, tmp.path().join("machine-b")).await,
+        vec!["a", "b", "c"],
+        "b's upload failed and nothing carried it up"
+    );
+}
+
+/// The same, across a restart: entries whose upload failed before shutdown go up at startup.
+#[cfg(unix)]
+#[tokio::test]
+async fn wal_entries_that_never_reached_object_storage_go_up_at_the_next_start() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let bucket_wal = shared.join("ssd").join("test-bucket").join("wal");
+    let machine_a = tmp.path().join("machine-a");
+    {
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(machine_a.clone()))
+            .await
+            .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        set_writable(&bucket_wal, false);
+        storage
+            .insert_records("t", vec![record("b", vec![0.0, 1.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+    }
+    set_writable(&bucket_wal, true);
+    {
+        // The same machine starts again; nothing new is written.
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(machine_a))
+            .await
+            .unwrap();
+        let h = storage.health_snapshot().await;
+        assert_eq!(
+            h.wal_mirrored_next_sequence, h.wal_next_sequence,
+            "not caught up at start"
+        );
+    }
+    assert_eq!(
+        ids_recovered_from_object_storage_alone(&config, tmp.path().join("machine-b")).await,
+        vec!["a", "b"]
+    );
+}

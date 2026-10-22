@@ -3109,6 +3109,15 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
             sequence.to_string(),
         );
     }
+    if let Some(sequence) = storage.wal_mirrored_next_sequence {
+        gauge(
+            &mut out,
+            "dxmt_wal_mirrored_next_sequence",
+            "With object storage, the first WAL sequence it does not hold yet; \
+             dxmt_wal_next_sequence minus this is what losing this machine would lose.",
+            sequence.to_string(),
+        );
+    }
     for (name, help, value) in [
         (
             "dxmt_last_wal_sync_timestamp_seconds",

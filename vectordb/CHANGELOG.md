@@ -119,6 +119,13 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A WAL upload to object storage that failed is retried, in order.** Each write uploaded its
+  own entries and, on failure, logged a warning and moved on; nothing uploaded them later, so
+  the bucket kept a hole the manifest's own check could not see, and a machine recovering from
+  object storage alone came back without those writes. The next write -- or the next start --
+  now uploads everything from the first entry the bucket lacks, so its chunks stay contiguous.
+  `/metrics` exports `dxmt_wal_mirrored_next_sequence`; its distance to
+  `dxmt_wal_next_sequence` is what losing the machine would lose.
 - **PQ parameters a one-byte code cannot hold are refused.** `quantization.num_centroids`
   above 256 wrapped centroid indices silently and degraded search; it is a 400 at creation,
   as is `num_subvectors: 0`.

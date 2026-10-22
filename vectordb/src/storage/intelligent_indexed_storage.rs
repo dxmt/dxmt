@@ -247,6 +247,10 @@ pub struct StorageHealthSnapshot {
     pub snapshot_present: bool,
     pub snapshot_manifest_valid: bool,
     pub snapshot_wal_next_sequence: Option<u64>,
+    /// With object storage, the first WAL sequence it does not hold yet. Equal to
+    /// `wal_next_sequence` when the bucket is up to date; the gap is what losing this machine
+    /// would lose.
+    pub wal_mirrored_next_sequence: Option<u64>,
     pub durability_degraded: bool,
     pub durability_error: Option<String>,
     pub resident_table_count: usize,
@@ -791,6 +795,11 @@ pub struct IntelligentIndexedStorage {
 
     /// 对象存储上 WAL 的清单，常驻内存，每次变更后回写。
     wal_manifest: Arc<StdMutex<WalManifest>>,
+    /// The first WAL sequence object storage does not hold yet: everything below it is in the
+    /// manifest's chunks or covered by the snapshot. See `mirror_wal`.
+    wal_mirrored_next: AtomicU64,
+    /// One mirror upload at a time, so chunks are contiguous and in order.
+    wal_mirror_lock: tokio::sync::Mutex<()>,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -2010,6 +2019,20 @@ impl IntelligentIndexedStorage {
             // snapshot already in place: the tail may delete or overwrite records the snapshot
             // restored, and applying it to an empty store would lose those edits.
             let from_seq = storage.load_snapshot(&dir).await?;
+            if storage.object_storage_enabled {
+                // Object storage holds the snapshot (through `from_seq`) and the manifest's
+                // chunks; mirroring resumes after whichever reaches further.
+                let chunked_next = storage
+                    .manifest()?
+                    .chunks
+                    .iter()
+                    .map(|c| c.last_seq + 1)
+                    .max()
+                    .unwrap_or(0);
+                storage
+                    .wal_mirrored_next
+                    .store(chunked_next.max(from_seq), Ordering::SeqCst);
+            }
 
             let mut pending = {
                 let mut guard = storage
@@ -2091,6 +2114,11 @@ impl IntelligentIndexedStorage {
                 *last = Some((took.as_nanos() as u64, replayed));
             }
             storage.load_persisted_derived().await;
+            // Entries this machine logged that never reached object storage -- an upload that
+            // failed before the last shutdown -- go up now, before anything new is written.
+            if storage.object_storage_enabled {
+                storage.mirror_wal(&[]).await;
+            }
         }
 
         Ok(storage)
@@ -2175,6 +2203,8 @@ impl IntelligentIndexedStorage {
             #[cfg(feature = "test-failpoints")]
             backup_pause: StdMutex::new(None),
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
+            wal_mirrored_next: AtomicU64::new(0),
+            wal_mirror_lock: tokio::sync::Mutex::new(()),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
@@ -5813,13 +5843,7 @@ impl IntelligentIndexedStorage {
         // machine loses it. Mirror the entries to object storage as an immutable chunk — the
         // same model the snapshot segments use, so a chunk is written once and never rewritten.
         if self.object_storage_enabled {
-            if let Some((first_seq, _)) = stamped.first() {
-                if let Err(e) = self.offload_wal_chunk(*first_seq, &stamped).await {
-                    // The write is already durable locally, so this is a reduction in blast
-                    // radius, not a lost write. Say so rather than failing the caller.
-                    warn!("WAL chunk {} stayed local, upload failed: {}", first_seq, e);
-                }
-            }
+            self.mirror_wal(&stamped).await;
         }
         Ok(())
     }
@@ -5940,6 +5964,65 @@ impl IntelligentIndexedStorage {
             pruned_entries: 0,
             total_entries,
         })
+    }
+
+    /// Bring object storage up to the local WAL: upload, as one chunk, every entry from
+    /// `wal_mirrored_next` on.
+    ///
+    /// Each write used to upload its own entries and, if that failed, log a warning and move
+    /// on. Nothing uploaded them later, so the bucket kept a hole for good -- and the manifest's
+    /// `live + pruned == total` check cannot see it, because the missing chunk was never
+    /// registered. A machine recovering from object storage alone then came back without those
+    /// writes and said nothing; a replica following the bucket would never have them. Now the
+    /// next write (or the next start) uploads everything from the first entry not yet mirrored,
+    /// in order, so the chunks stay contiguous. `fresh` is the batch just logged, which is all
+    /// there is to send in the usual case; anything else is read back from the local log. The
+    /// write itself is durable locally either way, so a failure here is logged, not returned.
+    async fn mirror_wal(&self, fresh: &[(u64, WalEntry)]) {
+        let _turn = self.wal_mirror_lock.lock().await;
+        let next = self.wal_mirrored_next.load(Ordering::SeqCst);
+        let Some(wal) = self.wal.as_ref() else {
+            return;
+        };
+        let read_back = {
+            let Ok(guard) = wal.lock() else {
+                return;
+            };
+            let local_next = guard.next_sequence();
+            if next >= local_next {
+                return; // another write's upload already carried these
+            }
+            let fresh_is_all = fresh.first().map(|(s, _)| *s) == Some(next)
+                && fresh.last().map(|(s, _)| *s + 1) == Some(local_next);
+            if fresh_is_all {
+                None
+            } else {
+                match guard.replay_from(next) {
+                    Ok(entries) => Some(entries),
+                    Err(e) => {
+                        warn!(
+                            "could not read WAL entries from {} to mirror them: {}",
+                            next, e
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let entries: &[(u64, WalEntry)] = read_back.as_deref().unwrap_or(fresh);
+        let (Some((first, _)), Some((last, _))) = (entries.first(), entries.last()) else {
+            return;
+        };
+        match self.offload_wal_chunk(*first, entries).await {
+            Ok(()) => self.wal_mirrored_next.store(last + 1, Ordering::SeqCst),
+            Err(e) => warn!(
+                "{} WAL entries from {} are not in object storage yet ({}); the next write \
+                 retries them",
+                last + 1 - next.max(*first),
+                next.max(*first),
+                e
+            ),
+        }
     }
 
     /// 把一批 WAL 条目作为不可变分块推到对象存储，并登记进清单。
@@ -11518,6 +11601,9 @@ impl IntelligentIndexedStorage {
             snapshot_present,
             snapshot_manifest_valid,
             snapshot_wal_next_sequence,
+            wal_mirrored_next_sequence: self
+                .object_storage_enabled
+                .then(|| self.wal_mirrored_next.load(Ordering::SeqCst)),
             durability_degraded,
             durability_error,
             resident_table_count,
