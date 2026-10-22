@@ -3109,6 +3109,21 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
             sequence.to_string(),
         );
     }
+    if let Some(sequence) = storage.replica_applied_next_sequence {
+        gauge(
+            &mut out,
+            "dxmt_replica_applied_next_sequence",
+            "On a read replica, the first WAL sequence it has not applied; compare with the \
+             primary's dxmt_wal_mirrored_next_sequence for its lag.",
+            sequence.to_string(),
+        );
+        gauge(
+            &mut out,
+            "dxmt_replica_stale",
+            "1 when a read replica can no longer catch up from the WAL chunks and needs a restart.",
+            u8::from(storage.replica_stale.is_some()).to_string(),
+        );
+    }
     if let Some(sequence) = storage.wal_mirrored_next_sequence {
         gauge(
             &mut out,

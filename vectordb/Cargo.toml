@@ -465,6 +465,10 @@ name = "admission_test"
 path = "tests/interfaces/admission_test.rs"
 
 [[test]]
+name = "replica_http_test"
+path = "tests/interfaces/replica_http_test.rs"
+
+[[test]]
 name = "rerank_test"
 path = "tests/interfaces/rerank_test.rs"
 
@@ -517,6 +521,10 @@ path = "tests/durability/table_export_test.rs"
 [[test]]
 name = "wal_recovery_test"
 path = "tests/durability/wal_recovery_test.rs"
+
+[[test]]
+name = "replica_test"
+path = "tests/durability/replica_test.rs"
 
 
 # filters/

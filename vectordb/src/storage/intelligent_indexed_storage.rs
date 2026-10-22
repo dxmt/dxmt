@@ -12,6 +12,14 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use crate::wal::{WalEntry, WalManager};
 use tracing::{debug, error, info, warn};
 
+tokio::task_local! {
+    /// Set while a read replica applies entries it read from object storage -- at startup and
+    /// in `follow_object_storage`. `ensure_writable` lets exactly those writes through: a
+    /// request handler runs in a task without it, so a client's write is refused even while
+    /// the follower is applying a batch.
+    static APPLYING_REPLICATED: ();
+}
+
 /// Longest the table map's lock has been held since the last reset, in microseconds.
 ///
 /// The warnings the guards emit are for operators; this is for tests. Four separate call paths
@@ -251,6 +259,10 @@ pub struct StorageHealthSnapshot {
     /// `wal_next_sequence` when the bucket is up to date; the gap is what losing this machine
     /// would lose.
     pub wal_mirrored_next_sequence: Option<u64>,
+    /// On a read replica, the first WAL sequence it has not applied yet.
+    pub replica_applied_next_sequence: Option<u64>,
+    /// On a read replica that can no longer catch up from the WAL chunks, why.
+    pub replica_stale: Option<String>,
     pub durability_degraded: bool,
     pub durability_error: Option<String>,
     pub resident_table_count: usize,
@@ -800,6 +812,14 @@ pub struct IntelligentIndexedStorage {
     wal_mirrored_next: AtomicU64,
     /// One mirror upload at a time, so chunks are contiguous and in order.
     wal_mirror_lock: tokio::sync::Mutex<()>,
+    /// A read replica: it follows the WAL another process mirrors to object storage, serves
+    /// reads, refuses writes, and never writes the bucket. See `new_replica`.
+    replica: bool,
+    /// On a replica, the first WAL sequence it has not applied.
+    replica_applied_next: AtomicU64,
+    /// On a replica that can no longer catch up from the WAL chunks (the primary pruned some
+    /// it had not applied), why; it reports not ready until restarted.
+    replica_stale: StdMutex<Option<String>>,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -1994,7 +2014,40 @@ impl IntelligentIndexedStorage {
         config: &StorageConfig,
         wal_dir: Option<PathBuf>,
     ) -> crate::Result<Self> {
+        Self::open(config, wal_dir, false).await
+    }
+
+    /// A read replica of the store whose WAL and snapshots are mirrored to the object storage
+    /// `config` names, with `local_dir` as its own working copy.
+    ///
+    /// It recovers the way a fresh machine does -- the bucket's snapshot, then its WAL chunks --
+    /// and `follow_object_storage` then applies new chunks as the primary uploads them. It
+    /// serves every read; every write is refused with `READ_ONLY_REPLICA`, and nothing it does
+    /// writes the bucket (`TieredStorage::set_read_only`), because two writers would overwrite
+    /// each other's WAL manifest. Aliases are not followed: they live in a local file, not the
+    /// WAL.
+    pub async fn new_replica(config: &StorageConfig, local_dir: PathBuf) -> crate::Result<Self> {
+        if config.object_storage.is_none() {
+            return Err(crate::Error::InvalidConfig(
+                "a replica follows object storage, and none is configured \
+                 (DXMT_OBJECT_STORAGE_PROVIDER)"
+                    .to_string(),
+            ));
+        }
+        Self::open(config, Some(local_dir), true).await
+    }
+
+    async fn open(
+        config: &StorageConfig,
+        wal_dir: Option<PathBuf>,
+        replica: bool,
+    ) -> crate::Result<Self> {
         let mut storage = Self::build(config).await?;
+        if replica {
+            storage.replica = true;
+            storage.storage.set_uncached_reads(true);
+            storage.storage.set_read_only(true);
+        }
 
         if let Some(dir) = wal_dir {
             let recovery_started = std::time::Instant::now();
@@ -2018,7 +2071,11 @@ impl IntelligentIndexedStorage {
             // Snapshot first, then only the log written after it. Replay has to run with the
             // snapshot already in place: the tail may delete or overwrite records the snapshot
             // restored, and applying it to an empty store would lose those edits.
-            let from_seq = storage.load_snapshot(&dir).await?;
+            // Restoring the snapshot's tables goes through the write paths too; on a replica
+            // that is replicated state being applied, not a client's write.
+            let from_seq = APPLYING_REPLICATED
+                .scope((), storage.load_snapshot(&dir))
+                .await?;
             if storage.object_storage_enabled {
                 // Object storage holds the snapshot (through `from_seq`) and the manifest's
                 // chunks; mirroring resumes after whichever reaches further.
@@ -2100,10 +2157,25 @@ impl IntelligentIndexedStorage {
                     from_seq
                 );
             } else {
-                storage.replay(pending).await?;
+                storage.replica_applied_next.store(
+                    pending.last().map_or(from_seq, |(seq, _)| seq + 1),
+                    Ordering::SeqCst,
+                );
+                APPLYING_REPLICATED
+                    .scope((), storage.replay(pending))
+                    .await?;
             }
-            storage.reindex_rows_the_graph_may_not_reflect().await?;
-            storage.index_rows_the_log_missed().await?;
+            if storage.replica_applied_next.load(Ordering::SeqCst) == 0 {
+                storage
+                    .replica_applied_next
+                    .store(from_seq, Ordering::SeqCst);
+            }
+            APPLYING_REPLICATED
+                .scope((), async {
+                    storage.reindex_rows_the_graph_may_not_reflect().await?;
+                    storage.index_rows_the_log_missed().await
+                })
+                .await?;
             let took = recovery_started.elapsed();
             info!(
                 "Recovery took {:.2}s ({} WAL entries replayed)",
@@ -2116,7 +2188,7 @@ impl IntelligentIndexedStorage {
             storage.load_persisted_derived().await;
             // Entries this machine logged that never reached object storage -- an upload that
             // failed before the last shutdown -- go up now, before anything new is written.
-            if storage.object_storage_enabled {
+            if storage.object_storage_enabled && !storage.replica {
                 storage.mirror_wal(&[]).await;
             }
         }
@@ -2205,6 +2277,9 @@ impl IntelligentIndexedStorage {
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             wal_mirrored_next: AtomicU64::new(0),
             wal_mirror_lock: tokio::sync::Mutex::new(()),
+            replica: false,
+            replica_applied_next: AtomicU64::new(0),
+            replica_stale: StdMutex::new(None),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
@@ -2233,6 +2308,13 @@ impl IntelligentIndexedStorage {
     }
 
     fn ensure_writable(&self) -> crate::Result<()> {
+        if self.replica && APPLYING_REPLICATED.try_with(|_| ()).is_err() {
+            return Err(crate::Error::ReadOnlyReplica(
+                "this server is a read replica following object storage; send writes to the \
+                 primary"
+                    .to_string(),
+            ));
+        }
         let failure = self
             .durability_error
             .lock()
@@ -2940,6 +3022,13 @@ impl IntelligentIndexedStorage {
     /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
     /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
     pub async fn snapshot(&self) -> crate::Result<usize> {
+        if self.replica {
+            return Err(crate::Error::ReadOnlyReplica(
+                "snapshots are the primary's: a replica's would be uploaded over the bucket it \
+                 follows"
+                    .to_string(),
+            ));
+        }
         // Serialize before reading the sequence number, not after: two snapshots that both
         // sampled the sequence and then queued would still truncate the log to the later one's
         // position while the earlier one's manifest is what ends up on disk.
@@ -3926,7 +4015,9 @@ impl IntelligentIndexedStorage {
     /// text and hybrid search -- so the table appears when someone uses it rather than on
     /// every server at startup. Two first writes racing are fine: the loser finds it made.
     async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
-        if self.kb_table.as_deref() != Some(tablename) {
+        // A replica has the primary's tables, the knowledge-base table among them once the
+        // primary made it; it makes none of its own.
+        if self.replica || self.kb_table.as_deref() != Some(tablename) {
             return Ok(());
         }
         let Some(embedding) = self.default_embedding() else {
@@ -5964,6 +6055,106 @@ impl IntelligentIndexedStorage {
             pruned_entries: 0,
             total_entries,
         })
+    }
+
+    /// Whether this storage is a read replica (`new_replica`).
+    pub fn is_replica(&self) -> bool {
+        self.replica
+    }
+
+    /// On a replica, apply WAL chunks the primary has uploaded since the last call, in order.
+    /// Returns how many entries were applied.
+    ///
+    /// The manifest is read from the bucket each time (a replica's reads skip the caches, see
+    /// `new_replica`), and only a contiguous run starting at `replica_applied_next` is applied:
+    /// a chunk listed but not readable yet, or out of order, means nothing is applied this time
+    /// and the next call tries again, since skipping an entry would diverge for good. If the
+    /// primary has pruned chunks this replica had not applied -- it snapshotted while the
+    /// replica was far behind -- the entries are gone from the bucket's WAL and only the
+    /// snapshot holds them: the replica marks itself stale and reports not ready, and a restart
+    /// recovers it from that snapshot.
+    pub async fn follow_object_storage(&self) -> crate::Result<usize> {
+        use crate::storage::object::traits::ObjectStorage;
+        if !self.replica {
+            return Ok(0);
+        }
+        let bytes = match self.storage.get_object(Self::wal_manifest_key()).await {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(0), // nothing mirrored yet
+        };
+        let manifest: WalManifest = match serde_json::from_slice(&bytes) {
+            Ok(m) => m,
+            // A manifest being replaced as it is read; the next call sees the whole one.
+            Err(_) => return Ok(0),
+        };
+        if !manifest.is_consistent() {
+            return Ok(0);
+        }
+        let next = self.replica_applied_next.load(Ordering::SeqCst);
+        if let Some(first) = manifest.chunks.iter().map(|c| c.first_seq).min() {
+            let lowest_needed_gone = first > next
+                && manifest
+                    .chunks
+                    .iter()
+                    .all(|c| c.first_seq > next || c.last_seq < next);
+            if lowest_needed_gone {
+                let message = format!(
+                    "the primary pruned WAL entries {next}..{first} before this replica applied \
+                     them; restart the replica to recover from the primary's latest snapshot"
+                );
+                if let Ok(mut stale) = self.replica_stale.lock() {
+                    if stale.is_none() {
+                        warn!("{message}");
+                    }
+                    *stale = Some(message);
+                }
+                return Ok(0);
+            }
+        }
+        if !manifest.chunks.iter().any(|c| c.last_seq >= next) {
+            return Ok(0);
+        }
+        *self
+            .wal_manifest
+            .lock()
+            .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))? =
+            manifest;
+        let mut entries = self.fetch_wal_chunks(next).await?;
+        entries.sort_by_key(|(seq, _)| *seq);
+        entries.dedup_by_key(|(seq, _)| *seq);
+        // Contiguous from `next`, or nothing this time.
+        let contiguous = entries
+            .iter()
+            .enumerate()
+            .take_while(|(i, (seq, _))| *seq == next + *i as u64)
+            .count();
+        if contiguous == 0 {
+            return Ok(0);
+        }
+        entries.truncate(contiguous);
+        let last = entries.last().map(|(seq, _)| *seq).unwrap_or(next);
+        APPLYING_REPLICATED.scope((), self.replay(entries)).await?;
+        self.replica_applied_next.store(last + 1, Ordering::SeqCst);
+        Ok(contiguous)
+    }
+
+    /// Run `follow_object_storage` every `every`, for as long as the process lives.
+    pub fn spawn_replica_follower(storage: Arc<Self>, every: std::time::Duration) {
+        if !storage.replica {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match storage.follow_object_storage().await {
+                    Ok(0) => {}
+                    Ok(n) => debug!("replica applied {n} WAL entries from object storage"),
+                    Err(e) => warn!("replica could not apply WAL from object storage: {e}"),
+                }
+            }
+        });
     }
 
     /// Bring object storage up to the local WAL: upload, as one chunk, every entry from
@@ -11583,7 +11774,14 @@ impl IntelligentIndexedStorage {
             .ok()
             .and_then(|state| state.clone());
         let durability_degraded = durability_error.is_some();
-        let ready = (!wal_enabled || wal_directory_accessible) && !durability_degraded;
+        let replica_stale = if self.replica {
+            self.replica_stale.lock().ok().and_then(|s| s.clone())
+        } else {
+            None
+        };
+        let ready = (!wal_enabled || wal_directory_accessible)
+            && !durability_degraded
+            && replica_stale.is_none();
 
         let last_wal_sync_at = self.last_wal_sync_at.lock().ok().and_then(|at| at.clone());
         let last_snapshot_at = self.last_snapshot_at.lock().ok().and_then(|at| at.clone());
@@ -11601,9 +11799,12 @@ impl IntelligentIndexedStorage {
             snapshot_present,
             snapshot_manifest_valid,
             snapshot_wal_next_sequence,
-            wal_mirrored_next_sequence: self
-                .object_storage_enabled
+            wal_mirrored_next_sequence: (self.object_storage_enabled && !self.replica)
                 .then(|| self.wal_mirrored_next.load(Ordering::SeqCst)),
+            replica_applied_next_sequence: self
+                .replica
+                .then(|| self.replica_applied_next.load(Ordering::SeqCst)),
+            replica_stale,
             durability_degraded,
             durability_error,
             resident_table_count,

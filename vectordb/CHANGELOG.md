@@ -42,6 +42,14 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Read replicas (experimental).** `serve --replica` (or `DXMT_REPLICA=1`) follows the object
+  storage bucket a primary mirrors its WAL and snapshots to: it recovers from the bucket,
+  applies the primary's new WAL chunks every `DXMT_REPLICA_POLL_MS` (default 1,000), serves
+  every read, and refuses every write with `403 READ_ONLY_REPLICA`. Nothing on a replica writes
+  the bucket -- uploads and deletes are refused in the storage layer -- and its object reads
+  skip the caches, which would otherwise serve another process's MANIFEST stale. A replica that
+  falls behind a snapshot that pruned chunks it had not applied reports not ready until
+  restarted. `/metrics`: `dxmt_replica_applied_next_sequence`, `dxmt_replica_stale`.
 - **Query admission.** At most `DXMT_MAX_CONCURRENT_QUERIES` searches run at once (default
   twice the cores), `DXMT_QUERY_QUEUE` more wait up to `DXMT_QUERY_QUEUE_TIMEOUT_MS`, and the
   rest are answered `429 TOO_MANY_REQUESTS` with `Retry-After: 1` instead of slowing every query

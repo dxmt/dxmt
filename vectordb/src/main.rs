@@ -85,6 +85,11 @@ enum Commands {
         /// 0 disables, which is the default.
         #[arg(long, default_value = "0", env = "DXMT_GRPC_PORT")]
         grpc_port: u16,
+        /// Serve as a read replica of the store mirrored to the configured object storage
+        /// (DXMT_OBJECT_STORAGE_PROVIDER): recover from the bucket, follow the WAL the primary
+        /// uploads, answer reads, refuse writes. The data directory is this replica's own.
+        #[arg(long, env = "DXMT_REPLICA")]
+        replica: bool,
     },
     /// Speak the Model Context Protocol over stdin/stdout
     ///
@@ -213,7 +218,12 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             dashboard,
             no_dashboard,
             grpc_port,
+            replica,
         } => {
+            if replica {
+                // Read by `create_app_with_storage`, which opens the store.
+                std::env::set_var("DXMT_REPLICA", "1");
+            }
             let bind_addr: SocketAddr = format!("{}:{}", host, port)
                 .parse()
                 .expect("Invalid bind address");

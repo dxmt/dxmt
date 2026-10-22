@@ -41,6 +41,23 @@ use crate::api::websocket;
 ///
 /// 只在服务端入口读环境变量，不放进 `IntelligentIndexedStorage::new`——那个构造函数有
 /// 四十多个调用点（单测、bench、example），让它们各自往磁盘写日志会互相回放污染。
+/// `DXMT_REPLICA` (set by `serve --replica`): open the store as a read replica.
+fn replica_from_env() -> bool {
+    crate::config::env::var("DXMT_REPLICA")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// How often a replica looks for new WAL chunks: `DXMT_REPLICA_POLL_MS`, default 1,000.
+fn replica_poll_from_env() -> std::time::Duration {
+    let ms = crate::config::env::var("DXMT_REPLICA_POLL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(1_000);
+    std::time::Duration::from_millis(ms)
+}
+
 pub fn wal_dir_from_env() -> Option<std::path::PathBuf> {
     if let Ok(dir) = crate::config::env::var("DXMT_WAL_DIR") {
         if dir.trim().is_empty() {
@@ -464,9 +481,17 @@ pub async fn create_app_with_storage(
 
     // 创建优化的存储实例。带 WAL：进程重启后要能恢复。
     // DXMT_WAL_DIR 可覆盖目录；设成空串则彻底关掉持久化（只建议用于压测对比）。
-    let storage = Arc::new(
-        IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?,
-    );
+    let replica = replica_from_env();
+    let storage = Arc::new(if replica {
+        let dir = wal_dir_from_env().ok_or_else(|| {
+            crate::Error::InvalidConfig(
+                "a replica needs a data directory of its own; DXMT_WAL_DIR is empty".to_string(),
+            )
+        })?;
+        IntelligentIndexedStorage::new_replica(&config.storage, dir).await?
+    } else {
+        IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir_from_env()).await?
+    });
     // The model a table without a dimension or a model gets, and the one the knowledge-base
     // table is made with: DXMT_EMBEDDING_MODEL, or what a local ollama already has.
     crate::api::quickstart::configure_default_embedding(&storage).await;
@@ -697,13 +722,19 @@ pub async fn create_app_with_storage(
 
     let app = app.with_state(base_state);
 
-    spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
-    let (backup_interval, backup_keep) = backup_schedule_from_env();
-    spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
-    spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
-    spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+    if storage.is_replica() {
+        // Everything that writes -- snapshots, backups, eviction (which snapshots a table),
+        // rebuilds and row reclamation -- is the primary's job; the replica follows.
+        IntelligentIndexedStorage::spawn_replica_follower(storage.clone(), replica_poll_from_env());
+    } else {
+        spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+        let (backup_interval, backup_keep) = backup_schedule_from_env();
+        spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
+        spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
+        spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+        spawn_row_reclamation(storage.clone(), row_compaction_interval_from_env());
+    }
     IntelligentIndexedStorage::spawn_derived_warmup(storage.clone());
-    spawn_row_reclamation(storage.clone(), row_compaction_interval_from_env());
     spawn_stall_detector(stall_threshold_from_env());
 
     Ok((app, storage))
