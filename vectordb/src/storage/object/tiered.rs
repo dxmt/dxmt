@@ -254,6 +254,12 @@ impl TieredStorage {
         Ok(())
     }
 
+    /// Read `key` from the source, skipping both caches: for an object another process may
+    /// have rewritten (the primary fencing token).
+    pub async fn get_object_fresh(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {
+        self.object_storage.get_object(key).await
+    }
+
     /// Read every object from the source rather than the caches: for a process that reads a
     /// bucket another one writes. See `get_object`.
     pub fn set_uncached_reads(&self, on: bool) {

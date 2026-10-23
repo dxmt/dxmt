@@ -209,6 +209,8 @@ async fn a_replica_too_far_behind_says_so_and_a_restart_recovers_it() {
     let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
         .await
         .unwrap();
+    // No retention window: every snapshot prunes the chunks it covers at once.
+    primary.set_wal_retention(std::time::Duration::ZERO);
     primary.create_table(table()).await.unwrap();
     primary
         .insert_records("t", vec![record("a", 1.0)])
@@ -269,4 +271,270 @@ async fn a_replica_needs_object_storage() {
         .map(|_| ())
         .unwrap_err();
     assert!(err.to_string().contains("object storage"), "{err}");
+}
+
+#[tokio::test]
+async fn a_replica_refuses_a_directory_holding_someone_else_s_data() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = config(&tmp.path().join("shared"));
+    let primary_dir = tmp.path().join("primary");
+    {
+        let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(primary_dir.clone()))
+            .await
+            .unwrap();
+        primary.create_table(table()).await.unwrap();
+        primary
+            .insert_records("t", vec![record("a", 1.0)])
+            .await
+            .unwrap();
+    }
+    let before: Vec<_> = std::fs::read_dir(&primary_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    let err = IntelligentIndexedStorage::new_replica(&cfg, primary_dir.clone())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(err.to_string().contains("not a replica's"), "{err}");
+    let after: Vec<_> = std::fs::read_dir(&primary_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the primary's directory was touched"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_replica_restarted_on_its_own_directory_starts_clean() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
+        .await
+        .unwrap();
+    primary.set_wal_retention(std::time::Duration::ZERO);
+    primary.create_table(table()).await.unwrap();
+    primary
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let replica_dir = tmp.path().join("replica");
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, replica_dir.clone())
+        .await
+        .unwrap();
+    primary
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+    primary.snapshot().await.unwrap();
+    primary
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .unwrap();
+    replica.follow_object_storage().await.unwrap();
+    assert!(!replica.health_snapshot().await.ready);
+    drop(replica);
+
+    // The same directory: emptied and rebuilt from the bucket, not mixed with the old state.
+    let restarted = IntelligentIndexedStorage::new_replica(&cfg, replica_dir)
+        .await
+        .unwrap();
+    assert_eq!(ids(&restarted).await, vec!["a", "b", "c"]);
+    assert!(restarted.health_snapshot().await.ready);
+}
+
+#[tokio::test]
+async fn a_replica_is_promoted_by_starting_a_primary_on_its_directory() {
+    std::env::set_var("DXMT_PRIMARY_CHECK_MS", "0");
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let replica_dir = tmp.path().join("replica");
+    {
+        let primary =
+            IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
+                .await
+                .unwrap();
+        primary.create_table(table()).await.unwrap();
+        primary
+            .insert_records("t", vec![record("a", 1.0), record("b", 2.0)])
+            .await
+            .unwrap();
+        let replica = IntelligentIndexedStorage::new_replica(&cfg, replica_dir.clone())
+            .await
+            .unwrap();
+        assert_eq!(ids(&replica).await, vec!["a", "b"]);
+        // The primary is lost here.
+    }
+    let promoted = IntelligentIndexedStorage::new_with_wal(&cfg, Some(replica_dir))
+        .await
+        .unwrap();
+    assert!(!promoted.is_replica());
+    assert_eq!(ids(&promoted).await, vec!["a", "b"]);
+    promoted
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .unwrap();
+
+    let follower = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica-2"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&follower).await, vec!["a", "b", "c"]);
+    promoted
+        .insert_records("t", vec![record("d", 4.0)])
+        .await
+        .unwrap();
+    follower.follow_object_storage().await.unwrap();
+    assert_eq!(ids(&follower).await, vec!["a", "b", "c", "d"]);
+}
+
+#[tokio::test]
+async fn a_primary_that_another_has_replaced_stops_writing() {
+    std::env::set_var("DXMT_PRIMARY_CHECK_MS", "0");
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let first = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("one")))
+        .await
+        .unwrap();
+    first.create_table(table()).await.unwrap();
+    first
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+
+    // A second primary takes the same bucket (say, a replica promoted while the first was only
+    // unreachable, not dead).
+    let second = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("two")))
+        .await
+        .unwrap();
+    assert_eq!(ids(&second).await, vec!["a"]);
+
+    let err = first
+        .insert_records("t", vec![record("x", 9.0)])
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.status_code(), 503, "{err}");
+    assert!(err.to_string().contains("another primary"), "{err}");
+    let health = first.health_snapshot().await;
+    assert!(!health.ready, "a replaced primary must not report ready");
+    // Every later write is refused too, without asking the bucket again.
+    assert!(first
+        .insert_records("t", vec![record("y", 8.0)])
+        .await
+        .is_err());
+
+    second
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&replica).await,
+        vec!["a", "b"],
+        "only the current primary's writes"
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_primary_refuses_to_start_on_its_old_directory() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let one = tmp.path().join("one");
+    let first = IntelligentIndexedStorage::new_with_wal(&cfg, Some(one.clone()))
+        .await
+        .unwrap();
+    first.create_table(table()).await.unwrap();
+    first
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    drop(first);
+    // Restarting where it left off is the ordinary case and must keep working.
+    let first = IntelligentIndexedStorage::new_with_wal(&cfg, Some(one.clone()))
+        .await
+        .unwrap();
+    drop(first);
+
+    // The first primary is gone; another machine takes over the bucket and writes.
+    let two = tmp.path().join("two");
+    let second = IntelligentIndexedStorage::new_with_wal(&cfg, Some(two.clone()))
+        .await
+        .unwrap();
+    second
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+
+    // The first comes back -- a supervisor restarting it, say. Its log stops before `b`, and
+    // taking the bucket back would depose the primary that wrote `b`.
+    let err = IntelligentIndexedStorage::new_with_wal(&cfg, Some(one.clone()))
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(err.to_string().contains("since"), "{err}");
+    second
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .expect("the current primary is undisturbed");
+    drop(second);
+
+    // The way back for that machine: an empty directory, which recovers from the bucket.
+    let again = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("one-new")))
+        .await
+        .unwrap();
+    assert_eq!(ids(&again).await, vec!["a", "b", "c"]);
+    // And the machine that just handed over may not take it back on its old directory either.
+    drop(again);
+    assert!(IntelligentIndexedStorage::new_with_wal(&cfg, Some(two))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_replica_behind_a_snapshot_catches_up_from_the_retained_chunks() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
+        .await
+        .unwrap();
+    primary.set_wal_retention(std::time::Duration::from_secs(3600));
+    primary.create_table(table()).await.unwrap();
+    primary
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+
+    // The same sequence that makes a replica stale without a window: it does not follow while
+    // the primary writes, snapshots, and writes again -- twice.
+    for (id, x) in [("b", 2.0), ("c", 3.0)] {
+        primary
+            .insert_records("t", vec![record(id, x)])
+            .await
+            .unwrap();
+        primary.snapshot().await.unwrap();
+    }
+    primary
+        .insert_records("t", vec![record("d", 4.0)])
+        .await
+        .unwrap();
+
+    assert!(replica.follow_object_storage().await.unwrap() > 0);
+    assert_eq!(ids(&replica).await, vec!["a", "b", "c", "d"]);
+    let health = replica.health_snapshot().await;
+    assert!(health.ready && health.replica_stale.is_none());
 }

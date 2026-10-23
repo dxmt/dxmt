@@ -58,7 +58,21 @@ release, and the first commit that was ever pushed anywhere.
   the bucket -- uploads and deletes are refused in the storage layer -- and its object reads
   skip the caches, which would otherwise serve another process's MANIFEST stale. A replica that
   falls behind a snapshot that pruned chunks it had not applied reports not ready until
-  restarted. `/metrics`: `dxmt_replica_applied_next_sequence`, `dxmt_replica_stale`.
+  restarted, and exits (status 3) so its supervisor restarts it from the newest snapshot;
+  `DXMT_REPLICA_EXIT_ON_STALE=0` keeps it running. `/metrics`:
+  `dxmt_replica_applied_next_sequence`, `dxmt_replica_stale`.
+- **WAL chunks outlive the snapshot that covers them by `DXMT_WAL_RETAIN_SECS`** (default 600).
+  Pruning at every snapshot left a replica one snapshot interval to apply each chunk; one that
+  restarted under steady writes was behind again by the time recovery finished, and never
+  caught up. `0` restores the old pruning.
+- **Replica failover.** A replica's data directory is a marked, disposable cache, emptied at
+  each start; a replica refuses a directory holding a primary's data. Starting a primary on a
+  replica's directory promotes it: the cache is emptied and the server recovers from the
+  bucket. Every primary claims `wal/PRIMARY` with a new epoch at start and checks it every
+  `DXMT_PRIMARY_CHECK_MS` (default 1,000); one that finds another primary has claimed the
+  bucket stops writing (503) and reports not ready. A primary refuses to start on a directory
+  whose last claim on the bucket has been superseded -- its log is no longer the bucket's --
+  so a restarted old primary cannot depose the new one; an empty directory recovers instead.
 - **Query admission.** At most `DXMT_MAX_CONCURRENT_QUERIES` searches run at once (default
   twice the cores), `DXMT_QUERY_QUEUE` more wait up to `DXMT_QUERY_QUEUE_TIMEOUT_MS`, and the
   rest are answered `429 TOO_MANY_REQUESTS` with `Retry-After: 1` instead of slowing every query
@@ -135,6 +149,17 @@ release, and the first commit that was ever pushed anywhere.
   `vector_weight` for `weighted_sum` and `reciprocal_rank_fusion` is 0.6 (was 0.7).
 
 ### Fixed
+
+- **The S3 backend ignored `DXMT_AWS_ACCESS_KEY_ID` / `DXMT_AWS_SECRET_ACCESS_KEY`.** They were
+  read into the configuration and dropped when the client was built, so the AWS SDK's default
+  chain (`~/.aws/credentials`, the instance role) signed every request -- against MinIO too.
+  A custom `DXMT_S3_ENDPOINT` is now also addressed path-style, which MinIO needs. Setting one
+  of the two keys without the other is a startup error.
+- **A server recovering from object storage numbered its first write after the snapshot, not
+  after the WAL chunks it had just replayed** -- so that write reused a sequence already in the
+  bucket, overwrote that chunk, and was never mirrored. Any machine started on an empty
+  directory with a bucket was affected, not only a promoted replica; its later writes did not
+  reach the bucket or the replicas following it.
 
 - **A snapshot that did not reach object storage no longer prunes it.** After a snapshot the
   local log was trimmed and the bucket's WAL chunks below it deleted whether or not the
