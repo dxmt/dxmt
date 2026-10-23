@@ -538,3 +538,123 @@ async fn a_replica_behind_a_snapshot_catches_up_from_the_retained_chunks() {
     let health = replica.health_snapshot().await;
     assert!(health.ready && health.replica_stale.is_none());
 }
+
+/// A manifest write that fails must leave nothing behind in memory: the retry rewrites the
+/// chunk under the same key with more entries, and a stale entry for the first attempt made
+/// the manifest list one object twice, with two ranges. GCS's per-object write limit is what
+/// made manifest writes fail in practice; a read-only MANIFEST file does the same here while
+/// chunk writes, in their own directory, still succeed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_manifest_write_that_failed_leaves_no_trace_in_the_manifest() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
+        .await
+        .unwrap();
+    primary.create_table(table()).await.unwrap();
+    primary
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+
+    let path = shared
+        .join("ssd")
+        .join("bucket")
+        .join("wal")
+        .join("MANIFEST");
+    let set_mode = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+    set_mode(0o444).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        set_mode(0o644).unwrap();
+        eprintln!("skipped: this user can write a read-only file (root?)");
+        return;
+    }
+    primary
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .expect("the write is durable locally; the mirror's failure is not the caller's");
+    set_mode(0o644).unwrap();
+    primary
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .unwrap();
+
+    let m: serde_json::Value = serde_json::from_slice(&manifest(&shared)).unwrap();
+    let chunks = m["chunks"].as_array().unwrap();
+    let mut paths: Vec<&str> = chunks.iter().map(|c| c["path"].as_str().unwrap()).collect();
+    paths.dedup();
+    assert_eq!(paths.len(), chunks.len(), "an object listed twice: {m}");
+    for pair in chunks.windows(2) {
+        assert_eq!(
+            pair[1]["first_seq"].as_u64(),
+            pair[0]["last_seq"].as_u64().map(|s| s + 1),
+            "chunks must be contiguous and not overlap: {m}"
+        );
+    }
+    let live: u64 = chunks.iter().map(|c| c["entries"].as_u64().unwrap()).sum();
+    assert_eq!(
+        live + m["pruned_entries"].as_u64().unwrap(),
+        m["total_entries"].as_u64().unwrap(),
+        "{m}"
+    );
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&replica).await, vec!["a", "b", "c"]);
+}
+
+/// A write logged before a snapshot and mirrored after it is still uploaded as a chunk. The
+/// snapshot holds it, so recovery never missed it; a replica follows chunks, and the mirror
+/// used to skip straight to the snapshot's point, leaving a hole every following replica fell
+/// into -- on GCS, whose slow uploads make that window most snapshots, once a minute.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_mirrored_after_a_snapshot_still_reaches_the_replicas() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("primary")))
+        .await
+        .unwrap();
+    primary.create_table(table()).await.unwrap();
+    primary
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+
+    // `b` is logged and not mirrored (its manifest write fails), then a snapshot is taken.
+    let path = shared
+        .join("ssd")
+        .join("bucket")
+        .join("wal")
+        .join("MANIFEST");
+    let set_mode = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+    set_mode(0o444).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        set_mode(0o644).unwrap();
+        eprintln!("skipped: this user can write a read-only file (root?)");
+        return;
+    }
+    primary
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+    primary.snapshot().await.unwrap();
+    set_mode(0o644).unwrap();
+    primary
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .unwrap();
+
+    assert!(replica.follow_object_storage().await.unwrap() > 0);
+    let health = replica.health_snapshot().await;
+    assert!(health.replica_stale.is_none(), "{:?}", health.replica_stale);
+    assert_eq!(ids(&replica).await, vec!["a", "b", "c"]);
+}

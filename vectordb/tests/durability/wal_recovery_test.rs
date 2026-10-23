@@ -891,7 +891,13 @@ async fn a_fresh_machine_recovers_from_object_storage_alone() {
 
     // Prove the segments actually reached the object store rather than the test passing on some
     // shared local cache. FilesystemStorage lays objects out at <root>/<bucket>/<key>.
-    let bucket = shared.join("ssd").join("test-bucket").join("snapshot");
+    // A snapshot is a version directory, published by `CURRENT` naming it.
+    let snapshots = shared.join("ssd").join("test-bucket").join("snapshot");
+    let current: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(snapshots.join("CURRENT")).expect("no snapshot was published"),
+    )
+    .unwrap();
+    let bucket = snapshots.join(format!("v{:020}", current["version"].as_u64().unwrap()));
     assert!(
         bucket.join("manifest").exists(),
         "manifest was never uploaded; looked in {}",
@@ -3453,4 +3459,47 @@ async fn a_snapshot_that_did_not_reach_object_storage_does_not_prune_it() {
         vec!["a", "b"],
         "the bucket lost entries a snapshot it never received was said to cover"
     );
+}
+
+/// A bucket written before snapshots were versioned -- `snapshot/manifest` and its segments at
+/// the top, no `CURRENT` -- still recovers. The layout is rebuilt here by moving a versioned
+/// snapshot's files up and deleting the pointer.
+#[tokio::test]
+async fn a_bucket_with_the_unversioned_snapshot_layout_still_recovers() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    {
+        let storage =
+            IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("machine-a")))
+                .await
+                .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        storage.snapshot().await.unwrap();
+    }
+    let snapshots = shared.join("ssd").join("test-bucket").join("snapshot");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(snapshots.join("CURRENT")).unwrap()).unwrap();
+    let version = snapshots.join(format!("v{:020}", current["version"].as_u64().unwrap()));
+    for entry in std::fs::read_dir(&version).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::rename(entry.path(), snapshots.join(entry.file_name())).unwrap();
+    }
+    std::fs::remove_dir(&version).unwrap();
+    std::fs::remove_file(snapshots.join("CURRENT")).unwrap();
+    // The SSD tier shares this directory in tests; a fresh machine reads the bucket regardless.
+    let recovered =
+        IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("machine-b")))
+            .await
+            .unwrap();
+    let tables = recovered.list_tables().await.unwrap();
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].record_count, 1);
 }
