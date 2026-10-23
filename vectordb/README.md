@@ -554,10 +554,28 @@ DXMT_OBJECT_STORAGE_PROVIDER=s3 DXMT_S3_BUCKET=my-bucket \
 It recovers from the bucket, applies new WAL chunks every `DXMT_REPLICA_POLL_MS` (default
 1,000), answers every read, and refuses every write with `403 READ_ONLY_REPLICA`. It never
 writes the bucket. `dxmt_replica_applied_next_sequence` is how far it has applied; if it falls
-behind a snapshot that pruned chunks it had not applied, it reports not ready
-(`dxmt_replica_stale 1`) until restarted. Aliases live in a local file and are not followed.
-There is one writer per bucket: the WAL manifest has no conditional write, so two primaries on
-one bucket would overwrite each other's.
+behind by more than `DXMT_WAL_RETAIN_SECS` (default 600: chunks stay in the bucket that long
+after a snapshot covers them), it reports not ready
+(`dxmt_replica_stale 1`) and exits with status 3, so a process supervisor restarts it from the
+newest snapshot (`DXMT_REPLICA_EXIT_ON_STALE=0` keeps it running, not ready). Aliases live in
+a local file and are not followed.
+
+A replica's data directory is a disposable cache, marked with a `REPLICA` file and emptied at
+every start; it refuses a directory that holds a primary's data rather than empty it.
+
+**Failover.** Stop the primary, then start the replica's server *without* `--replica` on the
+same directory and bucket: it empties the cache, recovers from the bucket like any new
+machine, and becomes the primary. Every primary records itself in `wal/PRIMARY` with a new
+epoch when it starts, and checks that file every `DXMT_PRIMARY_CHECK_MS` (default 1,000)
+before writing: an old primary that is still running when another one starts stops accepting
+writes (503) within that interval and reports not ready. That is a guard against a primary
+nobody stopped, not a lock -- object storage has no conditional write here, so writes an old
+primary acknowledges inside that interval are not on the new one. Stop the old one first.
+
+The old primary's directory is then out of date, and it refuses to start on it (it remembers
+its claims in `PRIMARY`), so a supervisor restarting it cannot take the bucket back. To bring
+that machine back as the primary, stop the current one and start it on an empty directory: it
+recovers from the bucket.
 
 ### Feature Flags
 

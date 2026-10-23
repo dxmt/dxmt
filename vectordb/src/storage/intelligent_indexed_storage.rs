@@ -12,6 +12,9 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use crate::wal::{WalEntry, WalManager};
 use tracing::{debug, error, info, warn};
 
+/// The object a primary writes when it takes a bucket; see `claim_primary`.
+const PRIMARY_KEY: &str = "wal/PRIMARY";
+
 tokio::task_local! {
     /// Set while a read replica applies entries it read from object storage -- at startup and
     /// in `follow_object_storage`. `ensure_writable` lets exactly those writes through: a
@@ -823,6 +826,18 @@ pub struct IntelligentIndexedStorage {
     /// On a replica that can no longer catch up from the WAL chunks (the primary pruned some
     /// it had not applied), why; it reports not ready until restarted.
     replica_stale: StdMutex<Option<String>>,
+    /// With object storage, the token this primary wrote to `wal/PRIMARY` when it started;
+    /// see `claim_primary`. `None` on a replica and without object storage.
+    primary_token: Option<String>,
+    /// When `ensure_still_primary` last read the token back, and found it ours.
+    primary_checked: StdMutex<Option<std::time::Instant>>,
+    /// How often it reads it: `DXMT_PRIMARY_CHECK_MS`, default 1,000.
+    primary_check_every: std::time::Duration,
+    /// How long WAL chunks stay in the bucket after a snapshot covers them, in seconds:
+    /// `DXMT_WAL_RETAIN_SECS`, default 600. See `retained_prune_point`.
+    wal_retain_secs: AtomicU64,
+    /// Snapshots uploaded since start, oldest first, with when: the candidates to prune to.
+    offloaded_snapshots: StdMutex<std::collections::VecDeque<(std::time::Instant, u64)>>,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -2162,8 +2177,17 @@ impl IntelligentIndexedStorage {
 
         if let Some(dir) = wal_dir {
             let recovery_started = std::time::Instant::now();
+            // Recovery reads the bucket itself, never the memory or SSD tier. The SSD cache
+            // outlives the process and is not inside the data directory, so after another
+            // primary has written the bucket it holds the snapshot, MANIFEST and chunks of an
+            // older epoch under the same keys: a machine failing back onto an empty directory
+            // recovered the state it had before the failover, found by
+            // `scripts/replica_soak.py`. A primary's own writes go through the tiers, so once it
+            // is running they are its to cache again.
+            storage.storage.set_uncached_reads(true);
             // Before the log is opened: opening it can already write (a torn tail is cut).
             storage._dir_lock = Some(Self::lock_dir(&dir)?);
+            Self::prepare_local_dir(&dir, replica, storage.object_storage_enabled)?;
             let manager = WalManager::new(&dir)?;
             storage.wal = Some(Arc::new(StdMutex::new(manager)));
             storage.wal_dir = Some(dir.clone());
@@ -2172,6 +2196,9 @@ impl IntelligentIndexedStorage {
             // Before anything reads chunks: the manifest is how they are found.
             if storage.object_storage_enabled {
                 storage.load_wal_manifest().await?;
+                if !replica {
+                    storage.claim_primary().await?;
+                }
             }
 
             // The aliases are names, not data, and are read before either: a request that
@@ -2261,6 +2288,19 @@ impl IntelligentIndexedStorage {
                 }
             }
 
+            // Number this machine's next write after everything it is about to replay, and after
+            // everything the bucket already holds. A machine recovering from object storage has
+            // an empty local log, which opens counting from the snapshot's point -- so its first
+            // write took the sequence of an entry already in a chunk, overwrote that chunk, and
+            // was never mirrored (the mirror frontier was already past it). A promoted replica's
+            // writes never reached the replicas following it; that is how this was found.
+            if let Some(wal) = storage.wal.as_ref() {
+                let after_pending = pending.last().map_or(0, |(seq, _)| seq + 1);
+                let after_bucket = storage.wal_mirrored_next.load(Ordering::SeqCst);
+                if let Ok(mut guard) = wal.lock() {
+                    guard.advance_sequence_to(after_pending.max(after_bucket));
+                }
+            }
             let replayed = pending.len() as u64;
             if pending.is_empty() {
                 info!(
@@ -2301,6 +2341,9 @@ impl IntelligentIndexedStorage {
             // failed before the last shutdown -- go up now, before anything new is written.
             if storage.object_storage_enabled && !storage.replica {
                 storage.mirror_wal(&[]).await;
+            }
+            if !storage.replica {
+                storage.storage.set_uncached_reads(false);
             }
         }
 
@@ -2392,6 +2435,21 @@ impl IntelligentIndexedStorage {
             replica: false,
             replica_applied_next: AtomicU64::new(0),
             replica_stale: StdMutex::new(None),
+            primary_token: None,
+            primary_checked: StdMutex::new(None),
+            primary_check_every: std::time::Duration::from_millis(
+                crate::config::env::var("DXMT_PRIMARY_CHECK_MS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(1_000),
+            ),
+            wal_retain_secs: AtomicU64::new(
+                crate::config::env::var("DXMT_WAL_RETAIN_SECS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(600),
+            ),
+            offloaded_snapshots: StdMutex::new(std::collections::VecDeque::new()),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
@@ -3452,14 +3510,16 @@ impl IntelligentIndexedStorage {
                     "WAL compacted below sequence {}: {} bytes reclaimed",
                     keep_from, reclaimed
                 );
-                if self.object_storage_enabled && offloaded {
-                    self.prune_wal_chunks(seq).await;
-                }
             }
             Ok(_) => {}
             // The snapshot is durable already, so a failed compaction costs disk and startup
             // time, not correctness.
             Err(e) => warn!("Snapshot written but WAL compaction failed: {}", e),
+        }
+        if self.object_storage_enabled && offloaded {
+            if let Some(keep_from) = self.retained_prune_point(seq) {
+                self.prune_wal_chunks(keep_from).await;
+            }
         }
 
         // Now, and only now, collect segments that maintenance superseded. The snapshot just
@@ -6028,6 +6088,7 @@ impl IntelligentIndexedStorage {
             return Ok(());
         }
         self.ensure_writable()?;
+        self.ensure_still_primary().await?;
         let Some(ref wal) = self.wal else {
             return Ok(());
         };
@@ -6187,6 +6248,209 @@ impl IntelligentIndexedStorage {
         })
     }
 
+    /// Make `dir` ready for this process. A replica's directory is a cache of the bucket: it is
+    /// emptied at every start (and marked `REPLICA`), so a restart recovers from the bucket's
+    /// newest snapshot rather than mixing with whatever an earlier run applied. A directory
+    /// holding anything else is refused rather than emptied -- `--replica` pointed at a
+    /// primary's data by mistake must not erase it. A primary started on a replica's directory
+    /// is a promotion: the cache is emptied and the primary recovers from the bucket.
+    fn prepare_local_dir(
+        dir: &std::path::Path,
+        replica: bool,
+        object_storage: bool,
+    ) -> crate::Result<()> {
+        const MARKER: &str = "REPLICA";
+        let marked = dir.join(MARKER).exists();
+        let contents: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name != "LOCK" && name != MARKER
+            })
+            .collect();
+        let empty = |paths: &[PathBuf]| -> crate::Result<()> {
+            for path in paths {
+                if path.is_dir() {
+                    std::fs::remove_dir_all(path)?;
+                } else {
+                    std::fs::remove_file(path)?;
+                }
+            }
+            Ok(())
+        };
+        if replica {
+            if !contents.is_empty() && !marked {
+                return Err(crate::Error::InvalidConfig(format!(
+                    "{} holds data that is not a replica's. A replica empties its data \
+                     directory at every start and rebuilds it from object storage, so it needs \
+                     one of its own",
+                    dir.display()
+                )));
+            }
+            empty(&contents)?;
+            std::fs::write(
+                dir.join(MARKER),
+                b"a read replica's cache of object storage\n",
+            )?;
+        } else if marked {
+            if !object_storage {
+                return Err(crate::Error::InvalidConfig(format!(
+                    "{} is a read replica's directory and holds nothing of its own; start the \
+                     primary with the object storage it followed configured, and it recovers \
+                     from there",
+                    dir.display()
+                )));
+            }
+            warn!(
+                "{} was a read replica's directory; recovering this primary from object storage",
+                dir.display()
+            );
+            empty(&contents)?;
+            std::fs::remove_file(dir.join(MARKER))?;
+        }
+        Ok(())
+    }
+
+    /// Take the bucket for this process: write `wal/PRIMARY` with an epoch one past the last
+    /// and a token of our own. A primary that finds someone else's token there afterwards --
+    /// another primary started on the same bucket, a promoted replica -- stops writing
+    /// (`ensure_still_primary`). The WAL manifest has no conditional write, so two primaries
+    /// would otherwise overwrite each other's manifest with no sign of it.
+    async fn claim_primary(&mut self) -> crate::Result<()> {
+        use crate::storage::object::traits::ObjectStorage;
+        let previous = self
+            .storage
+            .get_object_fresh(PRIMARY_KEY)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        let epoch = previous
+            .as_ref()
+            .and_then(|p| p["epoch"].as_u64())
+            .unwrap_or(0)
+            + 1;
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // The directory remembers which claims were its own. A directory that was a primary of
+        // this bucket, and finds the bucket claimed by someone else since, holds a history the
+        // bucket no longer continues: the other primary wrote after it, possibly under the same
+        // sequence numbers, and may have pruned the chunks between. Merging the two is not
+        // possible, and claiming the bucket back would depose the primary that took over -- which
+        // is exactly what a supervisor restarting a crashed old primary would do. So it refuses.
+        // An empty directory, a replica's (emptied on promotion) and one from before this file
+        // existed have no record and claim as before.
+        let local_path = self.wal_dir.as_ref().map(|d| d.join("PRIMARY"));
+        let ours: Option<Vec<String>> = local_path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|v| {
+                v["tokens"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+        let current = previous
+            .as_ref()
+            .and_then(|p| p["token"].as_str())
+            .map(str::to_string);
+        if let (Some(ours), Some(current)) = (&ours, &current) {
+            if !ours.contains(current) {
+                return Err(crate::Error::InvalidConfig(format!(
+                    "another primary (epoch {}) has written to this object storage bucket since \
+                     {} last did, so this directory's log is not the bucket's any more. Start \
+                     on an empty directory to recover from the bucket -- after stopping the \
+                     current primary -- or move this one aside first to keep it",
+                    epoch - 1,
+                    self.wal_dir
+                        .as_ref()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default()
+                )));
+            }
+        }
+        // Written before the bucket, holding the claim it replaces too: a crash between the two
+        // writes leaves a directory that still recognises whichever one the bucket holds.
+        if let Some(path) = &local_path {
+            let record = serde_json::json!({
+                "tokens": current.iter().chain(std::iter::once(&token)).collect::<Vec<_>>(),
+                "epoch": epoch,
+            });
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, record.to_string())?;
+            std::fs::File::open(&tmp)?.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+        }
+        let body = serde_json::json!({
+            "epoch": epoch,
+            "token": token,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+        });
+        self.storage
+            .put_object(
+                PRIMARY_KEY,
+                bytes::Bytes::from(body.to_string()),
+                Some("application/json"),
+            )
+            .await
+            .map_err(|e| crate::Error::Internal(format!("claiming the bucket: {e}")))?;
+        if previous.is_some() {
+            info!("primary of this bucket, epoch {epoch}");
+        }
+        self.primary_token = Some(token);
+        Ok(())
+    }
+
+    /// Refuse to write once another primary has taken the bucket. Reads `wal/PRIMARY` at most
+    /// every `primary_check_every`; when the token there is not ours, local durability is marked
+    /// failed -- every later write is a 503 and `/ready` says why -- since this process no
+    /// longer owns what it would write to.
+    async fn ensure_still_primary(&self) -> crate::Result<()> {
+        let Some(ours) = self.primary_token.as_deref() else {
+            return Ok(());
+        };
+        let due = self
+            .primary_checked
+            .lock()
+            .map(|at| at.is_none_or(|t| t.elapsed() >= self.primary_check_every))
+            .unwrap_or(true);
+        if !due {
+            return Ok(());
+        }
+        let current = self
+            .storage
+            .get_object_fresh(PRIMARY_KEY)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        match current {
+            Some(p) if p["token"].as_str() != Some(ours) => {
+                let error = crate::Error::Internal(format!(
+                    "another primary (epoch {}) took over this object storage bucket; this \
+                     server stopped writing to it",
+                    p["epoch"]
+                ));
+                self.mark_durability_failed(&error);
+                Err(crate::Error::ServiceUnavailable {
+                    message: error.to_string(),
+                })
+            }
+            // Ours, or unreadable for now: a bucket that cannot be read is the mirror's
+            // problem to report, not a reason to stop writing locally.
+            _ => {
+                if let Ok(mut at) = self.primary_checked.lock() {
+                    *at = Some(std::time::Instant::now());
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Whether this storage is a read replica (`new_replica`).
     pub fn is_replica(&self) -> bool {
         self.replica
@@ -6276,12 +6540,24 @@ impl IntelligentIndexedStorage {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(every);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // A stale replica can only recover by starting again from the newest snapshot, and a
+            // process supervisor (systemd, Kubernetes) restarts one that exits -- which is
+            // faster than waiting for someone to read /ready. DXMT_REPLICA_EXIT_ON_STALE=0
+            // keeps it running, not ready, instead.
+            let exit_on_stale = crate::config::env::var("DXMT_REPLICA_EXIT_ON_STALE")
+                .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
+                .unwrap_or(true);
             loop {
                 ticker.tick().await;
                 match storage.follow_object_storage().await {
                     Ok(0) => {}
                     Ok(n) => debug!("replica applied {n} WAL entries from object storage"),
                     Err(e) => warn!("replica could not apply WAL from object storage: {e}"),
+                }
+                let stale = storage.replica_stale.lock().ok().and_then(|s| s.clone());
+                if let (true, Some(why)) = (exit_on_stale, stale) {
+                    error!("{why}; exiting so the process supervisor restarts this replica");
+                    std::process::exit(3);
                 }
             }
         });
@@ -6461,6 +6737,37 @@ impl IntelligentIndexedStorage {
         }
 
         Ok(out)
+    }
+
+    /// How far the bucket's WAL may be pruned now that a snapshot through `seq` is uploaded:
+    /// to the newest snapshot at least `DXMT_WAL_RETAIN_SECS` old, or `None` if there is none.
+    ///
+    /// Pruning to the snapshot just written left a replica exactly one snapshot interval to
+    /// apply each chunk. One that fell further behind -- or simply restarted, since recovery
+    /// takes seconds and the primary keeps snapshotting meanwhile -- found its next chunks gone,
+    /// went stale, restarted, and was behind again by the time it was up: under steady writes
+    /// with 5 s snapshots it never caught up (`scripts/replica_soak.py`). Kept chunks cost
+    /// bucket space for the window's writes and nothing else; the local log is compacted as
+    /// before. `0` restores pruning at every snapshot.
+    fn retained_prune_point(&self, seq: u64) -> Option<u64> {
+        let retain = self.wal_retain_secs.load(Ordering::Relaxed);
+        if retain == 0 {
+            return Some(seq);
+        }
+        let retain = std::time::Duration::from_secs(retain);
+        let mut points = self.offloaded_snapshots.lock().ok()?;
+        points.push_back((std::time::Instant::now(), seq));
+        let ripe = points.iter().rposition(|(at, _)| at.elapsed() >= retain)?;
+        // Older candidates than the one used can never be used again.
+        points.drain(..ripe);
+        points.front().map(|(_, s)| *s)
+    }
+
+    /// Set how long WAL chunks stay in the bucket after a snapshot covers them
+    /// (`DXMT_WAL_RETAIN_SECS`); `Duration::ZERO` prunes at every snapshot.
+    pub fn set_wal_retention(&self, retain: std::time::Duration) {
+        self.wal_retain_secs
+            .store(retain.as_secs(), Ordering::Relaxed);
     }
 
     /// 删掉全部条目都低于 `keep_from` 的 WAL 分块。

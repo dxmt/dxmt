@@ -36,9 +36,34 @@ impl S3Storage {
 
         let mut client_config = aws_sdk_s3::config::Builder::from(&aws_config);
 
-        // 如果提供了自定义端点（如 MinIO），使用它
+        // The configured keys, when given, and nothing else. They were read into the config and
+        // dropped here, so the SDK's default chain answered instead -- `~/.aws/credentials` or
+        // the instance role -- and a MinIO deployment was signed with the machine's AWS key.
+        match (&config.access_key_id, &config.secret_access_key) {
+            (Some(id), Some(secret)) => {
+                client_config =
+                    client_config.credentials_provider(aws_sdk_s3::config::Credentials::new(
+                        id.clone(),
+                        secret.clone(),
+                        config.session_token.clone(),
+                        None,
+                        "dxmt-config",
+                    ));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ObjectStorageError::InvalidConfiguration(
+                    "set both DXMT_AWS_ACCESS_KEY_ID and DXMT_AWS_SECRET_ACCESS_KEY, or neither \
+                     (to use the AWS SDK's default credential chain)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // A custom endpoint (MinIO and other S3-compatible services) is addressed by path:
+        // `bucket.127.0.0.1` does not resolve.
         if let Some(endpoint) = &config.endpoint {
-            client_config = client_config.endpoint_url(endpoint);
+            client_config = client_config.endpoint_url(endpoint).force_path_style(true);
         }
         let client = Client::from_conf(client_config.build());
 
