@@ -774,6 +774,9 @@ pub struct IntelligentIndexedStorage {
     /// 日志截断，并发跑会互相拆台——后果从"索引被静默丢掉"一路到"日志被截断到落盘快照
     /// 覆盖不到的位置"，也就是静默丢数据。
     snapshotting: Arc<tokio::sync::Mutex<()>>,
+    /// One text-index rebuild at a time; see `rebuild_text_index`.
+    #[cfg_attr(not(feature = "text-bm25"), allow(dead_code))]
+    text_rebuild: tokio::sync::Mutex<()>,
 
     /// See [`OperationTimings`].
     index_rebuilds: AtomicU64,
@@ -1269,6 +1272,114 @@ pub struct PerformanceStats {
 
     /// 插入吞吐量
     insert_throughput: f64,
+}
+
+/// What a text index was built for: its fields and analyzers. Recorded in each generation's
+/// directory, so an index built for another config -- a rebuild cut short, a change made
+/// while the server was down -- is noticed at the next open and rebuilt.
+fn text_fingerprint(table: &Table) -> String {
+    serde_json::json!({
+        "enabled": table.enable_full_text_search,
+        "fields": table.text_fields,
+    })
+    .to_string()
+}
+
+/// The file in a text-index generation that records its `text_fingerprint`.
+#[cfg(feature = "text-bm25")]
+const TEXT_CONFIG_FILE: &str = "dxmt-text-config.json";
+
+/// Text indexes live under `fulltext/{table_id}/` as generations `g1`, `g2`, ... with
+/// `CURRENT` naming the one in use; a rebuild fills the next and then points `CURRENT` at it.
+/// An index from before generations has its files directly in the root and no `CURRENT`.
+#[cfg(feature = "text-bm25")]
+fn current_text_generation(root: &std::path::Path) -> Option<PathBuf> {
+    let name = std::fs::read_to_string(root.join("CURRENT")).ok()?;
+    let path = root.join(name.trim());
+    path.is_dir().then_some(path)
+}
+
+/// The generation to open for `table`: the current one if it was built for this config, an
+/// index from before generations as it is, and otherwise a new empty generation made current
+/// -- which `restore_table` fills from the records, as it does any empty text index.
+#[cfg(feature = "text-bm25")]
+fn text_generation_to_open(root: &std::path::Path, table: &Table) -> crate::Result<PathBuf> {
+    let fingerprint = text_fingerprint(table);
+    if let Some(current) = current_text_generation(root) {
+        if std::fs::read_to_string(current.join(TEXT_CONFIG_FILE)).ok() == Some(fingerprint) {
+            return Ok(current);
+        }
+    } else if root.join("meta.json").exists() {
+        return Ok(root.to_path_buf());
+    } else if !root.exists() {
+        // A new table: its first generation.
+        let generation = new_text_generation(root, table)?;
+        make_text_generation_current(root, &generation)?;
+        return Ok(generation);
+    }
+    warn!(
+        "text index for table '{}' was built for another configuration; rebuilding it from the \
+         records",
+        table.name
+    );
+    let generation = new_text_generation(root, table)?;
+    make_text_generation_current(root, &generation)?;
+    Ok(generation)
+}
+
+/// A new, empty generation directory under `root`, recording `table`'s config.
+#[cfg(feature = "text-bm25")]
+fn new_text_generation(root: &std::path::Path, table: &Table) -> crate::Result<PathBuf> {
+    let next = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_prefix('g')?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+        .map_or(1, |n| n + 1);
+    let path = root.join(format!("g{next}"));
+    std::fs::create_dir_all(&path)?;
+    std::fs::write(path.join(TEXT_CONFIG_FILE), text_fingerprint(table))?;
+    Ok(path)
+}
+
+/// Point `CURRENT` at `generation` (written whole, then renamed into place), and remove the
+/// other generations and any pre-generation index files in the root. Removal is best effort:
+/// on Windows a directory another handle still has open stays until the next time.
+#[cfg(feature = "text-bm25")]
+fn make_text_generation_current(
+    root: &std::path::Path,
+    generation: &std::path::Path,
+) -> crate::Result<()> {
+    let name = generation
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| crate::Error::Internal("text generation has no name".to_string()))?;
+    let tmp = root.join("CURRENT.tmp");
+    std::fs::write(&tmp, name)?;
+    std::fs::rename(&tmp, root.join("CURRENT"))?;
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if file == "CURRENT" || file == name {
+            continue;
+        }
+        if path.is_dir() {
+            if file.starts_with('g') {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 /// The indexable document for a record, or `None` if this table indexes no text from it.
@@ -2264,6 +2375,7 @@ impl IntelligentIndexedStorage {
             wal: None,
             wal_dir: None,
             snapshotting: Arc::new(tokio::sync::Mutex::new(())),
+            text_rebuild: tokio::sync::Mutex::new(()),
             index_rebuilds: AtomicU64::new(0),
             index_rebuild_ns: AtomicU64::new(0),
             index_rebuild_swap_wait_ns: AtomicU64::new(0),
@@ -3302,12 +3414,30 @@ impl IntelligentIndexedStorage {
         // Push the segments to object storage before trimming the log. If the upload fails the
         // local snapshot is still there and still verified, so compaction stays safe — but the
         // remote copy is the one that survives losing this machine, so say so loudly.
-        if self.object_storage_enabled {
-            match self.offload_snapshot(&dir, written).await {
-                Ok(bytes) => info!("Snapshot offloaded to object storage: {} bytes", bytes),
-                Err(e) => warn!("Snapshot is local-only, upload failed: {}", e),
-            }
-        }
+        let offloaded = !self.object_storage_enabled
+            || match self.offload_snapshot(&dir, written).await {
+                Ok(bytes) => {
+                    info!("Snapshot offloaded to object storage: {} bytes", bytes);
+                    // The bucket now holds everything below `seq` in the snapshot itself, so
+                    // the WAL mirror has nothing below it left to upload.
+                    self.wal_mirrored_next.fetch_max(seq, Ordering::SeqCst);
+                    true
+                }
+                Err(e) => {
+                    warn!("Snapshot is local-only, upload failed: {}", e);
+                    false
+                }
+            };
+        // With object storage, the log may only be trimmed to what the bucket holds. When the
+        // snapshot did not reach it, the entries the bucket lacks stay in the local log for
+        // `mirror_wal` to upload, and the bucket's own chunks stay too. Trimming to `seq`
+        // regardless -- as this did -- and pruning the chunks below it left a bucket holding
+        // neither the snapshot nor the entries: a machine recovering from it lost them.
+        let keep_from = if offloaded {
+            seq
+        } else {
+            seq.min(self.wal_mirrored_next.load(Ordering::SeqCst))
+        };
 
         // Only now is it safe to drop the log this snapshot covers. Compacting any earlier
         // leaves a window where neither the previous snapshot nor the log can reconstruct
@@ -3315,14 +3445,14 @@ impl IntelligentIndexedStorage {
         match wal
             .lock()
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))
-            .and_then(|mut g| g.truncate_before(seq))
+            .and_then(|mut g| g.truncate_before(keep_from))
         {
             Ok(reclaimed) if reclaimed > 0 => {
                 info!(
                     "WAL compacted below sequence {}: {} bytes reclaimed",
-                    seq, reclaimed
+                    keep_from, reclaimed
                 );
-                if self.object_storage_enabled {
+                if self.object_storage_enabled && offloaded {
                     self.prune_wal_chunks(seq).await;
                 }
             }
@@ -9597,15 +9727,27 @@ impl IntelligentIndexedStorage {
                 // which is also when a narrowed policy gives its memory back.
                 *data.derived.write() = None;
             }
+            let text_changed = text_fingerprint(&data.table) != text_fingerprint(&updated);
             data.table = updated.clone();
-            updated
+            (updated, text_changed)
         };
+        let (updated, text_changed) = updated;
 
         self.wal_append(vec![WalEntry::AlterTable {
             table: name.to_string(),
             request: req,
         }])
         .await?;
+
+        // Logged first, so a crash during the rebuild leaves the table's new text config with
+        // an index built for the old one -- which the next start notices (`text_fingerprint`)
+        // and rebuilds.
+        #[cfg(feature = "text-bm25")]
+        if text_changed {
+            self.rebuild_text_index(name).await?;
+        }
+        #[cfg(not(feature = "text-bm25"))]
+        let _ = text_changed;
 
         Ok(updated)
     }
@@ -12620,8 +12762,138 @@ impl IntelligentIndexedStorage {
     /// 创建全文搜索引擎
     #[cfg(feature = "text-bm25")]
     async fn create_full_text_engine(&self, table: &Table) -> crate::Result<FullTextSearchEngine> {
-        let index_path = self.full_text_index_path(&table.id);
-        let index_path = index_path.to_string_lossy().into_owned();
+        let root = self.full_text_index_path(&table.id);
+        let path = if root.as_os_str().is_empty() {
+            root
+        } else {
+            text_generation_to_open(&root, table)?
+        };
+        Self::text_engine_at(table, &path).await
+    }
+
+    /// Rebuild a table's text index for its current text config, from its records, without
+    /// stopping reads or writes, and make it current. Called by `alter_table` after the change
+    /// is logged.
+    ///
+    /// The new index is built in a new generation directory. While it fills, the current index
+    /// keeps answering searches and forwards every write to the new one (`set_shadow`); a table
+    /// with no index yet gets the new one at once and fills it in place. Each record is copied
+    /// as delete-then-add, under the table map's read lock for its chunk, so however a copy and
+    /// a concurrent write interleave the new index ends with one document per record holding
+    /// its latest text. Then the new index replaces the old and `CURRENT` names it.
+    #[cfg(feature = "text-bm25")]
+    async fn rebuild_text_index(&self, name: &str) -> crate::Result<()> {
+        let _one_at_a_time = self.text_rebuild.lock().await;
+        let (table, old) = {
+            let tables = self.read_tables("rebuild_text_index").await;
+            let data = tables
+                .get(name)
+                .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            (data.table.clone(), data.full_text_engine.clone())
+        };
+        let root = self.full_text_index_path(&table.id);
+        if !table.enable_full_text_search {
+            if let Some(data) = self.write_tables("rebuild_text_index").await.get_mut(name) {
+                data.full_text_engine = None;
+            }
+            if !root.as_os_str().is_empty() {
+                let _ = std::fs::remove_dir_all(&root);
+            }
+            return Ok(());
+        }
+
+        let generation = if root.as_os_str().is_empty() {
+            None
+        } else {
+            Some(new_text_generation(&root, &table)?)
+        };
+        let path = generation.clone().unwrap_or_default();
+        let engine = Arc::new(Self::text_engine_at(&table, &path).await?);
+        match &old {
+            Some(old) => old.set_shadow(Some(engine.clone())),
+            None => {
+                if let Some(data) = self.write_tables("rebuild_text_index").await.get_mut(name) {
+                    data.full_text_engine = Some(engine.clone());
+                }
+            }
+        }
+        // Counted only now that writes reach the new index: a row written before this is in
+        // the range copied below, one written after reached it directly. Counted first, a write
+        // between the count and the line above was in neither -- the test that writes during a
+        // rebuild found exactly that.
+        // `None`: the records are in memory, with no rows to page through.
+        let rows = {
+            let tables = self.read_tables("rebuild_text_index").await;
+            tables.get(name).and_then(|data| data.records.row_count())
+        };
+
+        const CHUNK: u32 = 4_096;
+        let started = std::time::Instant::now();
+        let mut copied = 0usize;
+        if rows.is_none() {
+            // An in-memory store is copied in one pass, under the read lock throughout, which
+            // is what keeps a concurrent write from slipping between a copy and its add.
+            let tables = self.read_tables("rebuild_text_index").await;
+            if let Some(data) = tables.get(name) {
+                let mut docs = Vec::new();
+                data.records.for_each(|record| {
+                    if let Some(doc) = text_document_for(&table, &record) {
+                        docs.push(doc);
+                    }
+                });
+                for doc in docs {
+                    engine.delete_document(&doc.id).await?;
+                    engine.add_document(doc).await?;
+                    copied += 1;
+                }
+            }
+        }
+        let rows = rows.unwrap_or(0);
+        let mut from = 0u32;
+        while from < rows {
+            let to = (from + CHUNK).min(rows);
+            {
+                let tables = self.read_tables("rebuild_text_index").await;
+                let Some(data) = tables.get(name) else {
+                    return Ok(()); // dropped meanwhile
+                };
+                let chunk = tokio::task::block_in_place(|| data.records.decode_range(from, to))
+                    .unwrap_or_default();
+                for record in chunk.into_iter().flatten() {
+                    if let Some(doc) = text_document_for(&table, &record) {
+                        engine.delete_document(&doc.id).await?;
+                        engine.add_document(doc).await?;
+                        copied += 1;
+                    }
+                }
+            }
+            from = to;
+            tokio::task::yield_now().await;
+        }
+        engine.commit().await?;
+
+        if let Some(data) = self.write_tables("rebuild_text_index").await.get_mut(name) {
+            data.full_text_engine = Some(engine.clone());
+        }
+        // The old index keeps forwarding to the new one: a write that took a handle to it just
+        // before the swap still reaches the index that now answers.
+        if let Some(generation) = generation {
+            make_text_generation_current(&root, &generation)?;
+        }
+        info!(
+            "Table '{name}': text index rebuilt from {copied} records in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        Ok(())
+    }
+
+    /// A text engine for `table`'s config over the index at `path` (empty: in memory).
+    #[cfg(feature = "text-bm25")]
+    async fn text_engine_at(
+        table: &Table,
+        path: &std::path::Path,
+    ) -> crate::Result<FullTextSearchEngine> {
+        let index_path = path.to_string_lossy().into_owned();
 
         // Create directory if it doesn't exist
         std::fs::create_dir_all(&index_path).map_err(|e| {

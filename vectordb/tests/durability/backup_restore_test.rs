@@ -458,13 +458,33 @@ fn scheduled_backups_keep_the_newest_and_restore_from_the_command_line() {
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..40 {
         let now = scheduled();
-        assert!(now.len() <= 2, "more than DXMT_BACKUP_KEEP kept: {now:?}");
+        // A tick writes the new backup whole, then prunes: deleting first would lose a good
+        // backup to a new one that fails. A listing between the two sees one over the limit,
+        // which a loaded machine (a full parallel `cargo test`) caught; more than that is a
+        // pruning that did not run.
+        assert!(
+            now.len() <= 3,
+            "more than DXMT_BACKUP_KEEP + 1 kept: {now:?}"
+        );
         seen.extend(now);
         if seen.len() >= 4 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    // And pruned back to the limit once the tick finishes.
+    let mut settled = scheduled();
+    for _ in 0..20 {
+        if settled.len() <= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        settled = scheduled();
+    }
+    assert!(
+        settled.len() <= 2,
+        "more than DXMT_BACKUP_KEEP kept: {settled:?}"
+    );
     assert!(
         seen.len() >= 4,
         "only {} scheduled backups were seen",

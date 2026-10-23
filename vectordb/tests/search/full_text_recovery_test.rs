@@ -299,9 +299,16 @@ fn the_index_lives_beside_the_wal_not_in_tmp() {
         "expected one index under {}",
         root.display()
     );
+    // Under the table's directory, as the generation `CURRENT` names (`fulltext/{id}/gN`).
+    let current = std::fs::read_to_string(indexes[0].path().join("CURRENT"))
+        .expect("the table's text index names its current generation");
     assert!(
-        indexes[0].path().join("meta.json").exists(),
-        "a Tantivy index should have written its meta.json here"
+        indexes[0]
+            .path()
+            .join(current.trim())
+            .join("meta.json")
+            .exists(),
+        "a Tantivy index should have written its meta.json in the current generation"
     );
 
     // And a sibling of the rest of the table's durable state, so one directory is the whole of it.

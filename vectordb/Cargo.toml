@@ -639,6 +639,10 @@ name = "exact_search_test"
 path = "tests/search/exact_search_test.rs"
 
 [[test]]
+name = "text_reindex_test"
+path = "tests/search/text_reindex_test.rs"
+
+[[test]]
 name = "calibration_test"
 path = "tests/recall/calibration_test.rs"
 

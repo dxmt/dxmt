@@ -42,6 +42,15 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **A table's text index can be changed after it holds data.** `PATCH /tables/{t}` takes
+  `text_fields` -- which payload fields are indexed and with which analyzer -- and rebuilds the
+  index from the records without stopping reads or writes: the current index keeps answering,
+  writes made meanwhile reach both, and the request returns once the new index has taken over.
+  It also turns full-text search on for a table created without it; `enable_full_text_search:
+  true` on its own used to set the flag and build nothing. Indexes now live in generations
+  (`fulltext/{table_id}/gN`, `CURRENT`), each recording the config it was built for, so an
+  index built for another config -- a rebuild cut short by a crash -- is rebuilt at the next
+  start. Indexes from before keep working where they are.
 - **Read replicas (experimental).** `serve --replica` (or `DXMT_REPLICA=1`) follows the object
   storage bucket a primary mirrors its WAL and snapshots to: it recovers from the bucket,
   applies the primary's new WAL chunks every `DXMT_REPLICA_POLL_MS` (default 1,000), serves
@@ -127,6 +136,11 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A snapshot that did not reach object storage no longer prunes it.** After a snapshot the
+  local log was trimmed and the bucket's WAL chunks below it deleted whether or not the
+  snapshot had been uploaded, so a failed upload left a bucket holding neither: a machine
+  recovering from it came back without the table. The chunks are pruned only once the bucket
+  holds the snapshot, and until then the local log keeps the entries the bucket lacks.
 - **A WAL upload to object storage that failed is retried, in order.** Each write uploaded its
   own entries and, on failure, logged a warning and moved on; nothing uploaded them later, so
   the bucket kept a hole the manifest's own check could not see, and a machine recovering from
