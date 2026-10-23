@@ -607,6 +607,37 @@ impl RowStore {
         }
     }
 
+    /// The live rows, in row order, each with the row of its vector. O(rows) over two flat
+    /// arrays and no decoding: cheap enough to take under the table lock, which is the point.
+    /// Rows are never reused or rewritten, so a row named here holds the same record later --
+    /// as long as nothing punches it in between (`punch_dead`), which the caller must exclude.
+    pub fn live_rows(&self) -> Vec<(u32, Option<u64>)> {
+        self.tombstone
+            .iter()
+            .enumerate()
+            .filter(|(_, gone)| !**gone)
+            .map(|(row, _)| {
+                let v = self.vector_rows.get(row).copied().unwrap_or(NO_VECTOR_ROW);
+                (row as u32, (v != NO_VECTOR_ROW).then_some(v))
+            })
+            .collect()
+    }
+
+    /// The records at `rows`, decoded on every core; `None` for one that will not decode.
+    /// Unlike `decode_range` this reads rows tombstoned since they were listed -- they still
+    /// hold the record that was live then.
+    pub fn decode_rows(&self, rows: &[u32]) -> Vec<Option<Arc<Record>>> {
+        use rayon::prelude::*;
+        rows.par_iter()
+            .map(|&row| {
+                self.file
+                    .read(row)
+                    .and_then(|bytes| rmp_serde::from_slice::<Record>(&bytes).ok())
+                    .map(Arc::new)
+            })
+            .collect()
+    }
+
     pub fn for_each(&self, mut f: impl FnMut(Arc<Record>)) {
         let mut timestamps = self
             .created
@@ -818,6 +849,22 @@ pub enum RecordStore {
 impl RecordStore {
     pub fn memory() -> Self {
         RecordStore::Memory(HashMap::new())
+    }
+
+    /// See [`RowStore::live_rows`]; `None` for the in-memory map.
+    pub fn live_rows(&self) -> Option<Vec<(u32, Option<u64>)>> {
+        match self {
+            RecordStore::Memory(_) => None,
+            RecordStore::Disk(s) => Some(s.live_rows()),
+        }
+    }
+
+    /// See [`RowStore::decode_rows`]; empty for the in-memory map.
+    pub fn decode_rows(&self, rows: &[u32]) -> Vec<Option<Arc<Record>>> {
+        match self {
+            RecordStore::Memory(_) => Vec::new(),
+            RecordStore::Disk(s) => s.decode_rows(rows),
+        }
     }
 
     pub fn is_on_disk(&self) -> bool {

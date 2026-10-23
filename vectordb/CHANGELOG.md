@@ -150,6 +150,13 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A snapshot mirrored to object storage held the table lock while it decoded every row.**
+  With object storage the snapshot carries each disk table's records and vectors, and it
+  decoded them under the table map's read lock, queueing every write: 2.0 s at 500,000 rows.
+  Only the list of live rows is taken under the lock now and the rows are decoded in chunks
+  under short locks; the longest write stall measured during a snapshot fell to 230 ms. The
+  row-reclamation sweep no longer runs during a snapshot. The snapshot's timing warning
+  reported the time it held the lock as time spent waiting for it; it reports both correctly.
 - **A snapshot upload interrupted part-way left the bucket inconsistent.** Segments were
   rewritten in place, manifest first, so a primary killed during the upload (1-2 s against GCS)
   left a manifest claiming the new sequence beside the previous snapshot's records; a machine

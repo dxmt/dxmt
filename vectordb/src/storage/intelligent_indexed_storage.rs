@@ -585,23 +585,26 @@ struct TableTemplate {
     algorithm: IndexAlgorithm,
     /// Shared with the live map rather than copied out of it; see `records` there.
     records: Vec<Arc<Record>>,
-    /// A disk table's rows when the snapshot is mirrored to object storage: the records
-    /// (without vectors) and where each vector is, so the vectors can be read in after the
-    /// lock is released. The row files are the durable copy on this machine, but a machine
-    /// recovering from the object store alone has no row files, and a snapshot that carries
-    /// no records would give it an empty table. Read from the row file rather than copied
-    /// out of memory, so this is the slow snapshot again -- only in that configuration.
+    /// A disk table's rows when the snapshot is mirrored to object storage. The row files are
+    /// the durable copy on this machine, but a machine recovering from the object store alone
+    /// has no row files, and a snapshot that carries no records would give it an empty table.
+    /// Only the list of live rows is taken under the lock; see `read_mirrored_rows`.
     mirrored_rows: Option<MirroredRows>,
     /// For `VectorFile::indexed_below`, read just before the graph is written.
     vector_file: Option<Arc<crate::storage::vector_file::VectorFile>>,
 }
 
-/// A disk table's rows as a mirrored snapshot copies them out: the vector file, and each
-/// record with the row its vector is at.
-type MirroredRows = (
-    Option<Arc<crate::storage::vector_file::VectorFile>>,
-    Vec<(Arc<Record>, Option<u64>)>,
-);
+/// A disk table's rows as a mirrored snapshot lists them under the lock: each live record row
+/// with the row its vector is at, and what is needed to read them afterwards.
+struct MirroredRows {
+    file: Option<Arc<crate::storage::vector_file::VectorFile>>,
+    live: Vec<(u32, Option<u64>)>,
+    /// The table's own id-to-vector-row map, which `vector_row` falls back to.
+    fallback: HashMap<RecordId, u64>,
+    /// Which table these rows belong to: a table dropped and created again under the name
+    /// between two chunks has rows of its own under the same numbers.
+    created_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// 一条待写入索引的记录：id、稠密向量，以及可选的命名向量。
 ///
@@ -3289,8 +3292,13 @@ impl IntelligentIndexedStorage {
         // that genuinely has to happen under the lock: it is what makes the snapshot a point in
         // time rather than a smear across one.
         let before_lock = std::time::Instant::now();
+        let waited;
         let pending: Vec<(String, crate::search::IndexWrapper, TableTemplate)> = {
             let tables = self.read_tables("snapshot").await;
+            // Taken here, once the lock is ours. It was taken after the copy, so the copy was
+            // reported as waiting and the copy itself as 0.0 s -- pointing at whoever held the
+            // lock instead of at this loop.
+            waited = before_lock.elapsed();
             tables
                 .iter()
                 .map(|(name, data)| {
@@ -3301,25 +3309,27 @@ impl IntelligentIndexedStorage {
                             table: data.table.clone(),
                             algorithm: data.selected_algorithm.clone(),
                             records: data.records.snapshot_records(),
-                            mirrored_rows: (self.object_storage_enabled
-                                && data.records.is_on_disk())
-                            .then(|| {
-                                let mut rows = Vec::with_capacity(data.records.len());
-                                data.records.for_each(|r| {
-                                    let row = data.vector_row(&r.id);
-                                    rows.push((r, row));
-                                });
-                                (data.vector_file.clone(), rows)
-                            }),
+                            // Which rows, not their contents: decoding every record of a disk
+                            // table under this lock was seconds at 500K rows, with every write
+                            // queued behind it (`scripts/replica_soak.py` against GCS).
+                            mirrored_rows: self
+                                .object_storage_enabled
+                                .then(|| data.records.live_rows())
+                                .flatten()
+                                .map(|live| MirroredRows {
+                                    file: data.vector_file.clone(),
+                                    live,
+                                    fallback: data.vector_rows.clone(),
+                                    created_at: data.table.created_at,
+                                }),
                             vector_file: data.vector_file.clone(),
                         },
                     )
                 })
                 .collect()
         };
-        let waited = before_lock.elapsed();
         let lock_held = std::time::Instant::now();
-        let copied_out = lock_held.duration_since(before_lock) - waited;
+        let copied_out = lock_held.duration_since(before_lock).saturating_sub(waited);
 
         let mut written = 0usize;
         let mut names = Vec::new();
@@ -3345,21 +3355,7 @@ impl IntelligentIndexedStorage {
 
             let records = match template.mirrored_rows {
                 None => template.records,
-                Some((file, rows)) => rows
-                    .into_iter()
-                    .map(|(record, row)| {
-                        if !record.vector.is_empty() {
-                            return record;
-                        }
-                        let Some(vector) = file.as_ref().zip(row).and_then(|(f, r)| f.read(r))
-                        else {
-                            return record;
-                        };
-                        let mut with_vector = (*record).clone();
-                        with_vector.vector = vector;
-                        Arc::new(with_vector)
-                    })
-                    .collect(),
+                Some(rows) => self.read_mirrored_rows(&name, rows).await?,
             };
             let head = rmp_serde::to_vec_named(&SnapshotHead {
                 table: template.table,
@@ -3557,6 +3553,64 @@ impl IntelligentIndexedStorage {
             written, seq
         );
         Ok(written)
+    }
+
+    /// The records a mirrored snapshot listed under the lock, with their vectors, read in
+    /// chunks under short read locks.
+    ///
+    /// A row is never reused or rewritten, so the rows listed are the table at the snapshot's
+    /// point whatever has been written since; the one thing that could change them is the
+    /// reclamation sweep punching a row that died in between, and it takes `snapshotting`.
+    /// The lock is still needed per chunk, because the record store lives in the table map.
+    async fn read_mirrored_rows(
+        &self,
+        name: &str,
+        rows: MirroredRows,
+    ) -> crate::Result<Vec<Arc<Record>>> {
+        const CHUNK: usize = 16_384;
+        let mut out = Vec::with_capacity(rows.live.len());
+        let mut undecodable = 0usize;
+        for chunk in rows.live.chunks(CHUNK) {
+            let numbers: Vec<u32> = chunk.iter().map(|(row, _)| *row).collect();
+            let decoded = {
+                let tables = self.read_tables("snapshot").await;
+                let data = tables
+                    .get(name)
+                    .filter(|d| d.table.created_at == rows.created_at)
+                    .ok_or_else(|| {
+                        crate::Error::Internal(format!(
+                            "table '{name}' was dropped, replaced or evicted while it was being \
+                             snapshotted; the next snapshot takes it"
+                        ))
+                    })?;
+                data.records.decode_rows(&numbers)
+            };
+            for ((_, vector_row), record) in chunk.iter().zip(decoded) {
+                let Some(record) = record else {
+                    undecodable += 1;
+                    continue;
+                };
+                if !record.vector.is_empty() {
+                    out.push(record);
+                    continue;
+                }
+                let row = vector_row.or_else(|| rows.fallback.get(&record.id).copied());
+                match rows.file.as_ref().zip(row).and_then(|(f, r)| f.read(r)) {
+                    Some(vector) => {
+                        let mut with_vector = (*record).clone();
+                        with_vector.vector = vector;
+                        out.push(Arc::new(with_vector));
+                    }
+                    None => out.push(record),
+                }
+            }
+        }
+        if undecodable > 0 {
+            warn!(
+                "table '{name}': {undecodable} rows would not decode and are not in the snapshot"
+            );
+        }
+        Ok(out)
     }
 
     /// 快照段在对象存储里的键。`version` is the snapshot's WAL sequence; `None` is the layout
@@ -5607,6 +5661,9 @@ impl IntelligentIndexedStorage {
     /// range that is already a hole succeeds and releases nothing, and deriving the number
     /// from the dead rows would report the same bytes again on every sweep.
     pub async fn reclaim_dead_rows(&self) -> crate::Result<Vec<(String, u64)>> {
+        // Not while a snapshot runs: a mirrored snapshot reads, after the lock, rows that were
+        // live when it listed them and may have died since (`read_mirrored_rows`).
+        let _serialized = self.snapshotting.lock().await;
         let names: Vec<String> = {
             let tables = self.read_tables("reclaim_dead_rows").await;
             tables.keys().cloned().collect()
