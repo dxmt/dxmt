@@ -501,6 +501,7 @@ async fn table_alterations_survive_a_restart() {
                     embedding: None,
                     rerank: None,
                     recall_target: None,
+                    text_fields: None,
                 },
             )
             .await

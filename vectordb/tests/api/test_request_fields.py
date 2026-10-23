@@ -850,6 +850,29 @@ def _(table, alterable=None):
     assert get(f"/tables/{name}").json()["data"]["table"]["enable_full_text_search"] is True
 
 
+@probe("TableAlterRequest", "text_fields")
+def _(table, alterable=None):
+    # A table created with no text index gets one, built from the rows already there: the
+    # record inserted before the PATCH is found by a word in its text.
+    name = f"textfields_{uuid.uuid4().hex[:8]}"
+    post("/tables", {"name": name, "dimension": 4})
+    try:
+        post(f"/tables/{name}/records", {"records": [
+            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"text": "hnsw builds a graph index"}}]})
+        r = alter(name, text_fields=[{"name": "content", "source": {"metadata_field": "text"},
+                                      "analyzer": "standard", "boost": 1.0}])
+        if r.status_code == 501 or "FEATURE_DISABLED" in r.text:
+            return
+        assert r.json()["success"] is True, r.text[:300]
+        found = post(f"/tables/{name}/search/text", {"query": "graph", "limit": 5},
+                     expect_ok=False)
+        if "FEATURE_DISABLED" in found.text:
+            return
+        assert [h["id"] for h in found.json()["data"]["hits"]] == ["a"], found.text[:300]
+    finally:
+        delete(f"/tables/{name}", expect_ok=False)
+
+
 @probe("TableAlterRequest", "memory_optimization")
 def _(table, alterable=None):
     name = alterable or table

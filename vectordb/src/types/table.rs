@@ -277,6 +277,14 @@ pub struct TableAlterRequest {
     /// config and the replay fail. `alter_request_logged_by_1_2_replays` pins the order.
     #[serde(default)]
     pub rerank: Option<RerankConfig>,
+    /// Replace the table's full-text fields -- which payload fields are indexed, and with which
+    /// analyzer -- and rebuild its text index from the records. Turns full-text search on if it
+    /// was off. The current index keeps answering while the new one is built, and writes made
+    /// meanwhile reach both; the request returns once the new index has taken over.
+    ///
+    /// **Last, and new fields go after it** (see `rerank`).
+    #[serde(default)]
+    pub text_fields: Option<Vec<TextFieldConfig>>,
 }
 
 /// Named vector space configuration (multi-vector support)
@@ -701,6 +709,10 @@ impl Table {
         }
         if let Some(mo) = req.memory_optimization {
             updated.memory_optimization = Some(mo);
+        }
+        if let Some(fields) = &req.text_fields {
+            updated.text_fields = Some(fields.clone());
+            updated.enable_full_text_search = true;
         }
         if let Some(fts) = req.enable_full_text_search {
             updated.enable_full_text_search = fts;

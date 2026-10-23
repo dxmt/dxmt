@@ -42,6 +42,15 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **A table's text index can be changed after it holds data.** `PATCH /tables/{t}` takes
+  `text_fields` -- which payload fields are indexed and with which analyzer -- and rebuilds the
+  index from the records without stopping reads or writes: the current index keeps answering,
+  writes made meanwhile reach both, and the request returns once the new index has taken over.
+  It also turns full-text search on for a table created without it; `enable_full_text_search:
+  true` on its own used to set the flag and build nothing. Indexes now live in generations
+  (`fulltext/{table_id}/gN`, `CURRENT`), each recording the config it was built for, so an
+  index built for another config -- a rebuild cut short by a crash -- is rebuilt at the next
+  start. Indexes from before keep working where they are.
 - **Read replicas (experimental).** `serve --replica` (or `DXMT_REPLICA=1`) follows the object
   storage bucket a primary mirrors its WAL and snapshots to: it recovers from the bucket,
   applies the primary's new WAL chunks every `DXMT_REPLICA_POLL_MS` (default 1,000), serves

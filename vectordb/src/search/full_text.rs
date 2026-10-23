@@ -36,6 +36,10 @@ pub struct FullTextSearchEngine {
 
     /// Statistics
     stats: Arc<RwLock<FullTextStats>>,
+
+    /// An index being rebuilt to replace this one, which every write here is forwarded to
+    /// until it does; see `set_shadow`.
+    shadow: std::sync::RwLock<Option<Arc<FullTextSearchEngine>>>,
 }
 
 /// Schema field references for quick access
@@ -372,11 +376,31 @@ impl FullTextSearchEngine {
             schema_fields,
             query_parsers: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(FullTextStats::default())),
+            shadow: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Forward every write, delete and commit made here to `shadow` as well, or stop (`None`).
+    ///
+    /// A table's text index is rebuilt -- new fields, a new analyzer -- into a second index
+    /// while this one keeps answering; the rows are copied over in the background, and the
+    /// writes that land meanwhile reach the new one through here, so nothing written during the
+    /// rebuild is missing when it takes over.
+    pub fn set_shadow(&self, shadow: Option<Arc<FullTextSearchEngine>>) {
+        if let Ok(mut slot) = self.shadow.write() {
+            *slot = shadow;
+        }
+    }
+
+    fn shadow(&self) -> Option<Arc<FullTextSearchEngine>> {
+        self.shadow.read().ok().and_then(|s| s.clone())
     }
 
     /// Add a document to the index
     pub async fn add_document(&self, doc: FullTextDocument) -> crate::Result<()> {
+        if let Some(shadow) = self.shadow() {
+            Box::pin(shadow.add_document(doc.clone())).await?;
+        }
         let mut tantivy_doc = tantivy::doc!();
 
         // Add fields
@@ -426,6 +450,9 @@ impl FullTextSearchEngine {
 
     /// Delete a document from the index
     pub async fn delete_document(&self, id: &RecordId) -> crate::Result<()> {
+        if let Some(shadow) = self.shadow() {
+            Box::pin(shadow.delete_document(id)).await?;
+        }
         let writer = self.writer.write().await;
 
         let term = Term::from_field_text(self.schema_fields.id_field, id);
@@ -442,6 +469,9 @@ impl FullTextSearchEngine {
 
     /// Commit changes to the index
     pub async fn commit(&self) -> crate::Result<()> {
+        if let Some(shadow) = self.shadow() {
+            Box::pin(shadow.commit()).await?;
+        }
         let mut writer = self.writer.write().await;
         writer
             .commit()
