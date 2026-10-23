@@ -93,6 +93,7 @@ impl From<Error> for ApiError {
             crate::Error::Serialization(_) => "SERIALIZATION_ERROR",
             crate::Error::NotImplemented(_) => "NOT_IMPLEMENTED",
             crate::Error::Timeout(_) => "TIMEOUT",
+            crate::Error::ReadOnlyReplica(_) => "READ_ONLY_REPLICA",
             crate::Error::NotLeader => "NOT_LEADER",
             crate::Error::NoAvailableNodes => "NO_AVAILABLE_NODES",
             crate::Error::EmptyVector => "EMPTY_VECTOR",

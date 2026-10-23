@@ -70,6 +70,11 @@ pub enum Error {
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// A write sent to a read replica. 403: the request is well formed and will never be
+    /// accepted here; it belongs on the primary.
+    #[error("Read-only replica: {0}")]
+    ReadOnlyReplica(String),
+
     #[error("Not leader")]
     NotLeader,
 
@@ -128,6 +133,7 @@ pub enum ErrorCode {
     // Client errors (4xx)
     NotFound,
     AlreadyExists,
+    ReadOnlyReplica,
     InvalidInput,
     InvalidConfig,
     DimensionMismatch,
@@ -160,6 +166,7 @@ impl Error {
             crate::Error::DimensionMismatch { .. } => ErrorCode::DimensionMismatch,
             crate::Error::Storage(_) | crate::Error::Io(_) => ErrorCode::Storage,
             crate::Error::Timeout(_) => ErrorCode::Timeout,
+            crate::Error::ReadOnlyReplica(_) => ErrorCode::ReadOnlyReplica,
             crate::Error::NotImplemented(_) => ErrorCode::NotImplemented,
             crate::Error::NotLeader | crate::Error::NoAvailableNodes => ErrorCode::ClusterError,
             crate::Error::ValidationError { .. } => ErrorCode::InvalidInput,
@@ -185,6 +192,7 @@ impl Error {
                 400
             }
             ErrorCode::Unauthorized => 401,
+            ErrorCode::ReadOnlyReplica => 403,
             ErrorCode::NotImplemented => 501,
             ErrorCode::ServiceUnavailable => 503,
             _ => 500,

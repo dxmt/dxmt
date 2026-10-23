@@ -98,6 +98,10 @@ pub struct TieredStorage {
     ssd_miss_count: Arc<AtomicU64>,
     /// 对象存储访问计数
     object_storage_access_count: Arc<AtomicU64>,
+    /// Read the source on every `get_object`, skipping both caches; see `get_object`.
+    uncached_reads: std::sync::atomic::AtomicBool,
+    /// Refuse every write and delete; see `set_read_only`.
+    read_only: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for TieredStorage {
@@ -141,6 +145,8 @@ impl TieredStorage {
             object_storage,
             stats: Arc::new(RwLock::new(HashMap::new())),
             memory_usage: Arc::new(RwLock::new(0)),
+            uncached_reads: std::sync::atomic::AtomicBool::new(false),
+            read_only: std::sync::atomic::AtomicBool::new(false),
             memory_hit_count: Arc::new(AtomicU64::new(0)),
             memory_miss_count: Arc::new(AtomicU64::new(0)),
             ssd_hit_count: Arc::new(AtomicU64::new(0)),
@@ -228,6 +234,30 @@ impl TieredStorage {
             };
 
         Self::new(tiered_config, object_storage)
+    }
+
+    /// Refuse every write to the bucket: for a read replica, which follows a bucket another
+    /// process owns. Two writers to one bucket overwrite each other's WAL manifest -- there is
+    /// no conditional write to stop them -- so this is enforced here, under every path that
+    /// could write, and not only at the API.
+    pub fn set_read_only(&self, on: bool) {
+        self.read_only.store(on, Ordering::Relaxed);
+    }
+
+    fn refuse_writes_on_a_replica(&self) -> ObjectStorageResult<()> {
+        if self.read_only.load(Ordering::Relaxed) {
+            return Err(ObjectStorageError::AccessDenied {
+                message: "this server is a read replica; it does not write to object storage"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Read every object from the source rather than the caches: for a process that reads a
+    /// bucket another one writes. See `get_object`.
+    pub fn set_uncached_reads(&self, on: bool) {
+        self.uncached_reads.store(on, Ordering::Relaxed);
     }
 
     /// 更新对象访问统计
@@ -408,6 +438,7 @@ impl ObjectStorage for TieredStorage {
         data: Bytes,
         content_type: Option<&str>,
     ) -> ObjectStorageResult<()> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage
             .put_object(key, data.clone(), content_type)
             .await?;
@@ -420,6 +451,12 @@ impl ObjectStorage for TieredStorage {
     }
 
     async fn get_object(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {
+        // A read replica reads the bucket another process writes. Its caches never see those
+        // writes -- this process put nothing -- so a cached MANIFEST or snapshot file would be
+        // served stale for good, the SSD tier across restarts too. It reads the source.
+        if self.uncached_reads.load(Ordering::Relaxed) {
+            return self.object_storage.get_object(key).await;
+        }
         // 尝试从内存获取
         if let Some(data) =
             self.get_from_memory(key)
@@ -456,6 +493,7 @@ impl ObjectStorage for TieredStorage {
     }
 
     async fn delete_object(&self, key: &str) -> ObjectStorageResult<()> {
+        self.refuse_writes_on_a_replica()?;
         // 从所有层删除
         let mut cache = self.memory_cache.write().await;
         if let Some(data) = cache.pop(key) {
@@ -475,6 +513,7 @@ impl ObjectStorage for TieredStorage {
     }
 
     async fn delete_objects(&self, keys: &[String]) -> ObjectStorageResult<Vec<String>> {
+        self.refuse_writes_on_a_replica()?;
         let mut deleted = Vec::new();
 
         for key in keys {
@@ -517,6 +556,7 @@ impl ObjectStorage for TieredStorage {
     }
 
     async fn copy_object(&self, source_key: &str, dest_key: &str) -> ObjectStorageResult<()> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage.copy_object(source_key, dest_key).await
     }
 
@@ -524,6 +564,7 @@ impl ObjectStorage for TieredStorage {
         &self,
         objects: Vec<(String, Vec<u8>)>,
     ) -> ObjectStorageResult<Vec<String>> {
+        self.refuse_writes_on_a_replica()?;
         let mut uploaded = Vec::new();
 
         for (key, data) in objects {
@@ -554,6 +595,7 @@ impl ObjectStorage for TieredStorage {
         content_length: Option<u64>,
         content_type: Option<&str>,
     ) -> ObjectStorageResult<()> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage
             .put_stream(key, stream, content_length, content_type)
             .await
@@ -571,6 +613,7 @@ impl ObjectStorage for TieredStorage {
         key: &str,
         content_type: Option<&str>,
     ) -> ObjectStorageResult<String> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage
             .create_multipart_upload(key, content_type)
             .await
@@ -583,6 +626,7 @@ impl ObjectStorage for TieredStorage {
         part_number: u32,
         data: &[u8],
     ) -> ObjectStorageResult<PartInfo> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage
             .upload_part(key, upload_id, part_number, data)
             .await
@@ -594,6 +638,7 @@ impl ObjectStorage for TieredStorage {
         upload_id: &str,
         parts: &[PartInfo],
     ) -> ObjectStorageResult<()> {
+        self.refuse_writes_on_a_replica()?;
         self.object_storage
             .complete_multipart_upload(key, upload_id, parts)
             .await

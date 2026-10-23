@@ -42,6 +42,14 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Read replicas (experimental).** `serve --replica` (or `DXMT_REPLICA=1`) follows the object
+  storage bucket a primary mirrors its WAL and snapshots to: it recovers from the bucket,
+  applies the primary's new WAL chunks every `DXMT_REPLICA_POLL_MS` (default 1,000), serves
+  every read, and refuses every write with `403 READ_ONLY_REPLICA`. Nothing on a replica writes
+  the bucket -- uploads and deletes are refused in the storage layer -- and its object reads
+  skip the caches, which would otherwise serve another process's MANIFEST stale. A replica that
+  falls behind a snapshot that pruned chunks it had not applied reports not ready until
+  restarted. `/metrics`: `dxmt_replica_applied_next_sequence`, `dxmt_replica_stale`.
 - **Query admission.** At most `DXMT_MAX_CONCURRENT_QUERIES` searches run at once (default
   twice the cores), `DXMT_QUERY_QUEUE` more wait up to `DXMT_QUERY_QUEUE_TIMEOUT_MS`, and the
   rest are answered `429 TOO_MANY_REQUESTS` with `Retry-After: 1` instead of slowing every query
@@ -119,6 +127,13 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A WAL upload to object storage that failed is retried, in order.** Each write uploaded its
+  own entries and, on failure, logged a warning and moved on; nothing uploaded them later, so
+  the bucket kept a hole the manifest's own check could not see, and a machine recovering from
+  object storage alone came back without those writes. The next write -- or the next start --
+  now uploads everything from the first entry the bucket lacks, so its chunks stay contiguous.
+  `/metrics` exports `dxmt_wal_mirrored_next_sequence`; its distance to
+  `dxmt_wal_next_sequence` is what losing the machine would lose.
 - **PQ parameters a one-byte code cannot hold are refused.** `quantization.num_centroids`
   above 256 wrapped centroid indices silently and degraded search; it is a 400 at creation,
   as is `num_subvectors: 0`.

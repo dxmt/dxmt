@@ -535,6 +535,30 @@ export DXMT_AWS_ACCESS_KEY_ID=<your-access-key>
 export DXMT_AWS_SECRET_ACCESS_KEY=<your-secret-key>
 ```
 
+### Object storage and read replicas
+
+With `DXMT_OBJECT_STORAGE_PROVIDER` set (`s3` needs the `s3-storage` build; `filesystem`
+writes under `DXMT_SSD_CACHE_DIR`, e.g. a network mount), every acknowledged write is also
+uploaded as a WAL chunk and every snapshot is uploaded, so a machine with an empty data
+directory recovers from the bucket alone. An upload that fails is retried, in order, by the
+next write or the next start; `dxmt_wal_mirrored_next_sequence` on `/metrics` shows how far
+the bucket trails `dxmt_wal_next_sequence`.
+
+A second server can follow that bucket as a **read replica** (experimental):
+
+```bash
+DXMT_OBJECT_STORAGE_PROVIDER=s3 DXMT_S3_BUCKET=my-bucket \
+  ./target/release/vectordb serve --replica --port 9998
+```
+
+It recovers from the bucket, applies new WAL chunks every `DXMT_REPLICA_POLL_MS` (default
+1,000), answers every read, and refuses every write with `403 READ_ONLY_REPLICA`. It never
+writes the bucket. `dxmt_replica_applied_next_sequence` is how far it has applied; if it falls
+behind a snapshot that pruned chunks it had not applied, it reports not ready
+(`dxmt_replica_stale 1`) until restarted. Aliases live in a local file and are not followed.
+There is one writer per bucket: the WAL manifest has no conditional write, so two primaries on
+one bucket would overwrite each other's.
+
 ### Feature Flags
 
 Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,
