@@ -83,7 +83,7 @@ def start(name, replica=False, tag=""):
         "DXMT_OBJECT_STORAGE_PROVIDER": "s3",
         "DXMT_WAL_DIR": d,
         "DXMT_SSD_CACHE_DIR": d + ".ssd",
-        "DXMT_SNAPSHOT_INTERVAL_SECS": "5",
+        "DXMT_SNAPSHOT_INTERVAL_SECS": os.environ.get("SOAK_SNAPSHOT_SECS", "5"),
         "DXMT_REPLICA_POLL_MS": "200",
         # Short enough that chunks are pruned during the run; long enough to cover a
         # replica's restart. The default is 600.

@@ -544,6 +544,9 @@ directory recovers from the bucket alone. An upload that fails is retried, in or
 next write or the next start; `dxmt_wal_mirrored_next_sequence` on `/metrics` shows how far
 the bucket trails `dxmt_wal_next_sequence`.
 
+Google Cloud Storage works through its S3-compatible API: `DXMT_S3_ENDPOINT=https://storage.googleapis.com`,
+`DXMT_S3_REGION=auto`, and an HMAC key pair in `DXMT_AWS_ACCESS_KEY_ID` / `DXMT_AWS_SECRET_ACCESS_KEY`.
+
 A second server can follow that bucket as a **read replica** (experimental):
 
 ```bash

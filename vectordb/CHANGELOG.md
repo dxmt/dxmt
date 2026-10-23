@@ -150,6 +150,22 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A snapshot upload interrupted part-way left the bucket inconsistent.** Segments were
+  rewritten in place, manifest first, so a primary killed during the upload (1-2 s against GCS)
+  left a manifest claiming the new sequence beside the previous snapshot's records; a machine
+  recovering from the bucket lost the writes in between. Each snapshot now goes to
+  `snapshot/v{seq}/` and is published by `snapshot/CURRENT` once every segment is up; older
+  versions are pruned with the WAL chunks. Buckets in the old layout are still read. An
+  unchanged snapshot is no longer re-uploaded every interval.
+- **Writes logged before a snapshot and mirrored after it never became WAL chunks.** The
+  snapshot covered them, so recovery was unaffected, but replicas follow chunks: they found a
+  hole and restarted, about once a minute on GCS.
+- **A failed WAL manifest write left the in-memory manifest changed**: the retry listed the
+  same chunk twice with two ranges, and a failed prune dropped chunks from the next manifest
+  written. Both are undone on failure now, manifest writes are serialised, and a manifest
+  write is retried with backoff, since GCS limits how often one object may be rewritten.
+- **S3 errors said only "service error"** and a missing object was never recognised as one;
+  the error code and message are reported now.
 - **The S3 backend ignored `DXMT_AWS_ACCESS_KEY_ID` / `DXMT_AWS_SECRET_ACCESS_KEY`.** They were
   read into the configuration and dropped when the client was built, so the AWS SDK's default
   chain (`~/.aws/credentials`, the instance role) signed every request -- against MinIO too.

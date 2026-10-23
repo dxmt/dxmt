@@ -108,7 +108,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         Ok(())
@@ -125,13 +125,16 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NoSuchKey") {
+                if aws_sdk_s3::error::DisplayErrorContext(&e)
+                    .to_string()
+                    .contains("NoSuchKey")
+                {
                     ObjectStorageError::ObjectNotFound {
                         key: key.to_string(),
                     }
                 } else {
                     ObjectStorageError::AwsError {
-                        message: e.to_string(),
+                        message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
                     }
                 }
             })?;
@@ -141,7 +144,7 @@ impl ObjectStorage for S3Storage {
             .collect()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         Ok(data.into_bytes().to_vec())
@@ -165,7 +168,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         let data = response
@@ -173,7 +176,7 @@ impl ObjectStorage for S3Storage {
             .collect()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         Ok(data.into_bytes().to_vec())
@@ -189,7 +192,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         Ok(())
@@ -235,7 +238,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         let last_modified = response
@@ -294,7 +297,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         let mut objects = Vec::new();
@@ -365,7 +368,7 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| ObjectStorageError::AwsError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
 
         Ok(())
@@ -413,7 +416,7 @@ impl ObjectStorage for S3Storage {
         let mut data = Vec::new();
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| ObjectStorageError::IoError {
-                message: e.to_string(),
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
             })?;
             data.extend_from_slice(&chunk);
         }
@@ -494,13 +497,16 @@ impl ObjectStorage for S3Storage {
             .send()
             .await
             .map_err(|e| {
-                if e.to_string().contains("NoSuchBucket") {
+                if aws_sdk_s3::error::DisplayErrorContext(&e)
+                    .to_string()
+                    .contains("NoSuchBucket")
+                {
                     ObjectStorageError::BucketNotFound {
                         bucket: self.bucket.clone(),
                     }
                 } else {
                     ObjectStorageError::AwsError {
-                        message: e.to_string(),
+                        message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
                     }
                 }
             })?;

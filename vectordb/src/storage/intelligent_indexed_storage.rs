@@ -818,6 +818,10 @@ pub struct IntelligentIndexedStorage {
     wal_mirrored_next: AtomicU64,
     /// One mirror upload at a time, so chunks are contiguous and in order.
     wal_mirror_lock: tokio::sync::Mutex<()>,
+    /// Held from changing the in-memory WAL manifest until its upload has succeeded or been
+    /// undone. Appending a chunk and pruning both write the whole manifest; unserialised, an
+    /// older copy could land after a newer one and list chunks already deleted.
+    manifest_write: tokio::sync::Mutex<()>,
     /// A read replica: it follows the WAL another process mirrors to object storage, serves
     /// reads, refuses writes, and never writes the bucket. See `new_replica`.
     replica: bool,
@@ -838,6 +842,8 @@ pub struct IntelligentIndexedStorage {
     wal_retain_secs: AtomicU64,
     /// Snapshots uploaded since start, oldest first, with when: the candidates to prune to.
     offloaded_snapshots: StdMutex<std::collections::VecDeque<(std::time::Instant, u64)>>,
+    /// The sequence of the last snapshot published to object storage; `u64::MAX` before one.
+    last_offloaded: AtomicU64,
 
     /// 回放期间置位，用于抑制 WAL 写入。回放走的是 `create_table` /
     /// `insert_records` 这些正常入口（否则索引不会被填充），所以必须挡住它们
@@ -2432,6 +2438,7 @@ impl IntelligentIndexedStorage {
             wal_manifest: Arc::new(StdMutex::new(WalManifest::default())),
             wal_mirrored_next: AtomicU64::new(0),
             wal_mirror_lock: tokio::sync::Mutex::new(()),
+            manifest_write: tokio::sync::Mutex::new(()),
             replica: false,
             replica_applied_next: AtomicU64::new(0),
             replica_stale: StdMutex::new(None),
@@ -2450,6 +2457,7 @@ impl IntelligentIndexedStorage {
                     .unwrap_or(600),
             ),
             offloaded_snapshots: StdMutex::new(std::collections::VecDeque::new()),
+            last_offloaded: AtomicU64::new(u64::MAX),
             replaying: replaying_flag,
             durability_error: Arc::new(StdMutex::new(None)),
             last_wal_sync_at: Arc::new(StdMutex::new(None)),
@@ -3473,12 +3481,19 @@ impl IntelligentIndexedStorage {
         // local snapshot is still there and still verified, so compaction stays safe — but the
         // remote copy is the one that survives losing this machine, so say so loudly.
         let offloaded = !self.object_storage_enabled
-            || match self.offload_snapshot(&dir, written).await {
+            // Nothing was logged since the last one: the bucket has this snapshot already. The
+            // periodic snapshot used to upload the same tens of megabytes every interval on an
+            // idle table, into the version a recovering machine may be reading.
+            || self.last_offloaded.load(Ordering::SeqCst) == seq
+            || match self.offload_snapshot(&dir, written, seq).await {
                 Ok(bytes) => {
                     info!("Snapshot offloaded to object storage: {} bytes", bytes);
-                    // The bucket now holds everything below `seq` in the snapshot itself, so
-                    // the WAL mirror has nothing below it left to upload.
-                    self.wal_mirrored_next.fetch_max(seq, Ordering::SeqCst);
+                    // The mirror frontier does not jump to `seq`. Recovery would not miss the
+                    // entries between -- the snapshot holds them -- but a replica follows the
+                    // chunks, not the snapshots, and found a hole there: every write logged
+                    // before a snapshot and mirrored after it was skipped. On GCS, whose
+                    // uploads are slow enough for that to be most snapshots, replicas went
+                    // stale every minute.
                     true
                 }
                 Err(e) => {
@@ -3491,10 +3506,13 @@ impl IntelligentIndexedStorage {
         // `mirror_wal` to upload, and the bucket's own chunks stay too. Trimming to `seq`
         // regardless -- as this did -- and pruning the chunks below it left a bucket holding
         // neither the snapshot nor the entries: a machine recovering from it lost them.
-        let keep_from = if offloaded {
-            seq
-        } else {
+        //
+        // That holds when the snapshot did reach it too: the entries it covers that are not yet
+        // in a chunk are still to be mirrored, for the replicas, and are read back from here.
+        let keep_from = if self.object_storage_enabled {
             seq.min(self.wal_mirrored_next.load(Ordering::SeqCst))
+        } else {
+            seq
         };
 
         // Only now is it safe to drop the log this snapshot covers. Compacting any earlier
@@ -3519,6 +3537,7 @@ impl IntelligentIndexedStorage {
         if self.object_storage_enabled && offloaded {
             if let Some(keep_from) = self.retained_prune_point(seq) {
                 self.prune_wal_chunks(keep_from).await;
+                self.prune_snapshot_versions(keep_from).await;
             }
         }
 
@@ -3540,9 +3559,55 @@ impl IntelligentIndexedStorage {
         Ok(written)
     }
 
-    /// 快照段在对象存储里的键。
-    fn snapshot_key(name: &str) -> String {
-        format!("snapshot/{}", name)
+    /// 快照段在对象存储里的键。`version` is the snapshot's WAL sequence; `None` is the layout
+    /// before versions, `snapshot/{name}`, still read when there is no `snapshot/CURRENT`.
+    ///
+    /// Each snapshot is written under its own prefix and published by rewriting
+    /// `snapshot/CURRENT` once every segment is up. They used to be rewritten in place,
+    /// manifest first: a primary killed during the upload -- 1-2 s for each snapshot against
+    /// GCS -- left a manifest claiming the new sequence beside the previous snapshot's
+    /// records, and a machine recovering from the bucket skipped the entries in between.
+    /// `scripts/replica_soak.py` lost the last batch before a `kill -9` that way.
+    fn snapshot_key(version: Option<u64>, name: &str) -> String {
+        match version {
+            Some(v) => format!("snapshot/v{v:020}/{name}"),
+            None => format!("snapshot/{name}"),
+        }
+    }
+
+    const SNAPSHOT_CURRENT: &'static str = "snapshot/CURRENT";
+
+    /// Delete the snapshots in object storage older than `keep_from`, and the unversioned
+    /// layout, which a `CURRENT` supersedes. Called with the same point the WAL chunks are
+    /// pruned to, so a machine that read `CURRENT` a moment ago still finds its segments.
+    async fn prune_snapshot_versions(&self, keep_from: u64) {
+        use crate::storage::object::traits::ObjectStorage;
+        let options = crate::storage::object::types::ListObjectsOptions {
+            prefix: Some("snapshot/".to_string()),
+            max_keys: None,
+            continuation_token: None,
+            delimiter: None,
+        };
+        let Ok(listed) = self.storage.list_objects(&options).await else {
+            return;
+        };
+        for object in listed.objects {
+            let key = object.key;
+            if key == Self::SNAPSHOT_CURRENT {
+                continue;
+            }
+            let older = match key.strip_prefix("snapshot/v") {
+                Some(rest) => rest
+                    .split('/')
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .is_some_and(|v| v < keep_from),
+                None => true, // unversioned
+            };
+            if older {
+                let _ = self.storage.delete_object(&key).await;
+            }
+        }
     }
 
     /// 列出一个快照目录下需要随身携带的段文件。
@@ -3562,7 +3627,12 @@ impl IntelligentIndexedStorage {
     ///
     /// 这是分层存储在写路径上的落点：本地磁盘是缓存，对象存储才是持久归宿。段文件是不可变的
     /// ——一次快照写一组新的键——所以不需要读改写，也没有并发覆盖问题。
-    async fn offload_snapshot(&self, dir: &std::path::Path, tables: usize) -> crate::Result<u64> {
+    async fn offload_snapshot(
+        &self,
+        dir: &std::path::Path,
+        tables: usize,
+        seq: u64,
+    ) -> crate::Result<u64> {
         use crate::storage::object::traits::ObjectStorage;
 
         let mut bytes = 0u64;
@@ -3571,7 +3641,7 @@ impl IntelligentIndexedStorage {
             bytes += data.len() as u64;
             self.storage
                 .put_object(
-                    &Self::snapshot_key(&name),
+                    &Self::snapshot_key(Some(seq), &name),
                     bytes::Bytes::from(data),
                     Some("application/octet-stream"),
                 )
@@ -3580,6 +3650,16 @@ impl IntelligentIndexedStorage {
                     crate::Error::Internal(format!("uploading snapshot segment {}: {}", name, e))
                 })?;
         }
+        // Last, and only once every segment is up: this is what makes it the snapshot.
+        self.storage
+            .put_object(
+                Self::SNAPSHOT_CURRENT,
+                bytes::Bytes::from(serde_json::json!({ "version": seq }).to_string()),
+                Some("application/json"),
+            )
+            .await
+            .map_err(|e| crate::Error::Internal(format!("publishing snapshot: {}", e)))?;
+        self.last_offloaded.store(seq, Ordering::SeqCst);
         Ok(bytes)
     }
 
@@ -3587,9 +3667,16 @@ impl IntelligentIndexedStorage {
     async fn fetch_snapshot(&self, dir: &std::path::Path) -> crate::Result<bool> {
         use crate::storage::object::traits::ObjectStorage;
 
+        let version = self
+            .storage
+            .get_object(Self::SNAPSHOT_CURRENT)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["version"].as_u64());
         let manifest_bytes = match self
             .storage
-            .get_object(&Self::snapshot_key("manifest"))
+            .get_object(&Self::snapshot_key(version, "manifest"))
             .await
         {
             Ok(b) => b,
@@ -3607,7 +3694,11 @@ impl IntelligentIndexedStorage {
 
         for i in 0..manifest.tables {
             for name in [format!("t{}.meta", i), format!("t{}.idx", i)] {
-                match self.storage.get_object(&Self::snapshot_key(&name)).await {
+                match self
+                    .storage
+                    .get_object(&Self::snapshot_key(version, &name))
+                    .await
+                {
                     Ok(data) => std::fs::write(dir.join(&name), data)?,
                     // `.idx` 是可选的：BruteForce 之类的索引没有磁盘格式，`has_index` 为 false。
                     Err(_) if name.ends_with(".idx") => {}
@@ -6155,16 +6246,42 @@ impl IntelligentIndexedStorage {
     async fn put_manifest(&self, manifest: &WalManifest) -> crate::Result<()> {
         use crate::storage::object::traits::ObjectStorage;
 
-        let bytes =
-            serde_json::to_vec(manifest).map_err(|e| crate::Error::Serialization(e.to_string()))?;
-        self.storage
-            .put_object(
-                Self::wal_manifest_key(),
-                bytes::Bytes::from(bytes),
-                Some("application/json"),
-            )
-            .await
-            .map_err(|e| crate::Error::Internal(format!("writing WAL manifest: {}", e)))
+        let bytes = bytes::Bytes::from(
+            serde_json::to_vec(manifest).map_err(|e| crate::Error::Serialization(e.to_string()))?,
+        );
+        // The manifest is one object rewritten on every mirrored write, and object stores limit
+        // how often one object may be rewritten -- GCS to about once a second, answering 429
+        // beyond it. A failure here is retried by the next write anyway; retrying a few times
+        // with backoff first keeps a burst of writes from turning into a run of warnings and a
+        // replica that sees nothing new until the burst ends. The write is a whole overwrite,
+        // so repeating it is safe.
+        let mut delay = std::time::Duration::from_millis(200);
+        let mut attempt = 0;
+        loop {
+            match self
+                .storage
+                .put_object(
+                    Self::wal_manifest_key(),
+                    bytes.clone(),
+                    Some("application/json"),
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 4 => {
+                    debug!("writing WAL manifest failed, retrying in {delay:?}: {e}");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(crate::Error::Internal(format!(
+                        "writing WAL manifest: {}",
+                        e
+                    )))
+                }
+            }
+        }
     }
 
     /// 启动时把清单读进内存；没有清单就从前缀里重建一份。
@@ -6649,13 +6766,14 @@ impl IntelligentIndexedStorage {
         // manifest pointing at an object that may not exist, and recovery fails outright; this
         // way a failed manifest write leaves an unreferenced object — wasted space, nothing
         // more.
+        let _write = self.manifest_write.lock().await;
         let manifest = {
             let mut guard = self
                 .wal_manifest
                 .lock()
                 .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))?;
             guard.chunks.push(WalChunkRef {
-                path,
+                path: path.clone(),
                 first_seq,
                 last_seq: entries.last().map(|(s, _)| *s).unwrap_or(first_seq),
                 entries: entries.len(),
@@ -6663,7 +6781,25 @@ impl IntelligentIndexedStorage {
             guard.total_entries += entries.len() as u64;
             guard.clone()
         };
-        self.put_manifest(&manifest).await
+        if let Err(e) = self.put_manifest(&manifest).await {
+            // Undo the entry. Kept, it stayed in memory while the bucket never had it, and the
+            // retry -- the same entries and more, from the same first sequence, so the same key
+            // -- added a second, overlapping one: a manifest listing one object twice with two
+            // different ranges. Found against GCS, whose per-object write rate limit fails
+            // manifest writes under load.
+            if let Ok(mut guard) = self.wal_manifest.lock() {
+                if let Some(i) = guard
+                    .chunks
+                    .iter()
+                    .rposition(|c| c.path == path && c.first_seq == first_seq)
+                {
+                    let undone = guard.chunks.remove(i);
+                    guard.total_entries -= undone.entries as u64;
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// 列出 `wal/` 下所有分块的键，按序号（即字典序）排好。
@@ -6777,6 +6913,7 @@ impl IntelligentIndexedStorage {
     async fn prune_wal_chunks(&self, keep_from: u64) {
         use crate::storage::object::traits::ObjectStorage;
 
+        let _write = self.manifest_write.lock().await;
         let (manifest, dropped) = {
             let Ok(mut guard) = self.wal_manifest.lock() else {
                 return;
@@ -6799,8 +6936,15 @@ impl IntelligentIndexedStorage {
             return;
         }
         if self.put_manifest(&manifest).await.is_err() {
-            // Leave the objects alone: a manifest that still lists them is consistent, just
-            // larger than it needs to be.
+            // Leave the objects alone, and put them back in the manifest: one that still lists
+            // them is consistent, just larger than it needs to be. Left out of the in-memory
+            // copy, the next manifest written for any reason dropped them while the objects
+            // stayed -- never deleted, and gone from under a replica that had not applied them.
+            if let Ok(mut guard) = self.wal_manifest.lock() {
+                guard.pruned_entries -= dropped.iter().map(|c| c.entries as u64).sum::<u64>();
+                guard.chunks.extend(dropped.iter().cloned());
+                guard.chunks.sort_by_key(|c| c.first_seq);
+            }
             warn!(
                 "WAL manifest update failed; leaving {} chunks in place",
                 dropped.len()
