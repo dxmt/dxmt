@@ -3408,3 +3408,49 @@ async fn wal_entries_that_never_reached_object_storage_go_up_at_the_next_start()
         vec!["a", "b"]
     );
 }
+
+/// A snapshot whose upload failed used to trim the local log and prune the bucket's WAL chunks
+/// below it anyway, leaving a bucket with neither the snapshot nor the entries. Now neither
+/// happens until the bucket holds the snapshot, and a fresh machine recovers everything.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_snapshot_that_did_not_reach_object_storage_does_not_prune_it() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let bucket = shared.join("ssd").join("test-bucket");
+    {
+        let storage =
+            IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("machine-a")))
+                .await
+                .unwrap();
+        storage
+            .create_table(table("t", 4, DistanceMetric::Euclidean))
+            .await
+            .unwrap();
+        storage
+            .insert_records(
+                "t",
+                vec![
+                    record("a", vec![1.0, 0.0, 0.0, 0.0]),
+                    record("b", vec![0.0, 1.0, 0.0, 0.0]),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(!bucket.join("snapshot").exists());
+        // No snapshot directory can be made in the bucket; the WAL chunks stay deletable.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bucket, std::fs::Permissions::from_mode(0o555)).unwrap();
+        storage
+            .snapshot()
+            .await
+            .expect("the local snapshot succeeds");
+        std::fs::set_permissions(&bucket, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(
+        ids_recovered_from_object_storage_alone(&config, tmp.path().join("machine-b")).await,
+        vec!["a", "b"],
+        "the bucket lost entries a snapshot it never received was said to cover"
+    );
+}

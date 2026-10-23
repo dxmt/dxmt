@@ -3414,12 +3414,30 @@ impl IntelligentIndexedStorage {
         // Push the segments to object storage before trimming the log. If the upload fails the
         // local snapshot is still there and still verified, so compaction stays safe — but the
         // remote copy is the one that survives losing this machine, so say so loudly.
-        if self.object_storage_enabled {
-            match self.offload_snapshot(&dir, written).await {
-                Ok(bytes) => info!("Snapshot offloaded to object storage: {} bytes", bytes),
-                Err(e) => warn!("Snapshot is local-only, upload failed: {}", e),
-            }
-        }
+        let offloaded = !self.object_storage_enabled
+            || match self.offload_snapshot(&dir, written).await {
+                Ok(bytes) => {
+                    info!("Snapshot offloaded to object storage: {} bytes", bytes);
+                    // The bucket now holds everything below `seq` in the snapshot itself, so
+                    // the WAL mirror has nothing below it left to upload.
+                    self.wal_mirrored_next.fetch_max(seq, Ordering::SeqCst);
+                    true
+                }
+                Err(e) => {
+                    warn!("Snapshot is local-only, upload failed: {}", e);
+                    false
+                }
+            };
+        // With object storage, the log may only be trimmed to what the bucket holds. When the
+        // snapshot did not reach it, the entries the bucket lacks stay in the local log for
+        // `mirror_wal` to upload, and the bucket's own chunks stay too. Trimming to `seq`
+        // regardless -- as this did -- and pruning the chunks below it left a bucket holding
+        // neither the snapshot nor the entries: a machine recovering from it lost them.
+        let keep_from = if offloaded {
+            seq
+        } else {
+            seq.min(self.wal_mirrored_next.load(Ordering::SeqCst))
+        };
 
         // Only now is it safe to drop the log this snapshot covers. Compacting any earlier
         // leaves a window where neither the previous snapshot nor the log can reconstruct
@@ -3427,14 +3445,14 @@ impl IntelligentIndexedStorage {
         match wal
             .lock()
             .map_err(|_| crate::Error::Internal("WAL lock poisoned".to_string()))
-            .and_then(|mut g| g.truncate_before(seq))
+            .and_then(|mut g| g.truncate_before(keep_from))
         {
             Ok(reclaimed) if reclaimed > 0 => {
                 info!(
                     "WAL compacted below sequence {}: {} bytes reclaimed",
-                    seq, reclaimed
+                    keep_from, reclaimed
                 );
-                if self.object_storage_enabled {
+                if self.object_storage_enabled && offloaded {
                     self.prune_wal_chunks(seq).await;
                 }
             }

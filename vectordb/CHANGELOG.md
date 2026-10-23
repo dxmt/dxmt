@@ -136,6 +136,11 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A snapshot that did not reach object storage no longer prunes it.** After a snapshot the
+  local log was trimmed and the bucket's WAL chunks below it deleted whether or not the
+  snapshot had been uploaded, so a failed upload left a bucket holding neither: a machine
+  recovering from it came back without the table. The chunks are pruned only once the bucket
+  holds the snapshot, and until then the local log keeps the entries the bucket lacks.
 - **A WAL upload to object storage that failed is retried, in order.** Each write uploaded its
   own entries and, on failure, logged a warning and moved on; nothing uploaded them later, so
   the bucket kept a hole the manifest's own check could not see, and a machine recovering from
