@@ -43,7 +43,7 @@ release, and the first commit that was ever pushed anywhere.
 ### Added
 
 - **Prebuilt Linux binaries.** Each release tag builds `x86_64` and `aarch64` binaries with
-  the web console compiled in, on glibc 2.31 (Debian 11, Ubuntu 20.04, RHEL 9 or newer),
+  the web console compiled in, on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer),
   smoke-tests them -- the server answers, `/dashboard` is served, a write and a search work --
   and attaches them with their SHA-256 to the release (`.github/workflows/release.yml`). A
   binary built from source by following the quick start had no console, because the bundle

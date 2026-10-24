@@ -5,9 +5,10 @@
 # without someone pressing the button. A pull request that touches this file builds and
 # smoke-tests everything and publishes nothing: that is how a change here is tried.
 #
-# Built in Debian 11 (glibc 2.31), so the binaries run on Debian 11+, Ubuntu 20.04+, RHEL 9 and
-# anything newer. A runner's own Ubuntu would tie them to its glibc, which is newer than most
-# servers'.
+# Built in AlmaLinux 8 (glibc 2.28, supported to 2029), so the binaries run on RHEL/Rocky/Alma 8,
+# Debian 10, Ubuntu 20.04 and anything newer. A runner's own Ubuntu would tie them to its glibc,
+# which is newer than most servers'. Debian 11 was the first choice and its mirrors no longer
+# serve it.
 name: release
 
 on:
@@ -51,7 +52,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    container: debian:bullseye
+    container: almalinux:8
     defaults:
       run:
         working-directory: vectordb
@@ -61,9 +62,7 @@ jobs:
       - name: Build tools
         working-directory: /
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential pkg-config ca-certificates curl git jq
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config git jq tar gzip which
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:

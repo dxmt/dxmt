@@ -49,7 +49,7 @@ standalone tests.
 
 Prebuilt Linux binaries, with the web console compiled in, are attached to each
 [release](https://github.com/dxmt/dxmt/releases) from 1.4.0 on: `dxmt-vectordb-<version>-<x86_64|aarch64>-linux-gnu.tar.gz`,
-built on glibc 2.31 (Debian 11, Ubuntu 20.04, RHEL 9 or newer), each with a `.sha256` beside
+built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.
 
 To build it yourself you need [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml` (1.99.0), and
