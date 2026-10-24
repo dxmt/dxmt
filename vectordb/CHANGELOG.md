@@ -168,6 +168,9 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **The crate did not compile on aarch64** (ARM servers, Graviton, Linux on Apple silicon): one
+  AVX2 function was missing its `cfg(target_arch = "x86_64")`. Found by the first ARM release
+  build; CI now runs clippy and the unit tests on an ARM runner.
 - **A first run without an embedding model was told `TABLE_NOT_FOUND: kb`** when it wrote its
   first note, as the README says to. It is a 400 now saying the notes table needs a model and
   how to get one (`ollama pull bge-m3`, or `DXMT_EMBEDDING_MODEL`).
