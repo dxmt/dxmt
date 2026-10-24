@@ -1060,6 +1060,13 @@ pub async fn insert_records(
     Path(table_name): Path<String>,
     ApiJson(request): ApiJson<BatchInsertRequest>,
 ) -> impl IntoResponse {
+    // A server that will refuse the write anyway says why first. Its refusals count as errors,
+    // and the error rate is what the overload check below reads, so a read-only server -- a
+    // primary another one replaced -- went on to answer 429 "overloaded, retry", which is the
+    // one thing a client should not do with it.
+    if let Err(e) = state.storage.check_writable() {
+        return error_response(e);
+    }
     // Check server health and apply backpressure if needed
     let (should_accept, health_state) = state.server_health.should_accept_insert().await;
 

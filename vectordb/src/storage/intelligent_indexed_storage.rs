@@ -659,11 +659,23 @@ struct WalChunkRef {
 /// 没有它就只能 LIST 前缀来发现分块：代价随日志增长，而且分块是不是齐的无从判断。
 /// 清单让恢复变成"读一个对象"，并且能校验完整性。
 ///
-/// **单写者。** 更新清单是读-改-写，没有 CAS——`ObjectStorage` trait 没有条件写
-/// （`If-Match`），而 wal3 正是靠它做到多写者安全的。两个进程共用同一个桶会互相覆盖清单。
+/// **One writer, enforced where the store allows it.** Every change a primary makes to the
+/// bucket's state is a write of this object conditional on the version it last wrote
+/// (`put_manifest`), so a primary another has replaced finds out on its next write and stops,
+/// instead of overwriting the new one's manifest. A store that ignores conditions falls back
+/// to `wal/PRIMARY` polling (`ensure_still_primary`).
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct WalManifest {
     chunks: Vec<WalChunkRef>,
+    /// The epoch of the primary that wrote this. A new primary rewrites the manifest with its
+    /// own when it starts, which is what changes the version the old one's next write expects.
+    #[serde(default)]
+    epoch: u64,
+    /// The snapshot recovery starts from: its directory under `snapshot/`. Kept here as well
+    /// as in `snapshot/CURRENT` so that publishing one is a conditional write: a replaced
+    /// primary's late snapshot cannot become the bucket's.
+    #[serde(default)]
+    snapshot: Option<String>,
     /// 已被快照覆盖、从清单里裁掉的条目数。
     pruned_entries: u64,
     /// 有史以来写入的条目总数。
@@ -825,6 +837,17 @@ pub struct IntelligentIndexedStorage {
     /// undone. Appending a chunk and pruning both write the whole manifest; unserialised, an
     /// older copy could land after a newer one and list chunks already deleted.
     manifest_write: tokio::sync::Mutex<()>,
+    /// The version of `wal/MANIFEST` this process last read or wrote, for the next conditional
+    /// write of it; `None` when there is none yet or the store has no versions.
+    manifest_version: StdMutex<Option<String>>,
+    /// Whether the object store honours conditional writes; probed at start
+    /// (`probe_conditional_writes`). Without them, fencing is the `wal/PRIMARY` poll.
+    conditional_writes: std::sync::atomic::AtomicBool,
+    /// Set by `fence`: another primary has this bucket, and nothing more goes to it.
+    fenced: std::sync::atomic::AtomicBool,
+    /// The epoch this primary claimed (`claim_primary`); 0 without object storage. Part of the
+    /// name of every chunk and snapshot it writes.
+    primary_epoch: AtomicU64,
     /// A read replica: it follows the WAL another process mirrors to object storage, serves
     /// reads, refuses writes, and never writes the bucket. See `new_replica`.
     replica: bool,
@@ -2349,7 +2372,7 @@ impl IntelligentIndexedStorage {
             // Entries this machine logged that never reached object storage -- an upload that
             // failed before the last shutdown -- go up now, before anything new is written.
             if storage.object_storage_enabled && !storage.replica {
-                storage.mirror_wal(&[]).await;
+                storage.mirror_wal(&[]).await?;
             }
             if !storage.replica {
                 storage.storage.set_uncached_reads(false);
@@ -2442,6 +2465,10 @@ impl IntelligentIndexedStorage {
             wal_mirrored_next: AtomicU64::new(0),
             wal_mirror_lock: tokio::sync::Mutex::new(()),
             manifest_write: tokio::sync::Mutex::new(()),
+            manifest_version: StdMutex::new(None),
+            conditional_writes: std::sync::atomic::AtomicBool::new(false),
+            fenced: std::sync::atomic::AtomicBool::new(false),
+            primary_epoch: AtomicU64::new(0),
             replica: false,
             replica_applied_next: AtomicU64::new(0),
             replica_stale: StdMutex::new(None),
@@ -2486,6 +2513,13 @@ impl IntelligentIndexedStorage {
             last_snapshot_error: Arc::new(StdMutex::new(None)),
             aliases: Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         })
+    }
+
+    /// Whether this storage accepts writes at all: `Err` on a replica, and once durability has
+    /// failed -- a WAL fsync failure, or another primary taking the bucket. For a caller that
+    /// must say so before anything else.
+    pub fn check_writable(&self) -> crate::Result<()> {
+        self.ensure_writable()
     }
 
     fn ensure_writable(&self) -> crate::Result<()> {
@@ -3622,10 +3656,22 @@ impl IntelligentIndexedStorage {
     /// GCS -- left a manifest claiming the new sequence beside the previous snapshot's
     /// records, and a machine recovering from the bucket skipped the entries in between.
     /// `scripts/replica_soak.py` lost the last batch before a `kill -9` that way.
-    fn snapshot_key(version: Option<u64>, name: &str) -> String {
+    fn snapshot_key(version: Option<&str>, name: &str) -> String {
         match version {
-            Some(v) => format!("snapshot/v{v:020}/{name}"),
+            Some(dir) => format!("snapshot/{dir}/{name}"),
             None => format!("snapshot/{name}"),
+        }
+    }
+
+    /// A snapshot's directory: its sequence, then the epoch of the primary that wrote it. Two
+    /// primaries can take a snapshot at one sequence -- the replaced one numbers its writes
+    /// from its own log -- and without the epoch the late one's segments would land in the
+    /// directory the new one had already published.
+    fn snapshot_dir_name(seq: u64, epoch: u64) -> String {
+        if epoch == 0 {
+            format!("v{seq:020}")
+        } else {
+            format!("v{seq:020}-e{epoch}")
         }
     }
 
@@ -3652,7 +3698,7 @@ impl IntelligentIndexedStorage {
             }
             let older = match key.strip_prefix("snapshot/v") {
                 Some(rest) => rest
-                    .split('/')
+                    .split(['/', '-'])
                     .next()
                     .and_then(|v| v.parse::<u64>().ok())
                     .is_some_and(|v| v < keep_from),
@@ -3689,13 +3735,14 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<u64> {
         use crate::storage::object::traits::ObjectStorage;
 
+        let version = Self::snapshot_dir_name(seq, self.primary_epoch.load(Ordering::SeqCst));
         let mut bytes = 0u64;
         for name in Self::snapshot_segments(dir, tables) {
             let data = std::fs::read(dir.join(&name))?;
             bytes += data.len() as u64;
             self.storage
                 .put_object(
-                    &Self::snapshot_key(Some(seq), &name),
+                    &Self::snapshot_key(Some(&version), &name),
                     bytes::Bytes::from(data),
                     Some("application/octet-stream"),
                 )
@@ -3704,11 +3751,17 @@ impl IntelligentIndexedStorage {
                     crate::Error::Internal(format!("uploading snapshot segment {}: {}", name, e))
                 })?;
         }
-        // Last, and only once every segment is up: this is what makes it the snapshot.
+        // Last, and only once every segment is up: this is what makes it the snapshot. The
+        // manifest first, conditionally -- a primary another has replaced stops here -- and
+        // then `CURRENT`, which only a bucket without one in the manifest is read by.
+        self.update_manifest(|m| m.snapshot = Some(version.clone()))
+            .await?;
         self.storage
             .put_object(
                 Self::SNAPSHOT_CURRENT,
-                bytes::Bytes::from(serde_json::json!({ "version": seq }).to_string()),
+                bytes::Bytes::from(
+                    serde_json::json!({ "version": seq, "dir": version }).to_string(),
+                ),
                 Some("application/json"),
             )
             .await
@@ -3721,13 +3774,26 @@ impl IntelligentIndexedStorage {
     async fn fetch_snapshot(&self, dir: &std::path::Path) -> crate::Result<bool> {
         use crate::storage::object::traits::ObjectStorage;
 
-        let version = self
-            .storage
-            .get_object(Self::SNAPSHOT_CURRENT)
-            .await
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v["version"].as_u64());
+        // The WAL manifest's, else `CURRENT`'s (a bucket written before the manifest named it),
+        // else the unversioned layout.
+        let current = || async {
+            let v = self
+                .storage
+                .get_object(Self::SNAPSHOT_CURRENT)
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
+            v["dir"].as_str().map(str::to_string).or_else(|| {
+                v["version"]
+                    .as_u64()
+                    .map(|seq| Self::snapshot_dir_name(seq, 0))
+            })
+        };
+        let version = match self.manifest().ok().and_then(|m| m.snapshot) {
+            Some(dir) => Some(dir),
+            None => current().await,
+        };
+        let version = version.as_deref();
         let manifest_bytes = match self
             .storage
             .get_object(&Self::snapshot_key(version, "manifest"))
@@ -6273,7 +6339,7 @@ impl IntelligentIndexedStorage {
         // machine loses it. Mirror the entries to object storage as an immutable chunk — the
         // same model the snapshot segments use, so a chunk is written once and never rewritten.
         if self.object_storage_enabled {
-            self.mirror_wal(&stamped).await;
+            self.mirror_wal(&stamped).await?;
         }
         Ok(())
     }
@@ -6287,8 +6353,21 @@ impl IntelligentIndexedStorage {
     ///
     /// 按 4096 一组分前缀：S3 是**按前缀限流**的，所有分块挤在一个前缀下，写入速率到一定
     /// 程度就会被限。定宽序号让字典序等于序号序。
-    fn wal_chunk_key(first_seq: u64) -> String {
-        format!("wal/{:08}/{:020}.chunk", first_seq / 4096, first_seq)
+    ///
+    /// The writer's epoch is in the name too: a replaced primary that has not yet noticed can
+    /// still upload a chunk under a sequence the new one also uses, and a late upload would
+    /// otherwise replace the new primary's chunk under the manifest that lists it.
+    fn wal_chunk_key(first_seq: u64, epoch: u64) -> String {
+        if epoch == 0 {
+            format!("wal/{:08}/{:020}.chunk", first_seq / 4096, first_seq)
+        } else {
+            format!(
+                "wal/{:08}/{:020}.e{}.chunk",
+                first_seq / 4096,
+                first_seq,
+                epoch
+            )
+        }
     }
 
     /// 读回内存里那份清单。
@@ -6300,12 +6379,16 @@ impl IntelligentIndexedStorage {
     }
 
     /// 把清单写到对象存储。
-    async fn put_manifest(&self, manifest: &WalManifest) -> crate::Result<()> {
-        use crate::storage::object::traits::ObjectStorage;
+    /// Write `manifest` as the bucket's, conditionally when the store allows: `Ok(false)` if
+    /// another process has written it since this one last did -- another primary took over.
+    async fn write_manifest_once(&self, manifest: &WalManifest) -> crate::Result<bool> {
+        use crate::storage::object::errors::ObjectStorageError;
+        use crate::storage::object::traits::{ObjectStorage, PutCondition};
 
         let bytes = bytes::Bytes::from(
             serde_json::to_vec(manifest).map_err(|e| crate::Error::Serialization(e.to_string()))?,
         );
+        let conditional = self.conditional_writes.load(Ordering::SeqCst);
         // The manifest is one object rewritten on every mirrored write, and object stores limit
         // how often one object may be rewritten -- GCS to about once a second, answering 429
         // beyond it. A failure here is retried by the next write anyway; retrying a few times
@@ -6315,16 +6398,56 @@ impl IntelligentIndexedStorage {
         let mut delay = std::time::Duration::from_millis(200);
         let mut attempt = 0;
         loop {
-            match self
-                .storage
-                .put_object(
-                    Self::wal_manifest_key(),
-                    bytes.clone(),
-                    Some("application/json"),
-                )
-                .await
-            {
-                Ok(()) => return Ok(()),
+            let written = if conditional {
+                let condition = match self.manifest_version.lock().ok().and_then(|v| v.clone()) {
+                    Some(version) => PutCondition::IfMatch(version),
+                    None => PutCondition::IfAbsent,
+                };
+                self.storage
+                    .put_object_if(
+                        Self::wal_manifest_key(),
+                        bytes.clone(),
+                        Some("application/json"),
+                        condition,
+                    )
+                    .await
+                    .map(Some)
+            } else {
+                self.storage
+                    .put_object(
+                        Self::wal_manifest_key(),
+                        bytes.clone(),
+                        Some("application/json"),
+                    )
+                    .await
+                    .map(|()| None)
+            };
+            match written {
+                Ok(version) => {
+                    if let (Some(version), Ok(mut slot)) = (version, self.manifest_version.lock()) {
+                        *slot = Some(version);
+                    }
+                    return Ok(true);
+                }
+                Err(ObjectStorageError::PreconditionFailed { .. }) => {
+                    // An earlier attempt of this same write may have landed with only its
+                    // answer lost; then the object is ours, byte for byte.
+                    if attempt > 0 {
+                        if let Ok((current, version)) = self
+                            .storage
+                            .get_object_versioned(Self::wal_manifest_key())
+                            .await
+                        {
+                            if current == bytes.as_ref() {
+                                if let Ok(mut slot) = self.manifest_version.lock() {
+                                    *slot = version;
+                                }
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
                 Err(e) if attempt < 4 => {
                     debug!("writing WAL manifest failed, retrying in {delay:?}: {e}");
                     tokio::time::sleep(delay).await;
@@ -6341,11 +6464,51 @@ impl IntelligentIndexedStorage {
         }
     }
 
+    /// Change the bucket's manifest: apply `change` to a copy, write it, and only then make it
+    /// this process's. All changes go through here, one at a time, so a failed write leaves
+    /// nothing behind in memory and no older copy can land after a newer one. A write another
+    /// primary has superseded fences this one (`fence`) and is an error.
+    async fn update_manifest(&self, change: impl FnOnce(&mut WalManifest)) -> crate::Result<()> {
+        let _write = self.manifest_write.lock().await;
+        let mut next = self.manifest()?;
+        change(&mut next);
+        if !self.write_manifest_once(&next).await? {
+            return Err(self.fence());
+        }
+        *self
+            .wal_manifest
+            .lock()
+            .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))? = next;
+        Ok(())
+    }
+
+    /// Stop writing: another primary has written the bucket's manifest since this one did.
+    /// Local durability is marked failed, so every later write is a 503 and `/ready` says why.
+    fn fence(&self) -> crate::Error {
+        let error = crate::Error::Internal(
+            "another primary took over this object storage bucket (its manifest changed under \
+             this one); this server stopped writing to it"
+                .to_string(),
+        );
+        self.fenced.store(true, Ordering::SeqCst);
+        self.mark_durability_failed(&error);
+        crate::Error::ServiceUnavailable {
+            message: error.to_string(),
+        }
+    }
+
     /// 启动时把清单读进内存；没有清单就从前缀里重建一份。
     async fn load_wal_manifest(&self) -> crate::Result<()> {
         use crate::storage::object::traits::ObjectStorage;
 
-        let manifest = match self.storage.get_object(Self::wal_manifest_key()).await {
+        let read = self
+            .storage
+            .get_object_versioned(Self::wal_manifest_key())
+            .await;
+        if let Ok(mut version) = self.manifest_version.lock() {
+            *version = read.as_ref().ok().and_then(|(_, v)| v.clone());
+        }
+        let manifest = match read.map(|(bytes, _)| bytes) {
             Ok(bytes) => match serde_json::from_slice::<WalManifest>(&bytes) {
                 Ok(m) => {
                     if !m.is_consistent() {
@@ -6419,6 +6582,7 @@ impl IntelligentIndexedStorage {
             // invariant satisfied for everything still present, which is what it is for.
             pruned_entries: 0,
             total_entries,
+            ..Default::default()
         })
     }
 
@@ -6577,7 +6741,81 @@ impl IntelligentIndexedStorage {
             info!("primary of this bucket, epoch {epoch}");
         }
         self.primary_token = Some(token);
-        Ok(())
+        self.primary_epoch.store(epoch, Ordering::SeqCst);
+
+        // Then the manifest, which is the lock: rewritten with this epoch, conditionally on the
+        // version just read. That changes its version under a primary still running on it, so
+        // that primary's next write of it fails and it stops (`fence`) -- no window, where the
+        // `wal/PRIMARY` poll left up to a second of writes acknowledged by the old one.
+        let conditional = self.probe_conditional_writes().await;
+        self.conditional_writes.store(conditional, Ordering::SeqCst);
+        if !conditional {
+            warn!(
+                "this object store does not honour conditional writes; a replaced primary is \
+                 stopped by polling wal/PRIMARY every DXMT_PRIMARY_CHECK_MS instead, and may \
+                 acknowledge writes for that long"
+            );
+        }
+        for attempt in 0..5 {
+            let mut manifest = self.manifest()?;
+            manifest.epoch = epoch;
+            if self.write_manifest_once(&manifest).await? {
+                *self.wal_manifest.lock().map_err(|_| {
+                    crate::Error::Internal("WAL manifest lock poisoned".to_string())
+                })? = manifest;
+                return Ok(());
+            }
+            // Written since it was read: the primary being replaced is still writing. Read the
+            // newer one and take that.
+            if attempt < 4 {
+                self.load_wal_manifest().await?;
+            }
+        }
+        Err(crate::Error::Internal(
+            "could not take the WAL manifest: it kept changing under this server -- another \
+             primary is writing the bucket"
+                .to_string(),
+        ))
+    }
+
+    /// Whether the object store makes a write conditional on an object's version: a write
+    /// against a version the object does not have must be refused. Some stores accept the
+    /// header and ignore it, and fencing that trusts one of those is no fencing at all.
+    async fn probe_conditional_writes(&self) -> bool {
+        use crate::storage::object::errors::ObjectStorageError;
+        use crate::storage::object::traits::{ObjectStorage, PutCondition};
+        const PROBE: &str = "wal/CONDITIONAL-WRITE-PROBE";
+        let body = || bytes::Bytes::from_static(b"dxmt conditional write probe");
+        match self
+            .storage
+            .put_object_if(PROBE, body(), None, PutCondition::IfAbsent)
+            .await
+        {
+            Ok(_) | Err(ObjectStorageError::PreconditionFailed { .. }) => {}
+            Err(ObjectStorageError::ConditionalWritesUnsupported) => return false,
+            Err(e) => {
+                warn!("probing for conditional writes: {e}");
+                return false;
+            }
+        }
+        match self
+            .storage
+            .put_object_if(
+                PROBE,
+                body(),
+                None,
+                // No ETag or content hash is ever "1".
+                PutCondition::IfMatch("1".to_string()),
+            )
+            .await
+        {
+            Err(ObjectStorageError::PreconditionFailed { .. }) => true,
+            Ok(_) => false,
+            Err(e) => {
+                warn!("probing for conditional writes: {e}");
+                false
+            }
+        }
     }
 
     /// Refuse to write once another primary has taken the bucket. Reads `wal/PRIMARY` at most
@@ -6588,6 +6826,11 @@ impl IntelligentIndexedStorage {
         let Some(ours) = self.primary_token.as_deref() else {
             return Ok(());
         };
+        // With conditional writes the manifest is the lock, and every write that reaches the
+        // bucket checks it; this poll is the fallback for stores without them.
+        if self.conditional_writes.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let due = self
             .primary_checked
             .lock()
@@ -6749,19 +6992,19 @@ impl IntelligentIndexedStorage {
     /// in order, so the chunks stay contiguous. `fresh` is the batch just logged, which is all
     /// there is to send in the usual case; anything else is read back from the local log. The
     /// write itself is durable locally either way, so a failure here is logged, not returned.
-    async fn mirror_wal(&self, fresh: &[(u64, WalEntry)]) {
+    async fn mirror_wal(&self, fresh: &[(u64, WalEntry)]) -> crate::Result<()> {
         let _turn = self.wal_mirror_lock.lock().await;
         let next = self.wal_mirrored_next.load(Ordering::SeqCst);
         let Some(wal) = self.wal.as_ref() else {
-            return;
+            return Ok(());
         };
         let read_back = {
             let Ok(guard) = wal.lock() else {
-                return;
+                return Ok(());
             };
             let local_next = guard.next_sequence();
             if next >= local_next {
-                return; // another write's upload already carried these
+                return Ok(()); // another write's upload already carried these
             }
             let fresh_is_all = fresh.first().map(|(s, _)| *s) == Some(next)
                 && fresh.last().map(|(s, _)| *s + 1) == Some(local_next);
@@ -6775,17 +7018,21 @@ impl IntelligentIndexedStorage {
                             "could not read WAL entries from {} to mirror them: {}",
                             next, e
                         );
-                        return;
+                        return Ok(());
                     }
                 }
             }
         };
         let entries: &[(u64, WalEntry)] = read_back.as_deref().unwrap_or(fresh);
         let (Some((first, _)), Some((last, _))) = (entries.first(), entries.last()) else {
-            return;
+            return Ok(());
         };
         match self.offload_wal_chunk(*first, entries).await {
             Ok(()) => self.wal_mirrored_next.store(last + 1, Ordering::SeqCst),
+            // Superseded: the caller's write must not be acknowledged. It is in this machine's
+            // log, but the bucket -- the history the cluster goes on with -- is another
+            // primary's now, and will never have it.
+            Err(e) if self.fenced.load(Ordering::SeqCst) => return Err(e),
             Err(e) => warn!(
                 "{} WAL entries from {} are not in object storage yet ({}); the next write \
                  retries them",
@@ -6794,6 +7041,7 @@ impl IntelligentIndexedStorage {
                 e
             ),
         }
+        Ok(())
     }
 
     /// 把一批 WAL 条目作为不可变分块推到对象存储，并登记进清单。
@@ -6809,7 +7057,7 @@ impl IntelligentIndexedStorage {
         let bytes =
             rmp_serde::to_vec(entries).map_err(|e| crate::Error::Serialization(e.to_string()))?;
 
-        let path = Self::wal_chunk_key(first_seq);
+        let path = Self::wal_chunk_key(first_seq, self.primary_epoch.load(Ordering::SeqCst));
         self.storage
             .put_object(
                 &path,
@@ -6823,40 +7071,22 @@ impl IntelligentIndexedStorage {
         // manifest pointing at an object that may not exist, and recovery fails outright; this
         // way a failed manifest write leaves an unreferenced object — wasted space, nothing
         // more.
-        let _write = self.manifest_write.lock().await;
-        let manifest = {
-            let mut guard = self
-                .wal_manifest
-                .lock()
-                .map_err(|_| crate::Error::Internal("WAL manifest lock poisoned".to_string()))?;
-            guard.chunks.push(WalChunkRef {
-                path: path.clone(),
-                first_seq,
-                last_seq: entries.last().map(|(s, _)| *s).unwrap_or(first_seq),
-                entries: entries.len(),
-            });
-            guard.total_entries += entries.len() as u64;
-            guard.clone()
+        //
+        // Through `update_manifest`, so a failed write leaves no entry behind: kept, it stayed in
+        // memory while the bucket never had it, and the retry -- the same entries and more,
+        // from the same first sequence, so the same key -- added a second, overlapping one.
+        // Found against GCS, whose per-object write rate limit fails manifest writes under load.
+        let chunk = WalChunkRef {
+            path,
+            first_seq,
+            last_seq: entries.last().map(|(s, _)| *s).unwrap_or(first_seq),
+            entries: entries.len(),
         };
-        if let Err(e) = self.put_manifest(&manifest).await {
-            // Undo the entry. Kept, it stayed in memory while the bucket never had it, and the
-            // retry -- the same entries and more, from the same first sequence, so the same key
-            // -- added a second, overlapping one: a manifest listing one object twice with two
-            // different ranges. Found against GCS, whose per-object write rate limit fails
-            // manifest writes under load.
-            if let Ok(mut guard) = self.wal_manifest.lock() {
-                if let Some(i) = guard
-                    .chunks
-                    .iter()
-                    .rposition(|c| c.path == path && c.first_seq == first_seq)
-                {
-                    let undone = guard.chunks.remove(i);
-                    guard.total_entries -= undone.entries as u64;
-                }
-            }
-            return Err(e);
-        }
-        Ok(())
+        self.update_manifest(|m| {
+            m.total_entries += chunk.entries as u64;
+            m.chunks.push(chunk);
+        })
+        .await
     }
 
     /// 列出 `wal/` 下所有分块的键，按序号（即字典序）排好。
@@ -6970,41 +7200,38 @@ impl IntelligentIndexedStorage {
     async fn prune_wal_chunks(&self, keep_from: u64) {
         use crate::storage::object::traits::ObjectStorage;
 
-        let _write = self.manifest_write.lock().await;
-        let (manifest, dropped) = {
-            let Ok(mut guard) = self.wal_manifest.lock() else {
-                return;
-            };
-            let mut dropped = Vec::new();
-            guard.chunks.retain(|c| {
-                if c.last_seq < keep_from {
-                    guard_pruned(&mut dropped, c);
-                    false
-                } else {
-                    true
-                }
-            });
-            let pruned: u64 = dropped.iter().map(|c: &WalChunkRef| c.entries as u64).sum();
-            guard.pruned_entries += pruned;
-            (guard.clone(), dropped)
+        let gone: Vec<WalChunkRef> = match self.manifest() {
+            Ok(m) => m
+                .chunks
+                .iter()
+                .filter(|c| c.last_seq < keep_from)
+                .cloned()
+                .collect(),
+            Err(_) => return,
         };
-
-        if dropped.is_empty() {
+        if gone.is_empty() {
             return;
         }
-        if self.put_manifest(&manifest).await.is_err() {
-            // Leave the objects alone, and put them back in the manifest: one that still lists
-            // them is consistent, just larger than it needs to be. Left out of the in-memory
-            // copy, the next manifest written for any reason dropped them while the objects
-            // stayed -- never deleted, and gone from under a replica that had not applied them.
-            if let Ok(mut guard) = self.wal_manifest.lock() {
-                guard.pruned_entries -= dropped.iter().map(|c| c.entries as u64).sum::<u64>();
-                guard.chunks.extend(dropped.iter().cloned());
-                guard.chunks.sort_by_key(|c| c.first_seq);
-            }
+        let mut dropped = Vec::new();
+        let updated = self
+            .update_manifest(|m| {
+                m.chunks.retain(|c| {
+                    if c.last_seq < keep_from {
+                        guard_pruned(&mut dropped, c);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                m.pruned_entries += dropped.iter().map(|c| c.entries as u64).sum::<u64>();
+            })
+            .await;
+        if let Err(e) = updated {
+            // The objects stay, and so does the manifest that lists them -- consistent, just
+            // larger than it needs to be.
             warn!(
-                "WAL manifest update failed; leaving {} chunks in place",
-                dropped.len()
+                "WAL manifest update failed; leaving {} chunks in place: {e}",
+                gone.len()
             );
             return;
         }

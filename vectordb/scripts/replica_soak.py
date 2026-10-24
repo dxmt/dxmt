@@ -31,6 +31,10 @@ Phases, each one a pass/fail line:
    promoted primary must be undisturbed.
 5. fail back: the promoted primary is stopped, the old machine starts on an empty directory
    and recovers everything from the bucket; the replica follows it.
+6. takeover while running: a new primary starts on an empty directory while the current one
+   is still up and being written to. The old one's writes must be refused from then on, and
+   every write it acknowledged must be on the new one -- on a store that honours conditional
+   writes. SOAK_EXPECT_LOCK=0 (GCS's S3 API) reports the writes lost in the poll's interval.
 """
 import json
 import os
@@ -51,7 +55,7 @@ ROOT = os.environ.get("SOAK_ROOT", tempfile.mkdtemp(prefix="dxmt-replica-soak-")
 BIN = os.environ.get("SOAK_BIN", os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target/release/vectordb"))
 CPUS = os.environ.get("SOAK_CPUS", "16-23")
-PORTS = {"a": 9971, "b": 9972, "c": 9973}
+PORTS = {"a": 9971, "b": 9972, "c": 9973, "d": 9974}
 
 for var in ("DXMT_S3_ENDPOINT", "DXMT_S3_BUCKET", "DXMT_AWS_ACCESS_KEY_ID",
             "DXMT_AWS_SECRET_ACCESS_KEY"):
@@ -307,6 +311,49 @@ def main():
     ok = code == 200 and wait_for(
         lambda: req(PORTS["c"], "GET", "/tables/t/records/from-a")[0] == 200, 30)
     check("replica c follows a", ok)
+
+    print("=== 6. takeover while a is running and being written to ===")
+    split_acked, split_refused, split_stop = [], [], threading.Event()
+
+    def split_writer():
+        n = 0
+        while not split_stop.is_set():
+            ids = [f"split-{n + i}" for i in range(50)]
+            code, _ = req(PORTS["a"], "POST", "/tables/t/records",
+                          {"records": [{"id": i, "vector": vec(i)} for i in ids]})
+            (split_acked if code == 200 else split_refused).append((time.time(), ids, code))
+            n += 50
+
+    th = threading.Thread(target=split_writer, daemon=True)
+    th.start()
+    time.sleep(3)
+    start("d")  # an empty directory, no --replica: a new primary on a live one's bucket
+    serving_at = time.time()
+    time.sleep(3)
+    split_stop.set()
+    th.join(timeout=60)
+    acked_ids = [i for _, ids, _ in split_acked for i in ids]
+    # From the moment d serves, a must acknowledge nothing: d took the manifest before it
+    # started serving, so any later write of a's has nowhere to land.
+    late = [t for t, _, _ in split_acked if t >= serving_at]
+    codes = {}
+    for t, _, c in split_refused:
+        if t >= serving_at:
+            codes[c] = codes.get(c, 0) + 1
+    check("a acknowledges nothing once d serves", not late and bool(codes),
+          f"acknowledged after: {len(late)}; refused by status: {codes}")
+    miss = missing_on(PORTS["d"], acked_ids)
+    total += 1 + len(acked_ids) - len(miss)  # from-a, then what a acknowledged and d has
+    if os.environ.get("SOAK_EXPECT_LOCK", "1") == "1":
+        check("every write a acknowledged is on d", not miss,
+              f"{len(miss)} of {len(acked_ids)} missing, e.g. {miss[:3]}")
+    else:
+        # A store without conditional writes (GCS's S3 API): the old primary is stopped by a
+        # poll, and what it acknowledged inside the interval is not on the new one.
+        print(f"INFO {len(miss)} of {len(acked_ids)} writes a acknowledged are not on d "
+              f"(no conditional writes: the DXMT_PRIMARY_CHECK_MS window)")
+    check("d holds exactly what a acknowledged and it found", count(PORTS["d"]) == total,
+          f"{count(PORTS['d'])} of {total}")
 
     for name in list(procs):
         stop(name)

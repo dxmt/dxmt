@@ -568,12 +568,17 @@ every start; it refuses a directory that holds a primary's data rather than empt
 
 **Failover.** Stop the primary, then start the replica's server *without* `--replica` on the
 same directory and bucket: it empties the cache, recovers from the bucket like any new
-machine, and becomes the primary. Every primary records itself in `wal/PRIMARY` with a new
-epoch when it starts, and checks that file every `DXMT_PRIMARY_CHECK_MS` (default 1,000)
-before writing: an old primary that is still running when another one starts stops accepting
-writes (503) within that interval and reports not ready. That is a guard against a primary
-nobody stopped, not a lock -- object storage has no conditional write here, so writes an old
-primary acknowledges inside that interval are not on the new one. Stop the old one first.
+machine, and becomes the primary.
+
+An old primary still running when another one starts is stopped, and how exactly depends on
+the store. Where the store honours conditional writes -- AWS S3, MinIO, the `filesystem`
+provider -- the WAL manifest is a lock: a new primary rewrites it with its epoch, and every
+change the old one makes to the bucket is a write conditional on the version it last wrote,
+so its next write is refused (503, not ready) and nothing it acknowledges is missing from the
+new one. **GCS through its S3 API ignores conditions** (measured), and so does any store the
+startup probe catches doing so; there each primary checks `wal/PRIMARY` every
+`DXMT_PRIMARY_CHECK_MS` (default 1,000) instead, and writes the old one acknowledges inside
+that interval are not on the new one. On those, stop the old primary first.
 
 The old primary's directory is then out of date, and it refuses to start on it (it remembers
 its claims in `PRIMARY`), so a supervisor restarting it cannot take the bucket back. To bring

@@ -897,7 +897,7 @@ async fn a_fresh_machine_recovers_from_object_storage_alone() {
         &std::fs::read(snapshots.join("CURRENT")).expect("no snapshot was published"),
     )
     .unwrap();
-    let bucket = snapshots.join(format!("v{:020}", current["version"].as_u64().unwrap()));
+    let bucket = snapshots.join(current["dir"].as_str().unwrap());
     assert!(
         bucket.join("manifest").exists(),
         "manifest was never uploaded; looked in {}",
@@ -3487,7 +3487,7 @@ async fn a_bucket_with_the_unversioned_snapshot_layout_still_recovers() {
     let snapshots = shared.join("ssd").join("test-bucket").join("snapshot");
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(snapshots.join("CURRENT")).unwrap()).unwrap();
-    let version = snapshots.join(format!("v{:020}", current["version"].as_u64().unwrap()));
+    let version = snapshots.join(current["dir"].as_str().unwrap());
     for entry in std::fs::read_dir(&version).unwrap() {
         let entry = entry.unwrap();
         std::fs::rename(entry.path(), snapshots.join(entry.file_name())).unwrap();

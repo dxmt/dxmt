@@ -65,6 +65,18 @@ release, and the first commit that was ever pushed anywhere.
   Pruning at every snapshot left a replica one snapshot interval to apply each chunk; one that
   restarted under steady writes was behind again by the time recovery finished, and never
   caught up. `0` restores the old pruning.
+- **The WAL manifest is a lock where the object store allows it.** Every change a primary
+  makes to the bucket -- a WAL chunk, a published snapshot, a prune -- is a write of
+  `wal/MANIFEST` conditional on the version it last wrote, and a new primary rewrites the
+  manifest with its epoch at start. An old primary still running is refused at its next write
+  (503, not ready), so nothing it acknowledges is missing from the new one; the
+  `DXMT_PRIMARY_CHECK_MS` poll left up to a second of such writes. Whether the store honours
+  conditions is probed at start: AWS S3, MinIO and the `filesystem` provider do; GCS through its
+  S3 API ignores them (measured), and keeps the poll. WAL chunk and snapshot object names now
+  carry the writer's epoch, so a late upload from a replaced primary cannot overwrite the new
+  one's. The published snapshot is named in the manifest, so a replaced primary's snapshot
+  cannot become the bucket's. `ObjectStorage` gains `get_object_versioned` and
+  `put_object_if`.
 - **Replica failover.** A replica's data directory is a marked, disposable cache, emptied at
   each start; a replica refuses a directory holding a primary's data. Starting a primary on a
   replica's directory promotes it: the cache is emptied and the server recovers from the
@@ -150,6 +162,10 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **A primary another one had replaced answered writes 429 "overloaded, retry".** Its
+  refusals counted as errors and the error rate drives the overload check, so after a few the
+  server said "retry" instead of why. A server that will refuse every write now says so first
+  (503 with the reason).
 - **A snapshot mirrored to object storage held the table lock while it decoded every row.**
   With object storage the snapshot carries each disk table's records and vectors, and it
   decoded them under the table map's read lock, queueing every write: 2.0 s at 500,000 rows.

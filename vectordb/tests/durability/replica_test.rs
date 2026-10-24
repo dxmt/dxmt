@@ -542,7 +542,7 @@ async fn a_replica_behind_a_snapshot_catches_up_from_the_retained_chunks() {
 /// A manifest write that fails must leave nothing behind in memory: the retry rewrites the
 /// chunk under the same key with more entries, and a stale entry for the first attempt made
 /// the manifest list one object twice, with two ranges. GCS's per-object write limit is what
-/// made manifest writes fail in practice; a read-only MANIFEST file does the same here while
+/// made manifest writes fail in practice; an unopenable lock file does the same here while
 /// chunk writes, in their own directory, still succeed.
 #[cfg(unix)]
 #[tokio::test]
@@ -560,11 +560,14 @@ async fn a_manifest_write_that_failed_leaves_no_trace_in_the_manifest() {
         .await
         .unwrap();
 
+    // The manifest is written under a lock file beside it and replaced by rename; a lock
+    // file that cannot be opened for writing is what makes that write fail.
     let path = shared
         .join("ssd")
         .join("bucket")
         .join("wal")
-        .join("MANIFEST");
+        .join("MANIFEST.lock");
+    assert!(path.exists(), "the manifest is written conditionally here");
     let set_mode = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
     set_mode(0o444).unwrap();
     if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
@@ -572,10 +575,16 @@ async fn a_manifest_write_that_failed_leaves_no_trace_in_the_manifest() {
         eprintln!("skipped: this user can write a read-only file (root?)");
         return;
     }
+    let before = manifest(&shared);
     primary
         .insert_records("t", vec![record("b", 2.0)])
         .await
         .expect("the write is durable locally; the mirror's failure is not the caller's");
+    assert_eq!(
+        manifest(&shared),
+        before,
+        "the manifest write was meant to fail"
+    );
     set_mode(0o644).unwrap();
     primary
         .insert_records("t", vec![record("c", 3.0)])
@@ -630,11 +639,14 @@ async fn a_write_mirrored_after_a_snapshot_still_reaches_the_replicas() {
         .unwrap();
 
     // `b` is logged and not mirrored (its manifest write fails), then a snapshot is taken.
+    // The manifest is written under a lock file beside it and replaced by rename; a lock
+    // file that cannot be opened for writing is what makes that write fail.
     let path = shared
         .join("ssd")
         .join("bucket")
         .join("wal")
-        .join("MANIFEST");
+        .join("MANIFEST.lock");
+    assert!(path.exists(), "the manifest is written conditionally here");
     let set_mode = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
     set_mode(0o444).unwrap();
     if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
@@ -642,10 +654,17 @@ async fn a_write_mirrored_after_a_snapshot_still_reaches_the_replicas() {
         eprintln!("skipped: this user can write a read-only file (root?)");
         return;
     }
+    let before = manifest(&shared);
     primary
         .insert_records("t", vec![record("b", 2.0)])
         .await
         .unwrap();
+    assert_eq!(
+        manifest(&shared),
+        before,
+        "the manifest write was meant to fail"
+    );
+    // Local-only: publishing a snapshot is a manifest write too.
     primary.snapshot().await.unwrap();
     set_mode(0o644).unwrap();
     primary
@@ -657,4 +676,84 @@ async fn a_write_mirrored_after_a_snapshot_still_reaches_the_replicas() {
     let health = replica.health_snapshot().await;
     assert!(health.replica_stale.is_none(), "{:?}", health.replica_stale);
     assert_eq!(ids(&replica).await, vec!["a", "b", "c"]);
+}
+
+/// With a store that honours conditional writes (the filesystem one does, as S3 and MinIO do),
+/// the manifest is a lock: a replaced primary is refused on its very next write, not within
+/// `DXMT_PRIMARY_CHECK_MS`, and the refusal says the manifest changed under it.
+#[tokio::test]
+async fn a_replaced_primary_is_refused_at_its_next_write_by_the_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let first = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("one")))
+        .await
+        .unwrap();
+    first.create_table(table()).await.unwrap();
+    first
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let second = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("two")))
+        .await
+        .unwrap();
+
+    let err = first
+        .insert_records("t", vec![record("x", 9.0)])
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.status_code(), 503, "{err}");
+    assert!(err.to_string().contains("manifest changed"), "{err}");
+
+    second
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&replica).await, vec!["a", "b"]);
+}
+
+/// A replaced primary that never writes again -- idle, so nothing told it -- still takes
+/// periodic snapshots. Publishing one is a conditional write of the manifest, so it fails, and
+/// the bucket keeps the new primary's snapshot: a machine recovering from it has `b`.
+#[tokio::test]
+async fn a_replaced_primary_cannot_publish_a_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let first = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("one")))
+        .await
+        .unwrap();
+    first.create_table(table()).await.unwrap();
+    first
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let second = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("two")))
+        .await
+        .unwrap();
+    second
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+    second.snapshot().await.unwrap();
+    let published: serde_json::Value = serde_json::from_slice(&manifest(&shared)).unwrap();
+
+    // The old one's snapshot is written locally and then refused at the bucket.
+    let _ = first.snapshot().await;
+    let after: serde_json::Value = serde_json::from_slice(&manifest(&shared)).unwrap();
+    assert_eq!(after["snapshot"], published["snapshot"], "{after}");
+    assert!(first
+        .insert_records("t", vec![record("y", 7.0)])
+        .await
+        .is_err());
+
+    drop(second);
+    let fresh = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("three")))
+        .await
+        .unwrap();
+    assert_eq!(ids(&fresh).await, vec!["a", "b"]);
 }

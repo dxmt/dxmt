@@ -8,7 +8,13 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use super::errors::ObjectStorageError;
-use super::traits::{ObjectStorage, ObjectStorageResult, StorageStats};
+use super::traits::{ObjectStorage, ObjectStorageResult, PutCondition, StorageStats};
+
+/// A file's version: a hash of its bytes. Equal contents are one version, which is what S3's
+/// ETag of a single-part upload is too.
+fn content_version(data: &[u8]) -> String {
+    format!("{:032x}", xxhash_rust::xxh3::xxh3_128(data))
+}
 use super::types::{ListObjectsOptions, ListObjectsResult, ObjectInfo, ObjectMetadata, PartInfo};
 
 /// 本地文件系统存储实现
@@ -103,6 +109,64 @@ impl ObjectStorage for FilesystemStorage {
                 message: e.to_string(),
             })?;
         Ok(())
+    }
+
+    async fn get_object_versioned(
+        &self,
+        key: &str,
+    ) -> ObjectStorageResult<(Vec<u8>, Option<String>)> {
+        let data = self.get_object(key).await?;
+        let version = content_version(&data);
+        Ok((data, Some(version)))
+    }
+
+    /// Check and write under an exclusive lock on `<object>.lock`, which every process using
+    /// this directory takes, and replace the file by rename so a reader never sees half of it.
+    async fn put_object_if(
+        &self,
+        key: &str,
+        data: Bytes,
+        _content_type: Option<&str>,
+        condition: PutCondition,
+    ) -> ObjectStorageResult<String> {
+        let path = self.get_object_path(key);
+        self.ensure_dir_exists(&path).await?;
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || -> ObjectStorageResult<String> {
+            let io = |e: std::io::Error| ObjectStorageError::IoError {
+                message: e.to_string(),
+            };
+            let mut lock_path = path.clone().into_os_string();
+            lock_path.push(".lock");
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .map_err(io)?;
+            lock.lock().map_err(io)?;
+            let current = match std::fs::read(&path) {
+                Ok(bytes) => Some(content_version(&bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(io(e)),
+            };
+            let holds = match &condition {
+                PutCondition::IfAbsent => current.is_none(),
+                PutCondition::IfMatch(v) => current.as_deref() == Some(v.as_str()),
+            };
+            if !holds {
+                return Err(ObjectStorageError::PreconditionFailed { key });
+            }
+            let mut tmp = path.clone().into_os_string();
+            tmp.push(".tmp");
+            std::fs::write(&tmp, &data).map_err(io)?;
+            std::fs::rename(&tmp, &path).map_err(io)?;
+            Ok(content_version(&data))
+        })
+        .await
+        .map_err(|e| ObjectStorageError::InternalError {
+            message: e.to_string(),
+        })?
     }
 
     async fn get_object(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {

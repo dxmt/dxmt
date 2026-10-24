@@ -8,6 +8,15 @@ use super::types::{ListObjectsOptions, ListObjectsResult, ObjectMetadata, PartIn
 
 pub type ObjectStorageResult<T> = Result<T, ObjectStorageError>;
 
+/// What a conditional write requires of the object it replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PutCondition {
+    /// The object is still at this version (an ETag, as `get_object_versioned` returned it).
+    IfMatch(String),
+    /// There is no object yet.
+    IfAbsent,
+}
+
 /// 对象存储抽象接口
 ///
 /// 提供统一的对象存储操作接口，支持不同的存储后端
@@ -39,6 +48,28 @@ pub trait ObjectStorage: Send + Sync {
     /// # 返回
     /// 对象数据，如果对象不存在则返回ObjectNotFound错误
     async fn get_object(&self, key: &str) -> ObjectStorageResult<Vec<u8>>;
+
+    /// An object with its version, for a later `put_object_if`. A backend without versions
+    /// answers `None`, and its `put_object_if` is unsupported.
+    async fn get_object_versioned(
+        &self,
+        key: &str,
+    ) -> ObjectStorageResult<(Vec<u8>, Option<String>)> {
+        Ok((self.get_object(key).await?, None))
+    }
+
+    /// Write `key` only if `condition` holds, atomically with the check; the new version.
+    /// `PreconditionFailed` when it does not hold. This is what lets two processes share one
+    /// object without overwriting each other's write unseen.
+    async fn put_object_if(
+        &self,
+        _key: &str,
+        _data: Bytes,
+        _content_type: Option<&str>,
+        _condition: PutCondition,
+    ) -> ObjectStorageResult<String> {
+        Err(ObjectStorageError::ConditionalWritesUnsupported)
+    }
 
     /// 获取对象的部分内容
     ///

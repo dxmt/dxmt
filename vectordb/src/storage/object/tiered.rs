@@ -102,6 +102,10 @@ pub struct TieredStorage {
     uncached_reads: std::sync::atomic::AtomicBool,
     /// Refuse every write and delete; see `set_read_only`.
     read_only: std::sync::atomic::AtomicBool,
+    /// The SSD tier and the object store are one directory: the `filesystem` provider is rooted
+    /// at the SSD cache directory under the same bucket name, so a key's cached copy *is* the
+    /// object. Dropping it from the SSD tier deleted the object.
+    ssd_is_the_object_store: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for TieredStorage {
@@ -147,6 +151,7 @@ impl TieredStorage {
             memory_usage: Arc::new(RwLock::new(0)),
             uncached_reads: std::sync::atomic::AtomicBool::new(false),
             read_only: std::sync::atomic::AtomicBool::new(false),
+            ssd_is_the_object_store: std::sync::atomic::AtomicBool::new(false),
             memory_hit_count: Arc::new(AtomicU64::new(0)),
             memory_miss_count: Arc::new(AtomicU64::new(0)),
             ssd_hit_count: Arc::new(AtomicU64::new(0)),
@@ -233,7 +238,15 @@ impl TieredStorage {
                 )?)
             };
 
-        Self::new(tiered_config, object_storage)
+        let aliased = config
+            .object_storage
+            .as_ref()
+            .is_some_and(|c| c.provider == "filesystem");
+        let storage = Self::new(tiered_config, object_storage)?;
+        storage
+            .ssd_is_the_object_store
+            .store(aliased, Ordering::Relaxed);
+        Ok(storage)
     }
 
     /// Refuse every write to the bucket: for a read replica, which follows a bucket another
@@ -258,6 +271,19 @@ impl TieredStorage {
     /// have rewritten (the primary fencing token).
     pub async fn get_object_fresh(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {
         self.object_storage.get_object(key).await
+    }
+
+    /// Drop `key` from the memory and SSD tiers, after a write the tiers did not see.
+    async fn forget_cached(&self, key: &str) {
+        let mut cache = self.memory_cache.write().await;
+        if let Some(data) = cache.pop(key) {
+            let mut memory_usage = self.memory_usage.write().await;
+            *memory_usage -= data.len()
+        }
+        drop(cache);
+        if !self.ssd_is_the_object_store.load(Ordering::Relaxed) {
+            let _ = self.ssd_storage.delete_object(key).await;
+        }
     }
 
     /// Read every object from the source rather than the caches: for a process that reads a
@@ -496,6 +522,30 @@ impl ObjectStorage for TieredStorage {
         end: u64,
     ) -> ObjectStorageResult<Vec<u8>> {
         self.object_storage.get_object_range(key, start, end).await
+    }
+
+    // Versions are the source's: the tiers are read through and written around.
+    async fn get_object_versioned(
+        &self,
+        key: &str,
+    ) -> ObjectStorageResult<(Vec<u8>, Option<String>)> {
+        self.object_storage.get_object_versioned(key).await
+    }
+
+    async fn put_object_if(
+        &self,
+        key: &str,
+        data: Bytes,
+        content_type: Option<&str>,
+        condition: super::traits::PutCondition,
+    ) -> ObjectStorageResult<String> {
+        self.refuse_writes_on_a_replica()?;
+        let version = self
+            .object_storage
+            .put_object_if(key, data, content_type, condition)
+            .await?;
+        self.forget_cached(key).await;
+        Ok(version)
     }
 
     async fn delete_object(&self, key: &str) -> ObjectStorageResult<()> {
