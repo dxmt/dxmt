@@ -112,6 +112,7 @@ fn get_cpu_vendor() -> String {
     String::from_utf8_lossy(&vendor).to_string()
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // only the x86 SIMD paths use it
 fn detect_amd_architecture(family: u32, model: u32) -> CpuArchitecture {
     match family {
         0x19 => {
@@ -127,6 +128,7 @@ fn detect_amd_architecture(family: u32, model: u32) -> CpuArchitecture {
     }
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // only the x86 SIMD paths use it
 fn detect_intel_architecture(family: u32, model: u32) -> CpuArchitecture {
     match family {
         0x06 => match model {

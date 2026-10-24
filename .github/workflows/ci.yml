@@ -89,6 +89,25 @@ jobs:
       - name: Text feature compile
         run: cargo check --no-default-features --features tokio-runtime,basic-storage,text-bm25
 
+  # The crate did not compile on aarch64 -- one AVX2 function was missing its
+  # `cfg(target_arch)` -- and nothing noticed until the release workflow built an ARM binary.
+  # Native, on GitHub's ARM runner, so the unit tests exercise the non-x86 distance paths.
+  aarch64:
+    name: aarch64 clippy and unit tests
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned; vectordb/rust-toolchain.toml says why. Keep the two versions equal.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vectordb
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --lib
+
   optional-features:
     name: optional features, compile and test
     runs-on: ubuntu-latest

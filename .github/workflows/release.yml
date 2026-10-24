@@ -1,0 +1,146 @@
+# Prebuilt Linux binaries, with the web console compiled in.
+#
+# A pushed `vX.Y.Z` tag builds them and attaches them to that tag's GitHub release -- creating
+# it as a draft, from the CHANGELOG section, if it does not exist yet, so nothing is published
+# without someone pressing the button. A pull request that touches this file builds and
+# smoke-tests everything and publishes nothing: that is how a change here is tried.
+#
+# Built in AlmaLinux 8 (glibc 2.28, supported to 2029), so the binaries run on RHEL/Rocky/Alma 8,
+# Debian 10, Ubuntu 20.04 and anything newer. A runner's own Ubuntu would tie them to its glibc,
+# which is newer than most servers'. Debian 11 was the first choice and its mirrors no longer
+# serve it.
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    paths: ['.github/workflows/release.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  console:
+    name: web console bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: vectordb/dashboard/package-lock.json
+      - name: Build the console
+        run: npm ci && npm run build
+        working-directory: vectordb/dashboard
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: vectordb/dashboard/dist
+          if-no-files-found: error
+
+  linux:
+    name: linux ${{ matrix.arch }}
+    needs: console
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: almalinux:8
+    defaults:
+      run:
+        working-directory: vectordb
+        shell: bash
+    steps:
+      # Before checkout: in a container, actions/checkout needs git to make a real clone.
+      - name: Build tools
+        working-directory: /
+        run: |
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config git jq tar gzip which
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: vectordb/dashboard/dist
+      # rustup reads vectordb/rust-toolchain.toml and installs the pinned version on first use.
+      - name: Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: cargo build --release --locked --bin vectordb
+
+      # The binary that is about to be shipped, started and used: it answers, it has the
+      # console, and a table takes a write and a search.
+      - name: Smoke test
+        run: |
+          bin=target/release/vectordb
+          $bin --version
+          HOME=$(mktemp -d) DXMT_EMBEDDING_AUTODETECT=0 $bin serve --port 9999 &
+          server=$!
+          for _ in $(seq 60); do curl -sf localhost:9999/health >/dev/null && break; sleep 1; done
+          curl -sf localhost:9999/ready >/dev/null
+          curl -sf -o /dev/null localhost:9999/dashboard
+          h='content-type: application/json'
+          curl -sf -X POST localhost:9999/api/v1/tables -H "$h" \
+               -d '{"name":"smoke","dimension":3,"distance_metric":"cosine"}' >/dev/null
+          curl -sf -X POST localhost:9999/api/v1/tables/smoke/records -H "$h" \
+               -d '{"records":[{"id":"a","vector":[1,0,0]},{"id":"b","vector":[0,1,0]}]}' >/dev/null
+          top=$(curl -sf -X POST localhost:9999/api/v1/tables/smoke/search -H "$h" \
+               -d '{"vector":[1,0,0],"top_k":1}' | jq -r '.data.hits[0].id')
+          test "$top" = a
+          kill "$server"
+
+      - name: Package
+        id: package
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          name="dxmt-vectordb-${version}-${{ matrix.arch }}-linux-gnu"
+          mkdir -p "dist/$name"
+          cp target/release/vectordb LICENSE NOTICE README.md CHANGELOG.md .env.example "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: The tag names this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "${GITHUB_REF_NAME}" = "v${{ steps.package.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            vectordb/dist/*.tar.gz
+            vectordb/dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: attach to the release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # The CHANGELOG section for this version, as the draft's notes.
+            awk -v v="${TAG#v}" '
+              $0 ~ "^## \\[" v "\\]" { on = 1; next }
+              on && /^## \[/ { exit }
+              on { print }' vectordb/CHANGELOG.md > notes.md
+            gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md --verify-tag
+          fi
+          gh release upload "$TAG" assets/* --clobber

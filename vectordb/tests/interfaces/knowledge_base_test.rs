@@ -191,6 +191,9 @@ async fn without_a_model_the_knowledge_base_table_is_not_made() {
         )
         .await
         .expect_err("a table was made with no model to make it with");
-    assert!(err.to_string().contains("not found"), "{err}");
+    // It says what is missing and how to get it, not `TABLE_NOT_FOUND`, which is what a
+    // first run that followed the README without ollama was told.
+    assert_eq!(err.status_code(), 400, "{err}");
+    assert!(err.to_string().contains("ollama pull bge-m3"), "{err}");
     assert!(storage.list_tables().await.unwrap().is_empty());
 }

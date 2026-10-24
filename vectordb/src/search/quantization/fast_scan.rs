@@ -37,6 +37,7 @@ pub const BLOCK: usize = 32;
 /// Centroids per subspace: one nibble.
 pub const CENTROIDS: usize = 16;
 /// Subspaces accumulated in 16 bits before a spill to 32.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // only the x86 SIMD paths use it
 const SPILL_EVERY: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
