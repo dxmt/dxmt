@@ -32,11 +32,24 @@ file is a landing page, not a second copy of it.
 
 ## Quick start
 
+A prebuilt Linux binary, web console included (x86_64 and aarch64, glibc 2.31+: Debian 11,
+Ubuntu 20.04, RHEL 9 or newer), from [Releases](https://github.com/dxmt/dxmt/releases):
+
+```bash
+v=1.4.0; arch=$(uname -m)   # x86_64 or aarch64
+curl -LO https://github.com/dxmt/dxmt/releases/download/v$v/dxmt-vectordb-$v-$arch-linux-gnu.tar.gz
+tar xzf dxmt-vectordb-$v-$arch-linux-gnu.tar.gz
+./dxmt-vectordb-$v-$arch-linux-gnu/vectordb serve          # http://127.0.0.1:9999
+```
+
+Or from source (Rust via [rustup](https://rustup.rs); add Node 20 and `make dashboard-build`
+first if you want the web console in the binary):
+
 ```bash
 git clone https://github.com/dxmt/dxmt.git
 cd dxmt/vectordb
 cargo build --release
-./target/release/vectordb serve          # http://127.0.0.1:9999
+./target/release/vectordb serve
 ```
 
 It listens on this machine only. To serve other machines, add `--host 0.0.0.0` and set

@@ -47,8 +47,15 @@ standalone tests.
 
 ## Quick Start
 
-Requires [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml` (1.99.0), and
-rustup installs it the first time you run `cargo` in `vectordb/`.
+Prebuilt Linux binaries, with the web console compiled in, are attached to each
+[release](https://github.com/dxmt/dxmt/releases) from 1.4.0 on: `dxmt-vectordb-<version>-<x86_64|aarch64>-linux-gnu.tar.gz`,
+built on glibc 2.31 (Debian 11, Ubuntu 20.04, RHEL 9 or newer), each with a `.sha256` beside
+it. Unpack and run `./vectordb serve`.
+
+To build it yourself you need [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml` (1.99.0), and
+rustup installs it the first time you run `cargo` in `vectordb/`. The web console is compiled
+into the binary only if its bundle exists when you build: `make dashboard-build` (Node 20+)
+first, or the server runs without `/dashboard` and says so at startup.
 
 ```bash
 # Build
