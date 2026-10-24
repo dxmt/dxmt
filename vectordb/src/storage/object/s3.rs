@@ -8,7 +8,7 @@ use futures::stream::BoxStream;
 use std::collections::HashMap;
 
 use super::errors::ObjectStorageError;
-use super::traits::{ObjectStorage, ObjectStorageResult, StorageStats};
+use super::traits::{ObjectStorage, ObjectStorageResult, PutCondition, StorageStats};
 use super::types::{
     ListObjectsOptions, ListObjectsResult, ObjectInfo, ObjectMetadata, ObjectStorageConfig,
     PartInfo,
@@ -112,6 +112,84 @@ impl ObjectStorage for S3Storage {
             })?;
 
         Ok(())
+    }
+
+    async fn get_object_versioned(
+        &self,
+        key: &str,
+    ) -> ObjectStorageResult<(Vec<u8>, Option<String>)> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(self.build_key(key))
+            .send()
+            .await
+            .map_err(|e| {
+                let message = aws_sdk_s3::error::DisplayErrorContext(&e).to_string();
+                if message.contains("NoSuchKey") {
+                    ObjectStorageError::ObjectNotFound {
+                        key: key.to_string(),
+                    }
+                } else {
+                    ObjectStorageError::AwsError { message }
+                }
+            })?;
+        let version = response.e_tag().map(str::to_string);
+        let data = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| ObjectStorageError::AwsError {
+                message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
+            })?;
+        Ok((data.into_bytes().to_vec(), version))
+    }
+
+    async fn put_object_if(
+        &self,
+        key: &str,
+        data: Bytes,
+        content_type: Option<&str>,
+        condition: PutCondition,
+    ) -> ObjectStorageResult<String> {
+        let mut request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(self.build_key(key))
+            .body(ByteStream::from(data.to_vec()));
+        if let Some(ct) = content_type {
+            request = request.content_type(ct);
+        }
+        // GCS's S3 API accepts these and ignores them (measured: every form succeeded against
+        // a version the object did not have), which `probe_conditional_writes` detects.
+        let sent = match condition {
+            PutCondition::IfMatch(version) => request.if_match(version),
+            PutCondition::IfAbsent => request.if_none_match("*"),
+        }
+        .send()
+        .await;
+        let response = sent.map_err(|e| {
+            // 412 is the condition failing; S3 answers 409 to a conditional write racing
+            // another one on the same key, which for this caller means the same thing.
+            let status = e.raw_response().map(|r| r.status().as_u16());
+            if matches!(status, Some(412) | Some(409)) {
+                ObjectStorageError::PreconditionFailed {
+                    key: key.to_string(),
+                }
+            } else {
+                ObjectStorageError::AwsError {
+                    message: aws_sdk_s3::error::DisplayErrorContext(&e).to_string(),
+                }
+            }
+        })?;
+        response
+            .e_tag()
+            .map(str::to_string)
+            .ok_or_else(|| ObjectStorageError::AwsError {
+                message: format!("{key}: a conditional write answered without an ETag"),
+            })
     }
 
     async fn get_object(&self, key: &str) -> ObjectStorageResult<Vec<u8>> {

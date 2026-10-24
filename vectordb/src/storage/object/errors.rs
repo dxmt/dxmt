@@ -56,6 +56,15 @@ pub enum ObjectStorageError {
 
     #[error("IO error: {message}")]
     IoError { message: String },
+
+    /// A conditional write whose condition did not hold: the object is not the version the
+    /// writer read, or exists when it was to be created.
+    #[error("Precondition failed: {key} changed since it was read")]
+    PreconditionFailed { key: String },
+
+    /// This backend cannot make a write conditional on the object's version.
+    #[error("Conditional writes are not supported by this object store")]
+    ConditionalWritesUnsupported,
 }
 
 impl From<std::io::Error> for ObjectStorageError {
