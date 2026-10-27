@@ -126,9 +126,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Only the packages: unfiltered, this also unpacked the console bundle, and its `assets/`
+      # directory made `gh release upload assets/*` fail after three of the four files (1.4.0).
       - uses: actions/download-artifact@v4
         with:
           path: assets
+          pattern: dxmt-vectordb-*
           merge-multiple: true
       - name: Release
         env:
