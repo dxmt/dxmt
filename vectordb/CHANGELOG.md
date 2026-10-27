@@ -42,6 +42,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Prebuilt Linux binaries.** Each release tag builds `x86_64` and `aarch64` binaries with
+  the web console compiled in, on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer),
+  smoke-tests them -- the server answers, `/dashboard` is served, a write and a search work --
+  and attaches them with their SHA-256 to the release (`.github/workflows/release.yml`). A
+  binary built from source by following the quick start had no console, because the bundle
+  needs Node and the quick start did not say so; it says so now.
 - **A table's text index can be changed after it holds data.** `PATCH /tables/{t}` takes
   `text_fields` -- which payload fields are indexed and with which analyzer -- and rebuilds the
   index from the records without stopping reads or writes: the current index keeps answering,
@@ -162,6 +168,12 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **The crate did not compile on aarch64** (ARM servers, Graviton, Linux on Apple silicon): one
+  AVX2 function was missing its `cfg(target_arch = "x86_64")`. Found by the first ARM release
+  build; CI now runs clippy and the unit tests on an ARM runner.
+- **A first run without an embedding model was told `TABLE_NOT_FOUND: kb`** when it wrote its
+  first note, as the README says to. It is a 400 now saying the notes table needs a model and
+  how to get one (`ollama pull bge-m3`, or `DXMT_EMBEDDING_MODEL`).
 - **A primary another one had replaced answered writes 429 "overloaded, retry".** Its
   refusals counted as errors and the error rate drives the overload check, so after a few the
   server said "retry" instead of why. A server that will refuse every write now says so first

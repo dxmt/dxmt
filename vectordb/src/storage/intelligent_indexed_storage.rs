@@ -4422,7 +4422,23 @@ impl IntelligentIndexedStorage {
             return Ok(());
         }
         let Some(embedding) = self.default_embedding() else {
-            return Ok(());
+            // A first run without a model, following the README to the letter, was told
+            // `TABLE_NOT_FOUND: kb` -- true, and no help. Say what is missing instead; a `kb`
+            // the caller made themselves is left alone.
+            self.ensure_resident(tablename).await?;
+            if self
+                .read_tables("ensure_kb_table")
+                .await
+                .contains_key(tablename)
+            {
+                return Ok(());
+            }
+            return Err(crate::Error::InvalidInput(format!(
+                "'{tablename}' is the notes table, made on first use with the server's \
+                 embedding model -- and this server has none. Run `ollama pull bge-m3` (a local \
+                 ollama is found on its own) and restart, or set DXMT_EMBEDDING_MODEL (with \
+                 OPENAI_API_KEY for OpenAI, or DXMT_EMBEDDING_BASE_URL for another provider)"
+            )));
         };
         // Not `get_table`, which calls this.
         self.ensure_resident(tablename).await?;

@@ -518,6 +518,7 @@ unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// The sum of squared differences, before the root `euclidean_distance_avx2` takes.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn squared_euclidean_avx2(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "Input vectors must have equal length");

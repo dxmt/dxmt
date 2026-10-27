@@ -935,6 +935,7 @@ impl QuantizedStore {
 
     /// The code's bytes, for a prefetch hint; empty past the end rather than a panic.
     #[inline]
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // only the x86 SIMD paths use it
     fn code_bytes(&self, idx: usize) -> &[u8] {
         let start = idx * self.m;
         self.codes.get(start..start + self.m).unwrap_or(&[])
