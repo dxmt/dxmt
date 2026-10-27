@@ -1,6 +1,6 @@
 [package]
 name = "dxmt-vectordb"
-version = "1.3.2"
+version = "1.4.0"
 edition = "2021"
 authors = ["DXMT Team <contact@dxmt.online>"]
 description = "A lightweight single-node vector database written in Rust"
