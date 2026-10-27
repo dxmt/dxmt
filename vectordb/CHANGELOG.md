@@ -17,6 +17,8 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-27
+
 ### Security
 
 - **A table's provider settings can no longer send the server's environment to a URL.** A
