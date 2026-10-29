@@ -3341,8 +3341,16 @@ impl IntelligentIndexedStorage {
         // time rather than a smear across one.
         let before_lock = std::time::Instant::now();
         let waited;
+        let dropped_at_capture;
         let pending: Vec<(String, crate::search::IndexWrapper, TableTemplate)> = {
             let tables = self.read_tables("snapshot").await;
+            // The tombstones as of this capture: the ones this snapshot may clear once it is
+            // installed. A table dropped after this point is resident in `pending` and so named
+            // by this snapshot's manifest; clearing its tombstone too -- the set used to be read
+            // only at the carry-forward below, after the rows were written -- left a manifest
+            // naming a dropped table with nothing to say it was, and the table came back. Moving
+            // tables between shards, which drops one mid-snapshot routinely, is what found it.
+            dropped_at_capture = self.dropped_table_names();
             // Taken here, once the lock is ours. It was taken after the copy, so the copy was
             // reported as waiting and the copy itself as 0.0 s -- pointing at whoever held the
             // lock instead of at this loop.
@@ -3403,7 +3411,17 @@ impl IntelligentIndexedStorage {
 
             let records = match template.mirrored_rows {
                 None => template.records,
-                Some(rows) => self.read_mirrored_rows(&name, rows).await?,
+                Some(rows) => match self.read_mirrored_rows(&name, rows).await {
+                    Ok(records) => records,
+                    // Dropped while it was being read -- a table moving to another shard is,
+                    // routinely. Its tombstone keeps it out of this snapshot's lineage; the
+                    // rest of the snapshot is still good.
+                    Err(_) if self.dropped_table_names().contains(&name) => {
+                        let _ = std::fs::remove_file(&idx_path);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             let head = rmp_serde::to_vec_named(&SnapshotHead {
                 table: template.table,
@@ -3445,7 +3463,9 @@ impl IntelligentIndexedStorage {
         // Taken before the carry-forward and cleared after the install, so a drop that
         // arrives while this snapshot is being written is held over for the next one
         // rather than forgotten by it.
-        let dropped_at_start = self.dropped_table_names();
+        // Every tombstone there is now, which includes any since the capture: none of them may
+        // be carried forward.
+        let dropped_now = self.dropped_table_names();
         if dir.exists() {
             if let Ok(previous) = crate::search::index_persistence::read_index::<SnapshotManifest>(
                 &dir.join("manifest"),
@@ -3455,7 +3475,7 @@ impl IntelligentIndexedStorage {
                 for (i, name) in previous.names.iter().enumerate() {
                     // A dropped table is non-resident too. Copying it forward is what made
                     // DROP non-durable: the deletion never reached the snapshot lineage.
-                    if resident.contains(name) || dropped_at_start.contains(name) {
+                    if resident.contains(name) || dropped_now.contains(name) {
                         continue;
                     }
                     let from = format!("t{}", i);
@@ -3513,10 +3533,10 @@ impl IntelligentIndexedStorage {
         let _ = std::fs::remove_dir_all(&previous);
 
         // The manifest that is now live does not name them, so the tombstones have done
-        // their job. Remove exactly the ones this snapshot filtered — a drop that landed
-        // mid-write is not in that set and stays for the next snapshot.
+        // their job. Remove exactly the ones there were when the tables were captured -- a
+        // drop after that is named by this manifest and keeps its tombstone for the next one.
         if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
-            for name in &dropped_at_start {
+            for name in &dropped_at_capture {
                 dropped.remove(name);
             }
         }
@@ -10654,6 +10674,13 @@ impl IntelligentIndexedStorage {
             let data = tables
                 .remove(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            // The tombstone, under the same lock that takes the table out of the map. Written
+            // after the log entry, as it was, a snapshot running in between saw the table
+            // neither resident nor dropped -- an evicted table, to carry forward from the
+            // previous snapshot -- and brought it back.
+            if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
+                dropped.insert(name.to_string());
+            }
             // The row file goes with the table. Best effort: a file that will not delete is
             // orphaned, not a failed drop.
             //
@@ -10705,12 +10732,8 @@ impl IntelligentIndexedStorage {
         }])
         .await?;
 
-        // The removal is durable in the log now, but the snapshot on disk still carries
-        // this table and the snapshot writer would copy it forward. Record it so the next
-        // snapshot leaves it out, and so nothing lists or rehydrates it in the meantime.
-        if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
-            dropped.insert(name.to_string());
-        }
+        // The snapshot on disk still carries this table; the tombstone recorded above keeps the
+        // snapshot writer from copying it forward, and anything from listing or rehydrating it.
 
         // A partitioned table leaves its segments in object storage. Delete them here rather
         // than at the next snapshot: the table is out of `tables` and its removal is in the

@@ -35,10 +35,27 @@ release, and the first commit that was ever pushed anywhere.
   after the term plus `DXMT_LEASE_GRACE_SECS`, applies the rest of the bucket and promotes
   itself in place (`IntelligentIndexedStorage::promote`). A primary that finds its lease taken
   steps down. `DXMT_AUTO_FAILOVER=0` turns it off.
+- **Moving tables between shards, and rebalancing.** `POST /cluster/tables/<t>/move` on a
+  router freezes the table on its shard against writes (`TABLE_MOVING`, waiting for writes in
+  flight), exports it to `transfers/` in the bucket, imports it on the target, compares record
+  counts, switches the placement and drops the original -- undoing everything on a failure.
+  Routers retry a request the old shard answers 503 or 404 once they have reread the placement.
+  `POST /cluster/rebalance` evens the number of tables per shard, one move at a time.
 - **`DXMT_ACK_AFTER_MIRROR`**: acknowledge a write only once object storage has it. Always on
   for a cluster node, so a failover loses nothing that was acknowledged.
 - **`DXMT_OBJECT_STORAGE_PREFIX`** puts a server's objects under a path in the bucket, so
   several servers can share one; the SSD cache is namespaced by it too.
+
+### Fixed
+
+- **A table dropped while a snapshot was being written could come back.** The snapshot named it
+  (it was resident when the tables were captured) and then cleared its tombstone (read after
+  the rows were written), leaving a manifest naming a dropped table with nothing to say so; it
+  was listed again and could be rehydrated. The tombstone is now recorded under the lock that
+  removes the table, and a snapshot clears only those it captured with the tables. Moving tables
+  between shards, which drops one mid-snapshot routinely, found it (a table on two shards within
+  16 stress moves before the fix; none in 152 after). A table dropped mid-read no longer fails the
+  whole snapshot either.
 
 ## [1.4.0] - 2026-10-27
 

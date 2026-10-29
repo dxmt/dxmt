@@ -630,8 +630,18 @@ acknowledges a write only once the bucket has it, so nothing acknowledged is los
 failover. `DXMT_AUTO_FAILOVER=0` leaves failover to you: restart a replica's directory without
 `--replica`.
 
-Not yet: moving a table between shards, one table spread over several shards, and routes that
-span tables (aliases, DXQL, backups), which the router answers with 501. Tables are created and dropped through the router; a node refuses them
+**Tables move between shards.** `POST /cluster/tables/<t>/move {"to": "b"}` freezes the table
+on its shard (writes answer 503 `TABLE_MOVING` with `Retry-After`; reads go on), carries it
+through the bucket with the same export and import a single server has -- ids, versions,
+`created_at`, payloads and vectors -- checks the copy's record count, points the placement at
+it and drops the original; anything that fails before the switch is undone. Routers that have
+not reread the placement yet are answered 503 or 404 by the old shard, reread, and retry on the
+new one. `POST /cluster/rebalance` (`{"dry_run": true}` for the plan alone) moves tables, one at
+a time, from the shard with the most to the one with the fewest until they differ by at most
+one -- which is how a new shard gets its share.
+
+Not yet: one table spread over several shards, and routes that span tables (aliases, DXQL,
+backups), which the router answers with 501. Tables are created and dropped through the router; a node refuses them
 directly (`DXMT_CLUSTER_SECRET`, when set, is the value the router proves itself with).
 
 ### Feature Flags

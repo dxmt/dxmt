@@ -55,6 +55,18 @@ pub struct ClusterRouter {
     kb_table: Option<String>,
 }
 
+/// A table name as a path segment.
+fn urlencode(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 fn envelope(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     let body = serde_json::json!({
         "success": false,
@@ -299,7 +311,7 @@ impl ClusterRouter {
         headers: &HeaderMap,
         body: Bytes,
     ) -> Response {
-        let shard = match self.shard_of(table).await {
+        let mut shard = match self.shard_of(table).await {
             Some(shard) => shard,
             None if self.kb_table.as_deref() == Some(table) => match self.place(table).await {
                 Ok(shard) => shard,
@@ -348,6 +360,21 @@ impl ClusterRouter {
                 .try_forward(&primary, method, path_and_query, headers, body.clone())
                 .await
             {
+                // A table that moved: the old shard has it frozen (503) or already dropped
+                // (404), and this router has not read the new placement yet.
+                Ok(response)
+                    if attempt == 0
+                        && matches!(
+                            response.status(),
+                            StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE
+                        ) =>
+                {
+                    let _ = self.refresh().await;
+                    match self.shard_of(table).await {
+                        Some(now) if now != shard => shard = now,
+                        _ => return response,
+                    }
+                }
                 Ok(response) => return response,
                 Err(e) if e.is_connect() && attempt == 0 => {
                     tracing::warn!(
@@ -399,6 +426,7 @@ impl ClusterRouter {
                     shard: shard.clone(),
                     state: PlacementState::Ready,
                     since: super::now(),
+                    to: None,
                 },
             );
             Ok(shard)
@@ -436,6 +464,7 @@ impl ClusterRouter {
                     shard: shard.clone(),
                     state: PlacementState::Creating,
                     since: super::now(),
+                    to: None,
                 },
             );
             Ok(shard)
@@ -606,6 +635,357 @@ impl ClusterRouter {
         success(data)
     }
 
+    /// A JSON request to a node, as a router; the `data` of a successful answer, or why not.
+    async fn node_call(
+        &self,
+        node: &NodeRecord,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        incoming: &HeaderMap,
+        extra: Option<(&'static str, &str)>,
+    ) -> Result<serde_json::Value, String> {
+        let mut headers = incoming.clone();
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        if let Some((name, value)) = extra {
+            if let Ok(v) = HeaderValue::from_str(value) {
+                headers.insert(name, v);
+            }
+        }
+        let bytes = body.map(|b| Bytes::from(b.to_string())).unwrap_or_default();
+        let response = self
+            .try_forward(node, &method, path, &headers, bytes)
+            .await
+            .map_err(|e| format!("{} {path} on {}: {e}", method, node.url))?;
+        let status = response.status();
+        let body = hyper::body::to_bytes(response.into_body())
+            .await
+            .map_err(|e| e.to_string())?;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if status.is_success() {
+            Ok(json["data"].clone())
+        } else {
+            Err(format!(
+                "{} {path} on shard '{}' answered {status}: {}",
+                method, node.shard, json["error"]["message"]
+            ))
+        }
+    }
+
+    /// Move `table` to shard `to`: freeze it on its shard, carry it through the bucket, check
+    /// the copy, point the placement at it, drop the original. Writes to the table are refused
+    /// (503, retry) for the length of the move; reads are served throughout. Anything that
+    /// fails before the placement flips is undone.
+    async fn move_table(&self, table: &str, to: &str, headers: &HeaderMap) -> Response {
+        let view = self.snapshot_view();
+        let Some(placed) = view.placement.tables.get(table).cloned() else {
+            return envelope(
+                StatusCode::NOT_FOUND,
+                "TABLE_NOT_FOUND",
+                format!("Table not found: {table}"),
+            );
+        };
+        if placed.state != PlacementState::Ready {
+            return envelope(
+                StatusCode::CONFLICT,
+                "TABLE_BUSY",
+                format!(
+                    "table '{table}' is {:?}; wait for that to finish",
+                    placed.state
+                ),
+            );
+        }
+        let from = placed.shard.clone();
+        if from == to {
+            return success(serde_json::json!({ "table": table, "shard": to, "moved": false }));
+        }
+        let Some(src) = self.primary(&from) else {
+            return Self::unavailable(&from);
+        };
+        let Some(dst) = self.primary(to) else {
+            return if view.shards.contains_key(to) {
+                Self::unavailable(to)
+            } else {
+                envelope(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_INPUT",
+                    format!("no shard '{to}'"),
+                )
+            };
+        };
+        let (t, f, d) = (table.to_string(), from.clone(), to.to_string());
+        let claimed = placement::update(&self.cluster, |p| match p.tables.get_mut(&t) {
+            Some(e) if e.state == PlacementState::Ready && e.shard == f => {
+                e.state = PlacementState::Moving;
+                e.to = Some(d.clone());
+                e.since = super::now();
+                Ok(())
+            }
+            _ => Err(crate::Error::InvalidInput(format!(
+                "table '{t}' changed; try again"
+            ))),
+        })
+        .await;
+        if let Err(e) = claimed {
+            return envelope(StatusCode::CONFLICT, "TABLE_BUSY", e.to_string());
+        }
+        let started = std::time::Instant::now();
+        let key = format!("transfers/{table}-{}", uuid::Uuid::new_v4());
+        let count_path = format!("/api/v1/tables/{}/records/count", urlencode(table));
+        let mut imported = false;
+        let result: Result<serde_json::Value, String> = async {
+            let table_body = serde_json::json!({ "table": table });
+            self.node_call(
+                &src,
+                Method::POST,
+                "/cluster/node/freeze",
+                Some(table_body),
+                headers,
+                None,
+            )
+            .await?;
+            let exported = self
+                .node_call(
+                    &src,
+                    Method::POST,
+                    "/cluster/node/export",
+                    Some(serde_json::json!({ "table": table, "key": key })),
+                    headers,
+                    None,
+                )
+                .await?;
+            self.node_call(
+                &dst,
+                Method::POST,
+                "/cluster/node/import",
+                Some(serde_json::json!({ "key": key, "name": table })),
+                headers,
+                None,
+            )
+            .await?;
+            imported = true;
+            let before = self
+                .node_call(
+                    &src,
+                    Method::POST,
+                    &count_path,
+                    Some(serde_json::json!({})),
+                    headers,
+                    None,
+                )
+                .await?["count"]
+                .clone();
+            let after = self
+                .node_call(
+                    &dst,
+                    Method::POST,
+                    &count_path,
+                    Some(serde_json::json!({})),
+                    headers,
+                    None,
+                )
+                .await?["count"]
+                .clone();
+            if before != after {
+                return Err(format!(
+                    "the copy holds {after} records, the original {before}"
+                ));
+            }
+            Ok(serde_json::json!({ "records": after, "bytes": exported["bytes"] }))
+        }
+        .await;
+
+        let (t, f, d) = (table.to_string(), from.clone(), to.to_string());
+        match result {
+            Ok(report) => {
+                let flipped = placement::update(&self.cluster, |p| {
+                    if let Some(e) = p.tables.get_mut(&t) {
+                        e.shard = d.clone();
+                        e.state = PlacementState::Ready;
+                        e.to = None;
+                        e.since = super::now();
+                    }
+                    Ok(())
+                })
+                .await;
+                if let Err(e) = flipped {
+                    // Both copies exist and the placement still says `from`: undo the copy.
+                    let _ = self
+                        .undo_move(&src, &dst, table, &from, true, headers)
+                        .await;
+                    let _ = self.cluster.store().delete_object(&key).await;
+                    return envelope(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "MOVE_FAILED",
+                        e.to_string(),
+                    );
+                }
+                let _ = self.refresh().await;
+                let path = format!("/api/v1/tables/{}", urlencode(table));
+                if let Err(e) = self
+                    .node_call(
+                        &src,
+                        Method::DELETE,
+                        &path,
+                        None,
+                        headers,
+                        Some((super::transfer::MOVE_DROP_HEADER, self.secret.as_str())),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "table '{table}' moved to '{to}' but its old copy on '{f}' stays: {e}"
+                    );
+                }
+                let _ = self.cluster.store().delete_object(&key).await;
+                success(serde_json::json!({
+                    "table": table, "from": from, "to": to, "moved": true,
+                    "records": report["records"], "bytes": report["bytes"],
+                    "seconds": started.elapsed().as_secs_f64(),
+                }))
+            }
+            Err(e) => {
+                self.undo_move(&src, &dst, table, &from, imported, headers)
+                    .await;
+                let _ = self.cluster.store().delete_object(&key).await;
+                envelope(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "MOVE_FAILED",
+                    format!("moving '{table}' from '{from}' to '{to}' failed and was undone: {e}"),
+                )
+            }
+        }
+    }
+
+    /// Put a move that did not finish back: the copy dropped, the original unfrozen, the
+    /// placement on `from` again.
+    async fn undo_move(
+        &self,
+        src: &NodeRecord,
+        dst: &NodeRecord,
+        table: &str,
+        from: &str,
+        drop_copy: bool,
+        headers: &HeaderMap,
+    ) {
+        if drop_copy {
+            let path = format!("/api/v1/tables/{}", urlencode(table));
+            if let Err(e) = self
+                .node_call(dst, Method::DELETE, &path, None, headers, None)
+                .await
+            {
+                tracing::warn!(
+                    "undoing a move: the copy of '{table}' on '{}' stays: {e}",
+                    dst.shard
+                );
+            }
+        }
+        let _ = self
+            .node_call(
+                src,
+                Method::POST,
+                "/cluster/node/unfreeze",
+                Some(serde_json::json!({ "table": table })),
+                headers,
+                None,
+            )
+            .await;
+        let (t, f) = (table.to_string(), from.to_string());
+        let _ = placement::update(&self.cluster, |p| {
+            if let Some(e) = p.tables.get_mut(&t) {
+                e.shard = f.clone();
+                e.state = PlacementState::Ready;
+                e.to = None;
+            }
+            Ok(())
+        })
+        .await;
+        let _ = self.refresh().await;
+    }
+
+    /// Even out the number of tables per shard, one move at a time, from the shard with the
+    /// most to the one with the fewest, until they differ by at most one -- or `max_moves`, or
+    /// a move fails. `dry_run` answers with the plan alone.
+    async fn rebalance(&self, dry_run: bool, max_moves: usize, headers: &HeaderMap) -> Response {
+        let _ = self.refresh().await;
+        let view = self.snapshot_view();
+        let live: Vec<&str> = view
+            .shards
+            .iter()
+            .filter(|(_, v)| v.primary.is_some())
+            .map(|(k, _)| k.as_str())
+            .collect();
+        let mut by_shard: BTreeMap<String, Vec<String>> =
+            live.iter().map(|s| (s.to_string(), Vec::new())).collect();
+        for (table, placed) in &view.placement.tables {
+            if placed.state == PlacementState::Ready {
+                if let Some(tables) = by_shard.get_mut(&placed.shard) {
+                    tables.push(table.clone());
+                }
+            }
+        }
+        let mut plan = Vec::new();
+        while plan.len() < max_moves {
+            let (Some(most), Some(fewest)) = (
+                by_shard
+                    .iter()
+                    .max_by_key(|(k, v)| (v.len(), std::cmp::Reverse((*k).clone())))
+                    .map(|(k, _)| k.clone()),
+                by_shard
+                    .iter()
+                    .min_by_key(|(k, v)| (v.len(), (*k).clone()))
+                    .map(|(k, _)| k.clone()),
+            ) else {
+                break;
+            };
+            if by_shard[&most].len() <= by_shard[&fewest].len() + 1 {
+                break;
+            }
+            let table = by_shard
+                .get_mut(&most)
+                .and_then(|v| v.pop())
+                .unwrap_or_default();
+            by_shard
+                .entry(fewest.clone())
+                .or_default()
+                .push(table.clone());
+            plan.push((table, most, fewest));
+        }
+        let planned: Vec<serde_json::Value> = plan
+            .iter()
+            .map(|(t, f, d)| serde_json::json!({ "table": t, "from": f, "to": d }))
+            .collect();
+        if dry_run {
+            return success(serde_json::json!({ "dry_run": true, "moves": planned }));
+        }
+        let mut done = Vec::new();
+        for (table, _, to) in &plan {
+            let response = self.move_table(table, to, headers).await;
+            let status = response.status();
+            let body = hyper::body::to_bytes(response.into_body())
+                .await
+                .unwrap_or_default();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if !status.is_success() {
+                return envelope(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "REBALANCE_STOPPED",
+                    format!(
+                        "{} moves done; moving '{table}' failed: {}",
+                        done.len(),
+                        json["error"]["message"]
+                    ),
+                );
+            }
+            done.push(json["data"].clone());
+        }
+        success(serde_json::json!({ "dry_run": false, "moves": done }))
+    }
+
     fn status(&self) -> serde_json::Value {
         let view = self.snapshot_view();
         let mut tables_by_shard: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -697,6 +1077,12 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
         }
         (&Method::GET, "/api/v1/tables") => router.list_tables(parts.uri.query(), &headers).await,
         (&Method::POST, "/api/v1/tables") => router.create_table(&headers, body).await,
+        (&Method::POST, "/cluster/rebalance") | (&Method::POST, "/api/v1/cluster/rebalance") => {
+            let opts: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let dry_run = opts["dry_run"].as_bool().unwrap_or(false);
+            let max_moves = opts["max_moves"].as_u64().unwrap_or(100) as usize;
+            router.rebalance(dry_run, max_moves, &headers).await
+        }
         (&Method::POST, "/api/v1/snapshot") => {
             let (answers, unavailable) = router
                 .ask_every_shard(&Method::POST, "/api/v1/snapshot", &headers)
@@ -708,6 +1094,24 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
             success(serde_json::json!({ "shards": shards, "unavailable_shards": unavailable }))
         }
         _ => {
+            let moving = trimmed
+                .strip_prefix("/api/v1/cluster/tables/")
+                .or_else(|| trimmed.strip_prefix("/cluster/tables/"))
+                .and_then(|rest| rest.strip_suffix("/move"));
+            if let (Some(table), &Method::POST) = (moving, &method) {
+                let table = super::percent_decode(table);
+                let to = serde_json::from_slice::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["to"].as_str().map(str::to_string));
+                return match to {
+                    Some(to) => router.move_table(&table, &to, &headers).await,
+                    None => envelope(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_INPUT",
+                        "say where: {\"to\": \"<shard>\"}",
+                    ),
+                };
+            }
             if let Some(rest) = trimmed.strip_prefix("/api/v1/tables/") {
                 let table = rest.split('/').next().unwrap_or_default();
                 if table == "import" {
@@ -717,7 +1121,7 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
                         "importing a table through a router is not supported yet",
                     );
                 }
-                let table = percent_decode(table);
+                let table = super::percent_decode(table);
                 if method == Method::DELETE && !rest.contains('/') {
                     return router.drop_table(&table, &path_and_query, &headers).await;
                 }
@@ -737,36 +1141,15 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
     }
 }
 
-fn percent_decode(segment: &str) -> String {
-    let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Some(b) = segment
-                .get(i + 1..i + 3)
-                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-            {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| segment.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn percent_decoding_a_table_segment() {
-        assert_eq!(percent_decode("my%2Dtable"), "my-table");
-        assert_eq!(percent_decode("plain"), "plain");
-        assert_eq!(percent_decode("bad%zz"), "bad%zz");
+        assert_eq!(super::super::percent_decode("my%2Dtable"), "my-table");
+        assert_eq!(super::super::percent_decode("plain"), "plain");
+        assert_eq!(super::super::percent_decode("bad%zz"), "bad%zz");
     }
 
     #[test]
@@ -803,6 +1186,7 @@ mod tests {
                 shard: "a".into(),
                 state: PlacementState::Ready,
                 since: chrono::Utc::now(),
+                to: None,
             },
         );
         assert_eq!(

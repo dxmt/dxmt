@@ -20,6 +20,10 @@ pub enum State {
     /// and the name may be claimed again.
     Creating,
     Ready,
+    /// Being moved to the shard in `Placed::to`; it is still served by `shard`, frozen
+    /// against writes, until the move flips it. A move a router abandoned is undone by the next
+    /// move or by hand (`POST /cluster/tables/<t>/move` again).
+    Moving,
 }
 
 /// How long a `Creating` entry is honoured before it counts as abandoned.
@@ -30,6 +34,9 @@ pub struct Placed {
     pub shard: String,
     pub state: State,
     pub since: chrono::DateTime<chrono::Utc>,
+    /// Where a `Moving` table is going.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -134,6 +141,7 @@ mod tests {
                             shard: format!("s{}", i % 3),
                             state: State::Ready,
                             since: super::super::now(),
+                            to: None,
                         },
                     );
                     Ok(())

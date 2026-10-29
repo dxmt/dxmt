@@ -431,3 +431,202 @@ fn a_replica_takes_over_its_shard_when_the_primary_dies() {
         assert_eq!(status, 200, "{id} was acknowledged and is gone");
     }
 }
+
+fn records_of(port: u16, table: &str) -> u64 {
+    let (status, body) = json(
+        port,
+        "POST",
+        &format!("/api/v1/tables/{table}/records/count"),
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(status, 200, "{body}");
+    body["data"]["count"].as_u64().unwrap()
+}
+
+/// A table moves to the other shard while it is being written to: writes during the move are
+/// refused and retried, not lost; afterwards the table is on the new shard only, and every
+/// acknowledged write is in it.
+#[test]
+fn a_table_moves_between_shards_under_writes_without_losing_any() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bucket = tmp.path().join("bucket-root");
+    let a = node(&tmp.path().join("a"), &bucket, "a", false);
+    let b = node(&tmp.path().join("b"), &bucket, "b", false);
+    let r = router(&bucket);
+    wait_for_shards(r.port, &[("a", 0), ("b", 0)]);
+    let (status, body) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables",
+        Some(serde_json::json!({"name": "mover", "dimension": 4, "distance_metric": "euclidean"})),
+    );
+    assert_eq!(status, 200, "{body}");
+    let records: Vec<_> = (0..50)
+        .map(|i| serde_json::json!({"id": format!("r{i}"), "vector": [i, 1, 0, 0], "payload": {"i": i}}))
+        .collect();
+    let (status, _) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables/mover/records",
+        Some(serde_json::json!({ "records": records })),
+    );
+    assert_eq!(status, 200);
+    let placement = |bucket: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(bucket.join("bucket/cluster/PLACEMENT")).unwrap())
+            .unwrap()
+    };
+    let from = placement(&bucket)["tables"]["mover"]["shard"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let to = if from == "a" { "b" } else { "a" };
+
+    // A writer that keeps going through the move, retrying what is refused.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        let port = r.port;
+        std::thread::spawn(move || {
+            let mut acked = Vec::new();
+            let mut refused = 0;
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let id = format!("during-{n}");
+                let (status, _) = json(
+                    port,
+                    "POST",
+                    "/api/v1/tables/mover/records",
+                    Some(serde_json::json!({"records": [{"id": id, "vector": [0, 0, 1, n]}]})),
+                );
+                if status == 200 {
+                    acked.push(id);
+                    n += 1;
+                } else {
+                    refused += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            (acked, refused)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let (status, body) = json(
+        r.port,
+        "POST",
+        "/cluster/tables/mover/move",
+        Some(serde_json::json!({ "to": to })),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["moved"], true, "{body}");
+    std::thread::sleep(Duration::from_millis(300));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (acked, refused) = writer.join().unwrap();
+    eprintln!(
+        "moved in {:.2} s; {} writes acknowledged during it, {refused} refused and retried",
+        body["data"]["seconds"].as_f64().unwrap(),
+        acked.len()
+    );
+
+    assert_eq!(placement(&bucket)["tables"]["mover"]["shard"], to);
+    assert_eq!(records_of(r.port, "mover"), 50 + acked.len() as u64);
+    for id in acked
+        .iter()
+        .chain(["r0".to_string(), "r49".to_string()].iter())
+    {
+        let reply = http::request(
+            r.port,
+            "GET",
+            &format!("/api/v1/tables/mover/records/{id}"),
+            &[],
+            None,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(reply.status, 200, "{id}: {}", reply.text());
+        assert_eq!(reply.header("x-dxmt-shard"), Some(to));
+    }
+    // The payload came along, and the old shard no longer has the table.
+    let (_, rec) = json(r.port, "GET", "/api/v1/tables/mover/records/r7", None);
+    let payload: serde_json::Value =
+        serde_json::from_str(rec["data"]["payload_json"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["i"], 7, "{rec}");
+    let old = if from == "a" { a.port } else { b.port };
+    let (status, _) = json(
+        old,
+        "POST",
+        "/api/v1/tables/mover/records/count",
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(status, 404, "the original was dropped");
+}
+
+/// Tables made while there was one shard spread out when a second joins and the cluster is
+/// rebalanced; nothing in them changes.
+#[test]
+fn rebalancing_spreads_tables_onto_a_new_shard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bucket = tmp.path().join("bucket-root");
+    let _a = node(&tmp.path().join("a"), &bucket, "a", false);
+    let r = router(&bucket);
+    wait_for_shards(r.port, &[("a", 0)]);
+    for i in 0..6 {
+        let t = format!("rb{i}");
+        let (status, _) = json(
+            r.port,
+            "POST",
+            "/api/v1/tables",
+            Some(serde_json::json!({"name": t, "dimension": 4})),
+        );
+        assert_eq!(status, 200);
+        let records: Vec<_> = (0..=i)
+            .map(|j| serde_json::json!({"id": format!("x{j}"), "vector": [j, 0, 0, 1]}))
+            .collect();
+        let (status, _) = json(
+            r.port,
+            "POST",
+            &format!("/api/v1/tables/{t}/records"),
+            Some(serde_json::json!({ "records": records })),
+        );
+        assert_eq!(status, 200);
+    }
+    let _b = node(&tmp.path().join("b"), &bucket, "b", false);
+    wait_for_shards(r.port, &[("a", 0), ("b", 0)]);
+
+    let (status, plan) = json(
+        r.port,
+        "POST",
+        "/cluster/rebalance",
+        Some(serde_json::json!({"dry_run": true})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(plan["data"]["moves"].as_array().unwrap().len(), 3, "{plan}");
+    let (status, done) = json(
+        r.port,
+        "POST",
+        "/cluster/rebalance",
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(status, 200, "{done}");
+    let (_, st) = json(r.port, "GET", "/cluster/status", None);
+    let per_shard: Vec<u64> = st["data"]["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["tables"].as_u64().unwrap())
+        .collect();
+    assert_eq!(per_shard, vec![3, 3], "{st}");
+    for i in 0..6 {
+        assert_eq!(records_of(r.port, &format!("rb{i}")), i + 1);
+    }
+    let (_, again) = json(
+        r.port,
+        "POST",
+        "/cluster/rebalance",
+        Some(serde_json::json!({"dry_run": true})),
+    );
+    assert_eq!(
+        again["data"]["moves"].as_array().unwrap().len(),
+        0,
+        "balanced: {again}"
+    );
+}

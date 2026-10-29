@@ -753,20 +753,46 @@ pub async fn create_app_with_storage(
     let app = app;
 
     #[cfg(feature = "cluster")]
-    let app = if membership.is_some() {
-        app.layer(axum::middleware::from_fn(
-            crate::cluster::node::require_router_for_placement,
-        ))
-    } else {
-        app
+    let freezer = membership
+        .as_ref()
+        .map(|_| Arc::new(crate::cluster::transfer::Freezer::default()));
+    #[cfg(feature = "cluster")]
+    let app = match &freezer {
+        Some(freezer) => app
+            .layer(axum::middleware::from_fn_with_state(
+                freezer.clone(),
+                crate::cluster::transfer::freeze_guard,
+            ))
+            .layer(axum::middleware::from_fn(
+                crate::cluster::node::require_router_for_placement,
+            )),
+        None => app,
     };
 
     let app = app.with_state(base_state);
 
+    // The routes a router moves tables with, outside the API key (they answer only a request
+    // carrying the router header -- set DXMT_CLUSTER_SECRET in production).
     #[cfg(feature = "cluster")]
-    if let Some((cluster, m)) = membership {
-        crate::cluster::node::spawn_membership(cluster, storage.clone(), m, spawn_primary_tasks);
-    }
+    let app = match (membership, freezer) {
+        (Some((cluster, m)), Some(freezer)) => {
+            let app = app.merge(crate::cluster::transfer::routes(
+                crate::cluster::transfer::NodeApi {
+                    storage: storage.clone(),
+                    cluster: cluster.clone(),
+                    freezer,
+                },
+            ));
+            crate::cluster::node::spawn_membership(
+                cluster,
+                storage.clone(),
+                m,
+                spawn_primary_tasks,
+            );
+            app
+        }
+        _ => app,
+    };
 
     if storage.is_replica() {
         // Everything that writes -- snapshots, backups, eviction (which snapshots a table),

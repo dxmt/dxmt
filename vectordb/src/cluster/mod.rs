@@ -17,6 +17,7 @@ pub mod node;
 pub mod nodes;
 pub mod placement;
 pub mod router;
+pub mod transfer;
 
 use crate::storage::object::errors::ObjectStorageError;
 use crate::storage::object::traits::{ObjectStorage, PutCondition};
@@ -95,6 +96,28 @@ pub fn router_secret() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "1".to_string())
+}
+
+/// A path segment as the table name it encodes (`my%2Dtable` is `my-table`).
+pub(crate) fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(b) = segment
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| segment.to_string())
 }
 
 fn now() -> chrono::DateTime<chrono::Utc> {

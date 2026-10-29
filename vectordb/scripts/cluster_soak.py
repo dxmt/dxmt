@@ -15,6 +15,7 @@ Keys come from the environment. The bucket should be empty, and must honour cond
   replicas;
 - shard a's primary is killed with SIGKILL and nothing is restarted: its replica sees the lease
   run out, promotes itself, and writes to shard a resume -- the time that took is reported;
+- a third shard joins and the cluster is rebalanced under load, tables moving onto it;
 - every write the cluster acknowledged, on every table, is there at the end.
 """
 import json
@@ -156,6 +157,7 @@ def check(name, ok, detail=""):
 
 
 acked = {}           # table -> set of ids the cluster acknowledged
+uncertain = {}       # table -> ids of writes whose outcome the client could not know (5xx, no answer)
 lock = threading.Lock()
 stop_load = threading.Event()
 write_status, read_status = {}, {}
@@ -177,6 +179,8 @@ def writer(k):
             write_status[s] = write_status.get(s, 0) + 1
             if s == 200:
                 acked.setdefault(table, set()).update(ids)
+            elif s is None or s >= 500:
+                uncertain.setdefault(table, set()).update(ids)
             if shard_of.get(table) == "a":
                 a_writes.append((time.time(), s == 200))
 
@@ -235,7 +239,23 @@ def main():
           f"{first - killed_at:.1f}s after the kill" if first else "")
     start_node("a3", "a", replica=True)  # a new replica for the new primary
 
-    time.sleep(DUR / 2)
+    time.sleep(DUR / 4)
+    print("=== shard c joins; rebalance under load ===", flush=True)
+    start_node("c1", "c")
+    wait_for(lambda: any(s["shard"] == "c" and s["primary"] for s in status("r1").get("shards", [])), 30)
+    t0 = time.time()
+    s_, body, _ = req(ports["r1"], "POST", "/cluster/rebalance", {}, timeout=600)
+    moves = body["data"]["moves"] if s_ == 200 else body
+    per = {x["shard"]: x["tables"] for x in status("r1").get("shards", [])}
+    check("rebalance moves tables onto the new shard", s_ == 200 and per.get("c", 0) >= TABLES // 3 - 1,
+          f"{len(moves) if s_ == 200 else moves} moves in {time.time() - t0:.1f}s; tables per shard {per}")
+    if s_ == 200:
+        slowest = max((m["seconds"] for m in moves), default=0)
+        print(f"  slowest move {slowest:.2f}s; records moved {sum(m['records'] for m in moves)}", flush=True)
+        for m in moves:
+            shard_of[m["table"]] = m["to"]
+
+    time.sleep(DUR / 4)
     stop_load.set()
     for t in threads:
         t.join(timeout=60)
@@ -244,22 +264,43 @@ def main():
           set(write_status) <= {200, 502, 503} and set(read_status) <= {200, 502, 503},
           f"{write_status} {read_status}")
 
+    # Every acknowledged write must be there. A write that failed with a 5xx may or may not
+    # have landed -- a primary killed after the bucket took a write and before it answered --
+    # so the count may exceed the acknowledged, by no more than those.
     total = sum(len(v) for v in acked.values())
-    missing = {}
+    missing, beyond, extra = {}, {}, {}
     for table, ids in sorted(acked.items()):
         s, body, _ = req(ports["r2"], "POST", f"/api/v1/tables/{table}/records/count", {})
         n = body["data"]["count"] if s == 200 else None
-        if n != len(ids):
+        if n is not None and n > len(ids):
+            extra[table] = n - len(ids)
+        maybe = len(uncertain.get(table, ()))
+        if n is None or n < len(ids):
             missing[table] = (n, len(ids))
+        elif n > len(ids) + maybe:
+            beyond[table] = (n, len(ids), maybe)
         sample = random.sample(sorted(ids), min(50, len(ids)))
         lost = [i for i in sample if req(ports["r1"], "GET", f"/api/v1/tables/{table}/records/{i}")[0] != 200]
         if lost:
             missing.setdefault(table, (n, len(ids)))
     check("every acknowledged write is there", not missing,
-          f"{total} acknowledged over {len(acked)} tables; mismatched {missing}")
+          f"{total} acknowledged over {len(acked)} tables; short {missing}")
+    check("nothing is there that was not written", not beyond,
+          f"writes whose outcome was unknown and landed: {extra}; beyond those {beyond}")
     l1 = req(ports["r1"], "GET", "/api/v1/tables?limit=1000")[1]["data"]["total"]
     l2 = req(ports["r2"], "GET", "/api/v1/tables?limit=1000")[1]["data"]["total"]
     check("both routers list every table", l1 == l2 == TABLES, f"{l1} {l2}")
+    if l1 != TABLES:
+        seen = {}
+        for name in list(procs):
+            if name.startswith("r"):
+                continue
+            s_, body, _ = req(ports[name], "GET", "/api/v1/tables?limit=1000")
+            if s_ == 200:
+                for t in body["data"]["tables"]:
+                    seen.setdefault(t["name"], []).append(name)
+        print("  tables on more than one node:", {t: n for t, n in seen.items() if len(n) > 1}, flush=True)
+        print("  placement:", json.dumps(status("r1"))[:600], flush=True)
 
     for name in list(procs):
         stop(name)
