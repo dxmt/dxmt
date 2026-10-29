@@ -592,6 +592,39 @@ its claims in `PRIMARY`), so a supervisor restarting it cannot take the bucket b
 that machine back as the primary, stop the current one and start it on an empty directory: it
 recovers from the bucket.
 
+### A cluster: many tables over many machines (experimental)
+
+When the tables -- one per user, one per agent -- add up to more than one machine, run several
+servers over one bucket and a router in front of them:
+
+```bash
+export DXMT_OBJECT_STORAGE_PROVIDER=s3 DXMT_S3_BUCKET=my-bucket   # + endpoint and keys
+
+vectordb serve --shard a --advertise http://10.0.0.1:9999          # shard a's primary
+vectordb serve --shard a --advertise http://10.0.0.2:9999 --replica
+vectordb serve --shard b --advertise http://10.0.0.3:9999          # shard b's primary
+vectordb router --host 0.0.0.0 --port 9990                         # clients use this one
+```
+
+Each shard is an ordinary store -- its WAL, snapshots and lock under `shards/<id>/` in the
+bucket, a primary and any read replicas. Every table belongs to one shard, recorded in
+`cluster/PLACEMENT`; every node writes who it is to `cluster/nodes/` every
+`DXMT_HEARTBEAT_SECS` (2). The router serves the same `/api/v1` as a single server and forwards
+each request to its table's shard: creating a table puts it on the shard holding the fewest,
+listing asks every shard, and a read sent with `X-DXMT-Read: replica` goes to a replica (which
+trails the primary; a 404 there is retried on the primary). Responses say where they were
+served (`X-DXMT-Shard`, `X-DXMT-Node`); `GET /cluster/status` shows the whole cluster. Routers
+keep nothing of their own, so run as many as you like.
+
+There is no consensus service: the cluster's state is in the bucket and changed by
+conditional writes, so a cluster needs a store that honours them -- AWS S3, MinIO, or the
+`filesystem` provider; GCS's S3 API does not, and is refused. Failing over a shard is the same
+as for one server: restart its replica's directory without `--replica`; routers follow the
+higher epoch. Not yet: automatic failover, moving a table between shards, one table spread
+over several shards, and routes that span tables (aliases, DXQL, backups), which the router
+answers with 501. Tables are created and dropped through the router; a node refuses them
+directly (`DXMT_CLUSTER_SECRET`, when set, is the value the router proves itself with).
+
 ### Feature Flags
 
 Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,

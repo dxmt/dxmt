@@ -496,6 +496,26 @@ pub async fn create_app_with_storage(
     // table is made with: DXMT_EMBEDDING_MODEL, or what a local ollama already has.
     crate::api::quickstart::configure_default_embedding(&storage).await;
 
+    // A cluster node: `serve --shard`. Its store is already under the shard's prefix (the
+    // configuration read it); membership adds a heartbeat and a rule about who may create
+    // tables. The cluster's own state needs conditional writes, so a store without them is
+    // refused here rather than discovered when two routers place one table twice.
+    #[cfg(feature = "cluster")]
+    let membership = match crate::cluster::node::Membership::from_env()? {
+        Some(m) => {
+            let cluster =
+                std::sync::Arc::new(crate::cluster::ClusterStore::open(&config.storage).await?);
+            tracing::info!(
+                "cluster node '{}' of shard '{}', advertised at {}",
+                m.node,
+                m.shard,
+                m.url
+            );
+            Some((cluster, m))
+        }
+        None => None,
+    };
+
     // 应用状态
     // Initialize server health monitor
     let server_health = Arc::new(crate::api::server_health::ServerHealth::default());
@@ -720,7 +740,21 @@ pub async fn create_app_with_storage(
     #[cfg(not(feature = "api-swagger"))]
     let app = app;
 
+    #[cfg(feature = "cluster")]
+    let app = if membership.is_some() {
+        app.layer(axum::middleware::from_fn(
+            crate::cluster::node::require_router_for_placement,
+        ))
+    } else {
+        app
+    };
+
     let app = app.with_state(base_state);
+
+    #[cfg(feature = "cluster")]
+    if let Some((cluster, m)) = membership {
+        crate::cluster::node::spawn_heartbeat(cluster, storage.clone(), m);
+    }
 
     if storage.is_replica() {
         // Everything that writes -- snapshots, backups, eviction (which snapshots a table),

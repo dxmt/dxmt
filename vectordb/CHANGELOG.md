@@ -17,6 +17,21 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **A cluster: many tables over many machines (experimental).** `serve --shard <id>
+  --advertise <url>` runs a server whose store is under `shards/<id>/` of a shared bucket and
+  which reports itself in `cluster/nodes/`; `vectordb router` serves `/api/v1` and forwards
+  every request to the shard holding its table, as recorded in `cluster/PLACEMENT` (changed
+  only by conditional writes). Creating a table places it on the least-loaded shard, listing
+  and snapshots ask every shard, `X-DXMT-Read: replica` sends a read to a replica (falling back
+  to the primary on a 404), a request whose node cannot be reached is retried once after the
+  router rereads the cluster, and `GET /cluster/status` shows it all. Nodes refuse to create or
+  drop tables except through a router. Requires a store with conditional writes. Not yet:
+  automatic failover, moving tables, one table across shards. See the README.
+- **`DXMT_OBJECT_STORAGE_PREFIX`** puts a server's objects under a path in the bucket, so
+  several servers can share one; the SSD cache is namespaced by it too.
+
 ## [1.4.0] - 2026-10-27
 
 ### Security

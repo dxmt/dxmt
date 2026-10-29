@@ -36,6 +36,7 @@ fn config(base: &Path) -> StorageConfig {
             endpoint: None,
             access_key_id: None,
             secret_access_key: None,
+            prefix: None,
         }),
     }
 }
@@ -756,4 +757,51 @@ async fn a_replaced_primary_cannot_publish_a_snapshot() {
         .await
         .unwrap();
     assert_eq!(ids(&fresh).await, vec!["a", "b"]);
+}
+
+fn config_with_prefix(base: &Path, prefix: &str) -> StorageConfig {
+    let mut cfg = config(base);
+    if let Some(o) = cfg.object_storage.as_mut() {
+        o.prefix = Some(prefix.to_string());
+    }
+    cfg
+}
+
+/// Two servers sharing one bucket under different prefixes -- what a cluster's shards are --
+/// see only their own: each recovers its own tables, a replica follows its own prefix, and the
+/// objects are where the prefix says.
+#[tokio::test]
+async fn servers_under_different_prefixes_share_a_bucket_without_seeing_each_other() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let a = config_with_prefix(&shared, "shards/a");
+    let b = config_with_prefix(&shared, "shards/b");
+    for (cfg, dir, id) in [(&a, "pa", "in-a"), (&b, "pb", "in-b")] {
+        let primary = IntelligentIndexedStorage::new_with_wal(cfg, Some(tmp.path().join(dir)))
+            .await
+            .unwrap();
+        primary.create_table(table()).await.unwrap();
+        primary
+            .insert_records("t", vec![record(id, 1.0)])
+            .await
+            .unwrap();
+        primary.snapshot().await.unwrap();
+        primary
+            .insert_records("t", vec![record(&format!("{id}-tail"), 2.0)])
+            .await
+            .unwrap();
+    }
+    let bucket = shared.join("ssd").join("bucket");
+    assert!(bucket.join("shards/a/wal/MANIFEST").exists());
+    assert!(bucket.join("shards/b/wal/MANIFEST").exists());
+    assert!(!bucket.join("wal").exists(), "nothing at the bucket's root");
+
+    let fresh_a = IntelligentIndexedStorage::new_with_wal(&a, Some(tmp.path().join("fa")))
+        .await
+        .unwrap();
+    assert_eq!(ids(&fresh_a).await, vec!["in-a", "in-a-tail"]);
+    let replica_b = IntelligentIndexedStorage::new_replica(&b, tmp.path().join("rb"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&replica_b).await, vec!["in-b", "in-b-tail"]);
 }

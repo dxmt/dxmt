@@ -6889,6 +6889,12 @@ impl IntelligentIndexedStorage {
         self.replica
     }
 
+    /// The epoch this primary claimed the bucket with (`wal/PRIMARY`); 0 on a replica and
+    /// without object storage. A cluster's routers prefer the higher of two primaries.
+    pub fn primary_epoch(&self) -> u64 {
+        self.primary_epoch.load(Ordering::SeqCst)
+    }
+
     /// On a replica, apply WAL chunks the primary has uploaded since the last call, in order.
     /// Returns how many entries were applied.
     ///

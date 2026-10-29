@@ -4,6 +4,8 @@
 pub mod api;
 #[cfg(feature = "benchmarks")]
 pub mod benchmarks;
+#[cfg(feature = "cluster")]
+pub mod cluster;
 pub mod config;
 pub mod error;
 pub mod search;
