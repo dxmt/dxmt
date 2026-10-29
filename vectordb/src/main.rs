@@ -98,6 +98,10 @@ enum Commands {
         /// The address a cluster's routers reach this node at, e.g. `http://10.0.0.5:9999`.
         #[arg(long, env = "DXMT_ADVERTISE_URL")]
         advertise: Option<String>,
+        /// Serve no shard until a cluster loses one -- its lease runs out and no replica takes
+        /// it -- then become that shard's primary, recovered from the bucket.
+        #[arg(long, env = "DXMT_STANDBY", conflicts_with_all = ["shard", "replica"])]
+        standby: bool,
     },
     /// Route a cluster: serve `/api/v1` and forward each request to the shard holding its
     /// table. Reads the cluster -- which shard holds which table, which nodes are up -- from
@@ -162,6 +166,37 @@ async fn shutdown_signal() {
         _ = ctrl_c => info!("Received Ctrl-C, shutting down"),
         _ = terminate => info!("Received SIGTERM, shutting down"),
     }
+}
+
+/// A standby's wait: until a shard is lost, then that shard, on a directory of its own. The
+/// lease taken is kept until the server's own membership loop takes it over.
+#[cfg(feature = "cluster")]
+async fn adopt_a_shard(config: &AppConfig, advertise: Option<&str>) -> Result<()> {
+    let url = advertise.ok_or_else(|| {
+        dxmt_vectordb::Error::InvalidConfig(
+            "--standby needs --advertise: the address routers will reach it at".to_string(),
+        )
+    })?;
+    let node = dxmt_vectordb::config::env::var("DXMT_NODE_ID")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| dxmt_vectordb::cluster::nodes::node_id_for(url));
+    let cluster =
+        std::sync::Arc::new(dxmt_vectordb::cluster::ClusterStore::open(&config.storage).await?);
+    let (shard, held) = dxmt_vectordb::cluster::standby::adopt(&cluster, &node).await?;
+    // Renewed until the server's membership loop, which starts once recovery is done, takes it.
+    let _renewing = dxmt_vectordb::cluster::standby::keep_renewing(cluster, shard.clone(), held);
+    join_shard(&shard, Some(url))?;
+    // A directory nobody has used: a shard recovered on a standby starts from the bucket.
+    let base = dxmt_vectordb::api::server::wal_dir_from_env()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    let dir = base.join(format!(
+        "standby-{shard}-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+    ));
+    std::env::set_var("DXMT_WAL_DIR", &dir);
+    tracing::warn!("serving shard '{shard}' from {}", dir.display());
+    Ok(())
 }
 
 /// Put this process in `shard`: the environment the store and the server read.
@@ -271,8 +306,20 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             grpc_port,
             replica,
             shard: _,
-            advertise: _,
+            advertise,
+            standby,
         } => {
+            #[cfg(feature = "cluster")]
+            if standby {
+                adopt_a_shard(&config, advertise.as_deref()).await?;
+            }
+            #[cfg(not(feature = "cluster"))]
+            if standby {
+                return Err(dxmt_vectordb::Error::InvalidConfig(
+                    "--standby needs a build with the `cluster` feature".to_string(),
+                ));
+            }
+            let _ = advertise;
             if replica {
                 // Read by `create_app_with_storage`, which opens the store.
                 std::env::set_var("DXMT_REPLICA", "1");

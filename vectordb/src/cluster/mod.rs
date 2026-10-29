@@ -17,6 +17,7 @@ pub mod node;
 pub mod nodes;
 pub mod placement;
 pub mod router;
+pub mod standby;
 pub mod transfer;
 
 use crate::storage::object::errors::ObjectStorageError;

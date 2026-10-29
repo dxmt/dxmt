@@ -630,6 +630,21 @@ acknowledges a write only once the bucket has it, so nothing acknowledged is los
 failover. `DXMT_AUTO_FAILOVER=0` leaves failover to you: restart a replica's directory without
 `--replica`.
 
+**A shard with no node left** -- primary and replicas gone -- loses nothing: what it
+acknowledged is in the bucket. Until a node serves it again its tables answer 503
+`SHARD_UNAVAILABLE` with `Retry-After`, the other shards carry on, a listing names it under
+`unavailable_shards`, and new tables go elsewhere. Any node started with `--shard <id>` on an
+empty directory, on any machine, recovers it. Or run standbys, which do that by themselves:
+
+```bash
+vectordb serve --standby --advertise http://10.0.0.9:9999
+```
+
+A standby serves nothing until a shard's lease has run out by the grace and
+`DXMT_STANDBY_DELAY_SECS` (5) more -- long enough for a replica, which already has the data, to
+go first -- then takes the lease and becomes that shard's primary, recovered from the bucket.
+One standby covers one lost shard.
+
 **Tables move between shards.** `POST /cluster/tables/<t>/move {"to": "b"}` freezes the table
 on its shard (writes answer 503 `TABLE_MOVING` with `Retry-After`; reads go on), carries it
 through the bucket with the same export and import a single server has -- ids, versions,

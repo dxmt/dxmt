@@ -630,3 +630,221 @@ fn rebalancing_spreads_tables_onto_a_new_shard() {
         "balanced: {again}"
     );
 }
+
+/// A whole shard goes away -- primary and replicas. Its tables answer 503 with Retry-After
+/// rather than wrong answers or hangs; every other shard is untouched; a listing says which
+/// shard is missing; new tables go elsewhere. A node started for the shard on an empty
+/// directory, on any machine, recovers it from the bucket with everything acknowledged.
+#[test]
+fn a_shard_that_goes_away_is_reported_and_comes_back_from_the_bucket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bucket = tmp.path().join("bucket-root");
+    let _a = node(&tmp.path().join("a"), &bucket, "a", false);
+    let b = node(&tmp.path().join("b"), &bucket, "b", false);
+    let r = router(&bucket);
+    wait_for_shards(r.port, &[("a", 0), ("b", 0)]);
+    for t in ["x", "y"] {
+        let (status, _) = json(
+            r.port,
+            "POST",
+            "/api/v1/tables",
+            Some(serde_json::json!({"name": t, "dimension": 4})),
+        );
+        assert_eq!(status, 200);
+        let records: Vec<_> = (0..30)
+            .map(|i| serde_json::json!({"id": format!("{t}{i}"), "vector": [i, 1, 0, 0]}))
+            .collect();
+        let (status, _) = json(
+            r.port,
+            "POST",
+            &format!("/api/v1/tables/{t}/records"),
+            Some(serde_json::json!({ "records": records })),
+        );
+        assert_eq!(status, 200);
+    }
+    let placement: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bucket.join("bucket/cluster/PLACEMENT")).unwrap())
+            .unwrap();
+    let on_b = ["x", "y"]
+        .into_iter()
+        .find(|t| placement["tables"][*t]["shard"] == "b")
+        .unwrap();
+    let on_a = if on_b == "x" { "y" } else { "x" };
+
+    drop(b); // the whole of shard b
+             // Once its record has expired (TTL 10 s by default here), the router knows it is gone.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, st) = json(r.port, "GET", "/cluster/status", None);
+        if st["data"]["unavailable_shards"]
+            .as_array()
+            .is_some_and(|u| u.iter().any(|s| s == "b"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never noticed: {st}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let reply = http::request(
+        r.port,
+        "POST",
+        &format!("/api/v1/tables/{on_b}/search"),
+        &[],
+        Some(br#"{"vector":[1,1,0,0],"top_k":1}"#),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(reply.status, 503, "{}", reply.text());
+    assert!(reply.text().contains("SHARD_UNAVAILABLE"));
+    assert_eq!(reply.header("retry-after"), Some("2"));
+    assert_eq!(records_of(r.port, on_a), 30, "the other shard is untouched");
+    let (status, list) = json(r.port, "GET", "/api/v1/tables", None);
+    assert_eq!(status, 200);
+    assert_eq!(list["data"]["total"], 1, "{list}");
+    assert_eq!(list["data"]["unavailable_shards"], serde_json::json!(["b"]));
+    let (status, body) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables",
+        Some(serde_json::json!({"name": "z", "dimension": 4})),
+    );
+    assert_eq!(status, 200, "{body}");
+    let placement: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bucket.join("bucket/cluster/PLACEMENT")).unwrap())
+            .unwrap();
+    assert_eq!(
+        placement["tables"]["z"]["shard"], "a",
+        "new tables avoid the missing shard"
+    );
+
+    // A replacement, on an empty directory: everything comes back from the bucket.
+    let _b2 = node(&tmp.path().join("b-replacement"), &bucket, "b", false);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, body) = json(
+            r.port,
+            "POST",
+            &format!("/api/v1/tables/{on_b}/records/count"),
+            Some(serde_json::json!({})),
+        );
+        if status == 200 {
+            assert_eq!(body["data"]["count"], 30, "{body}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shard b never came back: {status} {body}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let (_, list) = json(r.port, "GET", "/api/v1/tables", None);
+    assert_eq!(list["data"]["total"], 3, "{list}");
+}
+
+/// A shard with no replica loses its only node; a standby, which served nothing, takes the
+/// shard over from the bucket. It leaves a healthy shard alone.
+#[test]
+fn a_standby_takes_over_a_shard_that_lost_every_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bucket = tmp.path().join("bucket-root");
+    let fast = |cmd: &mut Command| {
+        cmd.env("DXMT_NODE_TTL_SECS", "3")
+            .env("DXMT_LEASE_GRACE_SECS", "1")
+            .env("DXMT_STANDBY_DELAY_SECS", "1");
+    };
+    let spawn = |args: Vec<String>, root: Option<&Path>| {
+        let port = free_port();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vectordb"));
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|a| a.replace("{port}", &port.to_string()))
+            .collect();
+        cmd.args(&args);
+        base(&mut cmd, &bucket);
+        fast(&mut cmd);
+        if let Some(root) = root {
+            cmd.env("DXMT_ROOT_DIR", root);
+        }
+        let child = cmd.spawn().unwrap();
+        (child, port)
+    };
+    let words = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let (child, port) = spawn(
+        words("serve --host 127.0.0.1 --port {port} --shard a --advertise http://127.0.0.1:{port}"),
+        Some(&tmp.path().join("a")),
+    );
+    wait_live(port);
+    let primary = Proc { child, port };
+    // A standby does not listen until it has a shard, so it is not waited for.
+    let (child, standby_port) = spawn(
+        words("serve --host 127.0.0.1 --port {port} --standby --advertise http://127.0.0.1:{port}"),
+        Some(&tmp.path().join("standby")),
+    );
+    let _standby = Proc {
+        child,
+        port: standby_port,
+    };
+    let (child, port) = spawn(words("router --host 127.0.0.1 --port {port}"), None);
+    wait_live(port);
+    let r = Proc { child, port };
+    wait_for_shards(r.port, &[("a", 0)]);
+
+    let (status, _) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables",
+        Some(serde_json::json!({"name": "t", "dimension": 4})),
+    );
+    assert_eq!(status, 200);
+    let records: Vec<_> = (0..25)
+        .map(|i| serde_json::json!({"id": format!("k{i}"), "vector": [i, 0, 1, 0]}))
+        .collect();
+    let (status, _) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables/t/records",
+        Some(serde_json::json!({ "records": records })),
+    );
+    assert_eq!(status, 200);
+    // Healthy: the standby stays out of it.
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(
+        http::call(standby_port, "GET", "/live", &[], None).is_none(),
+        "a standby took a healthy shard"
+    );
+
+    let killed = Instant::now();
+    drop(primary);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let served_by = loop {
+        let reply = http::request(
+            r.port,
+            "POST",
+            "/api/v1/tables/t/records",
+            &[],
+            Some(br#"{"records":[{"id":"after","vector":[0,1,0,0]}]}"#),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        if reply.status == 200 {
+            break reply.header("x-dxmt-node").map(str::to_string);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never taken over: {} {}",
+            reply.status,
+            reply.text()
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    eprintln!(
+        "standby took over in {:.1} s",
+        killed.elapsed().as_secs_f64()
+    );
+    assert_eq!(
+        served_by.as_deref(),
+        Some(format!("127-0-0-1-{standby_port}").as_str())
+    );
+    assert_eq!(records_of(r.port, "t"), 26);
+}

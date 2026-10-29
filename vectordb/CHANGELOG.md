@@ -41,6 +41,10 @@ release, and the first commit that was ever pushed anywhere.
   counts, switches the placement and drops the original -- undoing everything on a failure.
   Routers retry a request the old shard answers 503 or 404 once they have reread the placement.
   `POST /cluster/rebalance` evens the number of tables per shard, one move at a time.
+- **Standby nodes.** `serve --standby --advertise <url>` serves nothing until a shard has lost
+  every node -- its lease run out by the grace and `DXMT_STANDBY_DELAY_SECS`, so replicas go
+  first -- then takes the lease and becomes that shard's primary, recovered from the bucket.
+  A shard with no node answers 503 `SHARD_UNAVAILABLE` meanwhile; listings name it.
 - **`DXMT_ACK_AFTER_MIRROR`**: acknowledge a write only once object storage has it. Always on
   for a cluster node, so a failover loses nothing that was acknowledged.
 - **`DXMT_OBJECT_STORAGE_PREFIX`** puts a server's objects under a path in the bucket, so
