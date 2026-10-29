@@ -28,7 +28,15 @@ release, and the first commit that was ever pushed anywhere.
   to the primary on a 404), a request whose node cannot be reached is retried once after the
   router rereads the cluster, and `GET /cluster/status` shows it all. Nodes refuse to create or
   drop tables except through a router. Requires a store with conditional writes. Not yet:
-  automatic failover, moving tables, one table across shards. See the README.
+  moving tables, one table across shards. See the README.
+- **Automatic failover in a cluster.** Each shard's primary holds a lease
+  (`cluster/shards/<id>/LEASE`), renews it every heartbeat and takes writes only until the term
+  it last secured ends; when it stops renewing, one replica takes the lease by conditional write
+  after the term plus `DXMT_LEASE_GRACE_SECS`, applies the rest of the bucket and promotes
+  itself in place (`IntelligentIndexedStorage::promote`). A primary that finds its lease taken
+  steps down. `DXMT_AUTO_FAILOVER=0` turns it off.
+- **`DXMT_ACK_AFTER_MIRROR`**: acknowledge a write only once object storage has it. Always on
+  for a cluster node, so a failover loses nothing that was acknowledged.
 - **`DXMT_OBJECT_STORAGE_PREFIX`** puts a server's objects under a path in the bucket, so
   several servers can share one; the SSD cache is namespaced by it too.
 

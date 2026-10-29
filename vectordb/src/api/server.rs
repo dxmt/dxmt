@@ -398,6 +398,18 @@ pub async fn create_app_with_features(
 /// that builds a router would otherwise inherit whatever the developer happens to have in
 /// their shell, and a `DXMT_API_KEY` left over from an afternoon of manual testing would turn
 /// every one of them red for a reason none of them mention.
+/// The timers only a primary runs -- snapshots, backups, eviction (which snapshots a table),
+/// index re-evaluation and row reclamation. At startup for a primary, and for a cluster replica
+/// at the moment it promotes itself.
+pub fn spawn_primary_tasks(storage: Arc<IntelligentIndexedStorage>) {
+    spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+    let (backup_interval, backup_keep) = backup_schedule_from_env();
+    spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
+    spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
+    spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+    spawn_row_reclamation(storage, row_compaction_interval_from_env());
+}
+
 pub async fn create_app_with_storage(
     interfaces: Interfaces,
     api_key: Option<crate::api::auth::ApiKey>,
@@ -753,7 +765,7 @@ pub async fn create_app_with_storage(
 
     #[cfg(feature = "cluster")]
     if let Some((cluster, m)) = membership {
-        crate::cluster::node::spawn_heartbeat(cluster, storage.clone(), m);
+        crate::cluster::node::spawn_membership(cluster, storage.clone(), m, spawn_primary_tasks);
     }
 
     if storage.is_replica() {
@@ -761,12 +773,7 @@ pub async fn create_app_with_storage(
         // rebuilds and row reclamation -- is the primary's job; the replica follows.
         IntelligentIndexedStorage::spawn_replica_follower(storage.clone(), replica_poll_from_env());
     } else {
-        spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
-        let (backup_interval, backup_keep) = backup_schedule_from_env();
-        spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
-        spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
-        spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
-        spawn_row_reclamation(storage.clone(), row_compaction_interval_from_env());
+        spawn_primary_tasks(storage.clone());
     }
     IntelligentIndexedStorage::spawn_derived_warmup(storage.clone());
     spawn_stall_detector(stall_threshold_from_env());

@@ -618,11 +618,20 @@ keep nothing of their own, so run as many as you like.
 
 There is no consensus service: the cluster's state is in the bucket and changed by
 conditional writes, so a cluster needs a store that honours them -- AWS S3, MinIO, or the
-`filesystem` provider; GCS's S3 API does not, and is refused. Failing over a shard is the same
-as for one server: restart its replica's directory without `--replica`; routers follow the
-higher epoch. Not yet: automatic failover, moving a table between shards, one table spread
-over several shards, and routes that span tables (aliases, DXQL, backups), which the router
-answers with 501. Tables are created and dropped through the router; a node refuses them
+`filesystem` provider; GCS's S3 API does not, and is refused.
+
+**Failover is automatic.** A shard's primary holds a lease (`cluster/shards/<id>/LEASE`) and
+renews it every heartbeat; it takes writes only until the term it last secured runs out. When
+the primary stops renewing -- dead, or cut off from the bucket -- a replica waits for the term
+plus `DXMT_LEASE_GRACE_SECS` (3), takes the lease by conditional write (one replica wins),
+applies what is left in the bucket, and becomes the primary in place; the routers follow. With
+the defaults that is about 15 seconds; `DXMT_NODE_TTL_SECS` shortens it. A node in a cluster
+acknowledges a write only once the bucket has it, so nothing acknowledged is lost in a
+failover. `DXMT_AUTO_FAILOVER=0` leaves failover to you: restart a replica's directory without
+`--replica`.
+
+Not yet: moving a table between shards, one table spread over several shards, and routes that
+span tables (aliases, DXQL, backups), which the router answers with 501. Tables are created and dropped through the router; a node refuses them
 directly (`DXMT_CLUSTER_SECRET`, when set, is the value the router proves itself with).
 
 ### Feature Flags

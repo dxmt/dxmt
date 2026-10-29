@@ -315,3 +315,119 @@ fn a_router_spreads_tables_over_shards_and_sends_each_request_to_its_shard() {
     assert_eq!(list["data"]["total"], 5, "{list}");
     drop((a, b, r, r2, replica));
 }
+
+/// A shard's primary dies; its replica sees the lease run out, takes it, promotes itself, and
+/// the router sends writes to it -- with nothing restarted by hand, and nothing the old primary
+/// acknowledged missing.
+#[test]
+fn a_replica_takes_over_its_shard_when_the_primary_dies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bucket = tmp.path().join("bucket-root");
+    let fast = |cmd: &mut Command| {
+        cmd.env("DXMT_NODE_TTL_SECS", "3")
+            .env("DXMT_LEASE_GRACE_SECS", "1");
+    };
+    let start = |name: &str, replica: bool| {
+        let port = free_port();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vectordb"));
+        cmd.args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
+            .args([
+                "--shard",
+                "a",
+                "--advertise",
+                &format!("http://127.0.0.1:{port}"),
+            ]);
+        if replica {
+            cmd.arg("--replica");
+        }
+        base(&mut cmd, &bucket);
+        fast(&mut cmd);
+        cmd.env("DXMT_ROOT_DIR", tmp.path().join(name));
+        let child = cmd.spawn().unwrap();
+        wait_live(port);
+        Proc { child, port }
+    };
+    let primary = start("p", false);
+    let replica = start("r", true);
+    let r = {
+        let port = free_port();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_vectordb"));
+        cmd.args(["router", "--host", "127.0.0.1", "--port", &port.to_string()]);
+        base(&mut cmd, &bucket);
+        fast(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        wait_live(port);
+        Proc { child, port }
+    };
+    wait_for_shards(r.port, &[("a", 1)]);
+
+    let (status, body) = json(
+        r.port,
+        "POST",
+        "/api/v1/tables",
+        Some(serde_json::json!({"name": "t", "dimension": 4, "distance_metric": "euclidean"})),
+    );
+    assert_eq!(status, 200, "{body}");
+    // Writes go through until the primary holds its lease (the first heartbeat).
+    let mut acked = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while acked.len() < 20 {
+        let id = format!("before-{}", acked.len());
+        let (status, _) = json(
+            r.port,
+            "POST",
+            "/api/v1/tables/t/records",
+            Some(serde_json::json!({"records": [{"id": id, "vector": [1, 0, 0, 0]}]})),
+        );
+        if status == 200 {
+            acked.push(id);
+        } else {
+            assert!(
+                Instant::now() < deadline,
+                "the primary never took writes: {status}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    let killed = Instant::now();
+    drop(primary); // SIGKILL
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let served_by = loop {
+        let reply = http::request(
+            r.port,
+            "POST",
+            "/api/v1/tables/t/records",
+            &[],
+            Some(br#"{"records":[{"id":"after","vector":[0,1,0,0]}]}"#),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        if reply.status == 200 {
+            break reply.header("x-dxmt-node").map(str::to_string);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no failover within 30 s: {} {}",
+            reply.status,
+            reply.text()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    eprintln!("failover took {:.1} s", killed.elapsed().as_secs_f64());
+    assert_eq!(
+        served_by.as_deref(),
+        Some(format!("127-0-0-1-{}", replica.port).as_str()),
+        "the replica is the primary now"
+    );
+    acked.push("after".to_string());
+    for id in &acked {
+        let (status, _) = json(
+            r.port,
+            "GET",
+            &format!("/api/v1/tables/t/records/{id}"),
+            None,
+        );
+        assert_eq!(status, 200, "{id} was acknowledged and is gone");
+    }
+}

@@ -13,8 +13,8 @@ Keys come from the environment. The bucket should be empty, and must honour cond
 - tables spread over the shards; both routers list the same tables;
 - writes through either router are acknowledged and searches answer, including reads sent to
   replicas;
-- shard a's primary is killed with SIGKILL and its replica restarted as the primary; writes to
-  shard a resume, and the time that took is reported;
+- shard a's primary is killed with SIGKILL and nothing is restarted: its replica sees the lease
+  run out, promotes itself, and writes to shard a resume -- the time that took is reported;
 - every write the cluster acknowledged, on every table, is there at the end.
 """
 import json
@@ -222,19 +222,18 @@ def main():
         t.start()
     time.sleep(DUR / 2)
 
-    print("=== failover of shard a: SIGKILL a1, promote a2 ===", flush=True)
+    print("=== shard a's primary SIGKILLed; its replica should take over by itself ===", flush=True)
     killed_at = time.time()
     stop("a1", signal.SIGKILL)
-    stop("a2")
-    start_node("a3", "a", data="a2")  # the replica's directory, without --replica: promotion
     ok = wait_for(lambda: any(s["shard"] == "a" and s["primary"] and s["primary"]["node"] ==
-                              f"127-0-0-1-{ports['a3']}" for s in status("r1").get("shards", [])), 60)
-    check("routers move shard a to the promoted primary", ok)
+                              f"127-0-0-1-{ports['a2']}" for s in status("r1").get("shards", [])), 60)
+    check("the replica promotes itself and the routers follow", ok,
+          f"{time.time() - killed_at:.1f}s after the kill")
     ok = wait_for(lambda: any(t > killed_at and good for t, good in list(a_writes)), 60)
     first = min((t for t, good in list(a_writes) if t > killed_at and good), default=None)
     check("writes to shard a resume", ok,
           f"{first - killed_at:.1f}s after the kill" if first else "")
-    start_node("a4", "a", replica=True)  # a new replica for the new primary
+    start_node("a3", "a", replica=True)  # a new replica for the new primary
 
     time.sleep(DUR / 2)
     stop_load.set()

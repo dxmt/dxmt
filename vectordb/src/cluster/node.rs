@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use super::lease;
 use super::nodes::{self, NodeRecord, Role};
 use super::ClusterStore;
 use crate::storage::IntelligentIndexedStorage;
@@ -70,20 +71,81 @@ impl Membership {
     }
 }
 
-/// Write this node's record now and every `DXMT_HEARTBEAT_SECS`, for as long as the process
-/// lives. A node that cannot reach the bucket stops being written, and routers drop it once
-/// the record is older than `DXMT_NODE_TTL_SECS`.
-pub fn spawn_heartbeat(
+/// Whether a replica takes its shard over when the primary's lease runs out:
+/// `DXMT_AUTO_FAILOVER`, on unless `0`/`false`.
+fn auto_failover() -> bool {
+    !crate::config::env::var("DXMT_AUTO_FAILOVER")
+        .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
+}
+
+/// Run this node's part in the cluster, now and every `DXMT_HEARTBEAT_SECS`, for as long as the
+/// process lives:
+///
+/// - **A primary** takes its shard's lease at once (it was started as the primary: that is the
+///   operator's choice) and renews it each tick. Writes are allowed only until the end of the
+///   term it last secured, counted from before the renewal was sent; a renewal refused because
+///   someone else holds the lease stops it for good (`step_down`).
+/// - **A replica**, with `DXMT_AUTO_FAILOVER` on, watches the lease. Once the term in it ended
+///   more than the grace ago -- the primary has stopped renewing -- it tries to take it; the
+///   one replica that does promotes itself (`IntelligentIndexedStorage::promote`), starts the
+///   primary's timers through `on_promote`, and carries on as the primary. One that fails to
+///   promote gives the lease straight back.
+/// - **Both** write the node record routers read (`cluster/nodes/<node>`).
+///
+/// In a cluster a write is acknowledged only once the bucket has it: failover recovers from
+/// the bucket, and a write only this machine had would be lost with it.
+pub fn spawn_membership(
     cluster: Arc<ClusterStore>,
     storage: Arc<IntelligentIndexedStorage>,
     membership: Membership,
+    on_promote: fn(Arc<IntelligentIndexedStorage>),
 ) {
+    storage.set_ack_after_mirror(true);
+    if !storage.is_replica() {
+        // No writes until the lease is ours: the first tick takes it.
+        storage.hold_write_lease_until(Some(std::time::Instant::now()));
+    }
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(nodes::heartbeat_every());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut held: Option<lease::Held> = None;
+        let mut first = true;
+        let term = lease::term()
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(10));
         loop {
             ticker.tick().await;
-            let ready = storage.health_snapshot().await.ready;
+            if storage.is_replica() {
+                if auto_failover() && storage.health_snapshot().await.ready {
+                    held = try_take_over(&cluster, &storage, &membership, on_promote).await;
+                }
+            } else {
+                let sent = std::time::Instant::now();
+                let attempt = match &held {
+                    Some(h) => lease::renew(&cluster, &membership.shard, h).await,
+                    // Started as the primary, or promoted without a lease in hand: take it.
+                    None => {
+                        lease::acquire(&cluster, &membership.shard, &membership.node, first).await
+                    }
+                };
+                match attempt {
+                    Ok(Some(h)) => {
+                        storage.hold_write_lease_until(Some(sent + term));
+                        held = Some(h);
+                    }
+                    Ok(None) => {
+                        if held.take().is_some() || !first {
+                            storage.step_down(&format!(
+                                "another node took shard '{}''s lease",
+                                membership.shard
+                            ));
+                        }
+                    }
+                    // The bucket could not be reached: the term runs out on its own.
+                    Err(e) => tracing::warn!("lease on shard '{}': {e}", membership.shard),
+                }
+            }
+            first = false;
             let record = NodeRecord {
                 node: membership.node.clone(),
                 shard: membership.shard.clone(),
@@ -94,7 +156,7 @@ pub fn spawn_heartbeat(
                 },
                 url: membership.url.clone(),
                 epoch: storage.primary_epoch(),
-                ready,
+                ready: storage.health_snapshot().await.ready,
                 heartbeat_at: super::now(),
             };
             if let Err(e) = nodes::write(&cluster, &record).await {
@@ -102,6 +164,51 @@ pub fn spawn_heartbeat(
             }
         }
     });
+}
+
+/// A replica's turn: if the shard's lease has run out, take it and promote. The lease held on
+/// success; `None` otherwise.
+async fn try_take_over(
+    cluster: &ClusterStore,
+    storage: &Arc<IntelligentIndexedStorage>,
+    membership: &Membership,
+    on_promote: fn(Arc<IntelligentIndexedStorage>),
+) -> Option<lease::Held> {
+    // Only an expired lease: a shard with none has never had a cluster primary (or is being
+    // upgraded from before leases), and a replica is no judge of whether its primary is alive.
+    let (current, _) = lease::read(cluster, &membership.shard).await.ok()??;
+    if super::now() <= current.expires_at + lease::grace() {
+        return None;
+    }
+    // Before the write that takes the lease: the term it records starts no later than this.
+    let sent = std::time::Instant::now();
+    let held = lease::acquire(cluster, &membership.shard, &membership.node, false)
+        .await
+        .ok()??;
+    tracing::warn!(
+        "shard '{}': the primary ({}) let its lease run out; this replica is taking over",
+        membership.shard,
+        current.node
+    );
+    match storage.promote().await {
+        Ok(()) => {
+            let term = lease::term()
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(10));
+            // Counted from before the promotion, which took part of the term.
+            storage.hold_write_lease_until(Some(sent + term));
+            on_promote(Arc::clone(storage));
+            Some(held)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "shard '{}': promotion failed ({e}); giving the lease back",
+                membership.shard
+            );
+            lease::release(cluster, &membership.shard, &held).await;
+            None
+        }
+    }
 }
 
 /// Whether a request changes which tables exist: create, drop, import.

@@ -12,6 +12,7 @@
 //! to it is a conditional write, so a cluster needs a store that honours them (S3, MinIO, the
 //! filesystem provider) -- checked when a node or router starts ([`ClusterStore::open`]).
 
+pub mod lease;
 pub mod node;
 pub mod nodes;
 pub mod placement;
