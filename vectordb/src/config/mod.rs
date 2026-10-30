@@ -64,6 +64,11 @@ pub struct ObjectStorageConfig {
     pub endpoint: Option<String>,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
+    /// A path inside the bucket that everything this server writes goes under, so several
+    /// servers can share one bucket: `DXMT_OBJECT_STORAGE_PREFIX`, or `shards/<id>` for a
+    /// cluster node started with `--shard`. `None` is the bucket's root, as before.
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 /// 表默认配置
@@ -138,6 +143,16 @@ pub struct MinioConfig {
     pub address: String,
     /// 控制台地址
     pub console_address: String,
+}
+
+/// `a/b` from ` /a//b/ `; `None` for a prefix with nothing in it.
+pub fn normalize_prefix(prefix: &str) -> Option<String> {
+    let parts: Vec<&str> = prefix
+        .split('/')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 impl AppConfig {
@@ -239,6 +254,9 @@ impl Default for AppConfig {
                     endpoint: s3_endpoint,
                     access_key_id: aws_access_key,
                     secret_access_key: aws_secret_key,
+                    prefix: crate::config::env::var("DXMT_OBJECT_STORAGE_PREFIX")
+                        .ok()
+                        .and_then(|p| normalize_prefix(&p)),
                 })
             } else {
                 None

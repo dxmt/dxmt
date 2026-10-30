@@ -36,6 +36,7 @@ fn config(base: &Path) -> StorageConfig {
             endpoint: None,
             access_key_id: None,
             secret_access_key: None,
+            prefix: None,
         }),
     }
 }
@@ -756,4 +757,133 @@ async fn a_replaced_primary_cannot_publish_a_snapshot() {
         .await
         .unwrap();
     assert_eq!(ids(&fresh).await, vec!["a", "b"]);
+}
+
+fn config_with_prefix(base: &Path, prefix: &str) -> StorageConfig {
+    let mut cfg = config(base);
+    if let Some(o) = cfg.object_storage.as_mut() {
+        o.prefix = Some(prefix.to_string());
+    }
+    cfg
+}
+
+/// Two servers sharing one bucket under different prefixes -- what a cluster's shards are --
+/// see only their own: each recovers its own tables, a replica follows its own prefix, and the
+/// objects are where the prefix says.
+#[tokio::test]
+async fn servers_under_different_prefixes_share_a_bucket_without_seeing_each_other() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let a = config_with_prefix(&shared, "shards/a");
+    let b = config_with_prefix(&shared, "shards/b");
+    for (cfg, dir, id) in [(&a, "pa", "in-a"), (&b, "pb", "in-b")] {
+        let primary = IntelligentIndexedStorage::new_with_wal(cfg, Some(tmp.path().join(dir)))
+            .await
+            .unwrap();
+        primary.create_table(table()).await.unwrap();
+        primary
+            .insert_records("t", vec![record(id, 1.0)])
+            .await
+            .unwrap();
+        primary.snapshot().await.unwrap();
+        primary
+            .insert_records("t", vec![record(&format!("{id}-tail"), 2.0)])
+            .await
+            .unwrap();
+    }
+    let bucket = shared.join("ssd").join("bucket");
+    assert!(bucket.join("shards/a/wal/MANIFEST").exists());
+    assert!(bucket.join("shards/b/wal/MANIFEST").exists());
+    assert!(!bucket.join("wal").exists(), "nothing at the bucket's root");
+
+    let fresh_a = IntelligentIndexedStorage::new_with_wal(&a, Some(tmp.path().join("fa")))
+        .await
+        .unwrap();
+    assert_eq!(ids(&fresh_a).await, vec!["in-a", "in-a-tail"]);
+    let replica_b = IntelligentIndexedStorage::new_replica(&b, tmp.path().join("rb"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&replica_b).await, vec!["in-b", "in-b-tail"]);
+}
+
+/// A replica promoted in its own process -- what a cluster node does when its shard's primary
+/// stops renewing its lease -- applies what the old primary left in the bucket, takes writes
+/// numbered after it, and stops the old one if it is somehow still there.
+#[tokio::test]
+async fn a_replica_promoted_in_process_takes_over_the_bucket() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let old = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("old")))
+        .await
+        .unwrap();
+    old.create_table(table()).await.unwrap();
+    old.insert_records("t", vec![record("a", 1.0)])
+        .await
+        .unwrap();
+    let replica = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("replica"))
+        .await
+        .unwrap();
+    // Written after the replica last looked: promotion has to apply it before anything new.
+    old.insert_records("t", vec![record("b", 2.0)])
+        .await
+        .unwrap();
+
+    replica.promote().await.unwrap();
+    assert!(!replica.is_replica());
+    assert!(replica.primary_epoch() > old.primary_epoch());
+    replica
+        .insert_records("t", vec![record("c", 3.0)])
+        .await
+        .expect("a promoted replica takes writes");
+    assert_eq!(ids(&replica).await, vec!["a", "b", "c"]);
+
+    // The old primary is stopped at its next write by the manifest it no longer holds.
+    assert_eq!(
+        old.insert_records("t", vec![record("x", 9.0)])
+            .await
+            .map(|_| ())
+            .unwrap_err()
+            .status_code(),
+        503
+    );
+    let follower = IntelligentIndexedStorage::new_replica(&cfg, tmp.path().join("follower"))
+        .await
+        .unwrap();
+    assert_eq!(ids(&follower).await, vec!["a", "b", "c"]);
+}
+
+/// With `ack_after_mirror`, a write object storage did not take is not acknowledged.
+#[cfg(unix)]
+#[tokio::test]
+async fn ack_after_mirror_refuses_a_write_the_bucket_did_not_take() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let cfg = config(&shared);
+    let primary = IntelligentIndexedStorage::new_with_wal(&cfg, Some(tmp.path().join("p")))
+        .await
+        .unwrap();
+    primary.create_table(table()).await.unwrap();
+    primary.set_ack_after_mirror(true);
+    let lock = shared.join("ssd/bucket/wal/MANIFEST.lock");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&lock).is_ok() {
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        eprintln!("skipped: this user can write a read-only file (root?)");
+        return;
+    }
+    let err = primary
+        .insert_records("t", vec![record("a", 1.0)])
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.status_code(), 503, "{err}");
+    assert!(err.to_string().contains("not acknowledged"), "{err}");
+    primary.set_ack_after_mirror(false);
+    primary
+        .insert_records("t", vec![record("b", 2.0)])
+        .await
+        .expect("without it, the local log is the promise");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
 }

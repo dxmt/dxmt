@@ -74,7 +74,7 @@ impl From<crate::config::ObjectStorageConfig> for ObjectStorageConfig {
             access_key_id: config.access_key_id,
             secret_access_key: config.secret_access_key,
             session_token: None, // Not available in config::ObjectStorageConfig
-            prefix: None,        // Not available in config::ObjectStorageConfig
+            prefix: config.prefix,
         }
     }
 }

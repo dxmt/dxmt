@@ -191,52 +191,29 @@ impl TieredStorage {
             .as_ref()
             .map(|c| c.bucket.clone())
             .unwrap_or_else(|| "default-bucket".to_string());
+        // Everything this server keeps lives under the prefix: in the bucket, and in the SSD
+        // tier, whose keys carry no prefix -- two servers with different prefixes sharing a cache
+        // directory would otherwise serve each other's objects.
+        let prefix = config
+            .object_storage
+            .as_ref()
+            .and_then(|c| c.prefix.clone());
+        let bucket_name = match &prefix {
+            Some(p) => format!("{bucket_name}/{p}"),
+            None => bucket_name,
+        };
 
         let tiered_config = TieredStorageConfig {
             memory_cache_size: memory_config.max_size_mb * 1024 * 1024,
             memory_cache_capacity: 10000, // Default capacity, can be made configurable later
             ssd_cache_dir: ssd_cache_dir.clone(),
             ssd_cache_size,
-            bucket_name,
+            bucket_name: bucket_name.clone(),
             stats_interval_secs: 300, // Default, can be made configurable
             auto_tiering_enabled: config.ssd.is_some(), // 只有配置了 SSD 才启用自动分层
         };
 
-        let object_storage: Box<dyn ObjectStorage + Send + Sync> =
-            if let Some(object_storage_config) = config.object_storage.as_ref() {
-                match object_storage_config.provider.as_str() {
-                    "filesystem" => Box::new(FilesystemStorage::new(
-                        ssd_cache_dir, // Use ssd_cache_dir as base path for filesystem
-                        &object_storage_config.bucket,
-                    )?),
-                    "s3" => {
-                        #[cfg(feature = "s3-storage")]
-                        {
-                            Box::new(S3Storage::new(object_storage_config.clone().into()).await?)
-                        }
-                        #[cfg(not(feature = "s3-storage"))]
-                        {
-                            return Err(ObjectStorageError::ConfigurationError {
-                                message: "S3 storage requires the `s3-storage` feature".to_string(),
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(ObjectStorageError::ConfigurationError {
-                            message: format!(
-                                "Unsupported object storage provider: {}",
-                                object_storage_config.provider
-                            ),
-                        })
-                    }
-                }
-            } else {
-                // If no object storage config is provided, use a dummy FilesystemStorage for tests
-                Box::new(FilesystemStorage::new(
-                    std::env::temp_dir().join("dxmt_test_storage"),
-                    "test-bucket",
-                )?)
-            };
+        let object_storage = object_storage_for(config, prefix.as_deref()).await?;
 
         let aliased = config
             .object_storage
@@ -730,4 +707,58 @@ pub struct TierStats {
     pub memory: TierStat,
     pub ssd: TierStat,
     pub object_storage: TierStat,
+}
+
+/// The object store a configuration names, with `prefix` applied -- without the memory and SSD
+/// tiers. `TieredStorage` puts its tiers in front of this; a cluster reads and writes its own
+/// metadata (`cluster/`, at the bucket's root) through one with no prefix.
+///
+/// The `filesystem` provider is rooted at the SSD cache directory: a directory shared by every
+/// server that uses the "bucket", such as a network mount.
+pub async fn object_storage_for(
+    config: &crate::config::StorageConfig,
+    prefix: Option<&str>,
+) -> ObjectStorageResult<Box<dyn ObjectStorage + Send + Sync>> {
+    let Some(object_storage_config) = config.object_storage.as_ref() else {
+        // No object storage configured: a scratch directory, as tests have always had.
+        return Ok(Box::new(FilesystemStorage::new(
+            std::env::temp_dir().join("dxmt_test_storage"),
+            "test-bucket",
+        )?));
+    };
+    let bucket = match prefix {
+        Some(p) => format!("{}/{p}", object_storage_config.bucket),
+        None => object_storage_config.bucket.clone(),
+    };
+    match object_storage_config.provider.as_str() {
+        "filesystem" => {
+            let root = config
+                .ssd
+                .as_ref()
+                .map(|s| PathBuf::from(&s.cache_dir))
+                .unwrap_or_else(|| std::env::temp_dir().join("dxmt_temp_cache"));
+            // The prefix is a directory under the bucket's, so keys -- and a list's answers --
+            // are relative to it, as S3Storage's are.
+            Ok(Box::new(FilesystemStorage::new(root, &bucket)?))
+        }
+        "s3" => {
+            #[cfg(feature = "s3-storage")]
+            {
+                let mut s3: super::types::ObjectStorageConfig =
+                    object_storage_config.clone().into();
+                s3.prefix = prefix.map(str::to_string);
+                Ok(Box::new(S3Storage::new(s3).await?))
+            }
+            #[cfg(not(feature = "s3-storage"))]
+            {
+                let _ = bucket;
+                Err(ObjectStorageError::ConfigurationError {
+                    message: "S3 storage requires the `s3-storage` feature".to_string(),
+                })
+            }
+        }
+        other => Err(ObjectStorageError::ConfigurationError {
+            message: format!("Unsupported object storage provider: {other}"),
+        }),
+    }
 }

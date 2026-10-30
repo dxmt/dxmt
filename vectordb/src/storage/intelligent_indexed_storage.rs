@@ -845,12 +845,21 @@ pub struct IntelligentIndexedStorage {
     conditional_writes: std::sync::atomic::AtomicBool,
     /// Set by `fence`: another primary has this bucket, and nothing more goes to it.
     fenced: std::sync::atomic::AtomicBool,
+    /// In a cluster, the moment this primary's lease on its shard runs out unless renewed; a
+    /// write after it is refused (`wal_append`), so a primary cut off from the bucket stops
+    /// before a replica may take over. `None` outside a cluster.
+    write_lease_until: StdMutex<Option<std::time::Instant>>,
+    /// Acknowledge a write only once object storage has it (`mirror_wal`). Off on a single
+    /// server, where the local WAL is the promise; on in a cluster, where a failover recovers
+    /// from the bucket and a write only this machine had would be lost with it.
+    /// `DXMT_ACK_AFTER_MIRROR`, or `set_ack_after_mirror`.
+    ack_after_mirror: std::sync::atomic::AtomicBool,
     /// The epoch this primary claimed (`claim_primary`); 0 without object storage. Part of the
     /// name of every chunk and snapshot it writes.
     primary_epoch: AtomicU64,
     /// A read replica: it follows the WAL another process mirrors to object storage, serves
     /// reads, refuses writes, and never writes the bucket. See `new_replica`.
-    replica: bool,
+    replica: std::sync::atomic::AtomicBool,
     /// On a replica, the first WAL sequence it has not applied.
     replica_applied_next: AtomicU64,
     /// On a replica that can no longer catch up from the WAL chunks (the primary pruned some
@@ -858,7 +867,7 @@ pub struct IntelligentIndexedStorage {
     replica_stale: StdMutex<Option<String>>,
     /// With object storage, the token this primary wrote to `wal/PRIMARY` when it started;
     /// see `claim_primary`. `None` on a replica and without object storage.
-    primary_token: Option<String>,
+    primary_token: StdMutex<Option<String>>,
     /// When `ensure_still_primary` last read the token back, and found it ours.
     primary_checked: StdMutex<Option<std::time::Instant>>,
     /// How often it reads it: `DXMT_PRIMARY_CHECK_MS`, default 1,000.
@@ -2202,7 +2211,7 @@ impl IntelligentIndexedStorage {
     ) -> crate::Result<Self> {
         let mut storage = Self::build(config).await?;
         if replica {
-            storage.replica = true;
+            storage.replica.store(true, Ordering::SeqCst);
             storage.storage.set_uncached_reads(true);
             storage.storage.set_read_only(true);
         }
@@ -2371,10 +2380,10 @@ impl IntelligentIndexedStorage {
             storage.load_persisted_derived().await;
             // Entries this machine logged that never reached object storage -- an upload that
             // failed before the last shutdown -- go up now, before anything new is written.
-            if storage.object_storage_enabled && !storage.replica {
+            if storage.object_storage_enabled && !storage.replica.load(Ordering::SeqCst) {
                 storage.mirror_wal(&[]).await?;
             }
-            if !storage.replica {
+            if !storage.replica.load(Ordering::SeqCst) {
                 storage.storage.set_uncached_reads(false);
             }
         }
@@ -2468,11 +2477,16 @@ impl IntelligentIndexedStorage {
             manifest_version: StdMutex::new(None),
             conditional_writes: std::sync::atomic::AtomicBool::new(false),
             fenced: std::sync::atomic::AtomicBool::new(false),
+            write_lease_until: StdMutex::new(None),
+            ack_after_mirror: std::sync::atomic::AtomicBool::new(
+                crate::config::env::var("DXMT_ACK_AFTER_MIRROR")
+                    .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
+            ),
             primary_epoch: AtomicU64::new(0),
-            replica: false,
+            replica: std::sync::atomic::AtomicBool::new(false),
             replica_applied_next: AtomicU64::new(0),
             replica_stale: StdMutex::new(None),
-            primary_token: None,
+            primary_token: StdMutex::new(None),
             primary_checked: StdMutex::new(None),
             primary_check_every: std::time::Duration::from_millis(
                 crate::config::env::var("DXMT_PRIMARY_CHECK_MS")
@@ -2523,7 +2537,7 @@ impl IntelligentIndexedStorage {
     }
 
     fn ensure_writable(&self) -> crate::Result<()> {
-        if self.replica && APPLYING_REPLICATED.try_with(|_| ()).is_err() {
+        if self.replica.load(Ordering::SeqCst) && APPLYING_REPLICATED.try_with(|_| ()).is_err() {
             return Err(crate::Error::ReadOnlyReplica(
                 "this server is a read replica following object storage; send writes to the \
                  primary"
@@ -3237,7 +3251,7 @@ impl IntelligentIndexedStorage {
     /// 快照与 WAL 之间的顺序很关键：先取序号、再落盘。反过来的话，取序号之前写入的条目
     /// 会既在快照里、又被当成尾部重放一次；插入是 upsert 所以不会错，只是白做功。
     pub async fn snapshot(&self) -> crate::Result<usize> {
-        if self.replica {
+        if self.replica.load(Ordering::SeqCst) {
             return Err(crate::Error::ReadOnlyReplica(
                 "snapshots are the primary's: a replica's would be uploaded over the bucket it \
                  follows"
@@ -3327,8 +3341,16 @@ impl IntelligentIndexedStorage {
         // time rather than a smear across one.
         let before_lock = std::time::Instant::now();
         let waited;
+        let dropped_at_capture;
         let pending: Vec<(String, crate::search::IndexWrapper, TableTemplate)> = {
             let tables = self.read_tables("snapshot").await;
+            // The tombstones as of this capture: the ones this snapshot may clear once it is
+            // installed. A table dropped after this point is resident in `pending` and so named
+            // by this snapshot's manifest; clearing its tombstone too -- the set used to be read
+            // only at the carry-forward below, after the rows were written -- left a manifest
+            // naming a dropped table with nothing to say it was, and the table came back. Moving
+            // tables between shards, which drops one mid-snapshot routinely, is what found it.
+            dropped_at_capture = self.dropped_table_names();
             // Taken here, once the lock is ours. It was taken after the copy, so the copy was
             // reported as waiting and the copy itself as 0.0 s -- pointing at whoever held the
             // lock instead of at this loop.
@@ -3389,7 +3411,17 @@ impl IntelligentIndexedStorage {
 
             let records = match template.mirrored_rows {
                 None => template.records,
-                Some(rows) => self.read_mirrored_rows(&name, rows).await?,
+                Some(rows) => match self.read_mirrored_rows(&name, rows).await {
+                    Ok(records) => records,
+                    // Dropped while it was being read -- a table moving to another shard is,
+                    // routinely. Its tombstone keeps it out of this snapshot's lineage; the
+                    // rest of the snapshot is still good.
+                    Err(_) if self.dropped_table_names().contains(&name) => {
+                        let _ = std::fs::remove_file(&idx_path);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             let head = rmp_serde::to_vec_named(&SnapshotHead {
                 table: template.table,
@@ -3431,7 +3463,9 @@ impl IntelligentIndexedStorage {
         // Taken before the carry-forward and cleared after the install, so a drop that
         // arrives while this snapshot is being written is held over for the next one
         // rather than forgotten by it.
-        let dropped_at_start = self.dropped_table_names();
+        // Every tombstone there is now, which includes any since the capture: none of them may
+        // be carried forward.
+        let dropped_now = self.dropped_table_names();
         if dir.exists() {
             if let Ok(previous) = crate::search::index_persistence::read_index::<SnapshotManifest>(
                 &dir.join("manifest"),
@@ -3441,7 +3475,7 @@ impl IntelligentIndexedStorage {
                 for (i, name) in previous.names.iter().enumerate() {
                     // A dropped table is non-resident too. Copying it forward is what made
                     // DROP non-durable: the deletion never reached the snapshot lineage.
-                    if resident.contains(name) || dropped_at_start.contains(name) {
+                    if resident.contains(name) || dropped_now.contains(name) {
                         continue;
                     }
                     let from = format!("t{}", i);
@@ -3499,10 +3533,10 @@ impl IntelligentIndexedStorage {
         let _ = std::fs::remove_dir_all(&previous);
 
         // The manifest that is now live does not name them, so the tombstones have done
-        // their job. Remove exactly the ones this snapshot filtered — a drop that landed
-        // mid-write is not in that set and stays for the next snapshot.
+        // their job. Remove exactly the ones there were when the tables were captured -- a
+        // drop after that is named by this manifest and keeps its tombstone for the next one.
         if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
-            for name in &dropped_at_start {
+            for name in &dropped_at_capture {
                 dropped.remove(name);
             }
         }
@@ -4418,7 +4452,7 @@ impl IntelligentIndexedStorage {
     async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
         // A replica has the primary's tables, the knowledge-base table among them once the
         // primary made it; it makes none of its own.
-        if self.replica || self.kb_table.as_deref() != Some(tablename) {
+        if self.replica.load(Ordering::SeqCst) || self.kb_table.as_deref() != Some(tablename) {
             return Ok(());
         }
         let Some(embedding) = self.default_embedding() else {
@@ -6319,6 +6353,16 @@ impl IntelligentIndexedStorage {
         }
         self.ensure_writable()?;
         self.ensure_still_primary().await?;
+        if let Some(until) = self.write_lease_until.lock().ok().and_then(|l| *l) {
+            if std::time::Instant::now() > until {
+                return Err(crate::Error::ServiceUnavailable {
+                    message: "this primary's lease on its shard has lapsed -- the bucket could \
+                              not be reached to renew it -- so it takes no writes until the \
+                              lease is renewed or another node takes the shard"
+                        .to_string(),
+                });
+            }
+        }
         let Some(ref wal) = self.wal else {
             return Ok(());
         };
@@ -6671,7 +6715,7 @@ impl IntelligentIndexedStorage {
     /// another primary started on the same bucket, a promoted replica -- stops writing
     /// (`ensure_still_primary`). The WAL manifest has no conditional write, so two primaries
     /// would otherwise overwrite each other's manifest with no sign of it.
-    async fn claim_primary(&mut self) -> crate::Result<()> {
+    async fn claim_primary(&self) -> crate::Result<()> {
         use crate::storage::object::traits::ObjectStorage;
         let previous = self
             .storage
@@ -6756,7 +6800,9 @@ impl IntelligentIndexedStorage {
         if previous.is_some() {
             info!("primary of this bucket, epoch {epoch}");
         }
-        self.primary_token = Some(token);
+        if let Ok(mut slot) = self.primary_token.lock() {
+            *slot = Some(token);
+        }
         self.primary_epoch.store(epoch, Ordering::SeqCst);
 
         // Then the manifest, which is the lock: rewritten with this epoch, conditionally on the
@@ -6839,9 +6885,10 @@ impl IntelligentIndexedStorage {
     /// failed -- every later write is a 503 and `/ready` says why -- since this process no
     /// longer owns what it would write to.
     async fn ensure_still_primary(&self) -> crate::Result<()> {
-        let Some(ours) = self.primary_token.as_deref() else {
+        let Some(ours) = self.primary_token.lock().ok().and_then(|t| t.clone()) else {
             return Ok(());
         };
+        let ours = ours.as_str();
         // With conditional writes the manifest is the lock, and every write that reaches the
         // bucket checks it; this poll is the fallback for stores without them.
         if self.conditional_writes.load(Ordering::SeqCst) {
@@ -6886,7 +6933,96 @@ impl IntelligentIndexedStorage {
 
     /// Whether this storage is a read replica (`new_replica`).
     pub fn is_replica(&self) -> bool {
-        self.replica
+        self.replica.load(Ordering::SeqCst)
+    }
+
+    /// The epoch this primary claimed the bucket with (`wal/PRIMARY`); 0 on a replica and
+    /// without object storage. A cluster's routers prefer the higher of two primaries.
+    pub fn primary_epoch(&self) -> u64 {
+        self.primary_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Writes are taken until `until` and refused after it; `None` lifts the limit. A cluster
+    /// node sets it each time it renews its shard's lease.
+    pub fn hold_write_lease_until(&self, until: Option<std::time::Instant>) {
+        if let Ok(mut slot) = self.write_lease_until.lock() {
+            *slot = until;
+        }
+    }
+
+    /// See the `ack_after_mirror` field.
+    pub fn set_ack_after_mirror(&self, on: bool) {
+        self.ack_after_mirror.store(on, Ordering::SeqCst);
+    }
+
+    /// Stop writing because something outside the store says another node has the shard: a
+    /// cluster node that lost its lease. As `fence`, without waiting for the next write to find
+    /// the manifest changed.
+    pub fn step_down(&self, why: &str) {
+        let error = crate::Error::Internal(format!("{why}; this server stopped writing"));
+        self.fenced.store(true, Ordering::SeqCst);
+        self.mark_durability_failed(&error);
+    }
+
+    /// Become the primary of the bucket this replica follows, in this process.
+    ///
+    /// Everything the previous primary put in the bucket is applied first, so nothing it
+    /// acknowledged (with `DXMT_ACK_AFTER_MIRROR`, nothing it acknowledged at all) is missing
+    /// when writes start. Then the bucket is claimed as any primary claims it -- a new epoch in
+    /// `wal/PRIMARY`, the manifest rewritten conditionally, which stops a predecessor that is
+    /// somehow still writing -- and the next write is numbered after everything applied and
+    /// everything in the bucket. The replica's directory stays marked as one: a restart without
+    /// `--replica` recovers from the bucket, as a promotion by restart always has.
+    ///
+    /// A stale replica -- one that fell behind the bucket's pruning -- cannot be promoted: it is
+    /// missing entries it has no way to get.
+    pub async fn promote(&self) -> crate::Result<()> {
+        if !self.is_replica() {
+            return Ok(());
+        }
+        let stale = || self.replica_stale.lock().ok().and_then(|s| s.clone());
+        if let Some(why) = stale() {
+            return Err(crate::Error::ServiceUnavailable {
+                message: format!("a stale replica cannot be promoted: {why}"),
+            });
+        }
+        while self.follow_object_storage().await? > 0 {}
+        if let Some(why) = stale() {
+            return Err(crate::Error::ServiceUnavailable {
+                message: format!("a stale replica cannot be promoted: {why}"),
+            });
+        }
+        self.storage.set_read_only(false);
+        let claimed = async {
+            self.load_wal_manifest().await?;
+            self.claim_primary().await
+        }
+        .await;
+        if let Err(e) = claimed {
+            self.storage.set_read_only(true);
+            return Err(e);
+        }
+        let in_bucket = self
+            .manifest()?
+            .chunks
+            .iter()
+            .map(|c| c.last_seq + 1)
+            .max()
+            .unwrap_or(0);
+        let next = in_bucket.max(self.replica_applied_next.load(Ordering::SeqCst));
+        self.wal_mirrored_next.store(next, Ordering::SeqCst);
+        if let Some(wal) = self.wal.as_ref() {
+            if let Ok(mut guard) = wal.lock() {
+                guard.advance_sequence_to(next);
+            }
+        }
+        self.storage.set_uncached_reads(false);
+        self.replica.store(false, Ordering::SeqCst);
+        info!(
+            "promoted to primary of this bucket, epoch {}, writes from sequence {next}",
+            self.primary_epoch()
+        );
+        Ok(())
     }
 
     /// On a replica, apply WAL chunks the primary has uploaded since the last call, in order.
@@ -6902,7 +7038,7 @@ impl IntelligentIndexedStorage {
     /// recovers it from that snapshot.
     pub async fn follow_object_storage(&self) -> crate::Result<usize> {
         use crate::storage::object::traits::ObjectStorage;
-        if !self.replica {
+        if !self.replica.load(Ordering::SeqCst) {
             return Ok(0);
         }
         let bytes = match self.storage.get_object(Self::wal_manifest_key()).await {
@@ -6967,7 +7103,7 @@ impl IntelligentIndexedStorage {
 
     /// Run `follow_object_storage` every `every`, for as long as the process lives.
     pub fn spawn_replica_follower(storage: Arc<Self>, every: std::time::Duration) {
-        if !storage.replica {
+        if !storage.replica.load(Ordering::SeqCst) {
             return;
         }
         tokio::spawn(async move {
@@ -6982,6 +7118,10 @@ impl IntelligentIndexedStorage {
                 .unwrap_or(true);
             loop {
                 ticker.tick().await;
+                // Promoted (`promote`): a primary has nothing to follow.
+                if !storage.is_replica() {
+                    break;
+                }
                 match storage.follow_object_storage().await {
                     Ok(0) => {}
                     Ok(n) => debug!("replica applied {n} WAL entries from object storage"),
@@ -7049,6 +7189,15 @@ impl IntelligentIndexedStorage {
             // log, but the bucket -- the history the cluster goes on with -- is another
             // primary's now, and will never have it.
             Err(e) if self.fenced.load(Ordering::SeqCst) => return Err(e),
+            Err(e) if self.ack_after_mirror.load(Ordering::SeqCst) => {
+                return Err(crate::Error::ServiceUnavailable {
+                    message: format!(
+                        "object storage did not take this write ({e}), and this server \
+                         acknowledges a write only once it has (DXMT_ACK_AFTER_MIRROR): not \
+                         acknowledged. It is in the local log and goes up with the next write"
+                    ),
+                })
+            }
             Err(e) => warn!(
                 "{} WAL entries from {} are not in object storage yet ({}); the next write \
                  retries them",
@@ -10525,6 +10674,13 @@ impl IntelligentIndexedStorage {
             let data = tables
                 .remove(name)
                 .ok_or_else(|| crate::Error::TableNotFound(name.to_string()))?;
+            // The tombstone, under the same lock that takes the table out of the map. Written
+            // after the log entry, as it was, a snapshot running in between saw the table
+            // neither resident nor dropped -- an evicted table, to carry forward from the
+            // previous snapshot -- and brought it back.
+            if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
+                dropped.insert(name.to_string());
+            }
             // The row file goes with the table. Best effort: a file that will not delete is
             // orphaned, not a failed drop.
             //
@@ -10576,12 +10732,8 @@ impl IntelligentIndexedStorage {
         }])
         .await?;
 
-        // The removal is durable in the log now, but the snapshot on disk still carries
-        // this table and the snapshot writer would copy it forward. Record it so the next
-        // snapshot leaves it out, and so nothing lists or rehydrates it in the meantime.
-        if let Ok(mut dropped) = self.dropped_since_snapshot.lock() {
-            dropped.insert(name.to_string());
-        }
+        // The snapshot on disk still carries this table; the tombstone recorded above keeps the
+        // snapshot writer from copying it forward, and anything from listing or rehydrating it.
 
         // A partitioned table leaves its segments in object storage. Delete them here rather
         // than at the next snapshot: the table is out of `tables` and its removal is in the
@@ -12667,7 +12819,7 @@ impl IntelligentIndexedStorage {
             .ok()
             .and_then(|state| state.clone());
         let durability_degraded = durability_error.is_some();
-        let replica_stale = if self.replica {
+        let replica_stale = if self.replica.load(Ordering::SeqCst) {
             self.replica_stale.lock().ok().and_then(|s| s.clone())
         } else {
             None
@@ -12692,10 +12844,11 @@ impl IntelligentIndexedStorage {
             snapshot_present,
             snapshot_manifest_valid,
             snapshot_wal_next_sequence,
-            wal_mirrored_next_sequence: (self.object_storage_enabled && !self.replica)
-                .then(|| self.wal_mirrored_next.load(Ordering::SeqCst)),
+            wal_mirrored_next_sequence: (self.object_storage_enabled
+                && !self.replica.load(Ordering::SeqCst))
+            .then(|| self.wal_mirrored_next.load(Ordering::SeqCst)),
             replica_applied_next_sequence: self
-                .replica
+                .is_replica()
                 .then(|| self.replica_applied_next.load(Ordering::SeqCst)),
             replica_stale,
             durability_degraded,

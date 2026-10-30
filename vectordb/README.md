@@ -592,6 +592,73 @@ its claims in `PRIMARY`), so a supervisor restarting it cannot take the bucket b
 that machine back as the primary, stop the current one and start it on an empty directory: it
 recovers from the bucket.
 
+### A cluster: many tables over many machines (experimental)
+
+When the tables -- one per user, one per agent -- add up to more than one machine, run several
+servers over one bucket and a router in front of them:
+
+```bash
+export DXMT_OBJECT_STORAGE_PROVIDER=s3 DXMT_S3_BUCKET=my-bucket   # + endpoint and keys
+
+vectordb serve --shard a --advertise http://10.0.0.1:9999          # shard a's primary
+vectordb serve --shard a --advertise http://10.0.0.2:9999 --replica
+vectordb serve --shard b --advertise http://10.0.0.3:9999          # shard b's primary
+vectordb router --host 0.0.0.0 --port 9990                         # clients use this one
+```
+
+Each shard is an ordinary store -- its WAL, snapshots and lock under `shards/<id>/` in the
+bucket, a primary and any read replicas. Every table belongs to one shard, recorded in
+`cluster/PLACEMENT`; every node writes who it is to `cluster/nodes/` every
+`DXMT_HEARTBEAT_SECS` (2). The router serves the same `/api/v1` as a single server and forwards
+each request to its table's shard: creating a table puts it on the shard holding the fewest,
+listing asks every shard, and a read sent with `X-DXMT-Read: replica` goes to a replica (which
+trails the primary; a 404 there is retried on the primary). Responses say where they were
+served (`X-DXMT-Shard`, `X-DXMT-Node`); `GET /cluster/status` shows the whole cluster. Routers
+keep nothing of their own, so run as many as you like.
+
+There is no consensus service: the cluster's state is in the bucket and changed by
+conditional writes, so a cluster needs a store that honours them -- AWS S3, MinIO, or the
+`filesystem` provider; GCS's S3 API does not, and is refused.
+
+**Failover is automatic.** A shard's primary holds a lease (`cluster/shards/<id>/LEASE`) and
+renews it every heartbeat; it takes writes only until the term it last secured runs out. When
+the primary stops renewing -- dead, or cut off from the bucket -- a replica waits for the term
+plus `DXMT_LEASE_GRACE_SECS` (3), takes the lease by conditional write (one replica wins),
+applies what is left in the bucket, and becomes the primary in place; the routers follow. With
+the defaults that is about 15 seconds; `DXMT_NODE_TTL_SECS` shortens it. A node in a cluster
+acknowledges a write only once the bucket has it, so nothing acknowledged is lost in a
+failover. `DXMT_AUTO_FAILOVER=0` leaves failover to you: restart a replica's directory without
+`--replica`.
+
+**A shard with no node left** -- primary and replicas gone -- loses nothing: what it
+acknowledged is in the bucket. Until a node serves it again its tables answer 503
+`SHARD_UNAVAILABLE` with `Retry-After`, the other shards carry on, a listing names it under
+`unavailable_shards`, and new tables go elsewhere. Any node started with `--shard <id>` on an
+empty directory, on any machine, recovers it. Or run standbys, which do that by themselves:
+
+```bash
+vectordb serve --standby --advertise http://10.0.0.9:9999
+```
+
+A standby serves nothing until a shard's lease has run out by the grace and
+`DXMT_STANDBY_DELAY_SECS` (5) more -- long enough for a replica, which already has the data, to
+go first -- then takes the lease and becomes that shard's primary, recovered from the bucket.
+One standby covers one lost shard.
+
+**Tables move between shards.** `POST /cluster/tables/<t>/move {"to": "b"}` freezes the table
+on its shard (writes answer 503 `TABLE_MOVING` with `Retry-After`; reads go on), carries it
+through the bucket with the same export and import a single server has -- ids, versions,
+`created_at`, payloads and vectors -- checks the copy's record count, points the placement at
+it and drops the original; anything that fails before the switch is undone. Routers that have
+not reread the placement yet are answered 503 or 404 by the old shard, reread, and retry on the
+new one. `POST /cluster/rebalance` (`{"dry_run": true}` for the plan alone) moves tables, one at
+a time, from the shard with the most to the one with the fewest until they differ by at most
+one -- which is how a new shard gets its share.
+
+Not yet: one table spread over several shards, and routes that span tables (aliases, DXQL,
+backups), which the router answers with 501. Tables are created and dropped through the router; a node refuses them
+directly (`DXMT_CLUSTER_SECRET`, when set, is the value the router proves itself with).
+
 ### Feature Flags
 
 Default: `tokio-runtime`, `basic-storage`, `jemalloc`, `api-swagger`, `api-dashboard`,

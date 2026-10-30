@@ -90,6 +90,30 @@ enum Commands {
         /// uploads, answer reads, refuse writes. The data directory is this replica's own.
         #[arg(long, env = "DXMT_REPLICA")]
         replica: bool,
+        /// Serve this shard of a cluster: the store lives under `shards/<id>/` in the bucket,
+        /// this node says who it is in `cluster/nodes/`, and tables are created and dropped
+        /// through a router (`vectordb router`). With `--replica`, a replica of that shard.
+        #[arg(long, env = "DXMT_SHARD")]
+        shard: Option<String>,
+        /// The address a cluster's routers reach this node at, e.g. `http://10.0.0.5:9999`.
+        #[arg(long, env = "DXMT_ADVERTISE_URL")]
+        advertise: Option<String>,
+        /// Serve no shard until a cluster loses one -- its lease runs out and no replica takes
+        /// it -- then become that shard's primary, recovered from the bucket.
+        #[arg(long, env = "DXMT_STANDBY", conflicts_with_all = ["shard", "replica"])]
+        standby: bool,
+    },
+    /// Route a cluster: serve `/api/v1` and forward each request to the shard holding its
+    /// table. Reads the cluster -- which shard holds which table, which nodes are up -- from
+    /// the object storage the shards use.
+    #[cfg(feature = "cluster")]
+    Router {
+        /// Host to bind
+        #[arg(long, default_value = "127.0.0.1", env = "DXMT_HOST")]
+        host: String,
+        /// Port to bind
+        #[arg(long, default_value = "9990", env = "DXMT_ROUTER_PORT")]
+        port: u16,
     },
     /// Speak the Model Context Protocol over stdin/stdout
     ///
@@ -144,6 +168,57 @@ async fn shutdown_signal() {
     }
 }
 
+/// A standby's wait: until a shard is lost, then that shard, on a directory of its own. The
+/// lease taken is kept until the server's own membership loop takes it over.
+#[cfg(feature = "cluster")]
+async fn adopt_a_shard(config: &AppConfig, advertise: Option<&str>) -> Result<()> {
+    let url = advertise.ok_or_else(|| {
+        dxmt_vectordb::Error::InvalidConfig(
+            "--standby needs --advertise: the address routers will reach it at".to_string(),
+        )
+    })?;
+    let node = dxmt_vectordb::config::env::var("DXMT_NODE_ID")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| dxmt_vectordb::cluster::nodes::node_id_for(url));
+    let cluster =
+        std::sync::Arc::new(dxmt_vectordb::cluster::ClusterStore::open(&config.storage).await?);
+    let (shard, held) = dxmt_vectordb::cluster::standby::adopt(&cluster, &node).await?;
+    // Renewed until the server's membership loop, which starts once recovery is done, takes it.
+    let _renewing = dxmt_vectordb::cluster::standby::keep_renewing(cluster, shard.clone(), held);
+    join_shard(&shard, Some(url))?;
+    // A directory nobody has used: a shard recovered on a standby starts from the bucket.
+    let base = dxmt_vectordb::api::server::wal_dir_from_env()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    let dir = base.join(format!(
+        "standby-{shard}-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+    ));
+    std::env::set_var("DXMT_WAL_DIR", &dir);
+    tracing::warn!("serving shard '{shard}' from {}", dir.display());
+    Ok(())
+}
+
+/// Put this process in `shard`: the environment the store and the server read.
+fn join_shard(shard: &str, advertise: Option<&str>) -> Result<()> {
+    let shard = shard.trim();
+    let wanted = format!("shards/{shard}");
+    if let Ok(prefix) = dxmt_vectordb::config::env::var("DXMT_OBJECT_STORAGE_PREFIX") {
+        if dxmt_vectordb::config::normalize_prefix(&prefix).as_deref() != Some(wanted.as_str()) {
+            return Err(dxmt_vectordb::Error::InvalidConfig(format!(
+                "--shard {shard} keeps its store under {wanted}, but \
+                 DXMT_OBJECT_STORAGE_PREFIX says {prefix}; set one or the other"
+            )));
+        }
+    }
+    std::env::set_var("DXMT_OBJECT_STORAGE_PREFIX", &wanted);
+    std::env::set_var("DXMT_SHARD", shard);
+    if let Some(url) = advertise {
+        std::env::set_var("DXMT_ADVERTISE_URL", url);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     // `.env` first, so the variables clap reads (`DXMT_HOST`, `DXMT_PORT`, `DXMT_GRPC_PORT`)
     // and the legacy names below see it too. A variable already set in the environment wins.
@@ -152,6 +227,17 @@ fn main() -> Result<()> {
     let legacy = dxmt_vectordb::config::env::adopt_legacy_names();
 
     let cli = Cli::parse();
+
+    // A shard's store is a prefix of the bucket; set before the configuration is read, which
+    // is where the prefix is taken from.
+    if let Commands::Serve {
+        shard: Some(shard),
+        advertise,
+        ..
+    } = &cli.command
+    {
+        join_shard(shard, advertise.as_deref())?;
+    }
 
     // MCP owns stdout: it is the JSON-RPC channel. A log line written there lands in the middle
     // of a message and the client drops the connection over a parse error that names no cause.
@@ -219,7 +305,21 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             no_dashboard,
             grpc_port,
             replica,
+            shard: _,
+            advertise,
+            standby,
         } => {
+            #[cfg(feature = "cluster")]
+            if standby {
+                adopt_a_shard(&config, advertise.as_deref()).await?;
+            }
+            #[cfg(not(feature = "cluster"))]
+            if standby {
+                return Err(dxmt_vectordb::Error::InvalidConfig(
+                    "--standby needs a build with the `cluster` feature".to_string(),
+                ));
+            }
+            let _ = advertise;
             if replica {
                 // Read by `create_app_with_storage`, which opens the store.
                 std::env::set_var("DXMT_REPLICA", "1");
@@ -396,6 +496,28 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "cluster")]
+        Commands::Router { host, port } => {
+            let bind_addr: SocketAddr = format!("{}:{}", host, port)
+                .parse()
+                .map_err(|e| dxmt_vectordb::Error::InvalidConfig(format!("bind address: {e}")))?;
+            let cluster = std::sync::Arc::new(
+                dxmt_vectordb::cluster::ClusterStore::open(&config.storage).await?,
+            );
+            let router = dxmt_vectordb::cluster::router::ClusterRouter::new(cluster).await?;
+            router.spawn_refresh();
+            let app = router.app(dxmt_vectordb::api::auth::ApiKey::from_env());
+            println!(
+                "DXMT VectorDB {} router on http://{bind_addr}",
+                env!("CARGO_PKG_VERSION")
+            );
+            axum::Server::bind(&bind_addr)
+                .serve(app.into_make_service())
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .map_err(|e| dxmt_vectordb::Error::Internal(format!("router error: {}", e)))?;
+        }
+
         Commands::Mcp { wal_dir } => {
             let wal_dir = match wal_dir {
                 Some(dir) if dir.trim().is_empty() => None,
@@ -428,7 +550,7 @@ mod tests {
     fn serve_takes_its_address_from_the_environment_unless_a_flag_says_otherwise() {
         let address = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
             Commands::Serve { host, port, .. } => (host, port),
-            Commands::Mcp { .. } | Commands::Restore { .. } => unreachable!(),
+            _ => unreachable!(),
         };
         std::env::set_var("DXMT_HOST", "127.0.0.1");
         std::env::set_var("DXMT_PORT", "19876");

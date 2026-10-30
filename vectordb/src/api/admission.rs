@@ -113,7 +113,7 @@ impl Admission {
 }
 
 /// Whether a request is a read this layer admits.
-fn is_query(method: &Method, path: &str) -> bool {
+pub(crate) fn is_query(method: &Method, path: &str) -> bool {
     *method == Method::POST
         && (path.contains("/search")
             || path.ends_with("/hybrid_search")

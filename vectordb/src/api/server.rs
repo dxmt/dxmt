@@ -398,6 +398,18 @@ pub async fn create_app_with_features(
 /// that builds a router would otherwise inherit whatever the developer happens to have in
 /// their shell, and a `DXMT_API_KEY` left over from an afternoon of manual testing would turn
 /// every one of them red for a reason none of them mention.
+/// The timers only a primary runs -- snapshots, backups, eviction (which snapshots a table),
+/// index re-evaluation and row reclamation. At startup for a primary, and for a cluster replica
+/// at the moment it promotes itself.
+pub fn spawn_primary_tasks(storage: Arc<IntelligentIndexedStorage>) {
+    spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
+    let (backup_interval, backup_keep) = backup_schedule_from_env();
+    spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
+    spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
+    spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
+    spawn_row_reclamation(storage, row_compaction_interval_from_env());
+}
+
 pub async fn create_app_with_storage(
     interfaces: Interfaces,
     api_key: Option<crate::api::auth::ApiKey>,
@@ -495,6 +507,26 @@ pub async fn create_app_with_storage(
     // The model a table without a dimension or a model gets, and the one the knowledge-base
     // table is made with: DXMT_EMBEDDING_MODEL, or what a local ollama already has.
     crate::api::quickstart::configure_default_embedding(&storage).await;
+
+    // A cluster node: `serve --shard`. Its store is already under the shard's prefix (the
+    // configuration read it); membership adds a heartbeat and a rule about who may create
+    // tables. The cluster's own state needs conditional writes, so a store without them is
+    // refused here rather than discovered when two routers place one table twice.
+    #[cfg(feature = "cluster")]
+    let membership = match crate::cluster::node::Membership::from_env()? {
+        Some(m) => {
+            let cluster =
+                std::sync::Arc::new(crate::cluster::ClusterStore::open(&config.storage).await?);
+            tracing::info!(
+                "cluster node '{}' of shard '{}', advertised at {}",
+                m.node,
+                m.shard,
+                m.url
+            );
+            Some((cluster, m))
+        }
+        None => None,
+    };
 
     // 应用状态
     // Initialize server health monitor
@@ -720,19 +752,54 @@ pub async fn create_app_with_storage(
     #[cfg(not(feature = "api-swagger"))]
     let app = app;
 
+    #[cfg(feature = "cluster")]
+    let freezer = membership
+        .as_ref()
+        .map(|_| Arc::new(crate::cluster::transfer::Freezer::default()));
+    #[cfg(feature = "cluster")]
+    let app = match &freezer {
+        Some(freezer) => app
+            .layer(axum::middleware::from_fn_with_state(
+                freezer.clone(),
+                crate::cluster::transfer::freeze_guard,
+            ))
+            .layer(axum::middleware::from_fn(
+                crate::cluster::node::require_router_for_placement,
+            )),
+        None => app,
+    };
+
     let app = app.with_state(base_state);
+
+    // The routes a router moves tables with, outside the API key (they answer only a request
+    // carrying the router header -- set DXMT_CLUSTER_SECRET in production).
+    #[cfg(feature = "cluster")]
+    let app = match (membership, freezer) {
+        (Some((cluster, m)), Some(freezer)) => {
+            let app = app.merge(crate::cluster::transfer::routes(
+                crate::cluster::transfer::NodeApi {
+                    storage: storage.clone(),
+                    cluster: cluster.clone(),
+                    freezer,
+                },
+            ));
+            crate::cluster::node::spawn_membership(
+                cluster,
+                storage.clone(),
+                m,
+                spawn_primary_tasks,
+            );
+            app
+        }
+        _ => app,
+    };
 
     if storage.is_replica() {
         // Everything that writes -- snapshots, backups, eviction (which snapshots a table),
         // rebuilds and row reclamation -- is the primary's job; the replica follows.
         IntelligentIndexedStorage::spawn_replica_follower(storage.clone(), replica_poll_from_env());
     } else {
-        spawn_periodic_snapshots(storage.clone(), snapshot_interval_from_env());
-        let (backup_interval, backup_keep) = backup_schedule_from_env();
-        spawn_periodic_backups(storage.clone(), backup_interval, backup_keep);
-        spawn_eviction_sweep(storage.clone(), eviction_interval_from_env());
-        spawn_index_reevaluation(storage.clone(), reindex_interval_from_env());
-        spawn_row_reclamation(storage.clone(), row_compaction_interval_from_env());
+        spawn_primary_tasks(storage.clone());
     }
     IntelligentIndexedStorage::spawn_derived_warmup(storage.clone());
     spawn_stall_detector(stall_threshold_from_env());

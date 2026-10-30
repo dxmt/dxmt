@@ -346,7 +346,7 @@ protoc-bin-vendored = { version = "3.0", optional = true }
 # `text-bm25` is default since 2026-10-02: hybrid retrieval is what an evaluator tries second,
 # and `cargo run -- serve` answered it with FEATURE_DISABLED. It costs tantivy and jieba's
 # dictionary at build time and nothing at run time until a table enables full text.
-default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard", "server-embedding", "text-bm25"]
+default = ["tokio-runtime", "basic-storage", "jemalloc", "api-swagger", "api-dashboard", "server-embedding", "text-bm25", "cluster"]
 experimental = [
     "benchmarks",
     "adaptive-index",
@@ -373,6 +373,8 @@ api-grpc = ["dep:tonic", "dep:prost", "dep:tonic-build", "dep:protoc-bin-vendore
 # tries and a compile flag is a poor answer to it. It costs one HTTP client; nothing is
 # called unless a table declares `embedding`.
 server-embedding = ["reqwest"]
+# A cluster: `serve --shard`, `vectordb router`. Default; a build without it is a single server.
+cluster = ["reqwest"]
 # `embeddings`, `gpu` and `simd` were here, and `multimodal` and `python` below. They gated
 # about 9,300 lines that no route reached and no CI job compiled -- and of which `gpu` and
 # `python` did not compile at all, which is how long a feature nobody builds can stay broken.
@@ -467,6 +469,10 @@ path = "tests/interfaces/admission_test.rs"
 [[test]]
 name = "replica_http_test"
 path = "tests/interfaces/replica_http_test.rs"
+
+[[test]]
+name = "cluster_test"
+path = "tests/interfaces/cluster_test.rs"
 
 [[test]]
 name = "rerank_test"

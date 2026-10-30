@@ -856,6 +856,7 @@ fn storage_config_with_object_store(base: &Path) -> StorageConfig {
             endpoint: None,
             access_key_id: None,
             secret_access_key: None,
+            prefix: None,
         }),
     }
 }
