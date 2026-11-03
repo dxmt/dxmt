@@ -13,6 +13,16 @@
 //! - **Facts change.** A memory may `supersede` others: they are kept, marked `superseded_by`
 //!   the new one, and left out of recall unless asked for. "I moved to Berlin" does not erase
 //!   "I live in Shanghai"; it ends it, and the history stays inspectable.
+//! - **Saying it twice keeps it once.** A memory whose meaning is already held -- cosine
+//!   similarity at or above `DXMT_MEMORY_DUPLICATE_SIMILARITY` (default 0.97) to a live memory
+//!   of the same kind -- is not added: the one already there is refreshed (`at` moves to now,
+//!   tags are merged) and its id returned with `duplicate: true`. Events are exempt, because
+//!   an event that happens twice happened twice; so is a call naming an `id` or `supersedes`,
+//!   which already says what it means. The threshold is measured, on bge-m3: restatements of
+//!   one sentence scored 0.981-0.995, and contradicting facts -- Berlin and Lisbon, March 3
+//!   and March 4, Chinese and English -- 0.81-0.93. A paraphrase in other words (0.81-0.87)
+//!   is kept as its own memory; that costs a near-duplicate, where merging at that distance
+//!   would cost a fact.
 //! - **The user owns it.** Every memory can be listed, read, corrected (remember again with the
 //!   same id) and deleted (`forget`); the table exports like any other.
 //!
@@ -106,6 +116,16 @@ fn seconds(since: &serde_json::Value) -> crate::Result<f64> {
         })
 }
 
+/// The similarity at or above which a new memory is the same as one already held;
+/// `DXMT_MEMORY_DUPLICATE_SIMILARITY`, `off` (or anything above 1) to keep every memory.
+fn duplicate_similarity() -> Option<f32> {
+    match crate::config::env::var("DXMT_MEMORY_DUPLICATE_SIMILARITY") {
+        Ok(v) if v.trim().eq_ignore_ascii_case("off") => None,
+        Ok(v) => v.trim().parse::<f32>().ok().filter(|s| *s <= 1.0),
+        Err(_) => Some(0.97),
+    }
+}
+
 /// A memory as agents see it: the record's payload with its id and, from a search, its score.
 fn view(id: &str, payload: &serde_json::Value, score: Option<f32>) -> serde_json::Value {
     let mut out = serde_json::json!({ "id": id });
@@ -152,6 +172,27 @@ impl IntelligentIndexedStorage {
             "at".to_string(),
             serde_json::json!(chrono::Utc::now().timestamp()),
         );
+        let kind = request.kind.as_deref().unwrap_or("note").to_string();
+        let checks_duplicates = request.id.is_none()
+            && request.supersedes.as_ref().is_none_or(|s| s.is_empty())
+            && kind != "event";
+        let mut vector = Vec::new();
+        if let (true, Some(threshold)) = (checks_duplicates, duplicate_similarity()) {
+            self.ensure_kb_table(&table).await?;
+            vector = self.embed_for_table(&table, &request.text).await?;
+            if let Some(held) = self
+                .same_memory(&table, &kind, vector.clone(), threshold)
+                .await?
+            {
+                self.refresh_memory(&table, &held, payload.get("tags"))
+                    .await?;
+                return Ok(serde_json::json!({
+                    "id": held,
+                    "superseded": [],
+                    "duplicate": true,
+                }));
+            }
+        }
         let id = request
             .id
             .unwrap_or_else(|| format!("mem-{}", uuid::Uuid::new_v4()));
@@ -159,7 +200,7 @@ impl IntelligentIndexedStorage {
             &table,
             vec![CreateRecordRequest {
                 id: id.clone(),
-                vector: Vec::new(),
+                vector,
                 text: Some(request.text),
                 sparse_vector: None,
                 named_vectors: None,
@@ -194,6 +235,78 @@ impl IntelligentIndexedStorage {
             superseded.push(old);
         }
         Ok(serde_json::json!({ "id": id, "superseded": superseded }))
+    }
+
+    /// The live memory of `kind` nearest `vector`, if it is at least `threshold` similar.
+    async fn same_memory(
+        &self,
+        table: &str,
+        kind: &str,
+        vector: Vec<f32>,
+        threshold: f32,
+    ) -> crate::Result<Option<String>> {
+        let mut query: crate::types::record::SearchQuery =
+            serde_json::from_value(serde_json::json!({ "top_k": 1, "search_mode": "exact" }))
+                .map_err(|e| crate::Error::Internal(e.to_string()))?;
+        query.vector = vector;
+        query.filter = Some(Filter {
+            must: Some(vec![
+                condition("kind", FilterOperation::Equal(serde_json::json!(kind))),
+                condition("superseded_by", FilterOperation::IsEmpty),
+            ]),
+            must_not: None,
+            should: None,
+        });
+        let found = self.search(table, query).await?;
+        Ok(found
+            .hits
+            .first()
+            .filter(|hit| hit.score >= threshold)
+            .map(|hit| hit.id.clone()))
+    }
+
+    /// Remembered again: `at` moves to now and the new tags join the old.
+    async fn refresh_memory(
+        &self,
+        table: &str,
+        id: &str,
+        tags: Option<&serde_json::Value>,
+    ) -> crate::Result<()> {
+        let id = id.to_string();
+        let record = self.get_record(table, &id).await?;
+        let mut payload = record.payload.clone();
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert(
+                "at".to_string(),
+                serde_json::json!(chrono::Utc::now().timestamp()),
+            );
+            if let Some(serde_json::Value::Array(new)) = tags {
+                let mut all = match fields.get("tags") {
+                    Some(serde_json::Value::Array(old)) => old.clone(),
+                    _ => Vec::new(),
+                };
+                for tag in new {
+                    if !all.contains(tag) {
+                        all.push(tag.clone());
+                    }
+                }
+                fields.insert("tags".to_string(), serde_json::Value::Array(all));
+            }
+        }
+        self.update_record(
+            table,
+            &id,
+            CreateRecordRequest {
+                id: id.clone(),
+                vector: record.vector.clone(),
+                text: None,
+                sparse_vector: None,
+                named_vectors: None,
+                payload: Some(payload),
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     /// The memories that best match `query`, by meaning and by keyword, newest-first among

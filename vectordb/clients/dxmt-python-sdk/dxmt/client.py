@@ -1870,8 +1870,10 @@ class DXMTClient:
         ``supersedes`` names memories this one replaces (they are kept as history and no longer
         recalled); ``memory_id`` corrects an existing memory in place.
 
+        Saying what is already remembered refreshes that memory instead of adding a copy.
+
         Returns:
-            ``{"id", "superseded"}``.
+            ``{"id", "superseded"}``, plus ``"duplicate": True`` when the memory was already held.
         """
         body = self._remember_body(text, kind, tags, source, supersedes, memory_id, metadata)
         return self._memory("POST", "/memories", "remember", json=body)

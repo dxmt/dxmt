@@ -100,6 +100,13 @@ export type {
   DocumentWritten,
   DocumentChunks,
 
+  // Memory
+  RememberParams,
+  Remembered,
+  RecallParams,
+  Memory,
+  MemoryPage,
+
   // Utility
   HealthCheckResponse,
   ErrorResponse,

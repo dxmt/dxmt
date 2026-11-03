@@ -1310,7 +1310,7 @@ pub struct MemoryListQuery {
         "source": "claude-desktop"
     })),
     responses(
-        (status = 200, description = "The memory's id, and the ids it superseded", body = ApiResponse),
+        (status = 200, description = "The memory's id and the ids it superseded; `duplicate: true` when one with the same meaning was already held, whose id it is", body = ApiResponse),
         (status = 400, description = "No text, a reserved metadata key, or no embedding model on the server", body = ApiResponse),
         (status = 404, description = "A memory to supersede does not exist", body = ApiResponse)
     ),

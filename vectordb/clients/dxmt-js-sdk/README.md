@@ -304,6 +304,23 @@ const filter = {
 - `In`, `NotIn`
 - `Contains`, `StartsWith`, `EndsWith`
 
+### Memory
+
+One memory for every agent on the machine: the server's `memory` table, made on first use
+with its embedding model, which MCP clients read through `vectordb mcp` as well.
+
+```typescript
+const { id } = await client.remember({ text: 'Prefers answers in Chinese', kind: 'preference' });
+await client.remember({ text: 'Moved to Berlin', kind: 'fact', tags: ['home'] });
+const memories = await client.recall({ query: 'where does the user live', limit: 5 });
+await client.remember({ text: 'Moved to Lisbon', kind: 'fact', supersedes: [memories[0].id] });
+const { memories: recent, total } = await client.listMemories({ kind: 'fact' });
+await client.forget(id);
+```
+
+A superseded memory is kept as history (`superseded_by`) and left out of `recall` unless
+`include_superseded: true`.
+
 ### Error Handling
 
 The SDK provides custom error classes for different failure scenarios:

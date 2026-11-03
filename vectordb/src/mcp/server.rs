@@ -306,7 +306,8 @@ impl<S: Storage + 'static> McpServer<S> {
                  a decision, an event, an instruction. One memory per call, in a sentence that \
                  stands on its own. If it replaces something remembered before (the user moved, \
                  changed their mind), pass the old memory's id in `supersedes`: the old one is \
-                 kept as history and no longer recalled."
+                 kept as history and no longer recalled. Saying something already remembered \
+                 refreshes that memory rather than adding a copy (`duplicate: true`)."
                     .to_string(),
             ),
             input_schema: serde_json::json!({
