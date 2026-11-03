@@ -42,6 +42,9 @@ with standbys that take over a shard whose nodes are all gone.
   one and returns its id with `duplicate: true`. Events are exempt. The threshold is measured
   on bge-m3: restatements 0.98-0.995, contradicting facts 0.81-0.93.
 - **Memory in the JavaScript client.** `remember`, `recall`, `forget` and `listMemories`.
+- **Recall measured on LoCoMo.** `eval/memory/locomo.py` keeps every turn of LoCoMo's ten
+  conversations as a memory and scores `recall` by the evidence turns it returns: 0.692 in the
+  top 10 with bge-m3 (0.663 dense alone, 0.551 keyword alone).
 - **macOS binaries.** Each release builds `aarch64-apple-darwin` (started and smoke-tested on
   the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
 - **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's
