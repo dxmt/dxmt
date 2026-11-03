@@ -337,7 +337,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "A question or topic"},
-                    "limit": {"type": "integer", "description": "How many, default 10"},
+                    "limit": {"type": "integer", "description": "How many, default 25"},
                     "kind": {"type": "string", "description": "Only this kind"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Only memories with any of these tags"},
                     "since": {"description": "Only memories from then on: Unix seconds or RFC 3339"},
