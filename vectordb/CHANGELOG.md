@@ -32,6 +32,10 @@ release, and the first commit that was ever pushed anywhere.
   model, and -- when the store is already open in a server on this machine -- relays to that
   server's `/mcp` instead of failing on the lock; `--server <url>` relays explicitly. Several
   MCP clients on one machine now share one memory.
+- **macOS binaries.** Each release builds `aarch64-apple-darwin` (started and smoke-tested on
+  the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
+- **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's
+  Linux binaries; data under the `/data` volume, runs as a non-root user.
 
 - **A cluster: many tables over many machines (experimental).** `serve --shard <id>
   --advertise <url>` runs a server whose store is under `shards/<id>/` of a shared bucket and
