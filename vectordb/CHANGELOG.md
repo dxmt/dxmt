@@ -85,6 +85,12 @@ with standbys that take over a shard whose nodes are all gone.
 
 ### Fixed
 
+- **Two creates of one table name no longer lose data.** The existence check and the insert
+  were separate lock acquisitions with the row files opened between them, and a live create
+  opens them empty: both creates succeeded, the second emptied the first's files, and its
+  table replaced the first -- sometimes without the full-text index, so `recall` answered 400
+  until a restart. Eight agents remembering at once on a fresh server kept one or two of eight
+  memories. Creation is now one critical section, and a table made on first use is made once.
 - **MCP notifications were answered as unknown requests.** A notification has the same fields
   as a request and only the missing id tells them apart, so the `notifications/initialized`
   every client sends after `initialize` got "Unknown method" back -- a stray line on stdout.

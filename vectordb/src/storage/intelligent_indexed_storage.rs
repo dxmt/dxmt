@@ -911,6 +911,17 @@ pub struct IntelligentIndexedStorage {
     kb_table: Option<String>,
     /// The memory table (`storage::agent_memory`), made on first use the same way.
     memory_table: Option<String>,
+    /// Held while a table made on first use is being made. Without it the first burst of
+    /// writes each found the table missing and each began creating it: one won, and every
+    /// other one had already probed the model and opened the full-text index, which failed
+    /// on the winner's lock with a warning each (seven on a run of eight writers).
+    first_use: tokio::sync::Mutex<()>,
+    /// Held for the whole of `create_table_inner`. Its "does it exist?" and its insert were
+    /// two lock acquisitions with the row files opened between them, and opening them for a
+    /// live create wipes whatever a same-named table left: two creates of one name both
+    /// succeeded, and the second emptied the first's files under the records already written
+    /// to it -- eight agents remembering at once on a fresh server kept one or two memories.
+    creating: tokio::sync::Mutex<()>,
     backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
@@ -2512,6 +2523,8 @@ impl IntelligentIndexedStorage {
             default_embedding: StdMutex::new(None),
             kb_table: crate::storage::knowledge_base::kb_table_name(),
             memory_table: crate::storage::knowledge_base::memory_table_name(),
+            first_use: tokio::sync::Mutex::new(()),
+            creating: tokio::sync::Mutex::new(()),
             backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
@@ -4481,6 +4494,15 @@ impl IntelligentIndexedStorage {
         };
         // Not `get_table`, which calls this.
         self.ensure_resident(tablename).await?;
+        if self
+            .read_tables("ensure_kb_table")
+            .await
+            .contains_key(tablename)
+        {
+            return Ok(());
+        }
+        // One maker; whoever waited finds the table made.
+        let _making = self.first_use.lock().await;
         if self
             .read_tables("ensure_kb_table")
             .await
@@ -7520,7 +7542,7 @@ impl IntelligentIndexedStorage {
     /// swallow their WAL entries.
     async fn create_table_inner(&self, config: TableConfig, log: bool) -> crate::Result<Table> {
         self.ensure_writable()?;
-        // Check if table exists (quickly release the lock)
+        let _creating = self.creating.lock().await;
         {
             let tables = self.read_tables("create_table").await;
             if tables.contains_key(&config.name) {
