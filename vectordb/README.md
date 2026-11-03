@@ -82,7 +82,16 @@ whose meaning is already held (cosine 0.97 or more to a live memory of the same 
 `DXMT_MEMORY_DUPLICATE_SIMILARITY`) refreshes that one and returns its id with
 `duplicate: true`. Events are exempt -- one that happens twice happened twice. The threshold
 is measured on bge-m3: restatements scored 0.98-0.995, contradicting facts ("Berlin" and
-"Lisbon", "March 3" and "March 4") 0.81-0.93. Because it is an ordinary table, everything else the
+"Lisbon", "March 3" and "March 4") 0.81-0.93.
+
+How well recall finds things is measured on LoCoMo (`eval/memory/locomo.py`): every turn of
+its ten long conversations kept as a memory, every question asked through `recall`, scored by
+how many of the turns that hold the answer come back. With bge-m3, 69% of them are in the top
+10 (single-hop 78%, temporal 77%, multi-hop 43%), against 66% for the vector search alone and
+55% for keywords alone. That is retrieval, not answers: what a model makes of the ten memories
+is the model's half.
+
+Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.
 
 > **Status: 1.5**, under the compatibility promise 1.0 made (the HTTP API under `/api/v1` and
