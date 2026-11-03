@@ -1471,7 +1471,9 @@ def _bag_of_words(text):
     for word in text.lower().split():
         v[sum(map(ord, word)) % 4] += 1.0
     norm = sum(x * x for x in v) ** 0.5 or 1.0
-    return [x / norm for x in v] if norm > 1.0 else [1.0, 0.0, 0.0, 0.0]
+    # `> 0`, not `> 1`: a one-word text has norm 1 and is already a unit vector in its own
+    # bucket. Sending every one-word text to [1, 0, 0, 0] made them all the same vector.
+    return [x / norm for x in v] if norm > 0 else [1.0, 0.0, 0.0, 0.0]
 
 
 class _Provider(BaseHTTPRequestHandler):
@@ -2059,9 +2061,11 @@ def _(table):
 @probe("RecallRequest", "tags")
 def _(table):
     with memory_table():
+        # Two different vectors: "one" and "two" share a bucket of the provider's four, which
+        # would make the second the same memory as the first.
         remember(text="garden one", tags=["a"])
-        remember(text="garden two", tags=["b"])
-        assert [h["text"] for h in recall(query="garden", tags=["b"])] == ["garden two"]
+        remember(text="garden roses", tags=["b"])
+        assert [h["text"] for h in recall(query="garden", tags=["b"])] == ["garden roses"]
 
 
 @probe("RecallRequest", "since")
