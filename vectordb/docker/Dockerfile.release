@@ -1,0 +1,39 @@
+# The image published to ghcr.io/dxmt/dxmt by `.github/workflows/release.yml`.
+#
+# It wraps the release's own Linux binaries rather than compiling again: the binary in the
+# image is the one in the tarball, already smoke-tested, and a two-architecture image costs
+# minutes rather than an hour of emulated arm64 compilation. The build context is a directory
+# holding `amd64/vectordb` and `arm64/vectordb`; `docker/Dockerfile` is the one that builds
+# from source.
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+ARG VERSION
+
+LABEL org.opencontainers.image.title="DXMT" \
+      org.opencontainers.image.description="The open-source memory database for personal AI agents" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/dxmt/dxmt" \
+      org.opencontainers.image.version="${VERSION}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -m -s /usr/sbin/nologin dxmt \
+    && mkdir -p /data && chown dxmt:dxmt /data
+
+COPY --chmod=755 ${TARGETARCH}/vectordb /usr/local/bin/vectordb
+
+USER dxmt
+WORKDIR /data
+# Everything the server writes -- the WAL, row files, snapshots, backups -- is under here.
+ENV DXMT_ROOT_DIR=/data \
+    RUST_LOG=info
+VOLUME ["/data"]
+EXPOSE 9999
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:9999/ready || exit 1
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/vectordb"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "9999"]

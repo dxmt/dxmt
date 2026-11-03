@@ -53,6 +53,16 @@ from 1.5 on. Prebuilt Linux binaries, with the web console compiled in, are atta
 built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.
 
+From 1.5 there is also a container image, `ghcr.io/dxmt/dxmt` (linux/amd64 and linux/arm64). The data is in the volume;
+`OLLAMA_HOST` lets it find an ollama on the host for memory and text search:
+
+```bash
+docker run -d --name dxmt -p 127.0.0.1:9999:9999 -v dxmt:/data \
+  --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=host.docker.internal:11434 \
+  ghcr.io/dxmt/dxmt:latest
+```
+
+
 To build it yourself you need [rustup](https://rustup.rs). The Rust version is pinned in `rust-toolchain.toml` (1.99.0), and
 rustup installs it the first time you run `cargo` in `vectordb/`. The web console is compiled
 into the binary only if its bundle exists when you build: `make dashboard-build` (Node 20+)

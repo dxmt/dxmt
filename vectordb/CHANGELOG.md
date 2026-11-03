@@ -21,6 +21,8 @@ release, and the first commit that was ever pushed anywhere.
 
 - **macOS binaries.** Each release builds `aarch64-apple-darwin` (started and smoke-tested on
   the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
+- **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's
+  Linux binaries; data under the `/data` volume, runs as a non-root user.
 - **A cluster: many tables over many machines (experimental).** `serve --shard <id>
   --advertise <url>` runs a server whose store is under `shards/<id>/` of a shared bucket and
   which reports itself in `cluster/nodes/`; `vectordb router` serves `/api/v1` and forwards

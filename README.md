@@ -43,6 +43,15 @@ tar xzf dxmt-vectordb-$v-$arch-linux-gnu.tar.gz
 ./dxmt-vectordb-$v-$arch-linux-gnu/vectordb serve          # http://127.0.0.1:9999
 ```
 
+Or, from 1.5, the container image (linux/amd64 and linux/arm64). The data is in the volume;
+`OLLAMA_HOST` lets it find an ollama on the host for memory and text search:
+
+```bash
+docker run -d --name dxmt -p 127.0.0.1:9999:9999 -v dxmt:/data \
+  --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=host.docker.internal:11434 \
+  ghcr.io/dxmt/dxmt:latest
+```
+
 Or from source (Rust via [rustup](https://rustup.rs); add Node 20 and `make dashboard-build`
 first if you want the web console in the binary):
 
