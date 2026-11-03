@@ -197,3 +197,84 @@ async fn without_a_model_the_knowledge_base_table_is_not_made() {
     assert!(err.to_string().contains("ollama pull bge-m3"), "{err}");
     assert!(storage.list_tables().await.unwrap().is_empty());
 }
+
+/// The first burst of writes makes the memory table once. Eight agents remembering at the same
+/// moment on a fresh server used to each find the table missing and each start making it: one
+/// won, and the others had already asked the model for its width and opened the full-text
+/// index, which failed on the winner's lock with a warning apiece.
+#[test]
+fn eight_first_writes_at_once_make_the_memory_table_once() {
+    let root = tempfile::tempdir().unwrap();
+    let stdout = root.path().join("stdout.txt");
+    let (url, provider) = fake_provider::serve_on_a_thread(Behaviour::Normal, DIM);
+    let server = start(&root.path().join("db"), &url, &stdout);
+    let port = server.port;
+    let before = provider.calls.load(Ordering::SeqCst);
+
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            std::thread::spawn(move || {
+                json(
+                    port,
+                    "POST",
+                    "/api/v1/memories",
+                    serde_json::json!({"text": format!("memory number {i} about topic {}", i * 7919)}),
+                )
+            })
+        })
+        .collect();
+    for writer in writers {
+        let kept = writer.join().unwrap();
+        assert_eq!(kept["success"], true, "{kept}");
+    }
+    let listed = json(port, "GET", "/api/v1/memories", serde_json::json!({}));
+    assert_eq!(listed["data"]["total"], 8, "{listed}");
+    // One width probe, then one embedding per memory.
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst) - before,
+        9,
+        "the table was made more than once"
+    );
+}
+
+/// Two creates of one name: one table, one 409, and the records written to the winner stay.
+/// The second used to succeed too and open the row files fresh, emptying the first's.
+#[test]
+fn concurrent_creates_of_one_name_make_one_table_and_lose_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let stdout = root.path().join("stdout.txt");
+    let (url, _provider) = fake_provider::serve_on_a_thread(Behaviour::Normal, DIM);
+    let server = start(&root.path().join("db"), &url, &stdout);
+    let port = server.port;
+
+    let creators: Vec<_> = (0..8)
+        .map(|i| {
+            std::thread::spawn(move || {
+                let created = json(
+                    port,
+                    "POST",
+                    "/api/v1/tables",
+                    serde_json::json!({"name": "race", "dimension": 2}),
+                );
+                if created["success"] == true {
+                    let written = json(
+                        port,
+                        "POST",
+                        "/api/v1/tables/race/records",
+                        serde_json::json!({"records": [{"id": format!("r{i}"), "vector": [1.0, i as f32]}]}),
+                    );
+                    assert_eq!(written["success"], true, "{written}");
+                }
+                created["success"] == true
+            })
+        })
+        .collect();
+    let made = creators
+        .into_iter()
+        .map(|c| c.join().unwrap())
+        .filter(|ok| *ok)
+        .count();
+    assert_eq!(made, 1, "one create of a name succeeds");
+    let table = json(port, "GET", "/api/v1/tables/race", serde_json::json!({}));
+    assert_eq!(table["data"]["table"]["record_count"], 1, "{table}");
+}
