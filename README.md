@@ -1,24 +1,36 @@
-# DXMT VectorDB
+# DXMT
+
+### Memory for agents. Owned by you.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/dxmt/dxmt)](https://github.com/dxmt/dxmt/releases)
 
-A vector database written in Rust: HNSW, HNSW-PQ and product quantization with runtime SIMD
-dispatch, BM25 full-text and hybrid retrieval, and a query language behind a REST API, with a
-web console and an OpenAPI reference served by default. GraphQL, WebSocket, gRPC and S3 are
-opt-in build features. It is a single-node server.
+**The open-source memory database for personal AI agents.** One persistent, portable memory of
+you and your work, shared by every agent you use -- Claude, Cursor, ChatGPT, your own code --
+kept on your machine.
 
-> **Status: 1.3**, under the compatibility promise 1.0 made. A write-ahead log plus periodic snapshots is the durability story —
-> `kill -9` and restart preserves your tables. Records and full vectors live in row files
-> beside the log; what stays resident is the graph, the quantization codes and the id map,
-> about 0.45 KB per 768-dimension row measured at 100 million.
->
-> The compatibility promise covers the HTTP API under `/api/v1` and the six clients' public
-> surfaces. It does **not** cover anything
-> [`docs/SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental, or the
-> cargo features that are off by default. That matrix answers "can I use this", which is a
-> different question from "does this exist", and
-> [Known Limitations](vectordb/README.md#known-limitations) is worth reading before you
-> depend on this for real data.
+```bash
+ollama pull bge-m3                       # a local, multilingual embedding model
+claude mcp add dxmt -- vectordb mcp      # or the same block in Claude Desktop / Cursor
+```
+
+Your agent can now `remember` facts, preferences, events and instructions, `recall` them by
+meaning and keyword in any later conversation, let a new fact **supersede** an old one (kept as
+history), and `forget` on request. Every other agent on the machine sees the same memory.
+
+**D**ata → e**X**perience → **M**emory → **T**hinking: DXMT stores what you and your agents
+produce, remembers what is worth keeping, and gives it back when it matters -- and, underneath,
+it is a real database: its own write-ahead log and snapshots, HNSW/HNSW-PQ vector search, BM25
+full-text with Chinese segmentation, hybrid retrieval, filters and backups, in one Rust binary;
+object-storage replication, read replicas with automatic failover and a cluster mode when one
+machine is not enough.
+
+> **Status: 1.4.** The compatibility promise covers the HTTP API under `/api/v1` and the
+> clients' public surfaces; it does **not** cover anything
+> [`docs/SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental. That matrix
+> answers "can I use this", and [Known Limitations](vectordb/README.md#known-limitations) is
+> worth reading before you depend on DXMT for real data.
 
 ## Repository layout
 

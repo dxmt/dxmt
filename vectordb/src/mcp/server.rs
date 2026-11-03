@@ -297,6 +297,85 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
 
+        // Memory: what an agent should keep about its user and its work, shared by every agent
+        // that talks to this database. See `storage::agent_memory`.
+        tools.push(Tool {
+            name: "remember".to_string(),
+            description: Some(
+                "Keep something worth knowing next time: a fact about the user, a preference, \
+                 a decision, an event, an instruction. One memory per call, in a sentence that \
+                 stands on its own. If it replaces something remembered before (the user moved, \
+                 changed their mind), pass the old memory's id in `supersedes`: the old one is \
+                 kept as history and no longer recalled."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The memory, e.g. \"Prefers answers in Chinese\""},
+                    "kind": {"type": "string", "description": "fact, preference, event, instruction, or note (default)"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "source": {"type": "string", "description": "Which agent or conversation this came from"},
+                    "supersedes": {"type": "array", "items": {"type": "string"}, "description": "Ids of memories this replaces"},
+                    "id": {"type": "string", "description": "To correct an existing memory in place"},
+                    "metadata": {"type": "object", "description": "Anything else to keep with it"}
+                },
+                "required": ["text"]
+            }),
+        });
+        tools.push(Tool {
+            name: "recall".to_string(),
+            description: Some(
+                "Find what is remembered about a topic, by meaning and by keyword. Use it at the \
+                 start of a task and whenever the user refers to something from before. Returns \
+                 memories with their ids, kinds, tags, when they were remembered (`at`, Unix \
+                 seconds) and a score."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A question or topic"},
+                    "limit": {"type": "integer", "description": "How many, default 10"},
+                    "kind": {"type": "string", "description": "Only this kind"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Only memories with any of these tags"},
+                    "since": {"description": "Only memories from then on: Unix seconds or RFC 3339"},
+                    "include_superseded": {"type": "boolean", "description": "Include replaced memories, for history"}
+                },
+                "required": ["query"]
+            }),
+        });
+        tools.push(Tool {
+            name: "forget".to_string(),
+            description: Some(
+                "Delete memories for good, by id -- when the user asks you to forget something, \
+                 or a memory is plainly wrong. To record that something changed, `remember` the \
+                 new state with `supersedes` instead."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["ids"]
+            }),
+        });
+        tools.push(Tool {
+            name: "list_memories".to_string(),
+            description: Some(
+                "List memories, newest first -- to review or audit what is kept.".to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "limit": {"type": "integer", "description": "Default 50"},
+                    "offset": {"type": "integer"}
+                }
+            }),
+        });
+
         // Hybrid search tool
         tools.push(Tool {
             name: "hybrid_search".to_string(),
@@ -416,6 +495,51 @@ impl<S: Storage + 'static> McpServer<S> {
     /// **Nothing else may write to stdout while this runs.** The caller is responsible for
     /// sending logs to stderr; a stray log line lands in the middle of the JSON-RPC stream and
     /// the client drops the connection with a parse error that points nowhere useful.
+    /// One JSON-RPC message in, its reply out -- `None` for a notification, which has none.
+    /// A failure is an error response carrying the request's id, as JSON-RPC requires; it used
+    /// to go out without one, which a client cannot match to the call that failed.
+    ///
+    /// For transports that are not a session of their own: `POST /mcp` on the HTTP server,
+    /// where every request arrives on its own and all of them share this server's one session.
+    pub async fn answer(&self, message: &str) -> Option<String> {
+        self.initialize().await;
+        let session_id = self.shared_session().await;
+        match self.handle_message(session_id, message).await {
+            Ok(response) if response.is_empty() => None,
+            Ok(response) => Some(response),
+            Err(e) => {
+                error!("MCP request failed: {}", e);
+                let id = serde_json::from_str::<serde_json::Value>(message)
+                    .ok()
+                    .and_then(|v| v.get("id").cloned())
+                    .unwrap_or(serde_json::Value::Null);
+                Some(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32603, "message": e.to_string() }
+                    })
+                    .to_string(),
+                )
+            }
+        }
+    }
+
+    /// The session HTTP requests share: made on first use, kept for the life of the server.
+    async fn shared_session(&self) -> Uuid {
+        // A fixed id: requests over HTTP carry no session, and every one of them is the same
+        // client as far as this server's state goes (it keeps none that differs per client).
+        let id = Uuid::nil();
+        let mut sessions = self.sessions.write().await;
+        sessions.entry(id).or_insert_with(|| SessionState {
+            id,
+            client_info: None,
+            capabilities: None,
+            initialized: false,
+        });
+        id
+    }
+
     pub async fn serve_stdio(&self) -> Result<(), McpServerError> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -449,8 +573,13 @@ impl<S: Storage + 'static> McpServer<S> {
                 Ok(response) => response,
                 Err(e) => {
                     error!("MCP request failed: {}", e);
+                    let id = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|v| v.get("id").cloned())
+                        .unwrap_or(serde_json::Value::Null);
                     serde_json::to_string(&serde_json::json!({
                         "jsonrpc": "2.0",
+                        "id": id,
                         "error": { "code": -32603, "message": e.to_string() }
                     }))?
                 }
@@ -535,6 +664,14 @@ impl<S: Storage + 'static> McpServer<S> {
         let json_rpc: JsonRpcMessage = serde_json::from_str(message)?;
 
         let response = match json_rpc.content {
+            // A request and a notification have the same fields, so the untagged enum reads
+            // every one as a request; what tells them apart is the id. Without this, the
+            // `notifications/initialized` every client sends after `initialize` was answered
+            // "Unknown method", on stdout over stdio and as a 200 over HTTP.
+            JsonRpcContent::Request { method, params } if json_rpc.id.is_none() => {
+                self.handle_notification(session_id, &method, params).await;
+                return Ok(String::new());
+            }
             JsonRpcContent::Request { method, params } => {
                 self.handle_request(session_id, &method, params).await?
             }
@@ -652,6 +789,10 @@ impl<S: Storage + 'static> McpServer<S> {
             "hybrid_search" => self.handle_hybrid_search(params.arguments).await,
             "add_document" => self.handle_add_document(params.arguments).await,
             "delete_document" => self.handle_delete_document(params.arguments).await,
+            "remember" => self.handle_remember(params.arguments).await,
+            "recall" => self.handle_recall(params.arguments).await,
+            "forget" => self.handle_forget(params.arguments).await,
+            "list_memories" => self.handle_list_memories(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
     }
@@ -941,6 +1082,61 @@ impl<S: Storage + 'static> McpServer<S> {
             }],
             is_error: Some(false),
         })
+    }
+
+    fn json_result(value: &serde_json::Value) -> Result<CallToolResult, McpServerError> {
+        Ok(CallToolResult {
+            content: vec![ToolContent::Text {
+                text: serde_json::to_string_pretty(value)?,
+            }],
+            is_error: Some(false),
+        })
+    }
+
+    async fn handle_remember(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::agent_memory::RememberRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid remember arguments: {e}"))?;
+        Self::json_result(&self.storage.remember(request).await?)
+    }
+
+    async fn handle_recall(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::agent_memory::RecallRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid recall arguments: {e}"))?;
+        let memories = self.storage.recall(request).await?;
+        Self::json_result(&serde_json::json!({ "memories": memories }))
+    }
+
+    async fn handle_forget(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let ids: Vec<String> = serde_json::from_value(args["ids"].clone())
+            .map_err(|e| format!("`ids` must be a list of memory ids: {e}"))?;
+        let forgotten = self.storage.forget(ids).await?;
+        Self::json_result(&serde_json::json!({ "forgotten": forgotten }))
+    }
+
+    async fn handle_list_memories(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.unwrap_or_default();
+        let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+        let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+        let (memories, total) = self
+            .storage
+            .list_memories(args["kind"].as_str(), limit, offset)
+            .await?;
+        Self::json_result(&serde_json::json!({ "memories": memories, "total": total }))
     }
 
     /// Handle hybrid search tool

@@ -162,6 +162,46 @@ pub trait _Storage: Send + Sync {
         ))
     }
 
+    /// Keep a memory; see `storage::agent_memory`. Only a storage with server-side embedding
+    /// can, and the others say so.
+    async fn remember(
+        &self,
+        _request: crate::storage::agent_memory::RememberRequest,
+    ) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// The memories that match a query.
+    async fn recall(
+        &self,
+        _request: crate::storage::agent_memory::RecallRequest,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// Delete memories; how many there were.
+    async fn forget(&self, _ids: Vec<String>) -> crate::Result<usize> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// Memories, newest first; the page and the total.
+    async fn list_memories(
+        &self,
+        _kind: Option<&str>,
+        _limit: usize,
+        _offset: usize,
+    ) -> crate::Result<(Vec<serde_json::Value>, usize)> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
     /// Get table schema (stub implementation)
     async fn get_table_schema(&self, tablename: &str) -> crate::Result<serde_json::Value> {
         let table = self.get_table(tablename).await?;

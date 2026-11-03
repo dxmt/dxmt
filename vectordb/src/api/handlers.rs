@@ -1,5 +1,6 @@
 use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
+use crate::storage::agent_memory::{RecallRequest, RememberRequest};
 use crate::storage::documents::PutDocumentRequest;
 use axum::{
     extract::{Path, State},
@@ -1281,6 +1282,124 @@ pub async fn delete_document(
         Ok(deleted) => {
             ApiResponse::success(serde_json::json!({ "deleted_chunks": deleted })).into_response()
         }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Query of `GET /memories`.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::IntoParams))]
+#[serde(deny_unknown_fields)]
+pub struct MemoryListQuery {
+    /// Only this kind.
+    pub kind: Option<String>,
+    /// Default 50.
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Remember something: one memory, in a sentence that stands on its own. See
+/// `storage::agent_memory`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories",
+    request_body(content = RememberRequest, example = json!({
+        "text": "The user prefers answers in Chinese",
+        "kind": "preference",
+        "tags": ["language"],
+        "source": "claude-desktop"
+    })),
+    responses(
+        (status = 200, description = "The memory's id, and the ids it superseded", body = ApiResponse),
+        (status = 400, description = "No text, a reserved metadata key, or no embedding model on the server", body = ApiResponse),
+        (status = 404, description = "A memory to supersede does not exist", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn remember(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RememberRequest>,
+) -> impl IntoResponse {
+    match state.storage.remember(request).await {
+        Ok(kept) => ApiResponse::success(kept).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Recall: the memories that best match a query, by meaning and by keyword; superseded ones
+/// left out unless asked for.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/recall",
+    request_body(content = RecallRequest, example = json!({
+        "query": "how does the user like answers",
+        "limit": 5
+    })),
+    responses(
+        (status = 200, description = "Matching memories, best first", body = ApiResponse),
+        (status = 400, description = "A bad filter, or no embedding model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn recall(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<RecallRequest>,
+) -> impl IntoResponse {
+    match state.storage.recall(request).await {
+        Ok(memories) => {
+            ApiResponse::success(serde_json::json!({ "memories": memories })).into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Every memory, newest first, of one kind or all -- for review.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/memories",
+    params(MemoryListQuery),
+    responses(
+        (status = 200, description = "A page of memories and the total", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn list_memories(
+    State(state): State<AppState>,
+    ApiQuery(query): ApiQuery<MemoryListQuery>,
+) -> impl IntoResponse {
+    match state
+        .storage
+        .list_memories(
+            query.kind.as_deref(),
+            query.limit.unwrap_or(50),
+            query.offset.unwrap_or(0),
+        )
+        .await
+    {
+        Ok((memories, total)) => {
+            ApiResponse::success(serde_json::json!({ "memories": memories, "total": total }))
+                .into_response()
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Forget a memory for good.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    delete,
+    path = "/api/v1/memories/{memory_id}",
+    params(("memory_id" = String, Path, description = "The memory's id", example = "mem-1")),
+    responses(
+        (status = 200, description = "How many were forgotten: 1, or 0 when there was none", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn forget(
+    State(state): State<AppState>,
+    Path(memory_id): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.forget(vec![memory_id]).await {
+        Ok(n) => ApiResponse::success(serde_json::json!({ "forgotten": n })).into_response(),
         Err(e) => error_response(e),
     }
 }

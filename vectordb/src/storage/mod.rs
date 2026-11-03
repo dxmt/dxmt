@@ -1,5 +1,6 @@
 // Core storage module - simplified and clean
 
+pub mod agent_memory;
 pub mod compression;
 pub mod consistency_check; // New: Index consistency verification
 pub(crate) mod disk_guard;

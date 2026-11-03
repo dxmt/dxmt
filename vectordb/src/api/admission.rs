@@ -121,7 +121,8 @@ pub(crate) fn is_query(method: &Method, path: &str) -> bool {
             || path.ends_with("/query")
             || path.ends_with("/facets")
             || path.ends_with("/records/list")
-            || path.ends_with("/records/count"))
+            || path.ends_with("/records/count")
+            || path.ends_with("/memories/recall"))
 }
 
 pub async fn admit_queries(request: Request<Body>, next: Next<Body>) -> Response {

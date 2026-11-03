@@ -435,3 +435,303 @@ fn hybrid_search_with_text_on_a_table_without_keyword_search_says_so() {
         replies[4]
     );
 }
+
+/// `exchange`, with the server's default model pointed at a provider.
+fn exchange_with_model(
+    wal_dir: &std::path::Path,
+    base_url: &str,
+    requests: &[String],
+) -> Vec<serde_json::Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .arg("mcp")
+        .arg("--wal-dir")
+        .arg(wal_dir)
+        .env("DXMT_EMBEDDING_MODEL", "bag-of-words")
+        .env("DXMT_EMBEDDING_BASE_URL", base_url)
+        .env("DXMT_EMBEDDING_AUTODETECT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn the vectordb binary");
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{}", initialize()).unwrap();
+        for req in requests {
+            writeln!(stdin, "{}", req).unwrap();
+        }
+    }
+    drop(child.stdin.take());
+    let replies: Vec<serde_json::Value> = BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+        .collect();
+    child.wait().unwrap();
+    replies
+}
+
+fn call(id: u64, tool: &str, arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}
+    })
+    .to_string()
+}
+
+fn content(reply: &serde_json::Value) -> serde_json::Value {
+    assert_eq!(
+        reply["result"]["isError"],
+        serde_json::json!(false),
+        "{reply}"
+    );
+    serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+/// What a personal agent does with memory, through MCP with no table made by hand: keep facts
+/// and preferences, replace a fact that changed without losing it, recall by topic and by kind,
+/// audit the list, and forget on request. The memory table appears on first use.
+#[test]
+fn an_agent_remembers_recalls_supersedes_and_forgets() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let replies = exchange_with_model(
+        &wal,
+        &base_url,
+        &[
+            call(
+                2,
+                "remember",
+                serde_json::json!({"id": "home", "text": "The user lives in Shanghai", "kind": "fact", "tags": ["profile"], "source": "claude"}),
+            ),
+            call(
+                3,
+                "remember",
+                serde_json::json!({"text": "The user prefers answers in Chinese", "kind": "preference"}),
+            ),
+            call(
+                4,
+                "remember",
+                serde_json::json!({"text": "The user moved to Berlin and lives in Berlin now", "kind": "fact", "tags": ["profile"], "supersedes": ["home"]}),
+            ),
+            call(
+                5,
+                "recall",
+                serde_json::json!({"query": "where does the user live", "limit": 5}),
+            ),
+            call(
+                6,
+                "recall",
+                serde_json::json!({"query": "where does the user live", "limit": 5, "include_superseded": true}),
+            ),
+            call(
+                7,
+                "recall",
+                serde_json::json!({"query": "the user", "kind": "preference"}),
+            ),
+            call(
+                8,
+                "recall",
+                serde_json::json!({"query": "the user", "tags": ["profile"]}),
+            ),
+            call(9, "list_memories", serde_json::json!({})),
+        ],
+    );
+    let kept = content(&replies[1]);
+    assert_eq!(kept["id"], "home");
+    let moved = content(&replies[3]);
+    assert_eq!(moved["superseded"], serde_json::json!(["home"]), "{moved}");
+    let moved_id = moved["id"].as_str().unwrap().to_string();
+
+    let ids = |v: &serde_json::Value| -> Vec<String> {
+        v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let current = content(&replies[4]);
+    assert!(ids(&current).contains(&moved_id), "{current}");
+    assert!(
+        !ids(&current).contains(&"home".to_string()),
+        "a superseded fact is not recalled: {current}"
+    );
+    let history = content(&replies[5]);
+    let old = history["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "home")
+        .expect("history includes the old fact");
+    assert_eq!(old["superseded_by"], moved_id.as_str());
+    assert_eq!(old["source"], "claude");
+    assert!(old["at"].as_i64().unwrap() > 1_700_000_000, "{old}");
+
+    let preferences = content(&replies[6]);
+    assert_eq!(
+        preferences["memories"].as_array().unwrap().len(),
+        1,
+        "{preferences}"
+    );
+    assert_eq!(preferences["memories"][0]["kind"], "preference");
+    let tagged = content(&replies[7]);
+    assert_eq!(
+        ids(&tagged),
+        vec![moved_id.clone()],
+        "only the current profile fact: {tagged}"
+    );
+    let listed = content(&replies[8]);
+    assert_eq!(listed["total"], 3, "{listed}");
+
+    // A second session -- another agent -- sees the same memory, and can forget part of it.
+    let pref_id = preferences["memories"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let later = exchange_with_model(
+        &wal,
+        &base_url,
+        &[
+            call(2, "forget", serde_json::json!({"ids": [pref_id]})),
+            call(3, "list_memories", serde_json::json!({})),
+            call(
+                4,
+                "remember",
+                serde_json::json!({"text": "x", "metadata": {"kind": "sneaky"}}),
+            ),
+        ],
+    );
+    assert_eq!(content(&later[1])["forgotten"], 1);
+    assert_eq!(content(&later[2])["total"], 2);
+    // A tool's refusal comes back as this server's tools all refuse: a JSON-RPC error.
+    assert!(
+        later[3]["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("metadata may not set `kind`")),
+        "metadata may not set a memory's own fields: {}",
+        later[3]
+    );
+}
+
+#[path = "../common/http.rs"]
+mod http;
+
+/// Two ways in, one memory. With `vectordb serve` holding the store, `vectordb mcp` on the same
+/// store relays to the server instead of failing on the lock; what it remembers is recalled over
+/// REST, and `POST /mcp` answers directly too.
+#[test]
+fn mcp_relays_to_a_running_server_and_shares_its_memory() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _server = Kill(
+        Command::new(env!("CARGO_BIN_EXE_vectordb"))
+            .args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
+            .env("DXMT_WAL_DIR", &wal)
+            .env("DXMT_EMBEDDING_MODEL", "bag-of-words")
+            .env("DXMT_EMBEDDING_BASE_URL", &base_url)
+            .env("DXMT_EMBEDDING_AUTODETECT", "0")
+            .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+            .env_remove("DXMT_API_KEY")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while http::call(port, "GET", "/live", &[], None).is_none() {
+        assert!(std::time::Instant::now() < deadline, "server never came up");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // MCP over HTTP, directly.
+    let (status, listed) = http::call(
+        port,
+        "POST",
+        "/mcp",
+        &[],
+        Some(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#),
+    )
+    .unwrap();
+    assert_eq!(status, 200, "{listed}");
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["id"], 7);
+    assert!(listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "recall"));
+    let (status, _) = http::call(
+        port,
+        "POST",
+        "/mcp",
+        &[],
+        Some(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+    )
+    .unwrap();
+    assert_eq!(status, 202, "a notification has no reply");
+
+    // The stdio process on the same store: relayed, not refused.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .args(["mcp", "--wal-dir"])
+        .arg(&wal)
+        .env("DXMT_PORT", port.to_string())
+        .env_remove("DXMT_MCP_SERVER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{}", initialize()).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            call(
+                2,
+                "remember",
+                serde_json::json!({"text": "The user keeps bees on the roof", "kind": "fact"})
+            )
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+    let replies: Vec<serde_json::Value> = BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+        .collect();
+    child.wait().unwrap();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    let kept = content(&replies[1]);
+
+    let (status, recalled) = http::call(
+        port,
+        "POST",
+        "/api/v1/memories/recall",
+        &[],
+        Some(r#"{"query":"bees","limit":3}"#),
+    )
+    .unwrap();
+    assert_eq!(status, 200, "{recalled}");
+    let recalled: serde_json::Value = serde_json::from_str(&recalled).unwrap();
+    assert_eq!(
+        recalled["data"]["memories"][0]["id"], kept["id"],
+        "{recalled}"
+    );
+}

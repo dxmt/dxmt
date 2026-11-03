@@ -67,6 +67,27 @@ const CONTRACTS: &[Contract] = &[
         path: "/tables/{t}/records/{r}",
         caller: "python",
     },
+    // Memory: remember / recall / forget / list_memories in the Python SDK.
+    Contract {
+        method: "POST",
+        path: "/memories",
+        caller: "python",
+    },
+    Contract {
+        method: "GET",
+        path: "/memories",
+        caller: "python",
+    },
+    Contract {
+        method: "POST",
+        path: "/memories/recall",
+        caller: "python",
+    },
+    Contract {
+        method: "DELETE",
+        path: "/memories/{r}",
+        caller: "python",
+    },
     // Documents: put_document / get_document / delete_document in both SDKs.
     Contract {
         method: "PUT",
