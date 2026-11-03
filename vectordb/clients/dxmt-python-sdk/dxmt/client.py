@@ -1789,6 +1789,166 @@ class DXMTClient:
             msg = f"Connection error deleting document {doc_id}: {e}"
             raise DXMTConnectionError(msg) from e
 
+    # -- Memory: what an agent keeps about its user and its work ------------------------------
+    #
+    # One table on the server (``memory``), made on first use with the server's embedding
+    # model. Recall searches by meaning and by keyword; a memory that ``supersedes`` others
+    # leaves them as history and out of recall. Every agent reaching this database shares it.
+
+    @staticmethod
+    def _remember_body(
+        text: str,
+        kind: Optional[str],
+        tags: Optional[list[str]],
+        source: Optional[str],
+        supersedes: Optional[list[str]],
+        memory_id: Optional[str],
+        metadata: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"text": text}
+        for key, value in (
+            ("kind", kind),
+            ("tags", tags),
+            ("source", source),
+            ("supersedes", supersedes),
+            ("id", memory_id),
+            ("metadata", metadata),
+        ):
+            if value is not None:
+                body[key] = value
+        return body
+
+    @staticmethod
+    def _recall_body(
+        query: str,
+        limit: Optional[int],
+        kind: Optional[str],
+        tags: Optional[list[str]],
+        since: Optional[Any],
+        include_superseded: bool,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"query": query}
+        for key, value in (("limit", limit), ("kind", kind), ("tags", tags), ("since", since)):
+            if value is not None:
+                body[key] = value
+        if include_superseded:
+            body["include_superseded"] = True
+        return body
+
+    def _memory(self, method: str, path: str, action: str, **kwargs: Any) -> dict[str, Any]:
+        try:
+            response = self._client.request(method, path, **kwargs)
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            raise DXMTRecordError(f"Failed to {action}: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error trying to {action}: {e}") from e
+
+    async def _amemory(self, method: str, path: str, action: str, **kwargs: Any) -> dict[str, Any]:
+        try:
+            response = await self.async_client.request(method, path, **kwargs)
+            response.raise_for_status()
+            return self._response_data(response.json())
+        except httpx.HTTPStatusError as e:
+            raise DXMTRecordError(f"Failed to {action}: {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise DXMTConnectionError(f"Connection error trying to {action}: {e}") from e
+
+    def remember(
+        self,
+        text: str,
+        kind: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        source: Optional[str] = None,
+        supersedes: Optional[list[str]] = None,
+        memory_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Keep a memory -- a fact, preference, event, instruction or note (``kind``).
+
+        ``supersedes`` names memories this one replaces (they are kept as history and no longer
+        recalled); ``memory_id`` corrects an existing memory in place.
+
+        Returns:
+            ``{"id", "superseded"}``.
+        """
+        body = self._remember_body(text, kind, tags, source, supersedes, memory_id, metadata)
+        return self._memory("POST", "/memories", "remember", json=body)
+
+    async def aremember(
+        self,
+        text: str,
+        kind: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        source: Optional[str] = None,
+        supersedes: Optional[list[str]] = None,
+        memory_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Async version of :meth:`remember`."""
+        body = self._remember_body(text, kind, tags, source, supersedes, memory_id, metadata)
+        return await self._amemory("POST", "/memories", "remember", json=body)
+
+    def recall(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        kind: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        since: Optional[Any] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """The memories that best match ``query``, by meaning and keyword, best first.
+
+        ``since`` is Unix seconds or an RFC 3339 time. Each memory carries ``id``, ``text``,
+        ``kind``, ``tags``, ``source``, ``at`` and ``score``.
+        """
+        body = self._recall_body(query, limit, kind, tags, since, include_superseded)
+        return self._memory("POST", "/memories/recall", "recall", json=body)["memories"]
+
+    async def arecall(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        kind: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        since: Optional[Any] = None,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Async version of :meth:`recall`."""
+        body = self._recall_body(query, limit, kind, tags, since, include_superseded)
+        data = await self._amemory("POST", "/memories/recall", "recall", json=body)
+        return data["memories"]
+
+    def forget(self, memory_id: str) -> int:
+        """Delete a memory for good; returns 1, or 0 when there was none."""
+        data = self._memory("DELETE", f"/memories/{_seg(memory_id)}", "forget")
+        return int(data["forgotten"])
+
+    async def aforget(self, memory_id: str) -> int:
+        """Async version of :meth:`forget`."""
+        data = await self._amemory("DELETE", f"/memories/{_seg(memory_id)}", "forget")
+        return int(data["forgotten"])
+
+    def list_memories(
+        self, kind: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        """Memories newest first: ``{"memories": [...], "total": n}``."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if kind is not None:
+            params["kind"] = kind
+        return self._memory("GET", "/memories", "list memories", params=params)
+
+    async def alist_memories(
+        self, kind: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        """Async version of :meth:`list_memories`."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if kind is not None:
+            params["kind"] = kind
+        return await self._amemory("GET", "/memories", "list memories", params=params)
+
     # Search Operations
 
     def search(

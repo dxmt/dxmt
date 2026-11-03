@@ -50,6 +50,11 @@ use crate::types::{
         crate::api::handlers::put_document,
         crate::api::handlers::get_document,
         crate::api::handlers::delete_document,
+        // memory
+        crate::api::handlers::remember,
+        crate::api::handlers::recall,
+        crate::api::handlers::list_memories,
+        crate::api::handlers::forget,
         // search
         crate::api::handlers::search_vectors,
         crate::api::handlers::search_groups,
@@ -86,6 +91,8 @@ use crate::types::{
             crate::api::handlers::ListRecordsRequest,
             crate::api::handlers::CountRecordsRequest,
             crate::storage::documents::PutDocumentRequest,
+            crate::storage::agent_memory::RememberRequest,
+            crate::storage::agent_memory::RecallRequest,
             crate::api::handlers::SearchGroupsRequest,
             crate::types::record::SparseSearchQuery,
             crate::types::record::SearchGroup,
@@ -153,6 +160,11 @@ use crate::types::{
              sentence boundaries, one record each (id `{doc_id}#{n}`, payload `doc_id`, \
              `chunk_index`, `chunk_count`), embedded with the table's model. Search returns \
              chunks; `group_by: \"doc_id\"` returns documents."),
+        (name = "memory", description =
+            "An agent's memory of its user and its work, shared by every agent that reaches this \
+             database: remember facts, preferences, events and instructions; recall them by \
+             meaning and keyword; supersede what changed (kept as history); forget on request. \
+             One table (`memory`), made on first use with the server's embedding model."),
         (name = "index", description =
             "Rebuild or drop a table's index. Dropping one leaves searches answering by brute \
              force -- exactly, and slowly."),

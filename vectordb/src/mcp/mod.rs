@@ -4,6 +4,8 @@
 //! Claude and GPT to interact with the vector database through standardized tools.
 
 pub mod prompts;
+#[cfg(feature = "server-embedding")]
+pub mod relay;
 pub mod resources;
 pub mod server;
 pub mod tools;

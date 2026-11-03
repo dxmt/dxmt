@@ -1922,3 +1922,161 @@ def test_quantization_a_code_cannot_hold_is_refused_at_creation(quantization):
         assert "quantization" in r.text, r.text[:300]
     finally:
         delete(f"/tables/{name}", expect_ok=False)
+
+
+# ---- /memories ---------------------------------------------------------------------------------
+#
+# Memory is embedded with the server's default model, which the server under test does not
+# have; but the memory table is only *made* with it -- one that exists is used as it is. So each
+# probe makes `memory` itself, with the provider above and a keyword index over `text` (what the
+# server would make), and drops it afterwards.
+
+MEMORY = "memory"
+
+
+class memory_table:
+    def __enter__(self):
+        delete(f"/tables/{MEMORY}", expect_ok=False)
+        post("/tables", {
+            "name": MEMORY, "dimension": 4, "distance_metric": "cosine",
+            "embedding": {"model": "bag-of-words", "base_url": provider_url(),
+                          "api_key_env": "DXMT_PROBE_KEY_UNSET"},
+            "enable_full_text_search": True,
+            "text_fields": [{"name": "content", "source": {"metadata_field": "text"},
+                             "weight": 1.0}],
+        })
+        return self
+
+    def __exit__(self, *_):
+        delete(f"/tables/{MEMORY}", expect_ok=False)
+
+
+def remember(**body):
+    return post("/memories", body).json()["data"]
+
+
+def recall(**body):
+    return post("/memories/recall", body).json()["data"]["memories"]
+
+
+def memories(**params):
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    return get(f"/memories{'?' + query if query else ''}").json()["data"]
+
+
+def by_id(listing):
+    return {m["id"]: m for m in listing["memories"]}
+
+
+@probe("RememberRequest", "text")
+def _(table):
+    with memory_table():
+        kept = remember(text="the user grows tomatoes")
+        assert by_id(memories())[kept["id"]]["text"] == "the user grows tomatoes"
+
+
+@probe("RememberRequest", "kind")
+def _(table):
+    with memory_table():
+        a = remember(text="likes tea", kind="preference")["id"]
+        b = remember(text="saw a movie")["id"]
+        kept = by_id(memories())
+        assert (kept[a]["kind"], kept[b]["kind"]) == ("preference", "note"), kept
+
+
+@probe("RememberRequest", "tags")
+def _(table):
+    with memory_table():
+        remember(text="garden tomatoes", tags=["garden"])
+        remember(text="garden roses")
+        hits = recall(query="garden", tags=["garden"])
+        assert [h["text"] for h in hits] == ["garden tomatoes"], hits
+
+
+@probe("RememberRequest", "source")
+def _(table):
+    with memory_table():
+        a = remember(text="one", source="claude")["id"]
+        assert by_id(memories())[a]["source"] == "claude"
+
+
+@probe("RememberRequest", "supersedes")
+def _(table):
+    with memory_table():
+        old = remember(text="lives in Shanghai")["id"]
+        new = remember(text="lives in Berlin", supersedes=[old])
+        assert new["superseded"] == [old], new
+        assert by_id(memories())[old]["superseded_by"] == new["id"]
+
+
+@probe("RememberRequest", "id")
+def _(table):
+    with memory_table():
+        remember(text="first version", id="fixed")
+        remember(text="second version", id="fixed")
+        listing = memories()
+        assert listing["total"] == 1 and by_id(listing)["fixed"]["text"] == "second version"
+
+
+@probe("RememberRequest", "metadata")
+def _(table):
+    with memory_table():
+        a = remember(text="x", metadata={"project": "garden"})["id"]
+        assert by_id(memories())[a]["project"] == "garden"
+        r = post("/memories", {"text": "x", "metadata": {"kind": "sneaky"}}, expect_ok=False)
+        assert r.status_code == 400, r.text[:300]
+
+
+@probe("RecallRequest", "query")
+def _(table):
+    with memory_table():
+        # One word each, in different dimensions of the provider's four, so the vector half of
+        # recall agrees with the keyword half instead of being hash collisions.
+        remember(text="tomatoes")
+        remember(text="taxes")
+        assert recall(query="taxes")[0]["text"] == "taxes"
+        assert recall(query="tomatoes")[0]["text"] == "tomatoes"
+
+
+@probe("RecallRequest", "limit")
+def _(table):
+    with memory_table():
+        for i in range(3):
+            remember(text=f"garden note {i}")
+        assert len(recall(query="garden", limit=1)) == 1
+        assert len(recall(query="garden", limit=3)) == 3
+
+
+@probe("RecallRequest", "kind")
+def _(table):
+    with memory_table():
+        remember(text="garden fact", kind="fact")
+        remember(text="garden preference", kind="preference")
+        hits = recall(query="garden", kind="preference")
+        assert [h["kind"] for h in hits] == ["preference"], hits
+
+
+@probe("RecallRequest", "tags")
+def _(table):
+    with memory_table():
+        remember(text="garden one", tags=["a"])
+        remember(text="garden two", tags=["b"])
+        assert [h["text"] for h in recall(query="garden", tags=["b"])] == ["garden two"]
+
+
+@probe("RecallRequest", "since")
+def _(table):
+    with memory_table():
+        remember(text="garden then")
+        assert len(recall(query="garden", since=0)) == 1
+        assert recall(query="garden", since=4_000_000_000) == []
+        assert recall(query="garden", since="2100-01-01T00:00:00Z") == []
+
+
+@probe("RecallRequest", "include_superseded")
+def _(table):
+    with memory_table():
+        old = remember(text="garden in Shanghai")["id"]
+        remember(text="garden in Berlin", supersedes=[old])
+        assert old not in {h["id"] for h in recall(query="garden")}
+        assert old in {h["id"] for h in recall(query="garden", include_superseded=True)}

@@ -11,13 +11,13 @@ use crate::{
     api::handlers::{
         alter_table, branch_table, calibrate_recall, count_records, create_backup, create_snapshot,
         create_table, delete_alias, delete_document, delete_records, delete_table, drop_index,
-        drop_payload_index_field, execute_dxql, export_table, facets, full_text_search,
+        drop_payload_index_field, execute_dxql, export_table, facets, forget, full_text_search,
         get_document, get_record, get_status, get_table, get_table_stats, health_check,
         health_metrics, hybrid_search, hybrid_search_combined, import_table, index_payload_field,
-        insert_records, insert_records_optimized, knn_graph, list_aliases, list_records,
-        list_tables, liveness, payload_index_report, prometheus_metrics, put_document, readiness,
-        rebuild_index, repair_reachability, search_groups, search_vectors, set_alias,
-        sparse_search, update_record, AppState,
+        insert_records, insert_records_optimized, knn_graph, list_aliases, list_memories,
+        list_records, list_tables, liveness, payload_index_report, prometheus_metrics,
+        put_document, readiness, rebuild_index, recall, remember, repair_reachability,
+        search_groups, search_vectors, set_alias, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -398,6 +398,32 @@ pub async fn create_app_with_features(
 /// that builds a router would otherwise inherit whatever the developer happens to have in
 /// their shell, and a `DXMT_API_KEY` left over from an afternoon of manual testing would turn
 /// every one of them red for a reason none of them mention.
+/// `POST /mcp`: one JSON-RPC message, its reply (202 with no body for a notification). The
+/// Streamable HTTP transport, answered with JSON rather than an event stream: every tool here
+/// answers once.
+async fn mcp_http(
+    axum::Extension(mcp): axum::Extension<
+        Arc<crate::mcp::server::McpServer<IntelligentIndexedStorage>>,
+    >,
+    body: String,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match mcp.answer(&body).await {
+        Some(reply) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            reply,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// `GET /mcp` opens a server-to-client stream in the Streamable HTTP transport; this server
+/// sends nothing unprompted, and the transport's answer for that is 405.
+async fn mcp_no_stream() -> axum::http::StatusCode {
+    axum::http::StatusCode::METHOD_NOT_ALLOWED
+}
+
 /// The timers only a primary runs -- snapshots, backups, eviction (which snapshots a table),
 /// index re-evaluation and row reclamation. At startup for a primary, and for a cluster replica
 /// at the moment it promotes itself.
@@ -556,6 +582,10 @@ pub async fn create_app_with_storage(
             "/tables/:table_name/documents/:doc_id",
             get(get_document).put(put_document).delete(delete_document),
         )
+        // An agent's memory: see `storage::agent_memory`.
+        .route("/memories", post(remember).get(list_memories))
+        .route("/memories/recall", post(recall))
+        .route("/memories/:memory_id", delete(forget))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))
         .route("/tables/:table_name/facets", post(facets))
@@ -674,6 +704,16 @@ pub async fn create_app_with_storage(
             crate::api::auth::KEY_VARIABLE
         ),
     }
+
+    // MCP over HTTP: every agent on this machine reaches the one store through one server,
+    // where each `vectordb mcp` opening the store itself allowed one at a time -- the store is
+    // locked to its process. Inside the layers below, so behind the API key like everything.
+    let mcp = Arc::new(crate::mcp::server::McpServer::new(storage.clone()));
+    let app = app.merge(
+        Router::new()
+            .route("/mcp", post(mcp_http).get(mcp_no_stream))
+            .layer(axum::Extension(mcp)),
+    );
 
     let app = app
         // 增加请求体大小限制到500MB

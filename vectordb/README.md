@@ -1,30 +1,96 @@
-# DXMT VectorDB
+# DXMT
 
-A single-node vector database written in Rust. HNSW, HNSW-PQ and product quantization with
-runtime SIMD dispatch, payload filtering, full-text (BM25, with Chinese segmentation) and
-hybrid retrieval, server-side embedding and a query language behind one REST API, with
-Swagger and a read-only console served by default. GraphQL, WebSocket, gRPC and S3 are opt-in
-build features — see [Feature flags](#feature-flags) — so a default build is the supported
-single-node server and nothing more.
+### Memory for agents. Owned by you.
 
-> **Status: 1.3**, under the compatibility promise 1.0 made. Durability is a write-ahead log,
-> replayed on startup, plus periodic snapshots — `kill -9` and restart preserves your tables.
-> Records and full vectors are **not** held in memory: with a WAL directory, which is the
-> default, they live in row files beside it (`store/records/<table>.rec`,
-> `store/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident —
-> about 0.45 KB per 768-dimension row, measured at 100 million, against 8.3 KB when
-> everything was in the map. That figure predates 1.2, which also keeps 4-bit fast-scan codes
-> for filtered search beside the PQ codes (the same bytes again; `quantization.fast_scan:
-> false` at creation leaves them out). `docs/architecture/disk-index.md` is how that was done and what
-> it cost. (This paragraph said "records are held in memory" from 2026-08-14, when the WAL
-> went on the write path, until 2026-09-27: true when written, and left behind by the two
-> phases that moved the rows to disk.) The log defaults to
-> `~/.dxmt/store` — everything the server writes lives under one root, `DXMT_ROOT_DIR`, which
-> defaults to `~/.dxmt`. Under the home directory rather than the working directory, so
-> starting the server from somewhere else does not open a different, empty database. **Set
-> `DXMT_ROOT_DIR` for anything real**: a home directory is usually on the root filesystem, this
-> table can be tens of gigabytes, and it is often NFS, where `mmap` and `fsync` do not mean
-> what a WAL needs them to mean.
+**The open-source memory database for personal AI agents.** Give every agent you use --
+Claude, Cursor, ChatGPT, your own scripts -- one persistent, portable memory of you and your
+work, on your machine, in one binary.
+
+DXMT is **D**ata → e**X**perience → **M**emory → **T**hinking: what you and your agents produce,
+what happened, what is worth keeping, and what an agent can reason over next time. Today DXMT
+does the first three -- it stores, remembers and recalls -- and is built so the fourth
+(consolidation and reflection over memories) can run inside it.
+
+- **Memory, not just vectors.** `remember` a fact, a preference, an event or an instruction;
+  `recall` it by meaning *and* by keyword; when something changes, the new memory
+  **supersedes** the old one, which is kept as history rather than overwritten; `forget` on
+  request. Every memory has a kind, tags, a source (which agent) and a time.
+- **Every agent, one memory.** MCP over stdio and over HTTP (`/mcp`), a REST API, and Python,
+  JavaScript, Rust and Go clients -- all reading and writing the same store. Several MCP
+  clients on one machine share it through one server automatically.
+- **Yours.** Local-first: data lives in `~/.dxmt`, embeddings come from a local model (ollama)
+  unless you choose otherwise, and everything can be listed, edited, exported and deleted.
+  Apache-2.0.
+- **A real database underneath.** Its own storage and indexes, not a layer over someone
+  else's: a write-ahead log with snapshots (`kill -9` loses nothing acknowledged), HNSW and
+  HNSW-PQ vector search, BM25 full-text with Chinese segmentation, hybrid fusion, payload
+  filters, backups, and -- when you outgrow one machine -- object-storage replication, read
+  replicas with automatic failover, and an experimental cluster mode.
+
+## Memory for your agents in five minutes
+
+```bash
+# 1. The database (Linux x86_64/aarch64; or build from source, below)
+v=1.4.0; arch=$(uname -m)
+curl -L https://github.com/dxmt/dxmt/releases/download/v$v/dxmt-vectordb-$v-$arch-linux-gnu.tar.gz | tar xz
+sudo mv dxmt-vectordb-$v-$arch-linux-gnu/vectordb /usr/local/bin/
+
+# 2. A local embedding model -- multilingual, so Chinese and English memories both work
+ollama pull bge-m3
+
+# 3. Connect your agent (pick yours)
+claude mcp add dxmt -- vectordb mcp                              # Claude Code
+```
+
+Claude Desktop (`claude_desktop_config.json`) and Cursor (`~/.cursor/mcp.json`) take the same
+block:
+
+```json
+{ "mcpServers": { "dxmt": { "command": "vectordb", "args": ["mcp"] } } }
+```
+
+That is all: the agent now has `remember`, `recall`, `forget` and `list_memories` (plus
+document and table tools). Ask it to remember something, start a new conversation -- or open
+another agent -- and ask about it.
+
+**Several agents at once.** A store is open in one process at a time. Run `vectordb serve` and
+every `vectordb mcp` on the machine relays to it instead of opening the store, so all agents
+share one memory; clients that speak MCP over HTTP can connect to `http://127.0.0.1:9999/mcp`
+directly (`claude mcp add --transport http dxmt http://127.0.0.1:9999/mcp`). The same memory is
+on REST:
+
+```bash
+curl -X POST localhost:9999/api/v1/memories -H 'content-type: application/json' \
+     -d '{"text":"Prefers answers in Chinese","kind":"preference","source":"me"}'
+curl -X POST localhost:9999/api/v1/memories/recall -H 'content-type: application/json' \
+     -d '{"query":"how should answers be written"}'
+curl localhost:9999/api/v1/memories                    # everything kept, newest first
+```
+
+and in Python: `Client().remember("Lives in Berlin", kind="fact", supersedes=["mem-..."])`,
+`Client().recall("where does the user live")`.
+
+### How memory works
+
+One table, `memory` (`DXMT_MEMORY_TABLE`), made on first use with the server's embedding model
+and a keyword index over the same text. A memory is a record whose payload carries `text`,
+`kind`, `tags`, `source`, `at` (Unix seconds) and, once replaced, `superseded_by`. `recall` is
+a hybrid search, filtered by `kind`, `tags` and `since` if asked, and leaves superseded
+memories out unless `include_superseded` is set -- so "the user moved to Berlin" ends "the user
+lives in Shanghai" without erasing it. Because it is an ordinary table, everything else the
+database does applies: filters, export, backup, replication.
+
+> **Status: 1.4**, under the compatibility promise 1.0 made (the HTTP API under `/api/v1` and
+> the clients' public surfaces); the memory API is new in this line. Durability is a
+> write-ahead log replayed on startup plus periodic snapshots. With a data directory -- the
+> default -- records and full vectors live in row files (`store/records/<table>.rec`,
+> `store/vectors/<table>.f32`) and only the graph, the PQ codes and the id map stay resident:
+> about 0.45 KB per 768-dimension row, measured at 100 million (`docs/architecture/disk-index.md`).
+> Everything the server writes lives under one root, `DXMT_ROOT_DIR`, default `~/.dxmt` --
+> under the home directory so that starting the server from somewhere else does not open a
+> different, empty database. **Set `DXMT_ROOT_DIR` for anything large**: a home directory is
+> often on the root filesystem, or on NFS, where `mmap` and `fsync` do not mean what a WAL
+> needs them to mean.
 >
 > ```text
 > ~/.dxmt/                DXMT_ROOT_DIR
@@ -33,14 +99,10 @@ single-node server and nothing more.
 > └── cache/              derived; deleting it costs time, not data  (DXMT_CACHE_DIR)
 > ```
 >
-> The three have three different lifetimes, which is why they are three directories. Each can
-> be moved on its own; the root moves all of them. `store/` and `backups/` are created and
-> checked for writability at startup, so an unwritable `backups/` is a refusal to start rather
-> than a surprise for whoever takes the first backup; `cache/` is created only by whatever
-> first writes to it. When configured, snapshots, WAL chunks and
-> partition segments are mirrored to object storage, but that mirror is still experimental and
-> local WAL remains the readiness boundary. There is no replication or clustering: this is
-> one process on one machine. See [Known Limitations](#known-limitations).
+> Object-storage mirroring, read replicas with failover, and the cluster mode are documented
+> under [Object storage and read replicas](#object-storage-and-read-replicas); the replica and
+> cluster parts are experimental. See [Known Limitations](#known-limitations) and
+> [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md).
 
 Anything this README does not describe is experimental, even when its module compiles or has
 standalone tests.

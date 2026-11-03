@@ -53,6 +53,7 @@ pub struct ClusterRouter {
     next_replica: AtomicUsize,
     secret: String,
     kb_table: Option<String>,
+    memory_table: Option<String>,
 }
 
 /// A table name as a path segment.
@@ -121,6 +122,7 @@ impl ClusterRouter {
             next_replica: AtomicUsize::new(0),
             secret: super::router_secret(),
             kb_table: crate::storage::knowledge_base::kb_table_name(),
+            memory_table: crate::storage::knowledge_base::memory_table_name(),
         });
         router.refresh().await?;
         Ok(router)
@@ -313,12 +315,20 @@ impl ClusterRouter {
     ) -> Response {
         let mut shard = match self.shard_of(table).await {
             Some(shard) => shard,
-            None if self.kb_table.as_deref() == Some(table) => match self.place(table).await {
-                Ok(shard) => shard,
-                Err(e) => {
-                    return envelope(StatusCode::SERVICE_UNAVAILABLE, "NO_SHARDS", e.to_string())
+            None if self.kb_table.as_deref() == Some(table)
+                || self.memory_table.as_deref() == Some(table) =>
+            {
+                match self.place(table).await {
+                    Ok(shard) => shard,
+                    Err(e) => {
+                        return envelope(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "NO_SHARDS",
+                            e.to_string(),
+                        )
+                    }
                 }
-            },
+            }
             None => {
                 return envelope(
                     StatusCode::NOT_FOUND,
@@ -1109,6 +1119,21 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
                         StatusCode::BAD_REQUEST,
                         "INVALID_INPUT",
                         "say where: {\"to\": \"<shard>\"}",
+                    ),
+                };
+            }
+            // An agent's memory is one table; its routes go to the shard that holds it.
+            if trimmed == "/api/v1/memories" || trimmed.starts_with("/api/v1/memories/") {
+                return match router.memory_table.clone() {
+                    Some(table) => {
+                        router
+                            .table_request(&table, &method, &path_and_query, &headers, body)
+                            .await
+                    }
+                    None => envelope(
+                        StatusCode::NOT_FOUND,
+                        "NOT_FOUND",
+                        "memory is turned off (DXMT_MEMORY_TABLE=off)",
                     ),
                 };
             }
