@@ -37,6 +37,11 @@ with standbys that take over a shard whose nodes are all gone.
   model, and -- when the store is already open in a server on this machine -- relays to that
   server's `/mcp` instead of failing on the lock; `--server <url>` relays explicitly. Several
   MCP clients on one machine now share one memory.
+- **Saying it twice keeps it once.** A memory whose meaning is already held (cosine 0.97 or
+  more to a live memory of the same kind; `DXMT_MEMORY_DUPLICATE_SIMILARITY`) refreshes that
+  one and returns its id with `duplicate: true`. Events are exempt. The threshold is measured
+  on bge-m3: restatements 0.98-0.995, contradicting facts 0.81-0.93.
+- **Memory in the JavaScript client.** `remember`, `recall`, `forget` and `listMemories`.
 - **macOS binaries.** Each release builds `aarch64-apple-darwin` (started and smoke-tested on
   the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
 - **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's
