@@ -434,6 +434,22 @@ results = client.search(
 
 ## Integrations
 
+### Coming from Chroma
+
+`python -m dxmt.migrate.chroma` copies Chroma collections into DXMT tables with their stored
+vectors, so nothing is re-embedded: the same ids, the collection's distance (`l2` becomes
+`euclidean`, `ip` becomes `dot`), each metadata dict as the payload, and the document under
+`text` with a full-text index on it. Records are written by id, so a second run over the same
+table rewrites them rather than duplicating them, and an interrupted copy is finished by
+running it again.
+
+```bash
+pip install 'dxmt-python-sdk[chroma]'   # until published: pip install './vectordb/clients/dxmt-python-sdk[chroma]'
+python -m dxmt.migrate.chroma --path ./chroma_db                       # every collection
+python -m dxmt.migrate.chroma --path ./chroma_db --collection notes --table notes --analyzer chinese
+python -m dxmt.migrate.chroma --chroma-host localhost:8000 --url http://localhost:9999
+```
+
 ### mem0 Integration
 
 DXMT can be used as a vector storage backend for [mem0](https://mem0.ai), an intelligent memory layer for AI agents.
