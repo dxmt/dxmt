@@ -568,3 +568,58 @@ export interface DocumentChunks {
   metadata: Metadata;
   chunks: Array<{ id: string; chunk_index: number; text: string }>;
 }
+
+/** `remember`: one memory -- a fact, preference, event, instruction or note. */
+export interface RememberParams {
+  text: string;
+  /** `fact`, `preference`, `event`, `instruction` or `note` (the server's default). */
+  kind?: string;
+  tags?: string[];
+  /** Who or what it came from: an agent, a conversation, a file. */
+  source?: string;
+  /** Memories this one replaces; they are kept as history and no longer recalled. */
+  supersedes?: string[];
+  /** Correct an existing memory in place rather than adding one. */
+  id?: string;
+  /** Extra payload fields; the reserved ones (`text`, `kind`, `tags`, ...) are refused. */
+  metadata?: Metadata;
+}
+
+export interface Remembered {
+  id: string;
+  superseded: string[];
+}
+
+/** `recall`: the memories that best match a query, by meaning and keyword. */
+export interface RecallParams {
+  query: string;
+  /** 1-100; server default 10. */
+  limit?: number;
+  kind?: string;
+  /** Memories carrying any of these tags. */
+  tags?: string[];
+  /** Unix seconds or an RFC 3339 time. */
+  since?: number | string;
+  /** Include memories another has replaced. */
+  include_superseded?: boolean;
+}
+
+export interface Memory {
+  id: string;
+  text: string;
+  kind: string;
+  tags?: string[];
+  source?: string;
+  /** When it was kept, Unix seconds. */
+  at: number;
+  /** The memory that replaced this one, when it has been. */
+  superseded_by?: string;
+  /** Present on a recall. */
+  score?: number;
+  [field: string]: unknown;
+}
+
+export interface MemoryPage {
+  memories: Memory[];
+  total: number;
+}

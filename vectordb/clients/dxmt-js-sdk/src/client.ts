@@ -25,6 +25,11 @@ import {
   PutDocumentParams,
   DocumentWritten,
   DocumentChunks,
+  RememberParams,
+  Remembered,
+  RecallParams,
+  Memory,
+  MemoryPage,
   Filter,
   ScrollOptions,
   UploadOptions,
@@ -1005,6 +1010,54 @@ export class DXMTClient {
       `/tables/${encodeURIComponent(tableName)}/documents/${encodeURIComponent(docId)}`
     );
     return answer.deleted_chunks;
+  }
+
+  /**
+   * Keep a memory. It lands in the server's memory table (`memory` unless `DXMT_MEMORY_TABLE`
+   * says otherwise), made on first use with the server's embedding model -- the same memory
+   * every MCP client on the machine reads.
+   */
+  async remember(params: RememberParams): Promise<Remembered> {
+    if (!params.text || !params.text.trim()) {
+      throw new DXMTValidationError('A memory needs text');
+    }
+    const body: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) body[key] = value;
+    }
+    return this.request<Remembered>('POST', '/memories', body);
+  }
+
+  /** The memories that best match `query`, by meaning and keyword, best first. */
+  async recall(params: RecallParams): Promise<Memory[]> {
+    if (!params.query) throw new DXMTValidationError('A recall needs a query');
+    const body: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) body[key] = value;
+    }
+    const answer = await this.request<{ memories: Memory[] }>('POST', '/memories/recall', body);
+    return answer.memories;
+  }
+
+  /** Delete a memory for good: 1, or 0 when there was none. */
+  async forget(memoryId: string): Promise<number> {
+    if (!memoryId) throw new DXMTValidationError('A memory id is required');
+    const answer = await this.request<{ forgotten: number }>(
+      'DELETE',
+      `/memories/${encodeURIComponent(memoryId)}`
+    );
+    return answer.forgotten;
+  }
+
+  /** Memories newest first, superseded ones included. */
+  async listMemories(
+    options: { kind?: string; limit?: number; offset?: number } = {}
+  ): Promise<MemoryPage> {
+    const query = new URLSearchParams();
+    query.set('limit', String(options.limit ?? 50));
+    query.set('offset', String(options.offset ?? 0));
+    if (options.kind !== undefined) query.set('kind', options.kind);
+    return this.request<MemoryPage>('GET', `/memories?${query}`);
   }
 
   /** Update a record's vector and/or metadata without losing auxiliary vectors. */
