@@ -909,6 +909,8 @@ pub struct IntelligentIndexedStorage {
     default_embedding: StdMutex<Option<crate::types::table::EmbeddingConfig>>,
     /// The knowledge-base table's name, read once: see `storage::knowledge_base`.
     kb_table: Option<String>,
+    /// The memory table (`storage::agent_memory`), made on first use the same way.
+    memory_table: Option<String>,
     backup_failures: AtomicU64,
     /// `wal_next_sequence` and table names of the snapshot this process last loaded or
     /// installed. Cached so a health probe does not have to read and deserialize the manifest —
@@ -2509,6 +2511,7 @@ impl IntelligentIndexedStorage {
             last_backup_at: StdMutex::new(None),
             default_embedding: StdMutex::new(None),
             kb_table: crate::storage::knowledge_base::kb_table_name(),
+            memory_table: crate::storage::knowledge_base::memory_table_name(),
             backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
             snapshot_table_names: Arc::new(StdMutex::new(Vec::new())),
@@ -4449,10 +4452,12 @@ impl IntelligentIndexedStorage {
     /// server has a default model. Called by the paths a first note takes -- insert, search,
     /// text and hybrid search -- so the table appears when someone uses it rather than on
     /// every server at startup. Two first writes racing are fine: the loser finds it made.
-    async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
+    pub(crate) async fn ensure_kb_table(&self, tablename: &str) -> crate::Result<()> {
         // A replica has the primary's tables, the knowledge-base table among them once the
         // primary made it; it makes none of its own.
-        if self.replica.load(Ordering::SeqCst) || self.kb_table.as_deref() != Some(tablename) {
+        let made_on_first_use = self.kb_table.as_deref() == Some(tablename)
+            || self.memory_table.as_deref() == Some(tablename);
+        if self.replica.load(Ordering::SeqCst) || !made_on_first_use {
             return Ok(());
         }
         let Some(embedding) = self.default_embedding() else {
@@ -4468,7 +4473,7 @@ impl IntelligentIndexedStorage {
                 return Ok(());
             }
             return Err(crate::Error::InvalidInput(format!(
-                "'{tablename}' is the notes table, made on first use with the server's \
+                "'{tablename}' is made on first use with the server's \
                  embedding model -- and this server has none. Run `ollama pull bge-m3` (a local \
                  ollama is found on its own) and restart, or set DXMT_EMBEDDING_MODEL (with \
                  OPENAI_API_KEY for OpenAI, or DXMT_EMBEDDING_BASE_URL for another provider)"
@@ -6929,6 +6934,11 @@ impl IntelligentIndexedStorage {
                 Ok(())
             }
         }
+    }
+
+    /// The memory table (`DXMT_MEMORY_TABLE`, default `memory`), or `None` when turned off.
+    pub fn memory_table(&self) -> Option<&str> {
+        self.memory_table.as_deref()
     }
 
     /// Whether this storage is a read replica (`new_replica`).
@@ -13888,6 +13898,33 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
 
     async fn delete_document(&self, tablename: &str, doc_id: &str) -> crate::Result<usize> {
         IntelligentIndexedStorage::delete_document(self, tablename, doc_id).await
+    }
+
+    async fn remember(
+        &self,
+        request: crate::storage::agent_memory::RememberRequest,
+    ) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::remember(self, request).await
+    }
+
+    async fn recall(
+        &self,
+        request: crate::storage::agent_memory::RecallRequest,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        IntelligentIndexedStorage::recall(self, request).await
+    }
+
+    async fn forget(&self, ids: Vec<String>) -> crate::Result<usize> {
+        IntelligentIndexedStorage::forget(self, ids).await
+    }
+
+    async fn list_memories(
+        &self,
+        kind: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> crate::Result<(Vec<serde_json::Value>, usize)> {
+        IntelligentIndexedStorage::list_memories(self, kind, limit, offset).await
     }
 
     async fn get_table(&self, name: &str) -> crate::Result<Table> {

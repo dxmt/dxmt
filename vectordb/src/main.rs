@@ -124,6 +124,11 @@ enum Commands {
         /// Directory for the write-ahead log; empty disables persistence
         #[arg(long)]
         wal_dir: Option<String>,
+        /// Relay to a running server's `/mcp` instead of opening the store, e.g.
+        /// `http://127.0.0.1:9999`. Without it, a store a server already has open is relayed to
+        /// that server on this machine (DXMT_PORT, default 9999).
+        #[arg(long, env = "DXMT_MCP_SERVER")]
+        server: Option<String>,
     },
 
     /// Restore a backup into the data directory, with the server stopped.
@@ -518,17 +523,49 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 .map_err(|e| dxmt_vectordb::Error::Internal(format!("router error: {}", e)))?;
         }
 
-        Commands::Mcp { wal_dir } => {
+        Commands::Mcp { wal_dir, server } => {
+            #[cfg(feature = "server-embedding")]
+            if let Some(url) = &server {
+                info!("relaying MCP to {url}/mcp");
+                return dxmt_vectordb::mcp::relay::relay_stdio(url).await;
+            }
+            #[cfg(not(feature = "server-embedding"))]
+            if server.is_some() {
+                return Err(dxmt_vectordb::Error::InvalidConfig(
+                    "--server needs a build with the `server-embedding` feature".to_string(),
+                ));
+            }
+            // The same store `serve` opens unless told otherwise: an agent's memory is one place,
+            // whichever way the agent reaches it. This was `./data/wal`, relative to wherever
+            // the MCP client happened to start the process, so a memory kept from one client was
+            // missing from another and from the server.
             let wal_dir = match wal_dir {
                 Some(dir) if dir.trim().is_empty() => None,
                 Some(dir) => Some(std::path::PathBuf::from(dir)),
-                None => Some(std::path::PathBuf::from("./data/wal")),
+                None => dxmt_vectordb::api::server::wal_dir_from_env(),
             };
 
             info!("Starting DXMT VectorDB MCP server on stdio");
-            let storage = std::sync::Arc::new(
-                IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir).await?,
-            );
+            let opened = IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir).await;
+            // The store is locked to one process. If it is a server's, relay to that server, so
+            // this agent shares the memory every other agent on the machine reaches.
+            #[cfg(feature = "server-embedding")]
+            if let Err(e) = &opened {
+                if e.to_string().contains("in use by another process") {
+                    let port = dxmt_vectordb::config::env::var("DXMT_PORT")
+                        .unwrap_or_else(|_| "9999".to_string());
+                    let url = format!("http://127.0.0.1:{}", port.trim());
+                    if dxmt_vectordb::mcp::relay::server_answers(&url).await {
+                        info!("the store is open in the server at {url}; relaying MCP to it");
+                        return dxmt_vectordb::mcp::relay::relay_stdio(&url).await;
+                    }
+                }
+            }
+            let storage = std::sync::Arc::new(opened?);
+            // The model text is embedded with, as `serve` finds it: DXMT_EMBEDDING_MODEL, or a
+            // local ollama. Without it `remember` and `recall` -- text in, text out -- had no
+            // model to make the memory table with.
+            dxmt_vectordb::api::quickstart::configure_default_embedding(&storage).await;
 
             McpServer::new(storage)
                 .serve_stdio()

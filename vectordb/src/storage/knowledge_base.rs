@@ -19,6 +19,19 @@ pub fn kb_table_name() -> Option<String> {
     }
 }
 
+/// The memory table's name: `DXMT_MEMORY_TABLE`, default `memory`; `off` disables it. Made on
+/// first use like the knowledge-base table, with the same configuration; see `storage::agent_memory`.
+pub fn memory_table_name() -> Option<String> {
+    match crate::config::env::var("DXMT_MEMORY_TABLE")
+        .ok()
+        .map(|v| v.trim().to_string())
+    {
+        Some(name) if name.is_empty() || name.eq_ignore_ascii_case("off") => None,
+        Some(name) => Some(name),
+        None => Some("memory".to_string()),
+    }
+}
+
 /// The configuration of the knowledge-base table: the default model, and full-text search
 /// over the same `text` field with the Chinese analyzer, so `/search/hybrid` has both halves.
 /// jieba keeps runs of Latin letters together, so English notes are searchable too.

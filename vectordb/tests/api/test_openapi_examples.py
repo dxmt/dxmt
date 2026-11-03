@@ -80,6 +80,11 @@ NOT_RUN = {
     # probes every field of the body against a table that has one, and
     # `tests/interfaces/documents_test.rs` runs the endpoint end to end.
     ("PUT", "/tables/{t}/documents/{doc_id}"),
+    # Memory is embedded with the server's default model, and the server under test runs
+    # without one. `tests/interfaces/mcp_stdio_test.rs` runs remember and recall end to end,
+    # over MCP and over REST, against a provider.
+    ("POST", "/memories"),
+    ("POST", "/memories/recall"),
 }
 #: Examples whose *documented body* needs an optional feature, so `FEATURE_DISABLED` is a
 #: correct answer rather than a refusal. `disabled_feature()` still fails the run when

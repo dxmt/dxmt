@@ -19,6 +19,20 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Memory for agents.** `remember`, `recall`, `forget` and `list_memories` -- as MCP tools,
+  as REST (`POST /api/v1/memories`, `POST /api/v1/memories/recall`, `GET /api/v1/memories`,
+  `DELETE /api/v1/memories/{id}`) and in the Python client. A memory is a record in one table
+  (`DXMT_MEMORY_TABLE`, default `memory`), made on first use with the server's embedding model,
+  carrying `kind`, `tags`, `source` and `at`; recall is a hybrid search filtered by kind, tags
+  and time; a memory may `supersede` others, which are kept as history (`superseded_by`) and
+  left out of recall unless asked for.
+- **MCP over HTTP, and every agent on one memory.** `vectordb serve` answers MCP at
+  `POST /mcp` (the Streamable HTTP transport, with JSON responses). `vectordb mcp` opens the
+  same store `serve` does (`~/.dxmt/store`, not `./data/wal`), configures the same embedding
+  model, and -- when the store is already open in a server on this machine -- relays to that
+  server's `/mcp` instead of failing on the lock; `--server <url>` relays explicitly. Several
+  MCP clients on one machine now share one memory.
+
 - **A cluster: many tables over many machines (experimental).** `serve --shard <id>
   --advertise <url>` runs a server whose store is under `shards/<id>/` of a shared bucket and
   which reports itself in `cluster/nodes/`; `vectordb router` serves `/api/v1` and forwards
@@ -52,6 +66,10 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Fixed
 
+- **MCP notifications were answered as unknown requests.** A notification has the same fields
+  as a request and only the missing id tells them apart, so the `notifications/initialized`
+  every client sends after `initialize` got "Unknown method" back -- a stray line on stdout.
+  Errors now carry the request's id, as JSON-RPC requires.
 - **A table dropped while a snapshot was being written could come back.** The snapshot named it
   (it was resident when the tables were captured) and then cleared its tombstone (read after
   the rows were written), leaving a manifest naming a dropped table with nothing to say so; it
