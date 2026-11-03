@@ -1,6 +1,6 @@
 # DXMT - Data / eXperience / Memory / Thinking
 
-### Memory for agents, owned by you.
+### Memory Database for agents, owned by you.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
