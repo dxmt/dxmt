@@ -19,6 +19,9 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **Coming from Chroma.** `python -m dxmt.migrate.chroma` (Python SDK, extra `chroma`) copies
+  Chroma collections into tables with their stored vectors, ids, metadata and documents, the
+  distance carried over and a full-text index on the documents; rerunning it is safe.
 - **Memory for agents.** `remember`, `recall`, `forget` and `list_memories` -- as MCP tools,
   as REST (`POST /api/v1/memories`, `POST /api/v1/memories/recall`, `GET /api/v1/memories`,
   `DELETE /api/v1/memories/{id}`) and in the Python client. A memory is a record in one table

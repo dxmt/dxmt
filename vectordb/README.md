@@ -802,6 +802,22 @@ dxmt-client = { git = "https://github.com/dxmt/dxmt", package = "dxmt-client" }
 For Go, `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk@main` (the module lives in
 this repository's subdirectory and needs no registry).
 
+### Coming from Chroma
+
+`python -m dxmt.migrate.chroma` copies Chroma collections into DXMT tables with their stored
+vectors, so nothing is re-embedded: the same ids, the collection's distance (`l2` becomes
+`euclidean`, `ip` becomes `dot`), each metadata dict as the payload, and the document under
+`text` with a full-text index on it. Records are written by id, so a second run over the same
+table rewrites them rather than duplicating them, and an interrupted copy is finished by
+running it again.
+
+```bash
+pip install './clients/dxmt-python-sdk[chroma]'
+python -m dxmt.migrate.chroma --path ./chroma_db                       # every collection
+python -m dxmt.migrate.chroma --path ./chroma_db --collection notes --table notes --analyzer chinese
+python -m dxmt.migrate.chroma --chroma-host localhost:8000 --url http://localhost:9999
+```
+
 ## Development
 
 ```bash
