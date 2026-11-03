@@ -31,7 +31,7 @@ does the first three -- it stores, remembers and recalls -- and is built so the 
 
 ```bash
 # 1. The database (Linux x86_64/aarch64; or build from source, below)
-v=1.4.0; arch=$(uname -m)
+v=1.5.0; arch=$(uname -m)
 curl -L https://github.com/dxmt/dxmt/releases/download/v$v/dxmt-vectordb-$v-$arch-linux-gnu.tar.gz | tar xz
 sudo mv dxmt-vectordb-$v-$arch-linux-gnu/vectordb /usr/local/bin/
 
@@ -80,7 +80,7 @@ memories out unless `include_superseded` is set -- so "the user moved to Berlin"
 lives in Shanghai" without erasing it. Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.
 
-> **Status: 1.4**, under the compatibility promise 1.0 made (the HTTP API under `/api/v1` and
+> **Status: 1.5**, under the compatibility promise 1.0 made (the HTTP API under `/api/v1` and
 > the clients' public surfaces); the memory API is new in this line. Durability is a
 > write-ahead log replayed on startup plus periodic snapshots. With a data directory -- the
 > default -- records and full vectors live in row files (`store/records/<table>.rec`,

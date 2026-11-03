@@ -15,13 +15,15 @@ The `v0.2.0-*` tags in this repository are **not** releases -- they are measurem
 checkpoints from benchmarking runs, taken before anything was published. `v1.0.0` is the first
 release, and the first commit that was ever pushed anywhere.
 
-## [Unreleased]
+## [1.5.0] - 2026-11-03
+
+Memory for personal agents: one memory on a machine, shared by every MCP client and reachable
+over REST and Python. Binaries for macOS and a container image beside the Linux ones, and a way
+in from Chroma. And, experimental, a cluster: tables spread over machines sharing a bucket,
+with standbys that take over a shard whose nodes are all gone.
 
 ### Added
 
-- **Coming from Chroma.** `python -m dxmt.migrate.chroma` (Python SDK, extra `chroma`) copies
-  Chroma collections into tables with their stored vectors, ids, metadata and documents, the
-  distance carried over and a full-text index on the documents; rerunning it is safe.
 - **Memory for agents.** `remember`, `recall`, `forget` and `list_memories` -- as MCP tools,
   as REST (`POST /api/v1/memories`, `POST /api/v1/memories/recall`, `GET /api/v1/memories`,
   `DELETE /api/v1/memories/{id}`) and in the Python client. A memory is a record in one table
@@ -39,7 +41,9 @@ release, and the first commit that was ever pushed anywhere.
   the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
 - **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's
   Linux binaries; data under the `/data` volume, runs as a non-root user.
-
+- **Coming from Chroma.** `python -m dxmt.migrate.chroma` (Python SDK, extra `chroma`) copies
+  Chroma collections into tables with their stored vectors, ids, metadata and documents, the
+  distance carried over and a full-text index on the documents; rerunning it is safe.
 - **A cluster: many tables over many machines (experimental).** `serve --shard <id>
   --advertise <url>` runs a server whose store is under `shards/<id>/` of a shared bucket and
   which reports itself in `cluster/nodes/`; `vectordb router` serves `/api/v1` and forwards
