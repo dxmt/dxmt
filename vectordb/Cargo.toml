@@ -10,7 +10,11 @@ repository = "https://github.com/dxmt/dxmt"
 [lib]
 name = "dxmt_vectordb"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+# Not a cdylib as well: nothing loads one (the Python bindings it was for are in planning/), and
+# building both made the bench profile link the binaries against an rlib whose generic
+# instantiations had gone into the cdylib -- `undefined symbol ... drop_slow` by the hundred,
+# and the nightly benchmark red every night from 2026-10-23.
+crate-type = ["rlib"]
 
 [[bin]]
 name = "vectordb"
@@ -297,9 +301,8 @@ debug = false
 strip = false
 
 [profile.bench]
-# Criterion needs optimized database code, but fat LTO over both the rlib and
-# cdylib exhausts memory on normal development/CI machines before benchmarks
-# can start. Benchmarks are intended for repeatable local/CI validation, so
+# Criterion needs optimized database code, but fat LTO exhausts memory on normal
+# development/CI machines before benchmarks can start. Benchmarks are intended for repeatable local/CI validation, so
 # avoiding LTO entirely keeps linker memory and time bounded.
 inherits = "release"
 opt-level = 3
