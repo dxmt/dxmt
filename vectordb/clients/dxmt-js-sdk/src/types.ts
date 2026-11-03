@@ -595,7 +595,7 @@ export interface Remembered {
 /** `recall`: the memories that best match a query, by meaning and keyword. */
 export interface RecallParams {
   query: string;
-  /** 1-100; server default 10. */
+  /** 1-100; server default 25. */
   limit?: number;
   kind?: string;
   /** Memories carrying any of these tags. */

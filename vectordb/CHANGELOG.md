@@ -47,6 +47,9 @@ with standbys that take over a shard whose nodes are all gone.
   top 10 with bge-m3 (0.663 dense alone, 0.551 keyword alone).
   `eval/memory/longmemeval.py` does the same on LongMemEval-S: on 60 sampled questions every
   answer session is among the top-10 turns for 0.917 of them.
+- **Answers measured, and `recall` returns 25 by default.** `eval/memory/locomo_answer.py` has
+  a model answer every LoCoMo question from what `recall` returned and a model judge it: 0.682
+  right from the top 10, 0.734 from the top 25, so 25 is the default `limit`.
 - **macOS binaries.** Each release builds `aarch64-apple-darwin` (started and smoke-tested on
   the runner) and `x86_64-apple-darwin` (cross-built), with the console, beside the Linux ones.
 - **Container image** `ghcr.io/dxmt/dxmt` (linux/amd64, linux/arm64), built from the release's

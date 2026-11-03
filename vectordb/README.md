@@ -92,8 +92,15 @@ how many of the turns that hold the answer come back. With bge-m3, 69% of them a
 bge-m3 stays the suggestion. On LongMemEval-S (`eval/memory/longmemeval.py`, 60 questions, ten
 of each type, each with its own history of ~500 turns), the turns `recall` returns cover every
 session holding the answer for 92% of questions in the top 10 (83% in the top 5); the weak type
-is implicit preferences (80%). That is retrieval, not answers: what a model makes of the ten
-memories is the model's half.
+is implicit preferences (80%).
+
+And answers (`eval/memory/locomo_answer.py`): a model answers each of LoCoMo's 1,540 questions
+from what `recall` returned, and a model judges the answer against the gold one -- the J score
+Mem0, Zep and Letta report, here with qwen3.6 35B doing both, so it is not comparable with
+their GPT-4o figures. From the top 10 memories 68.2% are right; from the top 25, **73.4%**
+(single-hop 84%, multi-hop 65%, temporal 64%, open-domain 38%), which is why `recall` returns
+25 unless asked otherwise. When every turn holding the answer was recalled the model got 83-85%
+right, so most of what is left is retrieval.
 
 Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.

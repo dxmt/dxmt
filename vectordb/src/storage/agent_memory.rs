@@ -67,7 +67,9 @@ pub struct RememberRequest {
 pub struct RecallRequest {
     /// What to remember: a question, a topic, a few words.
     pub query: String,
-    /// How many, default 10.
+    /// How many, default 25. Measured on LoCoMo with a 35B model answering from what recall
+    /// returned: 0.682 of answers right from the top 10, 0.734 from the top 25
+    /// (`eval/memory/locomo_answer.py`). Twenty-five short memories are a small prompt.
     #[serde(default)]
     pub limit: Option<usize>,
     #[serde(default)]
@@ -337,7 +339,7 @@ impl IntelligentIndexedStorage {
         }
         let search = crate::types::record::HybridSearchRequest {
             text: Some(request.query),
-            limit: request.limit.unwrap_or(10).clamp(1, 100),
+            limit: request.limit.unwrap_or(25).clamp(1, 100),
             filter: if must.is_empty() {
                 None
             } else {
