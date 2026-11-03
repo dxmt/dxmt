@@ -88,8 +88,12 @@ How well recall finds things is measured on LoCoMo (`eval/memory/locomo.py`): ev
 its ten long conversations kept as a memory, every question asked through `recall`, scored by
 how many of the turns that hold the answer come back. With bge-m3, 69% of them are in the top
 10 (single-hop 78%, temporal 77%, multi-hop 43%), against 66% for the vector search alone and
-55% for keywords alone. That is retrieval, not answers: what a model makes of the ten memories
-is the model's half.
+55% for keywords alone; qwen3-embedding 8B scores the same (69.6%) at 2.5 times the latency, so
+bge-m3 stays the suggestion. On LongMemEval-S (`eval/memory/longmemeval.py`, 60 questions, ten
+of each type, each with its own history of ~500 turns), the turns `recall` returns cover every
+session holding the answer for 92% of questions in the top 10 (83% in the top 5); the weak type
+is implicit preferences (80%). That is retrieval, not answers: what a model makes of the ten
+memories is the model's half.
 
 Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.
