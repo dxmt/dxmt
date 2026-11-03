@@ -77,7 +77,12 @@ and a keyword index over the same text. A memory is a record whose payload carri
 `kind`, `tags`, `source`, `at` (Unix seconds) and, once replaced, `superseded_by`. `recall` is
 a hybrid search, filtered by `kind`, `tags` and `since` if asked, and leaves superseded
 memories out unless `include_superseded` is set -- so "the user moved to Berlin" ends "the user
-lives in Shanghai" without erasing it. Because it is an ordinary table, everything else the
+lives in Shanghai" without erasing it. Saying the same thing twice keeps it once: a memory
+whose meaning is already held (cosine 0.97 or more to a live memory of the same kind,
+`DXMT_MEMORY_DUPLICATE_SIMILARITY`) refreshes that one and returns its id with
+`duplicate: true`. Events are exempt -- one that happens twice happened twice. The threshold
+is measured on bge-m3: restatements scored 0.98-0.995, contradicting facts ("Berlin" and
+"Lisbon", "March 3" and "March 4") 0.81-0.93. Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.
 
 > **Status: 1.5**, under the compatibility promise 1.0 made (the HTTP API under `/api/v1` and

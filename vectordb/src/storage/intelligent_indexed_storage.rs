@@ -6941,6 +6941,29 @@ impl IntelligentIndexedStorage {
         self.memory_table.as_deref()
     }
 
+    /// `text` as the table's own model embeds it, for a caller that wants the vector before
+    /// deciding what to write (memory's duplicate check), so the text is embedded once.
+    pub(crate) async fn embed_for_table(
+        &self,
+        tablename: &str,
+        text: &str,
+    ) -> crate::Result<Vec<f32>> {
+        let config = self
+            .read_tables("embed_for_table")
+            .await
+            .get(tablename)
+            .map(|data| data.table.embedding.clone())
+            .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?
+            .ok_or_else(|| {
+                crate::Error::InvalidInput(format!("table '{tablename}' has no embedding model"))
+            })?;
+        Self::embed(&config, &[text.to_string()], None)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::Error::Internal("the model returned no vector".to_string()))
+    }
+
     /// Whether this storage is a read replica (`new_replica`).
     pub fn is_replica(&self) -> bool {
         self.replica.load(Ordering::SeqCst)

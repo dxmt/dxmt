@@ -442,6 +442,15 @@ fn exchange_with_model(
     base_url: &str,
     requests: &[String],
 ) -> Vec<serde_json::Value> {
+    exchange_with_model_and_env(wal_dir, base_url, requests, &[])
+}
+
+fn exchange_with_model_and_env(
+    wal_dir: &std::path::Path,
+    base_url: &str,
+    requests: &[String],
+    env: &[(&str, &str)],
+) -> Vec<serde_json::Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
         .arg("mcp")
         .arg("--wal-dir")
@@ -449,6 +458,7 @@ fn exchange_with_model(
         .env("DXMT_EMBEDDING_MODEL", "bag-of-words")
         .env("DXMT_EMBEDDING_BASE_URL", base_url)
         .env("DXMT_EMBEDDING_AUTODETECT", "0")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -490,6 +500,81 @@ fn content(reply: &serde_json::Value) -> serde_json::Value {
 /// What a personal agent does with memory, through MCP with no table made by hand: keep facts
 /// and preferences, replace a fact that changed without losing it, recall by topic and by kind,
 /// audit the list, and forget on request. The memory table appears on first use.
+/// Saying a fact twice keeps it once, refreshed and with both calls' tags; an event said twice
+/// is two events; and the check can be turned off.
+#[test]
+fn a_memory_said_twice_is_kept_once_unless_it_is_an_event() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let requests = [
+        call(
+            2,
+            "remember",
+            serde_json::json!({"text": "The user has two cats", "kind": "fact", "tags": ["pets"]}),
+        ),
+        call(
+            3,
+            "remember",
+            serde_json::json!({"text": "the user has two cats.", "kind": "fact", "tags": ["home"]}),
+        ),
+        call(
+            4,
+            "remember",
+            serde_json::json!({"text": "The user went running", "kind": "event"}),
+        ),
+        call(
+            5,
+            "remember",
+            serde_json::json!({"text": "The user went running", "kind": "event"}),
+        ),
+        call(
+            6,
+            "remember",
+            serde_json::json!({"text": "The user has two cats", "kind": "preference"}),
+        ),
+        call(7, "list_memories", serde_json::json!({})),
+    ];
+
+    let tmp = TempDir::new().unwrap();
+    let replies = exchange_with_model(&tmp.path().join("wal"), &base_url, &requests);
+    let first = content(&replies[1]);
+    let again = content(&replies[2]);
+    assert_eq!(again["id"], first["id"], "{again}");
+    assert_eq!(again["duplicate"], true, "{again}");
+    assert_ne!(
+        content(&replies[3])["id"],
+        content(&replies[4])["id"],
+        "an event that happens twice happened twice"
+    );
+    assert_ne!(
+        content(&replies[5])["id"],
+        first["id"],
+        "the same words as another kind are another memory"
+    );
+    let listed = content(&replies[6]);
+    assert_eq!(listed["total"], 4, "{listed}");
+    let cats = listed["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == first["id"])
+        .unwrap();
+    assert_eq!(cats["tags"], serde_json::json!(["pets", "home"]), "{cats}");
+    assert_eq!(
+        cats["text"], "The user has two cats",
+        "the memory already held is kept"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let replies = exchange_with_model_and_env(
+        &tmp.path().join("wal"),
+        &base_url,
+        &requests,
+        &[("DXMT_MEMORY_DUPLICATE_SIMILARITY", "off")],
+    );
+    assert_eq!(content(&replies[6])["total"], 5, "with the check off");
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =

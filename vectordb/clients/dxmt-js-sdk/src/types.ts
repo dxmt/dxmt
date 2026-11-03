@@ -588,6 +588,8 @@ export interface RememberParams {
 export interface Remembered {
   id: string;
   superseded: string[];
+  /** The memory was already held (same kind, same meaning): `id` is that one, refreshed. */
+  duplicate?: boolean;
 }
 
 /** `recall`: the memories that best match a query, by meaning and keyword. */
