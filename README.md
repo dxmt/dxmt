@@ -32,8 +32,9 @@ file is a landing page, not a second copy of it.
 
 ## Quick start
 
-A prebuilt Linux binary, web console included (x86_64 and aarch64, glibc 2.28+: RHEL/Rocky 8,
-Debian 10, Ubuntu 20.04 or newer), from [Releases](https://github.com/dxmt/dxmt/releases):
+Prebuilt binaries, web console included, are on [Releases](https://github.com/dxmt/dxmt/releases):
+Linux x86_64 and aarch64 (glibc 2.28+: RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), and,
+from 1.5, macOS on Apple silicon and Intel (`*-apple-darwin.tar.gz`). On Linux:
 
 ```bash
 v=1.4.0; arch=$(uname -m)   # x86_64 or aarch64

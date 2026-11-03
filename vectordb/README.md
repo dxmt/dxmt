@@ -47,7 +47,8 @@ standalone tests.
 
 ## Quick Start
 
-Prebuilt Linux binaries, with the web console compiled in, are attached to each
+Prebuilt binaries for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) are attached
+from 1.5 on. Prebuilt Linux binaries, with the web console compiled in, are attached to each
 [release](https://github.com/dxmt/dxmt/releases) from 1.4.0 on: `dxmt-vectordb-<version>-<x86_64|aarch64>-linux-gnu.tar.gz`,
 built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.

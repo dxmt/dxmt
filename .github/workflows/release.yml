@@ -119,10 +119,84 @@ jobs:
             vectordb/dist/*.sha256
           if-no-files-found: error
 
+  # Personal agents mostly run on Macs. Both architectures are built on an Apple-silicon
+  # runner; the arm64 binary is smoke-tested there, the x86_64 one is cross-built (Intel
+  # runners are being retired) and checked to be an x86_64 Mach-O.
+  macos:
+    name: macos ${{ matrix.arch }}
+    needs: console
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: vectordb
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: vectordb/dashboard/dist
+      - name: Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --bin vectordb --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/vectordb
+          file "$bin"
+          if [ "${{ matrix.arch }}" = x86_64 ]; then
+            file "$bin" | grep -q 'x86_64'
+            exit 0
+          fi
+          $bin --version
+          HOME=$(mktemp -d) DXMT_EMBEDDING_AUTODETECT=0 $bin serve --port 9999 &
+          server=$!
+          for _ in $(seq 60); do curl -sf localhost:9999/health >/dev/null && break; sleep 1; done
+          curl -sf localhost:9999/ready >/dev/null
+          curl -sf -o /dev/null localhost:9999/dashboard
+          h='content-type: application/json'
+          curl -sf -X POST localhost:9999/api/v1/tables -H "$h" \
+               -d '{"name":"smoke","dimension":3,"distance_metric":"cosine"}' >/dev/null
+          curl -sf -X POST localhost:9999/api/v1/tables/smoke/records -H "$h" \
+               -d '{"records":[{"id":"a","vector":[1,0,0]},{"id":"b","vector":[0,1,0]}]}' >/dev/null
+          top=$(curl -sf -X POST localhost:9999/api/v1/tables/smoke/search -H "$h" \
+               -d '{"vector":[1,0,0],"top_k":1}' | jq -r '.data.hits[0].id')
+          test "$top" = a
+          kill "$server"
+      - name: Package
+        id: package
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          name="dxmt-vectordb-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/vectordb LICENSE NOTICE README.md CHANGELOG.md .env.example "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            vectordb/dist/*.tar.gz
+            vectordb/dist/*.sha256
+          if-no-files-found: error
+
   publish:
     name: attach to the release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: linux
+    needs: [linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
