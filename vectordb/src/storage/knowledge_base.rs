@@ -4,7 +4,8 @@
 //! startup, so a server nobody uses for notes never gains a table it did not ask for.
 
 use crate::types::table::{
-    EmbeddingConfig, TableConfig, TextAnalyzer, TextFieldConfig, TextSource,
+    EmbeddingConfig, RerankConfig, RerankFormat, TableConfig, TextAnalyzer, TextFieldConfig,
+    TextSource,
 };
 
 /// The knowledge-base table's name: `DXMT_KB_TABLE`, default `kb`; `off` disables it.
@@ -32,6 +33,39 @@ pub fn memory_table_name() -> Option<String> {
     }
 }
 
+/// The server's reranker, given to the tables it makes on first use: `DXMT_RERANK_MODEL` and
+/// `DXMT_RERANK_BASE_URL` (both, or none), `DXMT_RERANK_FORMAT` (`cohere`, the default, or
+/// `tei` for text-embeddings-inference), `DXMT_RERANK_API_KEY_ENV`.
+///
+/// Off unless set, because a cross-encoder is worth having only where it is fast: on LoCoMo
+/// it took the evidence in recall's top 10 from 0.71 to 0.82 on the first 400 questions
+/// (`eval/memory/locomo_rerank.py`), and on CPU bge-reranker-v2-m3 spent ten seconds a query.
+pub fn default_rerank() -> Option<RerankConfig> {
+    let var = |k: &str| {
+        crate::config::env::var(k)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let model = var("DXMT_RERANK_MODEL")?;
+    let Some(base_url) = var("DXMT_RERANK_BASE_URL") else {
+        tracing::warn!("DXMT_RERANK_MODEL is set without DXMT_RERANK_BASE_URL; no reranker");
+        return None;
+    };
+    let format = match var("DXMT_RERANK_FORMAT").as_deref() {
+        Some(f) if f.eq_ignore_ascii_case("tei") => RerankFormat::Tei,
+        _ => RerankFormat::Cohere,
+    };
+    Some(RerankConfig {
+        model,
+        base_url,
+        format,
+        api_key_env: var("DXMT_RERANK_API_KEY_ENV"),
+        field: None,
+        top_n: None,
+    })
+}
+
 /// The configuration of the knowledge-base table: the default model, and full-text search
 /// over the same `text` field with the Chinese analyzer, so `/search/hybrid` has both halves.
 /// jieba keeps runs of Latin letters together, so English notes are searchable too.
@@ -55,7 +89,7 @@ pub fn kb_table_config(name: &str, embedding: EmbeddingConfig) -> TableConfig {
         quantization: None,
         payload_index: None,
         embedding: Some(embedding),
-        rerank: None,
+        rerank: default_rerank(),
     }
 }
 

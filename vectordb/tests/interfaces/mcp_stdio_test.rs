@@ -500,6 +500,56 @@ fn content(reply: &serde_json::Value) -> serde_json::Value {
 /// What a personal agent does with memory, through MCP with no table made by hand: keep facts
 /// and preferences, replace a fact that changed without losing it, recall by topic and by kind,
 /// audit the list, and forget on request. The memory table appears on first use.
+/// With a reranker on the server (`DXMT_RERANK_*`), the memory table is made with it and
+/// recall's order is the cross-encoder's. The two memories are built so the two orders
+/// disagree: in the bag-of-words space the query sits next to the one that repeats "tomato",
+/// while the stand-in reranker counts query words and prefers the one that also has "soil".
+#[test]
+fn recall_takes_the_rerankers_order_when_the_server_has_one() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let requests = [
+        call(
+            2,
+            "remember",
+            serde_json::json!({"id": "near", "text": "tomato tomato tomato tomato tomato tomato garden", "kind": "fact"}),
+        ),
+        call(
+            3,
+            "remember",
+            serde_json::json!({"id": "apt", "text": "tomato garden soil water", "kind": "fact"}),
+        ),
+        call(
+            4,
+            "recall",
+            serde_json::json!({"query": "tomato tomato tomato tomato garden soil", "limit": 1}),
+        ),
+    ];
+    let first = |replies: &[serde_json::Value]| {
+        content(&replies[3])["memories"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let plain = exchange_with_model(&tmp.path().join("wal"), &base_url, &requests);
+    assert_eq!(first(&plain), "near", "{}", plain[3]);
+
+    let tmp = TempDir::new().unwrap();
+    let reranked = exchange_with_model_and_env(
+        &tmp.path().join("wal"),
+        &base_url,
+        &requests,
+        &[
+            ("DXMT_RERANK_MODEL", "word-overlap"),
+            ("DXMT_RERANK_BASE_URL", &base_url),
+            ("DXMT_RERANK_API_KEY_ENV", "DXMT_TEST_RERANK_KEY_UNSET"),
+        ],
+    );
+    assert_eq!(first(&reranked), "apt", "{}", reranked[3]);
+}
+
 /// Saying a fact twice keeps it once, refreshed and with both calls' tags; an event said twice
 /// is two events; and the check can be turned off.
 #[test]
