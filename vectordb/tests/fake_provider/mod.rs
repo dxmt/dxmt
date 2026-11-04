@@ -206,6 +206,17 @@ async fn rerank(State(provider): State<Provider>, Json(body): Json<Value>) -> Re
                 .collect()
         })
         .unwrap_or_default();
+    // text-embeddings-inference's default `--max-client-batch-size`, and its answer.
+    if tei && docs.len() > 32 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": format!("batch size {} > maximum allowed batch size 32", docs.len()),
+                "error_type": "Validation",
+            })),
+        )
+            .into_response();
+    }
     provider.seen.lock().unwrap().extend(docs.iter().cloned());
     let mut scored: Vec<(usize, f32)> = docs
         .iter()

@@ -102,6 +102,20 @@ their GPT-4o figures. From the top 10 memories 68.2% are right; from the top 25,
 25 unless asked otherwise. When every turn holding the answer was recalled the model got 83-85%
 right, so most of what is left is retrieval.
 
+A reranker takes much of that back. Give the server a cross-encoder and the memory table is
+made with it, and `recall` has it reorder the first 50 candidates:
+
+```bash
+DXMT_RERANK_MODEL=BAAI/bge-reranker-v2-m3 DXMT_RERANK_BASE_URL=http://127.0.0.1:8080 \
+DXMT_RERANK_FORMAT=tei vectordb serve      # or a Cohere-style API: Cohere, Jina, Voyage
+```
+
+On the first 400 LoCoMo questions (`eval/memory/locomo_rerank.py`) the evidence in the top 10
+went from 71% to **82%** (top 5: 64% to 76%; multi-hop 49% to 66%). It is off by default because
+it is only worth it on a GPU: bge-reranker-v2-m3 on 16 CPU cores spent ten seconds a recall. A
+memory table made before the reranker was configured gets it with
+`PATCH /api/v1/tables/memory {"rerank": {...}}`.
+
 Because it is an ordinary table, everything else the
 database does applies: filters, export, backup, replication.
 

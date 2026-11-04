@@ -15,6 +15,22 @@ The `v0.2.0-*` tags in this repository are **not** releases -- they are measurem
 checkpoints from benchmarking runs, taken before anything was published. `v1.0.0` is the first
 release, and the first commit that was ever pushed anywhere.
 
+## [Unreleased]
+
+### Added
+
+- **Memory recall with a reranker.** `DXMT_RERANK_MODEL` and `DXMT_RERANK_BASE_URL` (with
+  `DXMT_RERANK_FORMAT`, `DXMT_RERANK_API_KEY_ENV`) give the tables made on first use a
+  cross-encoder, and `recall` has it reorder its first 50 candidates. On the first 400 LoCoMo
+  questions the evidence in the top 10 went from 0.714 to 0.822 (`eval/memory/locomo_rerank.py`).
+  Off by default: on CPU it costs seconds a recall.
+
+### Fixed
+
+- **A rerank pool larger than 32 is sent in batches.** text-embeddings-inference refuses more
+  than 32 documents in one request (413) by default, so any search reranking a wider pool
+  failed against it; the batches' scores are merged, which a cross-encoder allows.
+
 ## [1.5.0] - 2026-11-03
 
 Memory for personal agents: one memory on a machine, shared by every MCP client and reachable

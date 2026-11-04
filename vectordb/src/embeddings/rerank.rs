@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const MAX_ATTEMPTS: u32 = 3;
+/// Documents sent in one request. text-embeddings-inference refuses more than 32 by default
+/// (413, "batch size 50 > maximum allowed batch size 32"), and memory recall sends 50; a
+/// cross-encoder scores each pair on its own, so the batches' scores merge as they are.
+const BATCH: usize = 32;
 const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 
 #[derive(Serialize)]
@@ -62,12 +66,48 @@ pub async fn rerank(
     }
     let url = format!("{}/rerank", config.base_url.trim_end_matches('/'));
     let api_key = super::policy::provider_key(config.api_key_env(), &url)?;
+    let batches = documents.chunks(BATCH).enumerate().map(|(n, batch)| {
+        let (url, api_key) = (&url, api_key.as_deref());
+        async move {
+            rerank_batch(config, url, api_key, query, batch, batch.len())
+                .await
+                .map(|scored| {
+                    scored
+                        .into_iter()
+                        .map(|(i, s)| (n * BATCH + i, s))
+                        .collect::<Vec<_>>()
+                })
+        }
+    });
+    let mut scored: Vec<(usize, f32)> = futures::future::try_join_all(batches)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    scored.truncate(top_n.min(documents.len()));
+    Ok(scored)
+}
+
+/// One request: `(index within documents, score)`, best first, at most `top_n`.
+async fn rerank_batch(
+    config: &RerankConfig,
+    url: &str,
+    api_key: Option<&str>,
+    query: &str,
+    documents: &[String],
+    top_n: usize,
+) -> Result<Vec<(usize, f32)>> {
     let top_n = top_n.min(documents.len());
     let mut backoff = FIRST_BACKOFF;
     let mut last: Option<Error> = None;
     for attempt in 1..=MAX_ATTEMPTS {
-        let mut request = super::service::http().post(&url);
-        if let Some(key) = api_key.as_deref() {
+        let mut request = super::service::http().post(url);
+        if let Some(key) = api_key {
             request = request.bearer_auth(key);
         }
         let request = match config.format {
@@ -83,7 +123,7 @@ pub async fn rerank(
             }),
         };
         let outcome = match request.send().await {
-            Ok(response) => classify(response, &url, config).await,
+            Ok(response) => classify(response, url, config).await,
             Err(e) => Err(Retryable::Yes(Error::ServiceUnavailable {
                 message: format!("rerank provider at {url} is unreachable: {e}"),
             })),

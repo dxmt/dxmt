@@ -6963,6 +6963,14 @@ impl IntelligentIndexedStorage {
         self.memory_table.as_deref()
     }
 
+    /// Whether a table names a rerank provider.
+    pub(crate) async fn has_rerank(&self, tablename: &str) -> bool {
+        self.read_tables("has_rerank")
+            .await
+            .get(tablename)
+            .is_some_and(|data| data.table.rerank.is_some())
+    }
+
     /// `text` as the table's own model embeds it, for a caller that wants the vector before
     /// deciding what to write (memory's duplicate check), so the text is embedded once.
     pub(crate) async fn embed_for_table(

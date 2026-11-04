@@ -644,3 +644,31 @@ mod text_routes {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     }
 }
+
+/// More candidates than a provider takes at once go in batches, and the best of the last batch
+/// comes back with its index in the whole list. text-embeddings-inference refuses a request of
+/// more than 32 documents, and memory recall sends 50.
+#[tokio::test]
+async fn a_pool_larger_than_a_batch_is_scored_in_batches() {
+    let (rank, provider) = serve(Behaviour::Normal).await;
+    let mut documents: Vec<String> = (0..70).map(|i| format!("filler number {i}")).collect();
+    documents[65] = "garden tomato soil".to_string();
+    documents[3] = "garden tomato".to_string();
+    let scored = dxmt_vectordb::embeddings::rerank::rerank(
+        &reranker(&rank, RerankFormat::Tei),
+        "garden tomato soil",
+        &documents,
+        2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        scored.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        vec![65, 3]
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "70 documents, batches of 32"
+    );
+}
