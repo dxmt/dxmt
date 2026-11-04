@@ -38,15 +38,23 @@ CUT = 4000
 def memories(question):
     """(id, payload) for every turn of one question's history."""
     tag = question["question_id"]
-    for sid, when, session in zip(question["haystack_session_ids"], question["haystack_dates"],
-                                  question["haystack_sessions"]):
+    # A few histories hold one session twice under one id, so the id carries the session's
+    # position too; the session id stays the second field, which is what scoring reads.
+    for k, (sid, when, session) in enumerate(zip(question["haystack_session_ids"],
+                                                 question["haystack_dates"],
+                                                 question["haystack_sessions"])):
         for n, turn in enumerate(session):
             text = f"[{when}] {turn['role']}: {turn['content']}"[:CUT]
-            yield f"{tag}:{sid}:{n}", text, bool(turn.get("has_answer"))
+            yield f"{tag}:{sid}:{k}.{n}", text, bool(turn.get("has_answer"))
 
 
 def ingest(url, table, question, batch=64):
     rows = list(memories(question))
+    # A rerun skips a history already written: inserts are by id, so this only saves time.
+    where = {"must": [{"key": "tags", "operation": {"type": "In", "value": [question["question_id"]]}}]}
+    held = call(url, "POST", f"/api/v1/tables/{table}/records/count", {"filter": where})["count"]
+    if held == len(rows):
+        return rows
     for i in range(0, len(rows), batch):
         records = [{"id": mid, "text": text,
                     "payload": {"kind": "event", "tags": [question["question_id"]], "at": 0}}
@@ -72,10 +80,21 @@ def main():
     rng = random.Random(args.seed)
     sample = [q for t in sorted(by_type) for q in rng.sample(by_type[t], min(args.per_type, len(by_type[t])))]
 
-    # Make the memory table (first use) before writing into it directly.
-    call(args.url, "GET", "/api/v1/memories?limit=1")
+    # Make the memory table (first use) before writing into it directly: a recall makes it,
+    # a listing does not.
+    call(args.url, "POST", "/api/v1/memories/recall", {"query": "start", "limit": 1})
 
     def run(question):
+        for attempt in range(3):
+            try:
+                return attempt_one(question)
+            except Exception as e:  # a slow provider, a dropped connection: try twice more
+                print(f"  {question['question_id']}: {e}", file=sys.stderr, flush=True)
+                if attempt == 2:
+                    raise
+                time.sleep(30)
+
+    def attempt_one(question):
         rows = ingest(args.url, args.table, question)
         marked = {mid for mid, _, has in rows if has}
         hits = call(args.url, "POST", "/api/v1/memories/recall",
