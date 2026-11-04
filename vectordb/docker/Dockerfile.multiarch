@@ -115,8 +115,8 @@ ARG VCS_REF
 ARG VERSION
 
 # OCI labels
-LABEL org.opencontainers.image.title="DXMT VectorDB" \
-      org.opencontainers.image.description="Lightweight single-node vector database for AI applications" \
+LABEL org.opencontainers.image.title="DXMT" \
+      org.opencontainers.image.description="The open-source memory database for personal agents" \
       org.opencontainers.image.authors="DXMT Team" \
       org.opencontainers.image.vendor="DXMT" \
       org.opencontainers.image.licenses="Apache-2.0" \

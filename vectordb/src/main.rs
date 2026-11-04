@@ -345,14 +345,14 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 // wire shapes and no tests, and its "auto-embedding" was a hashed bag of
                 // words — lexical retrieval wearing a dense vector's shape. Peers ship several
                 // protocols over one model; none ships two models.
-                info!("Starting DXMT VectorDB on {}...", bind_addr);
+                info!("Starting DXMT on {}...", bind_addr);
 
                 let cluster_enabled = config.cluster.as_ref().map(|c| c.enabled).unwrap_or(false);
                 let (app, storage) = if cluster_enabled {
                     {
                         return Err(dxmt_vectordb::Error::InvalidConfig(
-                            "Cluster mode is configured, but this build has no cluster mode: \
-                             DXMT VectorDB is a single-node server"
+                            "`cluster` in the configuration file is not read: a DXMT cluster is \
+                             `serve --shard` nodes and a `router` (see the README)"
                                 .to_string(),
                         ));
                     }
@@ -513,7 +513,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             router.spawn_refresh();
             let app = router.app(dxmt_vectordb::api::auth::ApiKey::from_env());
             println!(
-                "DXMT VectorDB {} router on http://{bind_addr}",
+                "DXMT {} router on http://{bind_addr}",
                 env!("CARGO_PKG_VERSION")
             );
             axum::Server::bind(&bind_addr)
@@ -545,7 +545,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 None => dxmt_vectordb::api::server::wal_dir_from_env(),
             };
 
-            info!("Starting DXMT VectorDB MCP server on stdio");
+            info!("Starting DXMT MCP server on stdio");
             let opened = IntelligentIndexedStorage::new_with_wal(&config.storage, wal_dir).await;
             // The store is locked to one process. If it is a server's, relay to that server, so
             // this agent shares the memory every other agent on the machine reaches.

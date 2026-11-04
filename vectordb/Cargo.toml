@@ -3,7 +3,7 @@ name = "dxmt-vectordb"
 version = "1.6.0"
 edition = "2021"
 authors = ["DXMT Team <contact@dxmt.online>"]
-description = "A lightweight single-node vector database written in Rust"
+description = "The open-source memory database for personal agents: agent memory, vectors and full text in one Rust binary"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"
 

@@ -1,12 +1,12 @@
 # DXMT - Data / eXperience / Memory / Thinking
 
-### Memory Database for agents, owned by you.
+### Memory Database for Personal Agents. Owned by you.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/dxmt/dxmt/actions/workflows/ci.yml/badge.svg)](https://github.com/dxmt/dxmt/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dxmt/dxmt)](https://github.com/dxmt/dxmt/releases)
 
-**The open-source memory database for personal AI agents.** One persistent, portable memory of
+**The open-source memory database for personal agents.** One persistent, portable memory of
 you and your work, shared by every agent you use -- Claude, Cursor, ChatGPT, your own code --
 kept on your machine.
 

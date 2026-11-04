@@ -85,7 +85,7 @@ impl<S: Storage> ResourceManager<S> {
         resources.push(Resource {
             uri: "vectordb://docs/quickstart".to_string(),
             name: "Quick Start Guide".to_string(),
-            description: Some("Getting started with DXMT VectorDB".to_string()),
+            description: Some("Getting started with DXMT".to_string()),
             mime_type: Some("text/markdown".to_string()),
         });
 
@@ -180,7 +180,7 @@ impl<S: Storage> ResourceManager<S> {
 
         let content = match parts[0] {
             "info" => serde_json::to_string_pretty(&serde_json::json!({
-                "name": "DXMT VectorDB",
+                "name": "DXMT",
                 "version": env!("CARGO_PKG_VERSION"),
                 "features": {
                     "mcp_protocol": true,
@@ -250,7 +250,7 @@ impl<S: Storage> ResourceManager<S> {
         }
 
         let content = match parts[0] {
-            "quickstart" => r#"# DXMT VectorDB Quick Start Guide
+            "quickstart" => r#"# DXMT Quick Start Guide
 
 ## Installation
 

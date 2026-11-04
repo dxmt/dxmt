@@ -1,7 +1,7 @@
 """DXMT Python SDK.
 
-Official Python SDK for DXMT VectorDB - a lightweight single-node vector database
-written in Rust.
+Python SDK for DXMT, the open-source memory database for personal agents: agent
+memory (remember / recall / forget), vectors and full text, served by one Rust binary.
 
 Example:
     >>> from dxmt import Client

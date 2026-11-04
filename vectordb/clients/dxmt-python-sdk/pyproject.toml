@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dxmt-python-sdk"
 version = "1.6.0"
-description = "Official Python SDK for DXMT VectorDB"
+description = "Python SDK for DXMT, the open-source memory database for personal agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}

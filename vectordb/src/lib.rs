@@ -1,5 +1,6 @@
-//! DXMT VectorDB - a lightweight single-node vector database: WAL durability, HNSW-PQ
-//! indexing, payload filtering and server-side embedding behind one HTTP API.
+//! DXMT - the open-source memory database for personal agents: agent memory over MCP and
+//! HTTP, on a storage engine of its own -- WAL durability, HNSW-PQ indexing, full-text and
+//! hybrid search, payload filtering and server-side embedding.
 
 pub mod api;
 #[cfg(feature = "benchmarks")]

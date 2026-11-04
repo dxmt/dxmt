@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 name = "llama-index-vector-stores-dxmt"
 version = "1.6.0"
-description = "DXMT VectorDB vector store integration for LlamaIndex"
+description = "LlamaIndex vector store for DXMT, the open-source memory database for personal agents"
 authors = ["DXMT Team <contact@dxmt.online>"]
 license = "Apache-2.0"
 readme = "README.md"
