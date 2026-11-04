@@ -26,7 +26,7 @@ full-text with Chinese segmentation, hybrid retrieval, filters and backups, in o
 object-storage replication, read replicas with automatic failover and a cluster mode when one
 machine is not enough.
 
-> **Status: 1.5.** The compatibility promise covers the HTTP API under `/api/v1` and the
+> **Status: 1.6.** The compatibility promise covers the HTTP API under `/api/v1` and the
 > clients' public surfaces; it does **not** cover anything
 > [`docs/SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental. That matrix
 > answers "can I use this", and [Known Limitations](vectordb/README.md#known-limitations) is
@@ -49,7 +49,7 @@ Linux x86_64 and aarch64 (glibc 2.28+: RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or 
 from 1.5, macOS on Apple silicon and Intel (`*-apple-darwin.tar.gz`). On Linux:
 
 ```bash
-v=1.5.0; arch=$(uname -m)   # x86_64 or aarch64
+v=1.6.0; arch=$(uname -m)   # x86_64 or aarch64
 curl -LO https://github.com/dxmt/dxmt/releases/download/v$v/dxmt-vectordb-$v-$arch-linux-gnu.tar.gz
 tar xzf dxmt-vectordb-$v-$arch-linux-gnu.tar.gz
 ./dxmt-vectordb-$v-$arch-linux-gnu/vectordb serve          # http://127.0.0.1:9999
