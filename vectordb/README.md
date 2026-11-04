@@ -154,13 +154,15 @@ from 1.5 on. Prebuilt Linux binaries, with the web console compiled in, are atta
 built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.
 
-From 1.5 there is also a container image, `ghcr.io/dxmt/dxmt` (linux/amd64 and linux/arm64). The data is in the volume;
-`OLLAMA_HOST` lets it find an ollama on the host for memory and text search:
+Or as a container (linux/amd64 and linux/arm64). The published image is not public yet; until
+it is, build it from a checkout -- compiled from source, about 20 minutes. The data is in the
+volume; `OLLAMA_HOST` lets it find an ollama on the host for memory and text search:
 
 ```bash
+git clone https://github.com/dxmt/dxmt.git && cd dxmt/vectordb
+docker build -f docker/Dockerfile -t dxmt .
 docker run -d --name dxmt -p 127.0.0.1:9999:9999 -v dxmt:/data \
-  --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=host.docker.internal:11434 \
-  ghcr.io/dxmt/dxmt:latest
+  --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=host.docker.internal:11434 dxmt
 ```
 
 

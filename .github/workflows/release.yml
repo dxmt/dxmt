@@ -250,6 +250,27 @@ jobs:
                -d '{"vector":[1,0,0],"top_k":1}' | jq -r '.data.hits[0].id')
           test "$top" = a
           docker rm -f smoke
+      # Docker Hub as well, once the repository has the two secrets; the repository is
+      # DOCKERHUB_REPOSITORY (a variable), default <username>/dxmt.
+      - name: Docker Hub target
+        id: hub
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          REPO: ${{ vars.DOCKERHUB_REPOSITORY }}
+        run: |
+          if [ -n "$USER" ]; then
+            repo=${REPO:-$USER/dxmt}
+            v=${{ steps.ctx.outputs.version }}
+            { echo 'tags<<EOF'; echo "docker.io/$repo:$v"; echo "docker.io/$repo:latest"; echo EOF; } >> "$GITHUB_OUTPUT"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Log in to Docker Hub
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@v3
@@ -269,6 +290,7 @@ jobs:
           tags: |
             ghcr.io/dxmt/dxmt:${{ steps.ctx.outputs.version }}
             ghcr.io/dxmt/dxmt:latest
+            ${{ steps.hub.outputs.tags }}
 
   publish:
     name: attach to the release
