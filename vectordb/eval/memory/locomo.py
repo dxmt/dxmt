@@ -39,8 +39,12 @@ def call(url, method, path, body=None):
         headers["api-key"] = os.environ["DXMT_API_KEY"]
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(url + path, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(request, timeout=300) as response:
-        return json.load(response)["data"]
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return json.load(response)["data"]
+    except urllib.error.HTTPError as e:
+        # The status alone ("400: Bad Request") does not say which call or why.
+        raise RuntimeError(f"{method} {path}: {e.code} {e.read()[:500]!r}") from e
 
 
 def turns(sample):
