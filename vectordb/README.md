@@ -1,8 +1,8 @@
 # DXMT
 
-### Memory for agents. Owned by you.
+### Memory Database for Personal Agents. Owned by you.
 
-**The open-source memory database for personal AI agents.** Give every agent you use --
+**The open-source memory database for personal agents.** Give every agent you use --
 Claude, Cursor, ChatGPT, your own scripts -- one persistent, portable memory of you and your
 work, on your machine, in one binary.
 

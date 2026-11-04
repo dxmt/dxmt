@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to DXMT VectorDB. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+Notable changes to DXMT, the open-source memory database for personal agents. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **What 1.0 promises, and what it does not.** The compatibility guarantee covers the HTTP API

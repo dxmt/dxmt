@@ -194,10 +194,7 @@ pub async fn banner(
         out.push('\n');
     };
     line(String::new());
-    line(format!(
-        "DXMT VectorDB {} is running",
-        env!("CARGO_PKG_VERSION")
-    ));
+    line(format!("DXMT {} is running", env!("CARGO_PKG_VERSION")));
     line(format!("  API        {url}/api/v1"));
     if dashboard {
         line(format!("  Console    {url}/dashboard"));

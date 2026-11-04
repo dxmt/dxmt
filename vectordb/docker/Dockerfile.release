@@ -11,7 +11,7 @@ ARG TARGETARCH
 ARG VERSION
 
 LABEL org.opencontainers.image.title="DXMT" \
-      org.opencontainers.image.description="The open-source memory database for personal AI agents" \
+      org.opencontainers.image.description="The open-source memory database for personal agents" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/dxmt/dxmt" \
       org.opencontainers.image.version="${VERSION}"

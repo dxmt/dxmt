@@ -2,7 +2,7 @@
 name = "dxmt-client"
 version = "1.6.0"
 edition = "2021"
-description = "Rust client for DXMT VectorDB"
+description = "Rust client for DXMT, the open-source memory database for personal agents"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"
 

@@ -1,7 +1,7 @@
 {
   "name": "dxmt-js-sdk",
   "version": "1.6.0",
-  "description": "Official JavaScript/TypeScript SDK for DXMT VectorDB - a single-node vector database written in Rust",
+  "description": "JavaScript/TypeScript SDK for DXMT, the open-source memory database for personal agents",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",

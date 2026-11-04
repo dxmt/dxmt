@@ -401,7 +401,7 @@ pub enum JsonRpcContent {
 impl Default for ServerInfo {
     fn default() -> Self {
         Self {
-            name: "DXMT VectorDB MCP Server".to_string(),
+            name: "DXMT".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: MCP_VERSION.to_string(),
             capabilities: ServerCapabilities {

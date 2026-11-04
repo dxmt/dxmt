@@ -174,8 +174,8 @@ use crate::types::{
              unacknowledged write cannot become a new durable frontier.")
     ),
     info(
-        title = "DXMT VectorDB API",
-        description = "The HTTP surface of DXMT VectorDB. See docs/SUPPORT_MATRIX.md for what \
+        title = "DXMT API",
+        description = "The HTTP surface of DXMT, the open-source memory database for personal agents. See docs/SUPPORT_MATRIX.md for what \
                        is supported and what is experimental.",
         // `version` is deliberately absent: utoipa defaults it to `CARGO_PKG_VERSION`.
         // Typing it here made a second copy of the version number, and a second copy drifts
@@ -218,7 +218,7 @@ async fn swagger_ui_handler() -> axum::response::Html<String> {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DXMT VectorDB API Documentation</title>
+    <title>DXMT API</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.10.3/swagger-ui.css">
     <style>
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }

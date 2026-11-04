@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "langchain-dxmt"
 version = "1.6.0"
-description = "LangChain integration for DXMT VectorDB"
+description = "LangChain integration for DXMT, the open-source memory database for personal agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
