@@ -89,10 +89,12 @@ its ten long conversations kept as a memory, every question asked through `recal
 how many of the turns that hold the answer come back. With bge-m3, 69% of them are in the top
 10 (single-hop 78%, temporal 77%, multi-hop 43%), against 66% for the vector search alone and
 55% for keywords alone; qwen3-embedding 8B scores the same (69.6%) at 2.5 times the latency, so
-bge-m3 stays the suggestion. On LongMemEval-S (`eval/memory/longmemeval.py`, 60 questions, ten
-of each type, each with its own history of ~500 turns), the turns `recall` returns cover every
-session holding the answer for 92% of questions in the top 10 (83% in the top 5); the weak type
-is implicit preferences (80%).
+bge-m3 stays the suggestion. On LongMemEval-S (`eval/memory/longmemeval.py`, all 470 questions
+that have an answer, each with its own history of ~500 turns, 231,606 in all), the top 10 turns
+`recall` returns include a session holding the answer for 93% of questions and every such
+session for 80% -- 97% for knowledge updates, 97% for single-session facts, 71% when the answer
+is spread over several sessions, 65% for temporal reasoning and 57% for implicit preferences.
+A 60-question sample had said 92% for every session; the full set is the number to quote.
 
 And answers (`eval/memory/locomo_answer.py`): a model answers each of LoCoMo's 1,540 questions
 from what `recall` returned, and a model judges the answer against the gold one -- the J score

@@ -15,6 +15,15 @@ The `v0.2.0-*` tags in this repository are **not** releases -- they are measurem
 checkpoints from benchmarking runs, taken before anything was published. `v1.0.0` is the first
 release, and the first commit that was ever pushed anywhere.
 
+## [Unreleased]
+
+### Added
+
+- **Recall measured on all of LongMemEval-S.** 470 questions, 231,606 turns: every answer
+  session among the top 10 turns for 0.796 of questions, one of them for 0.926. The
+  60-question sample in 1.5.0 had said 0.917; the full set is lower on multi-session (0.711),
+  temporal (0.654) and implicit-preference (0.567) questions.
+
 ## [1.6.0] - 2026-11-04
 
 Memory recall can use a reranker, and the container image goes to Docker Hub.
