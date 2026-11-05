@@ -73,7 +73,13 @@ def make_embeddings() -> Embeddings:
     """What the fixtures use: local by default, a real model when asked for one."""
     if os.getenv("DXMT_TEST_EMBEDDING", "local").lower() != "openai":
         return LocalEmbedding()
-    from langchain_openai import OpenAIEmbeddings
+    # Not a dependency of this package, nor of its test extra: only this opt-in path uses it.
+    try:
+        from langchain_openai import OpenAIEmbeddings
+    except ImportError:
+        import pytest
+
+        pytest.skip("DXMT_TEST_EMBEDDING=openai needs langchain-openai: pip install langchain-openai")
 
     model = os.getenv("DXMT_TEST_EMBEDDING_MODEL", "text-embedding-3-small")
     return OpenAIEmbeddings(model=model)

@@ -3,9 +3,9 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from langchain_core.documents import Document
+from dxmt.exceptions import DXMTError
 
-from langchain_dxmt import DXMTVectorDB, DXMTClient
+from langchain_dxmt import DXMTClient, DXMTVectorDB
 
 
 @pytest.fixture
@@ -34,9 +34,7 @@ def mock_embeddings() -> Mock:
 
 def test_init_with_client(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test initialization with provided client."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
 
     store = DXMTVectorDB(
         table_name="test",
@@ -47,6 +45,52 @@ def test_init_with_client(mock_client: Mock, mock_embeddings: Mock) -> None:
 
     assert store._table_name == "test"
     assert store._dimension == 3
+
+
+def test_existing_table_dimension_and_metric_are_read(
+    mock_client: Mock, mock_embeddings: Mock
+) -> None:
+    """`get_table` returns the table dict itself; both fields come from it.
+
+    This read `table_info["data"]["table"]` -- the wire envelope the SDK had already
+    unwrapped -- so `_dimension` was None for every store opened on an existing table,
+    and the metric stayed at whatever the constructor's default was.
+    """
+    mock_client.get_table.return_value = {
+        "name": "test",
+        "dimension": 768,
+        "distance_metric": "euclidean",
+    }
+
+    store = DXMTVectorDB(
+        table_name="test",
+        embedding=mock_embeddings,
+        client=mock_client,
+        create_table_if_not_exists=False,
+    )
+
+    assert store._dimension == 768
+    assert store._distance_metric == "euclidean"
+    # And the relevance function follows the table's metric, not the default.
+    assert store._select_relevance_score_fn()(0.5) == 0.5
+
+
+def test_existing_table_adopted_when_create_if_not_exists(
+    mock_client: Mock, mock_embeddings: Mock
+) -> None:
+    """The default `create_table_if_not_exists=True` path reads the same two fields."""
+    mock_client.get_table.return_value = {"dimension": 5, "distance_metric": "dot"}
+
+    store = DXMTVectorDB(
+        table_name="test",
+        embedding=mock_embeddings,
+        dimension=5,
+        client=mock_client,
+    )
+
+    assert store._dimension == 5
+    assert store._distance_metric == "dot"
+    mock_client.create_table.assert_not_called()
 
 
 def test_init_without_dimension_error(mock_embeddings: Mock) -> None:
@@ -70,30 +114,35 @@ def test_init_invalid_client_type(mock_embeddings: Mock) -> None:
         )
 
 
-def test_add_texts_without_embedding() -> None:
-    """Test add_texts without embedding function."""
-    with patch("langchain_dxmt.vectorstores.DXMTClient") as MockClient:
-        mock_instance = Mock()
-        MockClient.return_value = mock_instance
-        mock_instance.get_table.return_value = {
-            "data": {"table": {"dimension": 3}}
-        }
+def test_add_texts_without_embedding_sends_text(mock_client: Mock) -> None:
+    """`embedding=None` means the server embeds: records carry `text`, no `vector`."""
+    mock_client.get_table.return_value = {
+        "dimension": 3,
+        "embedding": {"model": "text-embedding-3-small"},
+    }
+    mock_client.insert_records.return_value = {"success": True}
 
-        store = DXMTVectorDB(
-            table_name="test",
-            embedding=None,
-            create_table_if_not_exists=False,
-        )
+    store = DXMTVectorDB(
+        table_name="test",
+        embedding=None,
+        client=mock_client,
+        create_table_if_not_exists=False,
+    )
 
-        with pytest.raises(ValueError, match="embedding function is required"):
-            store.add_texts(["text1", "text2"])
+    ids = store.add_texts(["text1", "text2"], metadatas=[{"a": 1}, {"a": 2}])
+
+    assert len(ids) == 2
+    records = mock_client.insert_records.call_args.kwargs["records"]
+    assert [r["text"] for r in records] == ["text1", "text2"]
+    assert all("vector" not in r for r in records)
+    # The text is in the payload too: that is where page_content is read from.
+    assert records[0]["payload"] == {"a": 1, "text": "text1"}
+    assert records[1]["payload"] == {"a": 2, "text": "text2"}
 
 
 def test_add_texts_success(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test successful text addition."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.insert_records.return_value = {"success": True}
 
     store = DXMTVectorDB(
@@ -119,9 +168,7 @@ def test_add_texts_success(mock_client: Mock, mock_embeddings: Mock) -> None:
 
 def test_add_texts_with_metadata(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test text addition with metadata."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.insert_records.return_value = {"success": True}
 
     store = DXMTVectorDB(
@@ -145,9 +192,7 @@ def test_add_texts_with_metadata(mock_client: Mock, mock_embeddings: Mock) -> No
 
 def test_add_texts_with_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test text addition with provided IDs."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.insert_records.return_value = {"success": True}
 
     store = DXMTVectorDB(
@@ -171,9 +216,7 @@ def test_add_texts_with_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
 
 def test_add_texts_metadata_mismatch(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test error when metadata count doesn't match texts count."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
 
     store = DXMTVectorDB(
         table_name="test",
@@ -188,9 +231,7 @@ def test_add_texts_metadata_mismatch(mock_client: Mock, mock_embeddings: Mock) -
 
 def test_delete_success(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test successful deletion."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.delete_records.return_value = {"success": True}
 
     store = DXMTVectorDB(
@@ -210,10 +251,8 @@ def test_delete_success(mock_client: Mock, mock_embeddings: Mock) -> None:
 
 
 def test_delete_no_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
-    """Test deletion with no IDs."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    """Nothing to delete is None and no request, for both `[]` and `None`."""
+    mock_client.get_table.return_value = {"dimension": 3}
 
     store = DXMTVectorDB(
         table_name="test",
@@ -222,17 +261,56 @@ def test_delete_no_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
         create_table_if_not_exists=False,
     )
 
-    result = store.delete(ids=[])
-
-    assert result is False
+    assert store.delete(ids=[]) is None
+    assert store.delete(ids=None) is None
+    assert store.delete() is None
     mock_client.delete_records.assert_not_called()
+
+
+def test_delete_error_propagates(mock_client: Mock, mock_embeddings: Mock) -> None:
+    """A failed delete raises. It used to be logged and returned as False."""
+    mock_client.get_table.return_value = {"dimension": 3}
+    mock_client.delete_records.side_effect = DXMTError("TABLE_NOT_FOUND: test")
+
+    store = DXMTVectorDB(
+        table_name="test",
+        embedding=mock_embeddings,
+        client=mock_client,
+        create_table_if_not_exists=False,
+    )
+
+    with pytest.raises(DXMTError, match="TABLE_NOT_FOUND"):
+        store.delete(ids=["id1"])
+
+
+@pytest.mark.asyncio
+async def test_adelete(mock_client: Mock, mock_embeddings: Mock) -> None:
+    """The async form: same contract as `delete`."""
+    mock_client.get_table.return_value = {"dimension": 3}
+    mock_client.adelete_records = AsyncMock(return_value={"success": True})
+
+    store = DXMTVectorDB(
+        table_name="test",
+        embedding=mock_embeddings,
+        client=mock_client,
+        create_table_if_not_exists=False,
+    )
+
+    assert await store.adelete(ids=[]) is None
+    assert await store.adelete(ids=None) is None
+    mock_client.adelete_records.assert_not_called()
+
+    assert await store.adelete(ids=["id1"]) is True
+    mock_client.adelete_records.assert_awaited_once_with(table_name="test", ids=["id1"])
+
+    mock_client.adelete_records.side_effect = DXMTError("boom")
+    with pytest.raises(DXMTError, match="boom"):
+        await store.adelete(ids=["id1"])
 
 
 def test_get_by_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test get documents by IDs."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.get_records.return_value = [
         {
             "id": "id1",
@@ -263,9 +341,7 @@ def test_get_by_ids(mock_client: Mock, mock_embeddings: Mock) -> None:
 
 def test_similarity_search(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test similarity search."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.search.return_value = [
         {
             "id": "id1",
@@ -298,9 +374,7 @@ def test_similarity_search_with_score(
     mock_client: Mock, mock_embeddings: Mock
 ) -> None:
     """Test similarity search with scores."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.search.return_value = [
         {
             "id": "id1",
@@ -332,9 +406,7 @@ def test_similarity_search_with_score(
 
 def test_similarity_search_by_vector(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test similarity search by vector."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.search.return_value = [
         {
             "id": "id1",
@@ -366,9 +438,7 @@ def test_similarity_search_with_filter(
     mock_client: Mock, mock_embeddings: Mock
 ) -> None:
     """Test similarity search with metadata filter."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.search.return_value = []
 
     store = DXMTVectorDB(
@@ -389,9 +459,7 @@ def test_similarity_search_with_filter(
 
 def test_hybrid_search(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test hybrid search."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.hybrid_search.return_value = [
         {
             "id": "id1",
@@ -422,9 +490,7 @@ def test_hybrid_search(mock_client: Mock, mock_embeddings: Mock) -> None:
 
 def test_hybrid_search_not_enabled(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test hybrid search when full-text search not enabled."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
 
     store = DXMTVectorDB(
         table_name="test",
@@ -470,9 +536,7 @@ def test_from_existing_table(mock_embeddings: Mock) -> None:
     with patch("langchain_dxmt.vectorstores.DXMTClient") as MockClient:
         mock_instance = Mock()
         MockClient.return_value = mock_instance
-        mock_instance.get_table.return_value = {
-            "data": {"table": {"dimension": 128}}
-        }
+        mock_instance.get_table.return_value = {"dimension": 128}
 
         store = DXMTVectorDB.from_existing_table(
             table_name="existing_table",
@@ -486,12 +550,28 @@ def test_from_existing_table(mock_embeddings: Mock) -> None:
         mock_instance.create_table.assert_not_called()
 
 
+def test_from_existing_table_without_embedding() -> None:
+    """An existing table that embeds server-side needs no embedding function."""
+    with patch("langchain_dxmt.vectorstores.DXMTClient") as MockClient:
+        mock_instance = Mock()
+        MockClient.return_value = mock_instance
+        mock_instance.get_table.return_value = {
+            "dimension": 1024,
+            "distance_metric": "cosine",
+            "embedding": {"model": "BAAI/bge-m3"},
+        }
+
+        store = DXMTVectorDB.from_existing_table("existing_table")
+
+        assert store.embeddings is None
+        assert store._dimension == 1024
+        mock_instance.create_table.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_async_add_texts(mock_client: Mock, mock_embeddings: Mock) -> None:
     """Test async text addition."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.ainsert_records.return_value = {"success": True}
 
     store = DXMTVectorDB(
@@ -513,9 +593,7 @@ async def test_async_similarity_search(
     mock_client: Mock, mock_embeddings: Mock
 ) -> None:
     """Test async similarity search."""
-    mock_client.get_table.return_value = {
-        "data": {"table": {"dimension": 3}}
-    }
+    mock_client.get_table.return_value = {"dimension": 3}
     mock_client.asearch.return_value = [
         {
             "id": "id1",

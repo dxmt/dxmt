@@ -232,7 +232,7 @@ tests/integration_tests/test_dxmt_integration.py::TestAdvancedFeatures::test_hyb
 # All standard compliance tests
 pytest tests/langchain_standard/ -v
 
-# Official LangChain integration tests (requires langchain-standard-tests)
+# Official LangChain integration tests (requires langchain-tests)
 pytest tests/langchain_standard/test_vectorstore_integration_tests.py -v
 
 # Advanced features (MMR, score threshold, etc.)
@@ -243,7 +243,7 @@ pytest tests/langchain_standard/test_advanced_features.py -v
 
 ```bash
 # Install LangChain testing dependencies
-pip install langchain-openai langchain-standard-tests
+pip install langchain-tests
 
 # Or use dev dependencies
 pip install -e ".[dev]"
@@ -261,10 +261,10 @@ pip install -e ".[dev]"
 - ✅ DXMT-specific features (hybrid_search, from_existing_table)
 
 **test_vectorstore_integration_tests.py** - Official LangChain tests:
-- Uses `VectorStoreIntegrationTests` base class from `langchain-standard-tests`
+- Uses `VectorStoreIntegrationTests` base class from `langchain-tests`
 - Automatically tests all standard VectorStore interface requirements
 - Ensures full LangChain compatibility and best practices
-- Note: Requires `langchain-standard-tests` package
+- Note: Requires the `langchain-tests` package
 
 **test_advanced_features.py** - Advanced LangChain features:
 - ✅ **MMR Search** (Maximal Marginal Relevance for diversity)

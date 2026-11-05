@@ -121,12 +121,14 @@ The main VectorStore implementation that:
 
 ```toml
 dependencies = [
-    "langchain-core>=0.3.0,<0.4.0",   # LangChain abstractions
-    "dxmt-python-sdk>=0.1.0,<1.0.0",  # DXMT HTTP client
-    "pydantic>=2.0.0,<3.0.0",         # Data validation
-    "numpy>=1.24.0,<2.0.0",           # Vector operations
+    "langchain-core>=1.0.0,<2.0.0",   # LangChain abstractions
+    "dxmt-python-sdk>=1.3.0,<2.0.0",  # DXMT HTTP client
 ]
 ```
+
+Two things that were listed here and are not dependencies: `pydantic` (imported by nothing in
+the package; it comes with `langchain-core`) and `numpy` (vectors are plain lists on the wire,
+and MMR is reranked on the server, so nothing here does arithmetic on them).
 
 ### Why This Architecture?
 

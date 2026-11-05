@@ -8,7 +8,7 @@ Run with:
 
 Prerequisites:
 - DXMT server running on localhost:9999
-- langchain-standard-tests package installed
+- `langchain-tests` installed (the `test` extra: `pip install -e ".[test]"`)
 """
 
 import os
@@ -116,8 +116,8 @@ class TestDXMTVectorStoreIntegrationTests(VectorStoreIntegrationTests):
 def test_compliance_note(capsys) -> None:
     """Print compliance information."""
     if not LANGCHAIN_TESTS_AVAILABLE:
-        print("\n⚠️  langchain-standard-tests not installed.")
-        print("Install with: pip install langchain-standard-tests")
+        print("\n⚠️  langchain-tests not installed.")
+        print("Install with: pip install langchain-tests")
         print("This package provides official LangChain VectorStore compliance tests.")
     else:
         print("\n✅ Using LangChain official VectorStoreIntegrationTests")
