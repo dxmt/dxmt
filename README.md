@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#memory-for-personal-agents">Agent memory</a> ·
+  <a href="#it-is-a-database-too">Search</a> ·
   <a href="#clients-and-integrations">Clients &amp; integrations</a> ·
   <a href="#performance">Performance</a> ·
   <a href="vectordb/README.md">Manual</a> ·
@@ -32,21 +32,20 @@
 </p>
 
 <p align="center">
-  <img src="vectordb/docs/assets/console.png" width="880" alt="The DXMT web console: tables, their indexes and a search">
+  <img src="vectordb/docs/assets/console.png" width="880" alt="The DXMT web console: a 4,000-row table laid out from its neighbour graph, coloured by a payload field">
 </p>
 
 ## Why DXMT
 
-- **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword; a new fact **supersedes** an old one, which is kept as history; `forget` on request. Recall is measured on LoCoMo and LongMemEval, not asserted.
-- **Yours.** Local-first: the data lives in `~/.dxmt`, embeddings come from a local model unless you choose otherwise, every memory can be listed, edited, exported and deleted, and every agent on your machine shares the one store over MCP or REST. No account, no cloud, Apache-2.0.
+- **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword, in Chinese or English; a new fact **supersedes** an old one, which is kept as history; `forget` on request.
+- **Yours.** Local-first: the data lives in `~/.dxmt`, embeddings come from a local model (bge-m3 through ollama) unless you point it at an OpenAI-compatible endpoint, and every memory can be listed, edited, exported and deleted. No account, no cloud.
 - **Every agent, one memory.** MCP over stdio and HTTP, a REST API, and Python, JavaScript, Rust and Go clients, all reading and writing the same store. Several MCP clients on one machine share it through one server automatically.
-- **Recall by meaning and by keyword.** Chinese and English alike; a local multilingual model (bge-m3 through ollama) is the default, and any OpenAI-compatible embedding endpoint works instead.
 - **A real database underneath, not a layer over someone else's.** Its own storage and indexes: a write-ahead log with snapshots (`kill -9` loses nothing acknowledged), HNSW and HNSW-PQ vector search, BM25 full-text, hybrid fusion, payload filters, backups, and object-storage replication when one machine is not enough. One 22 MB binary.
-- **Measured, not claimed.** Memory recall on LoCoMo and LongMemEval; search recall and throughput on 1M, 10M and 100M vectors. Every number below links to the run that produced it.
+- **Measured, not claimed.** Memory recall on LoCoMo and LongMemEval; search recall and throughput on 1M, 10M and 100M vectors. Every number on this page links to the run that produced it.
 
 ## Quick start
 
-**Run the server.** Linux (x86_64, aarch64) and macOS binaries are on [Releases](https://github.com/dxmt/dxmt/releases); or Docker; or `cargo build --release` in `vectordb/`.
+**1. Run the server.** Linux (x86_64, aarch64) and macOS binaries are on [Releases](https://github.com/dxmt/dxmt/releases); or Docker; or `cargo build --release` in `vectordb/`. Memory needs an embedding model the server can reach: a local `ollama pull bge-m3` is found on its own, or set `OPENAI_API_KEY`.
 
 ```bash
 # binary
@@ -54,14 +53,36 @@ v=1.6.0; arch=$(uname -m)
 curl -L https://github.com/dxmt/dxmt/releases/download/v$v/dxmt-vectordb-$v-$arch-linux-gnu.tar.gz | tar xz
 ./dxmt-vectordb-$v-$arch-linux-gnu/vectordb serve          # http://127.0.0.1:9999, console at /dashboard
 
-# docker
-docker run -d --name dxmt -p 127.0.0.1:9999:9999 -v dxmt:/data dxmtai/dxmt:latest
+# docker, reaching an ollama on the host
+docker run -d --name dxmt -p 127.0.0.1:9999:9999 -v dxmt:/data \
+  --add-host=host.docker.internal:host-gateway -e OLLAMA_HOST=host.docker.internal:11434 dxmtai/dxmt:latest
 ```
 
-With an embedding model the server can reach (`ollama pull bge-m3`, or `OPENAI_API_KEY`), the `kb` table is made by its first write and takes text:
+**2. Give your agents the memory.** One line for Claude Code; Claude Desktop and Cursor take the same command in their MCP config. The agent now has `remember`, `recall`, `forget` and `list_memories`, and every other agent on the machine sees the same memory.
+
+```bash
+claude mcp add dxmt -- vectordb mcp
+```
+
+**3. Or use it from code.** The same memory is on REST (`/api/v1/memories`) and in the Python and JavaScript clients:
 
 ```python
 # pip install dxmt-python-sdk
+from dxmt import Client
+
+db = Client(host="localhost", port=9999)
+db.remember("Prefers answers in Chinese", kind="preference", source="me")
+db.remember("Moved to Berlin", kind="fact", supersedes=["mem-…"])     # the old fact stays as history
+db.recall("how should answers be written")                            # by meaning and by keyword
+```
+
+A memory has a kind, tags, a source and a time; recall is filtered by any of them. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%.
+
+## It is a database, too
+
+The memory layer decides *what* to keep and how it is recalled; the database underneath is why that recall is fast and survives anything, and it takes ordinary search workloads on its own. With a model configured, the `kb` table is made by its first write and takes text:
+
+```python
 from dxmt import Client, Field
 
 db = Client(host="localhost", port=9999)
@@ -74,25 +95,7 @@ db.hybrid_search("kb", text="why can't Python use all my cores", limit=2)     # 
 db.search("kb", text="graph index", limit=2, filter=Field("lang") == "en")   # vector search with a payload filter
 ```
 
-The same store takes ordinary vector workloads too: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector` and a filter. Everything is `curl`-able under `/api/v1`; the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
-
-## Memory for personal agents
-
-The same binary is an MCP server. One line gives an agent `remember`, `recall`, `forget` and `list_memories`, and every other agent on the machine sees the same memory:
-
-```bash
-claude mcp add dxmt -- vectordb mcp     # Claude Desktop and Cursor take the same command in their MCP config
-```
-
-The same memory is on REST and in every client:
-
-```python
-db.remember("Prefers answers in Chinese", kind="preference", source="me")
-db.remember("Moved to Berlin", kind="fact", supersedes=["mem-…"])     # the old fact stays as history
-db.recall("how should answers be written")                            # by meaning and by keyword
-```
-
-A memory has a kind, tags, a source and a time; recall is filtered by any of them. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%. The memory layer decides *what* to keep and how it is recalled; the database underneath is why that recall is fast and survives anything.
+Bring your own vectors instead: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector` and a filter. Everything is `curl`-able under `/api/v1`; the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
 
 ## Clients and integrations
 
@@ -101,7 +104,7 @@ A memory has a kind, tags, a source and a time; recall is filtered by any of the
 | Python | `pip install dxmt-python-sdk` | `from dxmt import Client` |
 | JavaScript / TypeScript | `npm install dxmt-js-sdk` | `import { DXMTClient } from "dxmt-js-sdk"` |
 | Rust | `dxmt-client = "1.6"` | `use dxmt_client::Client` |
-| Go | `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk` | |
+| Go | `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk` | `import dxmt "github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk"` |
 | LlamaIndex | `pip install llama-index-vector-stores-dxmt` | `from llama_index.vector_stores.dxmt import DXMTVectorStore` |
 | LangChain | `pip install "git+https://github.com/dxmt/dxmt#subdirectory=vectordb/clients/langchain-dxmt"` | `from langchain_dxmt import DXMTVectorDB` |
 | LangGraph | in `dxmt-python-sdk` | `from dxmt.langgraph_store import DXMTLangGraphStore` |
@@ -112,7 +115,7 @@ A memory has a kind, tags, a source and a time; recall is filtered by any of the
 
 ## Performance
 
-Memory recall is measured above. The database under it is measured on public vector benchmarks: one machine, 32 vCPU and local NVMe, one binary, ingested over REST; Cohere 768-d vectors for 1M and 10M rows, LAION for 100M. Full tables, methods and the client-overhead caveat are in the [manual](vectordb/README.md#measured-performance).
+Memory recall is measured in the quick start. The database under it is measured on public vector benchmarks: one machine, 32 vCPU and local NVMe, one binary, ingested over REST; Cohere 768-d vectors for 1M and 10M rows, LAION for 100M. Full tables, methods and the client-overhead caveat are in the [manual](vectordb/README.md#measured-performance).
 
 | Corpus | Ingest | Resident memory | recall@100 | QPS | p99 |
 | --- | --- | --- | --- | --- | --- |
@@ -131,7 +134,7 @@ Memory recall is measured above. The database under it is measured on public vec
 
 ## Status
 
-1.6. The compatibility promise covers the HTTP API under `/api/v1` and the clients' public surfaces. It does **not** cover anything [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental; read it, and [Known Limitations](vectordb/README.md#known-limitations), before depending on DXMT for real data. Everything lives under [`vectordb/`](vectordb/) — the server crate and the client packages; every `cargo` and `make` command runs from there.
+Version 1.6. The compatibility promise covers the HTTP API under `/api/v1` and the clients' public surfaces. It does **not** cover anything [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) marks experimental; read it, and [Known Limitations](vectordb/README.md#known-limitations), before depending on DXMT for real data. Everything lives under [`vectordb/`](vectordb/) — the server crate and the client packages; every `cargo` and `make` command runs from there.
 
 | | |
 | --- | --- |
