@@ -7,9 +7,9 @@
 <h3 align="center">The open-source memory database for personal agents. Owned by you.</h3>
 
 <p align="center">
-  One persistent, portable memory of you and your work, shared by every agent you use -- Claude, Cursor, ChatGPT, your own code --<br>
-  kept on your machine, in one binary. Underneath it, a real vector database: vector, full-text and hybrid search,<br>
-  metadata filters, a write-ahead log, server-side embedding. Written in Rust. Apache-2.0.
+  One persistent, portable memory of you and your work, shared by every agent you use --<br>
+  Claude, Cursor, ChatGPT, your own code -- kept on your machine, in one binary.<br>
+  Written in Rust. Apache-2.0.
 </p>
 
 <p align="center">
@@ -39,11 +39,10 @@
 
 - **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword; a new fact **supersedes** an old one, which is kept as history; `forget` on request. Recall is measured on LoCoMo and LongMemEval, not asserted.
 - **Yours.** Local-first: the data lives in `~/.dxmt`, embeddings come from a local model unless you choose otherwise, every memory can be listed, edited, exported and deleted, and every agent on your machine shares the one store over MCP or REST. No account, no cloud, Apache-2.0.
-- **One binary, no dependencies.** `vectordb serve` is the database, the REST and gRPC API, the MCP server and the web console. 22 MB.
-- **Search the way people actually search.** HNSW and HNSW-PQ vector search, BM25 full-text with Chinese word segmentation, and hybrid fusion of the two, with metadata filters and a payload index on every field.
-- **Text in, text out.** A table can name an embedding model (ollama, OpenAI, or anything that speaks the OpenAI `/embeddings` protocol) and then records and queries carry text, not vectors.
-- **Durable by default.** A write-ahead log with snapshots: `kill -9` loses nothing that was acknowledged. Backups, restore, and object-storage replication when one machine is not enough.
-- **Measured, not claimed.** recall@100 0.98 at 6,465 QPS on 1M vectors; 100M vectors in 45 GB. Every number below links to the run that produced it.
+- **Every agent, one memory.** MCP over stdio and HTTP, a REST API, and Python, JavaScript, Rust and Go clients, all reading and writing the same store. Several MCP clients on one machine share it through one server automatically.
+- **Recall by meaning and by keyword.** Chinese and English alike; a local multilingual model (bge-m3 through ollama) is the default, and any OpenAI-compatible embedding endpoint works instead.
+- **A real database underneath, not a layer over someone else's.** Its own storage and indexes: a write-ahead log with snapshots (`kill -9` loses nothing acknowledged), HNSW and HNSW-PQ vector search, BM25 full-text, hybrid fusion, payload filters, backups, and object-storage replication when one machine is not enough. One 22 MB binary.
+- **Measured, not claimed.** Memory recall on LoCoMo and LongMemEval; search recall and throughput on 1M, 10M and 100M vectors. Every number below links to the run that produced it.
 
 ## Quick start
 
@@ -75,7 +74,7 @@ db.hybrid_search("kb", text="why can't Python use all my cores", limit=2)     # 
 db.search("kb", text="graph index", limit=2, filter=Field("lang") == "en")   # vector search with a payload filter
 ```
 
-Bring your own vectors instead: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector`. The same API is `curl`-able under `/api/v1`, and the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
+The same store takes ordinary vector workloads too: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector` and a filter. Everything is `curl`-able under `/api/v1`; the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
 
 ## Memory for personal agents
 
@@ -93,7 +92,7 @@ db.remember("Moved to Berlin", kind="fact", supersedes=["mem-…"])     # the ol
 db.recall("how should answers be written")                            # by meaning and by keyword
 ```
 
-A memory has a kind, tags, a source and a time; recall is filtered by any of them. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%. The memory layer is the part of DXMT that says *what* to keep; the vector database below it is why recall is fast and durable.
+A memory has a kind, tags, a source and a time; recall is filtered by any of them. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%. The memory layer decides *what* to keep and how it is recalled; the database underneath is why that recall is fast and survives anything.
 
 ## Clients and integrations
 
@@ -113,7 +112,7 @@ A memory has a kind, tags, a source and a time; recall is filtered by any of the
 
 ## Performance
 
-One machine, 32 vCPU and local NVMe, one binary, ingested over REST; Cohere 768-d vectors for 1M and 10M rows, LAION for 100M. Full tables, methods and the client-overhead caveat are in the [manual](vectordb/README.md#measured-performance).
+Memory recall is measured above. The database under it is measured on public vector benchmarks: one machine, 32 vCPU and local NVMe, one binary, ingested over REST; Cohere 768-d vectors for 1M and 10M rows, LAION for 100M. Full tables, methods and the client-overhead caveat are in the [manual](vectordb/README.md#measured-performance).
 
 | Corpus | Ingest | Resident memory | recall@100 | QPS | p99 |
 | --- | --- | --- | --- | --- | --- |

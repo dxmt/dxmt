@@ -4,14 +4,13 @@ This is the reference for the server and its API: every feature, how it is store
 measured and what is not supported yet. The short version -- what DXMT is, install, a
 ten-line quick start, the clients and integrations -- is the [repository README](../README.md).
 
-DXMT is the open-source memory database for personal agents, owned by you, and the vector
-database underneath it,
-in one binary: HNSW and HNSW-PQ vector search, BM25
-full-text with Chinese segmentation, hybrid fusion, payload filters, a write-ahead log with
-snapshots, server-side embedding and reranking, object-storage replication, read replicas, an
-experimental cluster mode, and a memory layer (`remember` / `recall` / `forget`) that agents
-reach over MCP. One data model, several protocols: REST under `/api/v1`, gRPC, MCP, DXQL, a
-read-only web console.
+DXMT is the open-source memory database for personal agents, owned by you: `remember` /
+`recall` / `forget` that every agent on a machine shares over MCP, REST and four clients, with
+its own storage and indexes underneath -- a write-ahead log with snapshots, HNSW and HNSW-PQ
+vector search, BM25 full-text with Chinese segmentation, hybrid fusion, payload filters,
+server-side embedding and reranking, object-storage replication, read replicas and an
+experimental cluster mode. One data model, several protocols: REST under `/api/v1`, gRPC,
+MCP, DXQL, a read-only web console.
 
 ## Memory for your agents in five minutes
 
