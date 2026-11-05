@@ -4,12 +4,12 @@
   </a>
 </p>
 
-<h3 align="center">The open-source memory database for AI agents,<br>and the vector database underneath it. One binary.</h3>
+<h3 align="center">The open-source memory database for personal agents. Owned by you.</h3>
 
 <p align="center">
-  <code>remember</code> / <code>recall</code> / <code>forget</code> over MCP for Claude, Cursor and your own agents;<br>
-  vector, full-text and hybrid search with metadata filters, a write-ahead log and server-side embedding for everything else.<br>
-  Written in Rust. Apache-2.0.
+  One persistent, portable memory of you and your work, shared by every agent you use -- Claude, Cursor, ChatGPT, your own code --<br>
+  kept on your machine, in one binary. Underneath it, a real vector database: vector, full-text and hybrid search,<br>
+  metadata filters, a write-ahead log, server-side embedding. Written in Rust. Apache-2.0.
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#memory-for-ai-agents">Agent memory</a> ·
+  <a href="#memory-for-personal-agents">Agent memory</a> ·
   <a href="#clients-and-integrations">Clients &amp; integrations</a> ·
   <a href="#performance">Performance</a> ·
   <a href="vectordb/README.md">Manual</a> ·
@@ -37,7 +37,8 @@
 
 ## Why DXMT
 
-- **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword; a new fact **supersedes** an old one, which is kept as history; `forget` on request. Every agent on the machine shares the one store, over MCP or REST. Recall is measured on LoCoMo and LongMemEval, not asserted.
+- **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword; a new fact **supersedes** an old one, which is kept as history; `forget` on request. Recall is measured on LoCoMo and LongMemEval, not asserted.
+- **Yours.** Local-first: the data lives in `~/.dxmt`, embeddings come from a local model unless you choose otherwise, every memory can be listed, edited, exported and deleted, and every agent on your machine shares the one store over MCP or REST. No account, no cloud, Apache-2.0.
 - **One binary, no dependencies.** `vectordb serve` is the database, the REST and gRPC API, the MCP server and the web console. 22 MB.
 - **Search the way people actually search.** HNSW and HNSW-PQ vector search, BM25 full-text with Chinese word segmentation, and hybrid fusion of the two, with metadata filters and a payload index on every field.
 - **Text in, text out.** A table can name an embedding model (ollama, OpenAI, or anything that speaks the OpenAI `/embeddings` protocol) and then records and queries carry text, not vectors.
@@ -76,7 +77,7 @@ db.search("kb", text="graph index", limit=2, filter=Field("lang") == "en")   # v
 
 Bring your own vectors instead: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector`. The same API is `curl`-able under `/api/v1`, and the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
 
-## Memory for AI agents
+## Memory for personal agents
 
 The same binary is an MCP server. One line gives an agent `remember`, `recall`, `forget` and `list_memories`, and every other agent on the machine sees the same memory:
 

@@ -4,7 +4,8 @@ This is the reference for the server and its API: every feature, how it is store
 measured and what is not supported yet. The short version -- what DXMT is, install, a
 ten-line quick start, the clients and integrations -- is the [repository README](../README.md).
 
-DXMT is the open-source memory database for AI agents and the vector database underneath it,
+DXMT is the open-source memory database for personal agents, owned by you, and the vector
+database underneath it,
 in one binary: HNSW and HNSW-PQ vector search, BM25
 full-text with Chinese segmentation, hybrid fusion, payload filters, a write-ahead log with
 snapshots, server-side embedding and reranking, object-storage replication, read replicas, an
