@@ -108,7 +108,7 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | LlamaIndex | `pip install llama-index-vector-stores-dxmt` | `from llama_index.vector_stores.dxmt import DXMTVectorStore` |
 | LangChain | `pip install "git+https://github.com/dxmt/dxmt#subdirectory=vectordb/clients/langchain-dxmt"` | `from langchain_dxmt import DXMTVectorDB` |
 | LangGraph | in `dxmt-python-sdk` | `from dxmt.langgraph_store import DXMTLangGraphStore` |
-| Haystack | in `dxmt-python-sdk` | `from dxmt.haystack import DXMTDocumentStore` |
+| Haystack | `pip install dxmt-haystack` | `from haystack_integrations.document_stores.dxmt import DXMTDocumentStore` |
 | mem0 | in `dxmt-python-sdk` | `from dxmt.mem0 import DXMTMemoryStore` |
 
 [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) says exactly which routes each client wraps; everything else is one raw request away, because every capability is in the HTTP API.

@@ -68,16 +68,10 @@ except ImportError:
     MEM0_AVAILABLE = False
     DXMTMemoryStore = None  # type: ignore
 
-# Optional Haystack integration (requires haystack-ai package)
-try:
-    from .haystack import DXMTDocumentStore
-    from .haystack_retrievers import DXMTEmbeddingRetriever, DXMTBM25Retriever
-    HAYSTACK_AVAILABLE = True
-except ImportError:
-    HAYSTACK_AVAILABLE = False
-    DXMTDocumentStore = None  # type: ignore
-    DXMTEmbeddingRetriever = None  # type: ignore
-    DXMTBM25Retriever = None  # type: ignore
+# The Haystack integration is its own package since 1.7: `pip install dxmt-haystack`, then
+# `from haystack_integrations.document_stores.dxmt import DXMTDocumentStore`. The copy that
+# lived here passed `dataframe=` to a Document that no longer has the field and invented a
+# vector for documents without one; it is gone rather than kept beside the real one.
 
 # Optional CrewAI integration (requires crewai package)
 try:
@@ -146,10 +140,6 @@ __all__ = [
     "DXMTLangGraphStore",
     # mem0 integration (optional)
     "DXMTMemoryStore",
-    # Haystack integration (optional)
-    "DXMTDocumentStore",
-    "DXMTEmbeddingRetriever",
-    "DXMTBM25Retriever",
     # CrewAI integration (optional)
     "DXMTVectorSearchTool",
     "DXMTToolConfig",

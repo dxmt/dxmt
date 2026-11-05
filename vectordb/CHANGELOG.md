@@ -17,6 +17,19 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **`dxmt-haystack`**, the Haystack integration as its own package in the
+  `haystack_integrations` namespace, the layout deepset's own integrations use:
+  `DXMTDocumentStore` and `DXMTEmbeddingRetriever` / `DXMTBM25Retriever` /
+  `DXMTHybridRetriever`. It passes Haystack's `DocumentStoreBaseTests` (count, every
+  duplicate policy, delete, 39 filter cases) against a live server. A filter the server has a
+  flat form for runs on the server; the rest (dates, `None`, nested logic) are evaluated with
+  Haystack's own `document_matches_filter` by `filter_documents`, and refused by name by the
+  retrievers. A document without an embedding is kept and never ranked. The copy that lived in
+  `dxmt-python-sdk` (`dxmt.haystack`) is removed: it passed `dataframe=` to a `Document` that
+  no longer has the field and gave vector-less documents a made-up vector that ranked.
+
 ### Fixed
 
 - **LlamaIndex filters that returned the wrong rows.** `FilterOperator.ALL` was sent as

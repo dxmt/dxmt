@@ -26,7 +26,7 @@ backup root, and the hybrid and full-text tests skip on a server built without `
 | `test_integration.py` | server | every route the client wraps, judged by its effect on the server |
 | `test_langchain_vectorstore.py`, `test_bisheng_integration.py` | `langchain-core` (mocked client); the second also `bisheng` | the `dxmt.langchain_vectorstore` adapter |
 | `test_langgraph_store.py`, `test_langgraph_store_integration.py` | server + `langgraph` | the `BaseStore` implementation |
-| `test_haystack_integration.py`, `test_crewai_integration.py`, `test_metagpt_vector_store.py`, `test_mem0_adapter.py` | the framework | each adapter, mocked where the framework is heavy |
+| `test_crewai_integration.py`, `test_metagpt_vector_store.py`, `test_mem0_adapter.py` | the framework | each adapter, mocked where the framework is heavy |
 
 CI (`.github/workflows/ci.yml`, job `sdk-live`) runs `test_integration.py` and the LangGraph
 suites against a freshly built server, once keyless and once with `DXMT_API_KEY`.

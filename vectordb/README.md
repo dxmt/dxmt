@@ -820,7 +820,8 @@ All six live under `clients/`.
 | `clients/langchain-dxmt/`                     | LangChain vector store                   |
 | `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
-The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI and
+`dxmt-haystack` (`clients/dxmt-haystack/`) is the Haystack document store and retrievers. The
+Python SDK additionally ships integrations for LangGraph, mem0, CrewAI and
 MetaGPT. See `clients/dxmt-python-sdk/README.md`.
 
 `dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI, `dxmt-js-sdk` is on npm
