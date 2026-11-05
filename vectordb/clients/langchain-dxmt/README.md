@@ -70,8 +70,8 @@ pip install langchain-dxmt
 
 This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/dxmt/tree/main/vectordb/clients/dxmt-python-sdk) as a dependency.
 
-Neither package is on PyPI yet. Until the packages are published, install from source: the SDK first, because this package's
-dependency on `dxmt-python-sdk` would otherwise be looked up on PyPI and fail.
+`dxmt-python-sdk` is on PyPI since 1.6.0 (2026-11-05); this package is not published yet.
+Install it from a checkout, the SDK first so the dependency resolves from the same tree:
 
 ```bash
 # from a checkout of the repository

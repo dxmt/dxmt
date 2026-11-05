@@ -45,12 +45,10 @@ Listed because the list above used to include them.
 pip install llama-index-vector-stores-dxmt
 ```
 
-Neither this package nor `dxmt-python-sdk` is on PyPI yet. Until the packages are published, install from source: the SDK first,
-because this package's dependency on `dxmt-python-sdk` would otherwise be looked up on PyPI and
-fail.
+That pulls in `dxmt-python-sdk`, the HTTP client. Both are on PyPI since 1.6.0
+(2026-11-05). To run against a checkout of the repository instead, install the SDK first:
 
 ```bash
-# from a checkout of the repository
 pip install ./vectordb/clients/dxmt-python-sdk
 pip install ./vectordb/clients/llama-index-vector-stores-dxmt
 ```

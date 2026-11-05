@@ -45,6 +45,9 @@ release, and the first commit that was ever pushed anywhere.
 
 ### Added
 
+- **`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI** (1.6.0, 2026-11-05):
+  `pip install llama-index-vector-stores-dxmt` is enough. The LangChain package, the
+  JavaScript and the Rust clients are still installed from a checkout.
 - **Recall measured on all of LongMemEval-S.** 470 questions, 231,606 turns: every answer
   session among the top 10 turns for 0.796 of questions, one of them for 0.926. The
   60-question sample in 1.5.0 had said 0.917; the full set is lower on multi-session (0.711),
