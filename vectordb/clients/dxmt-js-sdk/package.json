@@ -50,7 +50,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dxmt/dxmt",
+    "url": "git+https://github.com/dxmt/dxmt.git",
     "directory": "vectordb/clients/dxmt-js-sdk"
   },
   "bugs": {
