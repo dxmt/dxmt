@@ -106,7 +106,7 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | Rust | `dxmt-client = "1.6"` | `use dxmt_client::Client` |
 | Go | `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk` | `import dxmt "github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk"` |
 | LlamaIndex | `pip install llama-index-vector-stores-dxmt` | `from llama_index.vector_stores.dxmt import DXMTVectorStore` |
-| LangChain | `pip install "git+https://github.com/dxmt/dxmt#subdirectory=vectordb/clients/langchain-dxmt"` | `from langchain_dxmt import DXMTVectorDB` |
+| LangChain | `pip install langchain-dxmt` | `from langchain_dxmt import DXMTVectorDB` |
 | LangGraph | in `dxmt-python-sdk` | `from dxmt.langgraph_store import DXMTLangGraphStore` |
 | Haystack | `pip install dxmt-haystack` | `from haystack_integrations.document_stores.dxmt import DXMTDocumentStore` |
 | mem0 | in `dxmt-python-sdk` | `from dxmt.mem0 import DXMTMemoryStore` |
