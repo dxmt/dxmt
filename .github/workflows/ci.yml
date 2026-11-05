@@ -345,9 +345,9 @@ jobs:
       # with no conditions and returns everything. They run here rather than in a job of their
       # own because the payload round trip is only worth asserting against a real server, and
       # this job has one. Order matters: the step above installed `dxmt-python-sdk` editable
-      # from this checkout, which is what satisfies both packages' dependency on it -- there is
-      # no such distribution on PyPI, and a non-editable resolution would test the adapters
-      # against an SDK this commit does not contain.
+      # from this checkout, which is what satisfies both packages' dependency on it. The SDK
+      # is on PyPI since 1.6.0, so a non-editable resolution would *succeed* and quietly test
+      # the adapters against the published SDK rather than the one this commit contains.
       # The Rust client is the third one that has to keep working against a real server, and
       # the only one whose tests compile. `--test live --test api_key` rather than `cargo test`:
       # the doctest in lib.rs is `no_run`, so building it adds a link step that proves nothing

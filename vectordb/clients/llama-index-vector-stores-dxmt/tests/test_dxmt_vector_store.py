@@ -299,31 +299,20 @@ class TestDXMTVectorStoreQuery:
 class TestDXMTVectorStoreDelete:
     """Tests for deleting nodes from vector store.
 
-    Two of these used to set `search.return_value = {"hits": [...]}` -- **a dict**, where the
-    SDK returns a `list`. So the mock asserted the author's belief about the client rather
-    than the client, and `delete()` passed here while raising
-    `AttributeError: 'list' object has no attribute 'get'` against every real server there
-    has ever been. `tests/test_integration.py::TestDeletionActuallyDeletes` is the half of
-    this that a mock cannot do: it counts rows on a server afterwards.
+    A delete by document or by filter is one `delete_records(filter=...)` request. It used to
+    scroll the matching ids and send them back -- and before that, searched with a zero vector
+    and read `.get("hits")` off a list, so it raised against every real server while passing
+    here, because a `MagicMock` has `.get()`.
+    `tests/test_integration.py::TestDeletionActuallyDeletes` counts rows on a server afterwards.
     """
 
     def test_delete_by_ref_doc_id(self, vector_store, mock_dxmt_client):
-        """Test deleting by reference document ID."""
-        # `scroll` yields records, one dict each -- the shape `DXMTClient.scroll` returns.
-        mock_dxmt_client.scroll.return_value = iter([
-            {"id": "node1", "payload": {}},
-            {"id": "node2", "payload": {}},
-        ])
-
         vector_store.delete("doc123")
 
-        mock_dxmt_client.scroll.assert_called_once()
-        assert mock_dxmt_client.scroll.call_args.kwargs["filter"] == {"ref_doc_id": "doc123"}
-
-        # Should have deleted the found nodes
+        mock_dxmt_client.scroll.assert_not_called()
         mock_dxmt_client.delete_records.assert_called_once_with(
             "test_table",
-            ["node1", "node2"]
+            filter={"must": [{"key": "ref_doc_id", "operation": {"type": "Equal", "value": "doc123"}}]},
         )
 
     def test_delete_nodes_by_ids(self, vector_store, mock_dxmt_client):
@@ -338,19 +327,33 @@ class TestDXMTVectorStoreDelete:
         )
 
     def test_delete_nodes_by_filter(self, vector_store, mock_dxmt_client):
-        """Test deleting nodes by metadata filter."""
-        mock_dxmt_client.scroll.return_value = iter([{"id": "node1", "payload": {}}])
-
         filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="test", operator=FilterOperator.EQ)
-            ]
+            filters=[MetadataFilter(key="category", value="test", operator=FilterOperator.EQ)]
         )
 
         vector_store.delete_nodes(filters=filters)
 
-        mock_dxmt_client.scroll.assert_called_once()
-        mock_dxmt_client.delete_records.assert_called_once_with("test_table", ["node1"])
+        mock_dxmt_client.delete_records.assert_called_once_with(
+            "test_table",
+            filter={"must": [{"key": "category", "operation": {"type": "Equal", "value": "test"}}]},
+        )
+
+    def test_delete_nodes_by_an_empty_filter_deletes_nothing(self, vector_store, mock_dxmt_client):
+        vector_store.delete_nodes(filters=MetadataFilters(filters=[]))
+        mock_dxmt_client.delete_records.assert_not_called()
+
+    def test_delete_from_a_missing_table_is_a_no_op(self, vector_store, mock_dxmt_client):
+        from dxmt.exceptions import DXMTError
+
+        mock_dxmt_client.delete_records.side_effect = DXMTError("TABLE_NOT_FOUND: no such table")
+        vector_store.delete("doc123")
+
+    def test_any_other_delete_error_raises(self, vector_store, mock_dxmt_client):
+        from dxmt.exceptions import DXMTError
+
+        mock_dxmt_client.delete_records.side_effect = DXMTError("503 durability degraded")
+        with pytest.raises(DXMTError):
+            vector_store.delete("doc123")
 
     def test_clear(self, vector_store, mock_dxmt_client):
         """Test clearing all nodes (deleting table)."""
@@ -380,28 +383,39 @@ class TestDXMTVectorStoreGetNodes:
 
         mock_dxmt_client.get_records.assert_called_once_with("test_table", ["node1"])
 
-    def test_get_nodes_by_filter(self, vector_store, mock_dxmt_client):
-        """Test getting nodes by metadata filter."""
-        mock_dxmt_client.search.return_value = [
-            {
-                "id": "node1",
-                "score": 1.0,
-                "payload": {"_node_content": "Test", "category": "test"}
-            }
-        ]
-
+    def test_get_nodes_by_filter_scrolls_the_table(self, vector_store, mock_dxmt_client):
+        # By filter is a scroll with the vector, not a search with a zero vector capped at
+        # ten thousand rows.
+        mock_dxmt_client.scroll.return_value = iter([
+            {"id": "node1", "payload": {"_node_content": "Test", "category": "test"}, "vector": [0.1] * 128},
+            {"id": "node2", "payload": {"_node_content": "Two", "category": "test"}, "vector": [0.2] * 128},
+        ])
         filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="test", operator=FilterOperator.EQ)
-            ]
+            filters=[MetadataFilter(key="category", value="test", operator=FilterOperator.EQ)]
         )
 
         nodes = vector_store.get_nodes(filters=filters)
 
-        assert len(nodes) == 1
-        assert nodes[0].node_id == "node1"
+        assert [n.node_id for n in nodes] == ["node1", "node2"]
+        assert nodes[0].embedding == [0.1] * 128
+        mock_dxmt_client.search.assert_not_called()
+        mock_dxmt_client.scroll.assert_called_once_with(
+            "test_table",
+            filter={"must": [{"key": "category", "operation": {"type": "Equal", "value": "test"}}]},
+            with_vector=True,
+        )
 
-        mock_dxmt_client.search.assert_called_once()
+    def test_get_nodes_from_a_missing_table_is_empty_and_other_errors_raise(
+        self, vector_store, mock_dxmt_client
+    ):
+        from dxmt.exceptions import DXMTError
+
+        mock_dxmt_client.scroll.side_effect = DXMTError("TABLE_NOT_FOUND")
+        assert vector_store.get_nodes(filters=MetadataFilters(filters=[])) == []
+
+        mock_dxmt_client.get_records.side_effect = DXMTError("connection refused")
+        with pytest.raises(DXMTError):
+            vector_store.get_nodes(node_ids=["node1"])
 
 
 class TestDXMTVectorStoreFromExistingTable:

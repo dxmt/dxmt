@@ -38,7 +38,8 @@ Or with pnpm:
 pnpm add dxmt-js-sdk
 ```
 
-The package is not on npm yet. Until the packages are published, install from source:
+On npm since 1.6.0 (2026-11-05). The `dxmt-js-sdk/langchain` entry needs `@langchain/core`,
+an optional peer dependency, installed beside it. To run against a checkout instead:
 
 ```bash
 git clone https://github.com/dxmt/dxmt

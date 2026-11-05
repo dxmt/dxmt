@@ -29,11 +29,9 @@ Official Python SDK for DXMT VectorDB - a lightweight single-node vector databas
 pip install dxmt-python-sdk
 ```
 
-The package is not on PyPI yet. Until the packages are published, install from source:
+On PyPI since 1.6.0 (2026-11-05). To run against a checkout of the repository instead:
 
 ```bash
-pip install "git+https://github.com/dxmt/dxmt#subdirectory=vectordb/clients/dxmt-python-sdk"
-# or, from a checkout of the repository:
 pip install ./vectordb/clients/dxmt-python-sdk
 ```
 

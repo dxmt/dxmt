@@ -1,380 +1,196 @@
-"""Tests for filter conversion utilities."""
+"""The translation from LlamaIndex ``MetadataFilters`` to the server's filter shape.
+
+Each case states the LlamaIndex meaning (``build_metadata_filter_fn`` in llama-index-core is the
+reference) and the exact server filter that means the same, or the ``ValueError`` for a shape
+the server cannot take. Nothing here is approximated: the translation this tests replaced
+turned ``ALL`` into ``IN``, ``NOT`` into ``AND`` and dropped ``IS_EMPTY``, three queries that
+ran and returned the wrong rows.
+"""
 
 import pytest
 from llama_index.core.vector_stores.types import (
-    MetadataFilters,
-    MetadataFilter,
-    FilterOperator,
     FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
 )
-from llama_index.vector_stores.dxmt.utils import (
-    convert_llamaindex_filters_to_dxmt,
-    _convert_single_filter,
-)
+from llama_index.vector_stores.dxmt.utils import convert_llamaindex_filters_to_dxmt
 
 
-class TestSingleFilterConversion:
-    """Tests for converting single MetadataFilter to DXMT format."""
+def one(key, value, op):
+    return convert_llamaindex_filters_to_dxmt(
+        MetadataFilters(filters=[MetadataFilter(key=key, value=value, operator=op)])
+    )
 
-    def test_eq_operator(self):
-        """Test EQ (==) operator conversion."""
-        filter = MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ)
-        result = _convert_single_filter(filter)
 
-        assert result == {
-            "key": "category",
-            "operation": {
-                "type": "Equal",
-                "value": "AI"
-            }
+def cond(key, type_, value=...):
+    operation = {"type": type_} if value is ... else {"type": type_, "value": value}
+    return {"key": key, "operation": operation}
+
+
+class TestOneOperator:
+    @pytest.mark.parametrize(
+        ("op", "value", "server"),
+        [
+            (FilterOperator.EQ, "AI", cond("k", "Equal", "AI")),
+            (FilterOperator.NE, "draft", cond("k", "NotEqual", "draft")),
+            (FilterOperator.GT, 0.8, cond("k", "GreaterThan", 0.8)),
+            (FilterOperator.GTE, 2020, cond("k", "GreaterThanOrEqual", 2020)),
+            (FilterOperator.LT, 10, cond("k", "LessThan", 10)),
+            (FilterOperator.LTE, 10, cond("k", "LessThanOrEqual", 10)),
+            (FilterOperator.IN, ["a", "b"], cond("k", "In", ["a", "b"])),
+            (FilterOperator.NIN, ["a", "b"], cond("k", "NotIn", ["a", "b"])),
+            (FilterOperator.EQ, "2024", cond("k", "Equal", "2024")),
+        ],
+    )
+    def test_direct_mappings(self, op, value, server):
+        assert one("k", value, op) == {"must": [server]}
+
+    def test_in_with_one_value_is_still_a_list(self):
+        assert one("k", "a", FilterOperator.IN) == {"must": [cond("k", "In", ["a"])]}
+
+    def test_contains_is_equal_because_an_array_field_matches_on_any_element(self):
+        # LlamaIndex: "metadata array contains value" -- `value in metadata_value`.
+        assert one("tags", "rag", FilterOperator.CONTAINS) == {"must": [cond("tags", "Equal", "rag")]}
+
+    def test_any_is_in(self):
+        assert one("tags", ["a", "b"], FilterOperator.ANY) == {"must": [cond("tags", "In", ["a", "b"])]}
+
+    def test_all_is_one_equal_per_value_all_of_which_must_hold(self):
+        # The old translation sent `In`, which matches a record carrying *either* tag.
+        assert one("tags", ["a", "b"], FilterOperator.ALL) == {
+            "must": [cond("tags", "Equal", "a"), cond("tags", "Equal", "b")]
         }
 
-    def test_ne_operator(self):
-        """Test NE (!=) operator conversion."""
-        filter = MetadataFilter(key="status", value="draft", operator=FilterOperator.NE)
-        result = _convert_single_filter(filter)
+    def test_all_with_no_values_is_refused(self):
+        with pytest.raises(ValueError, match="ALL"):
+            one("tags", [], FilterOperator.ALL)
 
-        assert result == {
-            "key": "status",
-            "operation": {
-                "type": "NotEqual",
-                "value": "draft"
-            }
+    def test_text_match_is_a_substring_test(self):
+        assert one("body", "machine", FilterOperator.TEXT_MATCH) == {
+            "must": [cond("body", "Contains", "machine")]
         }
 
-    def test_gt_operator(self):
-        """Test GT (>) operator conversion."""
-        filter = MetadataFilter(key="score", value=0.8, operator=FilterOperator.GT)
-        result = _convert_single_filter(filter)
+    def test_text_match_insensitive_has_no_server_form(self):
+        with pytest.raises(ValueError, match="TEXT_MATCH_INSENSITIVE"):
+            one("body", "machine", FilterOperator.TEXT_MATCH_INSENSITIVE)
 
-        assert result == {
-            "key": "score",
-            "operation": {
-                "type": "GreaterThan",
-                "value": 0.8
-            }
+    def test_is_empty(self):
+        # Used to be dropped, so the filter silently widened to every record.
+        assert one("k", None, FilterOperator.IS_EMPTY) == {"must": [cond("k", "IsEmpty")]}
+
+    def test_comparing_against_a_list_with_eq_is_refused(self):
+        with pytest.raises(ValueError, match="Equal"):
+            one("tags", ["a", "b"], FilterOperator.EQ)
+
+
+class TestConditions:
+    A = MetadataFilter(key="a", value=1, operator=FilterOperator.EQ)
+    B = MetadataFilter(key="b", value=2, operator=FilterOperator.EQ)
+    C = MetadataFilter(key="c", value=3, operator=FilterOperator.EQ)
+
+    def test_and(self):
+        f = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.AND)
+        assert convert_llamaindex_filters_to_dxmt(f) == {
+            "must": [cond("a", "Equal", 1), cond("b", "Equal", 2)]
         }
 
-    def test_gte_operator(self):
-        """Test GTE (>=) operator conversion."""
-        filter = MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE)
-        result = _convert_single_filter(filter)
+    def test_and_is_the_default(self):
+        f = MetadataFilters(filters=[self.A, self.B])
+        assert convert_llamaindex_filters_to_dxmt(f)["must"] == [
+            cond("a", "Equal", 1),
+            cond("b", "Equal", 2),
+        ]
 
-        assert result == {
-            "key": "year",
-            "operation": {
-                "type": "GreaterThanOrEqual",
-                "value": 2020
-            }
+    def test_or(self):
+        f = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.OR)
+        assert convert_llamaindex_filters_to_dxmt(f) == {
+            "should": [cond("a", "Equal", 1), cond("b", "Equal", 2)]
         }
 
-    def test_lt_operator(self):
-        """Test LT (<) operator conversion."""
-        filter = MetadataFilter(key="price", value=100.0, operator=FilterOperator.LT)
-        result = _convert_single_filter(filter)
-
-        assert result == {
-            "key": "price",
-            "operation": {
-                "type": "LessThan",
-                "value": 100.0
-            }
+    def test_not_means_none_of_these_match(self):
+        # LlamaIndex: "Match when none of the filters match" -- not (a or b).
+        f = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.NOT)
+        assert convert_llamaindex_filters_to_dxmt(f) == {
+            "must_not": [cond("a", "Equal", 1), cond("b", "Equal", 2)]
         }
 
-    def test_lte_operator(self):
-        """Test LTE (<=) operator conversion."""
-        filter = MetadataFilter(key="age", value=30, operator=FilterOperator.LTE)
-        result = _convert_single_filter(filter)
+    def test_empty_and_none(self):
+        assert convert_llamaindex_filters_to_dxmt(MetadataFilters(filters=[])) == {}
+        assert convert_llamaindex_filters_to_dxmt(None) == {}
 
-        assert result == {
-            "key": "age",
-            "operation": {
-                "type": "LessThanOrEqual",
-                "value": 30
-            }
-        }
-
-    def test_in_operator(self):
-        """Test IN operator conversion."""
-        filter = MetadataFilter(
-            key="category",
-            value=["AI", "ML", "DL"],
-            operator=FilterOperator.IN
-        )
-        result = _convert_single_filter(filter)
-
-        assert result == {
-            "key": "category",
-            "operation": {
-                "type": "In",
-                "value": ["AI", "ML", "DL"]
-            }
-        }
-
-    def test_nin_operator(self):
-        """Test NIN (not in) operator conversion."""
-        filter = MetadataFilter(
-            key="status",
-            value=["draft", "archived"],
-            operator=FilterOperator.NIN
-        )
-        result = _convert_single_filter(filter)
-
-        assert result == {
-            "key": "status",
-            "operation": {
-                "type": "NotIn",
-                "value": ["draft", "archived"]
-            }
-        }
-
-    def test_contains_operator(self):
-        """Test CONTAINS operator conversion."""
-        filter = MetadataFilter(key="title", value="python", operator=FilterOperator.CONTAINS)
-        result = _convert_single_filter(filter)
-
-        assert result == {
-            "key": "title",
-            "operation": {
-                "type": "Contains",
-                "value": "python"
-            }
-        }
-
-    def test_text_match_operator(self):
-        """Test TEXT_MATCH operator conversion."""
-        filter = MetadataFilter(key="content", value="machine learning", operator=FilterOperator.TEXT_MATCH)
-        result = _convert_single_filter(filter)
-
-        assert result == {
-            "key": "content",
-            "operation": {
-                "type": "Contains",
-                "value": "machine learning"
-            }
-        }
-
-
-class TestComplexFilterConversion:
-    """Tests for converting complex MetadataFilters to DXMT format."""
-
-    def test_single_filter(self):
-        """Test converting a single filter."""
-        filters = MetadataFilters(
+    def test_a_range_is_two_conditions_on_one_key(self):
+        f = MetadataFilters(
             filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ)
+                MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE),
+                MetadataFilter(key="year", value=2023, operator=FilterOperator.LTE),
             ]
         )
-
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        # Even one filter is wrapped. The server's `Filter` is `{must?, must_not?, should?}`
-        # (`src/types/record.rs`), and serde ignores unknown fields -- so an unwrapped
-        # `{"key": ..., "operation": ...}` does not fail, it deserializes to a filter with
-        # every list empty and silently returns unfiltered results.
-        assert result == {
-            "must": [
-                {
-                    "key": "category",
-                    "operation": {
-                        "type": "Equal",
-                        "value": "AI"
-                    }
-                }
-            ]
+        assert convert_llamaindex_filters_to_dxmt(f) == {
+            "must": [cond("year", "GreaterThanOrEqual", 2020), cond("year", "LessThanOrEqual", 2023)]
         }
 
-    def test_and_filters(self):
-        """Test converting multiple filters with AND condition."""
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ),
-                MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE),
-            ],
-            condition=FilterCondition.AND,
-        )
 
-        result = convert_llamaindex_filters_to_dxmt(filters)
+class TestNesting:
+    A = MetadataFilter(key="a", value=1, operator=FilterOperator.EQ)
+    B = MetadataFilter(key="b", value=2, operator=FilterOperator.EQ)
+    C = MetadataFilter(key="c", value=3, operator=FilterOperator.EQ)
+    D = MetadataFilter(key="d", value=4, operator=FilterOperator.EQ)
 
-        assert "must" in result
-        assert len(result["must"]) == 2
-        assert result["must"][0]["key"] == "category"
-        assert result["must"][1]["key"] == "year"
+    def test_and_of_and_flattens(self):
+        inner = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.AND)
+        outer = MetadataFilters(filters=[inner, self.C], condition=FilterCondition.AND)
+        assert convert_llamaindex_filters_to_dxmt(outer) == {
+            "must": [cond("a", "Equal", 1), cond("b", "Equal", 2), cond("c", "Equal", 3)]
+        }
 
-    def test_or_filters(self):
-        """Test converting multiple filters with OR condition."""
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ),
-                MetadataFilter(key="category", value="ML", operator=FilterOperator.EQ),
-            ],
-            condition=FilterCondition.OR,
-        )
+    def test_or_of_or_flattens(self):
+        inner = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.OR)
+        outer = MetadataFilters(filters=[inner, self.C], condition=FilterCondition.OR)
+        assert convert_llamaindex_filters_to_dxmt(outer) == {
+            "should": [cond("a", "Equal", 1), cond("b", "Equal", 2), cond("c", "Equal", 3)]
+        }
 
-        result = convert_llamaindex_filters_to_dxmt(filters)
+    def test_not_inside_and_is_must_not(self):
+        negated = MetadataFilters(filters=[self.B], condition=FilterCondition.NOT)
+        outer = MetadataFilters(filters=[self.A, negated], condition=FilterCondition.AND)
+        assert convert_llamaindex_filters_to_dxmt(outer) == {
+            "must": [cond("a", "Equal", 1)],
+            "must_not": [cond("b", "Equal", 2)],
+        }
 
-        assert "should" in result
-        assert len(result["should"]) == 2
+    def test_and_with_one_or_group_is_must_plus_should(self):
+        either = MetadataFilters(filters=[self.B, self.C], condition=FilterCondition.OR)
+        outer = MetadataFilters(filters=[self.A, either], condition=FilterCondition.AND)
+        assert convert_llamaindex_filters_to_dxmt(outer) == {
+            "must": [cond("a", "Equal", 1)],
+            "should": [cond("b", "Equal", 2), cond("c", "Equal", 3)],
+        }
 
-    def test_nested_filters(self):
-        """Test converting nested filters."""
-        # (category == "AI" AND year >= 2020) OR (category == "ML" AND year >= 2021)
-        inner_filters_1 = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ),
-                MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE),
-            ],
-            condition=FilterCondition.AND,
-        )
+    def test_or_of_and_groups_is_refused(self):
+        # (a and b) or (c and d): the old translation nested `{"must": [...]}` inside
+        # `should`, a shape the server rejects -- or, in the SDK's permissive days, read
+        # as something else entirely.
+        g1 = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.AND)
+        g2 = MetadataFilters(filters=[self.C, self.D], condition=FilterCondition.AND)
+        outer = MetadataFilters(filters=[g1, g2], condition=FilterCondition.OR)
+        with pytest.raises(ValueError, match="OR"):
+            convert_llamaindex_filters_to_dxmt(outer)
 
-        inner_filters_2 = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="ML", operator=FilterOperator.EQ),
-                MetadataFilter(key="year", value=2021, operator=FilterOperator.GTE),
-            ],
-            condition=FilterCondition.AND,
-        )
+    def test_and_of_two_or_groups_is_refused(self):
+        g1 = MetadataFilters(filters=[self.A, self.B], condition=FilterCondition.OR)
+        g2 = MetadataFilters(filters=[self.C, self.D], condition=FilterCondition.OR)
+        outer = MetadataFilters(filters=[g1, g2], condition=FilterCondition.AND)
+        with pytest.raises(ValueError, match="OR"):
+            convert_llamaindex_filters_to_dxmt(outer)
 
-        outer_filters = MetadataFilters(
-            filters=[inner_filters_1, inner_filters_2],
-            condition=FilterCondition.OR,
-        )
+    def test_not_of_an_all_is_refused(self):
+        # not (tags has a and tags has b) has no flat form; refused rather than guessed.
+        every = MetadataFilter(key="tags", value=["a", "b"], operator=FilterOperator.ALL)
+        outer = MetadataFilters(filters=[every], condition=FilterCondition.NOT)
+        with pytest.raises(ValueError, match="NOT"):
+            convert_llamaindex_filters_to_dxmt(outer)
 
-        result = convert_llamaindex_filters_to_dxmt(outer_filters)
-
-        assert "should" in result
-        assert len(result["should"]) == 2
-        assert "must" in result["should"][0]
-        assert "must" in result["should"][1]
-
-    def test_empty_filters(self):
-        """Test converting empty filters."""
-        filters = MetadataFilters(filters=[])
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        assert result == {}
-
-    def test_complex_and_chain(self):
-        """Test complex AND chain with multiple conditions."""
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ),
-                MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE),
-                MetadataFilter(key="score", value=0.8, operator=FilterOperator.GT),
-                MetadataFilter(key="status", value="published", operator=FilterOperator.EQ),
-            ],
-            condition=FilterCondition.AND,
-        )
-
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        assert "must" in result
-        assert len(result["must"]) == 4
-
-        # Verify all conditions are present
-        keys = [f["key"] for f in result["must"]]
-        assert "category" in keys
-        assert "year" in keys
-        assert "score" in keys
-        assert "status" in keys
-
-    def test_range_filter(self):
-        """Test range filter (between values)."""
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="year", value=2020, operator=FilterOperator.GTE),
-                MetadataFilter(key="year", value=2024, operator=FilterOperator.LTE),
-            ],
-            condition=FilterCondition.AND,
-        )
-
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        assert "must" in result
-        assert len(result["must"]) == 2
-        assert result["must"][0]["operation"]["type"] == "GreaterThanOrEqual"
-        assert result["must"][1]["operation"]["type"] == "LessThanOrEqual"
-
-    def test_in_filter_with_single_value(self):
-        """Test IN filter with single value (should be converted to list)."""
-        filter = MetadataFilter(key="category", value="AI", operator=FilterOperator.IN)
-        result = _convert_single_filter(filter)
-
-        # Single value should be wrapped in list for IN operator
-        assert result["operation"]["type"] == "In"
-        # Note: Current implementation doesn't auto-wrap, this documents current behavior
-
-    def test_complex_or_chain(self):
-        """Test complex OR chain."""
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ),
-                MetadataFilter(key="category", value="ML", operator=FilterOperator.EQ),
-                MetadataFilter(key="category", value="DL", operator=FilterOperator.EQ),
-            ],
-            condition=FilterCondition.OR,
-        )
-
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        assert "should" in result
-        assert len(result["should"]) == 3
-
-
-class TestFilterEdgeCases:
-    """Tests for edge cases in filter conversion."""
-
-    def test_filter_with_none_value(self):
-        """Test filter with None value."""
-        filter = MetadataFilter(key="optional_field", value=None, operator=FilterOperator.EQ)
-        result = _convert_single_filter(filter)
-
-        assert result["operation"]["value"] is None
-
-    def test_filter_with_boolean_value(self):
-        """Test filter with boolean value.
-
-        `MetadataFilter.value` is a pydantic union that does not admit `bool`, so the filter
-        is built with `model_construct` to skip validation. What is under test is our
-        converter, which passes the value through untouched -- and a payload really can hold
-        a boolean, so the conversion has to survive one.
-        """
-        filter = MetadataFilter.model_construct(
-            key="is_active", value=True, operator=FilterOperator.EQ
-        )
-        result = _convert_single_filter(filter)
-
-        assert result["operation"]["value"] is True
-
-    def test_filter_with_numeric_string(self):
-        """Test filter with numeric string value."""
-        filter = MetadataFilter(key="code", value="12345", operator=FilterOperator.EQ)
-        result = _convert_single_filter(filter)
-
-        assert result["operation"]["value"] == "12345"
-
-    def test_filter_with_empty_list(self):
-        """Test filter with empty list for IN operator."""
-        filter = MetadataFilter(key="categories", value=[], operator=FilterOperator.IN)
-        result = _convert_single_filter(filter)
-
-        assert result["operation"]["value"] == []
-
-    def test_default_condition_when_not_specified(self):
-        """Test that default condition is AND when not specified."""
-        # Create filters without explicit condition
-        filters = MetadataFilters(
-            filters=[
-                MetadataFilter(key="a", value=1, operator=FilterOperator.EQ),
-                MetadataFilter(key="b", value=2, operator=FilterOperator.EQ),
-            ]
-        )
-
-        result = convert_llamaindex_filters_to_dxmt(filters)
-
-        # Should default to AND (must)
-        assert "must" in result or len(result) == 1
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    def test_an_empty_nested_group_is_skipped(self):
+        outer = MetadataFilters(filters=[MetadataFilters(filters=[]), self.A])
+        assert convert_llamaindex_filters_to_dxmt(outer) == {"must": [cond("a", "Equal", 1)]}

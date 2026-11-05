@@ -1,7 +1,16 @@
 """Utility functions for DXMT vector store integration."""
 
-from typing import Dict, List, Any, Optional
-from llama_index.core.vector_stores.types import MetadataFilters, MetadataFilter, FilterOperator, FilterCondition
+import functools
+import operator
+from typing import Any, Dict, List, Optional
+
+from dxmt.filters import Field, Filter
+from llama_index.core.vector_stores.types import (
+    FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+)
 from llama_index.core.schema import BaseNode, TextNode
 from llama_index.core.vector_stores.utils import (
     node_to_metadata_dict,
@@ -10,195 +19,113 @@ from llama_index.core.vector_stores.utils import (
 
 
 def convert_llamaindex_filters_to_dxmt(
-    filters: MetadataFilters
+    filters: Optional[MetadataFilters],
 ) -> Dict[str, Any]:
-    """Convert LlamaIndex MetadataFilters to DXMT filter format.
+    """Translate LlamaIndex ``MetadataFilters`` into the server's filter shape.
 
-    LlamaIndex uses a structured filter format with operators like EQ, NE, GT, etc.
-    DXMT uses a nested dictionary format with operators like "==", "!=", ">", etc.
+    The server takes one shape: flat ``must`` / ``should`` / ``must_not`` lists of conditions,
+    meaning every ``must`` holds, at least one ``should`` holds, and no ``must_not`` holds. That
+    is not every boolean formula, so this translation is built on the SDK's ``Field`` builder,
+    which either produces that shape exactly or raises ``ValueError`` naming what it cannot
+    express. It never approximates: the translation this replaced turned ``ALL`` into ``IN``
+    (any value instead of every value), ``NOT`` into ``AND``, dropped ``IS_EMPTY`` on the floor
+    and nested a ``{"must": [...]}`` group inside a ``must`` list, each a query that ran and
+    returned the wrong records.
 
-    This function bridges the two formats, similar to how the LangChain integration
-    converts MongoDB-style filters.
+    Operators, with the semantics of ``llama_index.core.vector_stores.utils
+    .build_metadata_filter_fn`` as the reference:
 
-    Args:
-        filters: LlamaIndex MetadataFilters object.
+    * ``EQ`` ``NE`` ``GT`` ``GTE`` ``LT`` ``LTE`` ``IN`` ``NIN`` map one to one.
+    * ``CONTAINS`` ("metadata array contains value") is ``Equal``: on the server a field holding
+      an array matches when any element does.
+    * ``ANY`` is ``In`` for the same reason; ``ALL`` is one ``Equal`` per value, all of which
+      must hold, so it is only expressible under ``AND`` (or on its own).
+    * ``TEXT_MATCH`` (substring of a string field) is ``Contains``. ``TEXT_MATCH_INSENSITIVE``
+      has no server form and raises.
+    * ``IS_EMPTY`` is ``IsEmpty``: the field is absent, ``null`` or an empty array.
 
-    Returns:
-        DXMT filter dictionary.
+    Conditions: ``AND`` is ``&``, ``OR`` is ``|``, and ``NOT`` -- which in LlamaIndex means
+    "none of these filters match" -- is ``~(a | b | ...)``. Nested ``MetadataFilters`` are
+    composed the same way, so ``AND`` of ``AND``, ``OR`` of ``OR`` and ``NOT`` inside ``AND``
+    all work; ``(a AND b) OR c`` and ``(a OR b) AND (c OR d)`` raise.
 
-    Examples:
-        Single filter:
-        >>> from llama_index.core.vector_stores.types import MetadataFilters, MetadataFilter, FilterOperator
-        >>> filters = MetadataFilters(filters=[
-        ...     MetadataFilter(key="category", value="AI", operator=FilterOperator.EQ)
-        ... ])
-        >>> convert_llamaindex_filters_to_dxmt(filters)
-        {'must': [{'key': 'category', 'operation': {'type': 'Equal', 'value': 'AI'}}]}
+    One deviation from the reference: ``NIN`` on a record that lacks the field. LlamaIndex's
+    in-memory evaluator counts it a match; the server's ``NotIn`` does not (its ``NotEqual``
+    does). A record without the field is the rare case; the common one, a present value that
+    is not in the list, agrees.
 
-        Multiple filters with AND:
-        >>> filters = MetadataFilters(filters=[
-        ...     MetadataFilter(key="year", value=2022, operator=FilterOperator.GTE),
-        ...     MetadataFilter(key="rating", value=8.0, operator=FilterOperator.GT),
-        ... ], condition=FilterCondition.AND)
-        >>> result = convert_llamaindex_filters_to_dxmt(filters)
-        >>> result['must']  # Returns list of filter conditions
-        [...]
+    Returns ``{}`` for ``None`` or an empty filter set.
     """
-    if not filters.filters:
+    if filters is None or not filters.filters:
         return {}
+    return _filter_of(filters).to_dict()
 
-    # Convert individual filters
-    dxmt_filters = []
 
+def _filter_of(filters: MetadataFilters) -> Filter:
+    parts = []
     for f in filters.filters:
         if isinstance(f, MetadataFilters):
-            # Nested filters - recursively convert
-            nested = convert_llamaindex_filters_to_dxmt(f)
-            if nested:
-                dxmt_filters.append(nested)
-        elif isinstance(f, MetadataFilter):
-            # Single filter - convert to DXMT format
-            dxmt_filter = _convert_single_filter(f)
-            if dxmt_filter:
-                dxmt_filters.append(dxmt_filter)
-
-    # If no filters, return empty dict
-    if not dxmt_filters:
-        return {}
-
-    # Always wrap filters in must/should, even for single filter
-    # This ensures compatibility with DXMT SDK's filter processing
-    # LlamaIndex uses FilterCondition.AND or FilterCondition.OR
-    # DXMT uses "must" (AND) or "should" (OR) at the root level
-    condition = filters.condition if hasattr(filters, 'condition') else FilterCondition.AND
-
+            if f.filters:
+                parts.append(_filter_of(f))
+        else:
+            parts.append(_condition_of(f))
+    if not parts:
+        raise ValueError("a MetadataFilters group with nothing in it")
+    condition = filters.condition or FilterCondition.AND
     if condition == FilterCondition.AND:
-        return {"must": dxmt_filters}
-    elif condition == FilterCondition.OR:
-        return {"should": dxmt_filters}
-    else:
-        # Default to AND
-        return {"must": dxmt_filters}
+        return functools.reduce(operator.and_, parts)
+    if condition == FilterCondition.OR:
+        return functools.reduce(operator.or_, parts)
+    if condition == FilterCondition.NOT:
+        return ~functools.reduce(operator.or_, parts)
+    raise ValueError(f"unknown FilterCondition {condition!r}")
 
 
-def _convert_single_filter(filter: MetadataFilter) -> Optional[Dict[str, Any]]:
-    """Convert a single MetadataFilter to DXMT format.
+def _condition_of(f: MetadataFilter) -> Filter:
+    field = Field(f.key)
+    op, value = f.operator, f.value
+    if op == FilterOperator.EQ:
+        return field == value
+    if op == FilterOperator.NE:
+        return field != value
+    if op == FilterOperator.GT:
+        return field > value
+    if op == FilterOperator.GTE:
+        return field >= value
+    if op == FilterOperator.LT:
+        return field < value
+    if op == FilterOperator.LTE:
+        return field <= value
+    if op == FilterOperator.IN:
+        return field.is_in(_as_list(value))
+    if op == FilterOperator.NIN:
+        return field.not_in(_as_list(value))
+    if op == FilterOperator.CONTAINS:
+        return field == value
+    if op == FilterOperator.ANY:
+        return field.is_in(_as_list(value))
+    if op == FilterOperator.ALL:
+        values = _as_list(value)
+        if not values:
+            raise ValueError(f"ALL on {f.key!r} with no values matches nothing meaningful")
+        return functools.reduce(operator.and_, (field == v for v in values))
+    if op == FilterOperator.TEXT_MATCH:
+        return field.contains(str(value))
+    if op == FilterOperator.IS_EMPTY:
+        return field.is_empty()
+    if op == FilterOperator.TEXT_MATCH_INSENSITIVE:
+        raise ValueError(
+            f"TEXT_MATCH_INSENSITIVE on {f.key!r}: the server matches substrings case-sensitively "
+            "and has no case-insensitive form; use TEXT_MATCH, or a full-text query "
+            "(VectorStoreQueryMode.TEXT_SEARCH) on an indexed text field"
+        )
+    raise ValueError(f"unsupported filter operator {op!r} on {f.key!r}")
 
-    Args:
-        filter: Single MetadataFilter.
 
-    Returns:
-        DXMT filter dictionary or None if unsupported.
-    """
-    key = filter.key
-    value = filter.value
-    operator = filter.operator
-
-    # Map LlamaIndex operators to DXMT operation types
-    if operator == FilterOperator.EQ:
-        return {
-            "key": key,
-            "operation": {
-                "type": "Equal",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.NE:
-        return {
-            "key": key,
-            "operation": {
-                "type": "NotEqual",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.GT:
-        return {
-            "key": key,
-            "operation": {
-                "type": "GreaterThan",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.GTE:
-        return {
-            "key": key,
-            "operation": {
-                "type": "GreaterThanOrEqual",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.LT:
-        return {
-            "key": key,
-            "operation": {
-                "type": "LessThan",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.LTE:
-        return {
-            "key": key,
-            "operation": {
-                "type": "LessThanOrEqual",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.IN:
-        return {
-            "key": key,
-            "operation": {
-                "type": "In",
-                "value": value if isinstance(value, list) else [value]
-            }
-        }
-    elif operator == FilterOperator.NIN:
-        return {
-            "key": key,
-            "operation": {
-                "type": "NotIn",
-                "value": value if isinstance(value, list) else [value]
-            }
-        }
-    elif operator == FilterOperator.CONTAINS:
-        return {
-            "key": key,
-            "operation": {
-                "type": "Contains",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.TEXT_MATCH:
-        # Text match - use Contains as approximation
-        return {
-            "key": key,
-            "operation": {
-                "type": "Contains",
-                "value": value
-            }
-        }
-    elif operator == FilterOperator.ANY:
-        # ANY - at least one value matches
-        # For DXMT, use In operator
-        return {
-            "key": key,
-            "operation": {
-                "type": "In",
-                "value": value if isinstance(value, list) else [value]
-            }
-        }
-    elif operator == FilterOperator.ALL:
-        # ALL - all values must match
-        # This is more complex - for now, use In as approximation
-        return {
-            "key": key,
-            "operation": {
-                "type": "In",
-                "value": value if isinstance(value, list) else [value]
-            }
-        }
-    else:
-        # Unsupported operator - return None
-        return None
+def _as_list(value: Any) -> List[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
 
 
 def node_to_dxmt_record(

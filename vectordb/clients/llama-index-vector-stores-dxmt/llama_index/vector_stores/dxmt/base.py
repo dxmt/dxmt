@@ -20,8 +20,7 @@ try:
     from dxmt.exceptions import DXMTError
 except ImportError:
     raise ImportError(
-        "DXMT SDK is required for this vector store. "
-        "Install it with: pip install dxmt"
+        "the DXMT client is required for this vector store: pip install dxmt-python-sdk"
     )
 
 from .utils import (
@@ -289,55 +288,27 @@ class DXMTVectorStore(BasePydanticVectorStore):
         # TODO: Implement with async client when needed
         return self.add(nodes, **kwargs)
 
-    def _ids_matching(self, dxmt_filter: dict) -> List[str]:
-        """Every record id the filter selects.
+    def _delete_matching(self, dxmt_filter: dict) -> None:
+        """Delete every record the filter selects, in one request.
 
-        Three things this replaces, each of which was a defect in both callers:
-
-        **It reads the answer correctly.** The old code did `results.get("hits", [])` on the
-        return of `client.search`, which is a `list`. `query()` twenty lines below has the
-        comment "the DXMT SDK returns a list of hits directly, not a dict" -- the same file
-        knew. So `delete()` and `delete_nodes(filters=...)` raised
-        `AttributeError: 'list' object has no attribute 'get'` and deleted nothing, on every
-        call there has ever been. The unit tests mock the client, and a `MagicMock` does have
-        `.get()`; the integration tests cover `delete_nodes(node_ids=...)`, which takes the
-        other branch. Neither could see it.
-
-        **It scrolls instead of searching with a zero vector.** Selecting rows by filter is
-        not a nearest-neighbour question, and the old code faked one with `[0.0] * dimension`
-        -- a vector with no direction, which under this store's default cosine metric orders
-        the results arbitrarily. That did not matter while the whole match set came back, and
-        it mattered a great deal at the `k=10000` cap: past ten thousand rows the cap silently
-        decided *which* records were deleted, by an arbitrary ordering. `scroll` pages with a
-        cursor, so there is no cap and no vector.
-
-        **It does not swallow the error.** Both callers ended in `except DXMTError: pass`, so
-        a delete that failed for any reason at all reported success. A missing table is the
-        one case where doing nothing is right -- deleting from a table that is not there has
-        already achieved what the caller asked for -- and that case is now the only one caught.
+        One request rather than "scroll the ids, then send them back": a delete by filter is
+        what the server offers (`client.delete_records(filter=...)`), it is atomic with
+        respect to writes that land meanwhile, and it has no page cap to decide which rows go.
+        The one error not raised is a missing table: deleting from a table that is not there
+        has already achieved what the caller asked for.
         """
         try:
-            return [row["id"] for row in self.client.scroll(self.table_name, filter=dxmt_filter)]
+            self.client.delete_records(self.table_name, filter=dxmt_filter)
         except DXMTError as e:
             if "TABLE_NOT_FOUND" in str(e):
-                return []
+                return
             raise
 
     def delete(self, ref_doc_id: str, **delete_kwargs: Any) -> None:
-        """Delete nodes by ref_doc_id.
-
-        This method deletes all nodes that have the specified ref_doc_id
-        in their metadata.
-
-        Args:
-            ref_doc_id: Reference document ID to delete.
-            **delete_kwargs: Additional delete options.
-        """
-        # There is no delete-by-filter endpoint, so this selects the ids first and then
-        # deletes them.
-        ids = self._ids_matching({"ref_doc_id": ref_doc_id})
-        if ids:
-            self.client.delete_records(self.table_name, ids)
+        """Delete every node of one document (`ref_doc_id` in its metadata)."""
+        self._delete_matching(
+            {"must": [{"key": "ref_doc_id", "operation": {"type": "Equal", "value": ref_doc_id}}]}
+        )
 
     def delete_nodes(
         self,
@@ -345,21 +316,19 @@ class DXMTVectorStore(BasePydanticVectorStore):
         filters: Optional[MetadataFilters] = None,
         **delete_kwargs: Any,
     ) -> None:
-        """Delete nodes by IDs or filters.
+        """Delete nodes by id, or every node a filter matches.
 
         Args:
-            node_ids: Optional list of node IDs to delete.
-            filters: Optional metadata filters for selecting nodes to delete.
-            **delete_kwargs: Additional delete options.
+            node_ids: Node ids to delete.
+            filters: Metadata filters selecting the nodes to delete; see
+                `convert_llamaindex_filters_to_dxmt` for what can be expressed.
         """
         if node_ids is not None:
-            # Direct deletion by IDs
             self.client.delete_records(self.table_name, node_ids)
-
         elif filters is not None:
-            ids = self._ids_matching(convert_llamaindex_filters_to_dxmt(filters))
-            if ids:
-                self.client.delete_records(self.table_name, ids)
+            dxmt_filter = convert_llamaindex_filters_to_dxmt(filters)
+            if dxmt_filter:
+                self._delete_matching(dxmt_filter)
 
     def clear(self) -> None:
         """Clear all nodes from table.
@@ -559,41 +528,29 @@ class DXMTVectorStore(BasePydanticVectorStore):
         node_ids: Optional[List[str]] = None,
         filters: Optional[MetadataFilters] = None,
     ) -> List[BaseNode]:
-        """Get nodes by IDs or filters.
+        """Nodes by id, or every node a filter matches.
 
-        Args:
-            node_ids: Optional list of node IDs to retrieve.
-            filters: Optional metadata filters.
-
-        Returns:
-            List of matching nodes.
+        By filter this scrolls the table with a cursor: selecting rows is not a nearest-
+        neighbour question, and the search with a zero vector and `k=10000` it replaced
+        returned an arbitrary ten thousand of a larger match set, and `[]` on any error.
+        A missing table is the one error answered with `[]`; everything else raises.
         """
-        if node_ids is not None:
-            # Get by IDs directly
-            try:
+        try:
+            if node_ids is not None:
                 records = self.client.get_records(self.table_name, node_ids)
                 return [dxmt_hit_to_node(record) for record in records]
-            except DXMTError:
+            if filters is not None:
+                dxmt_filter = convert_llamaindex_filters_to_dxmt(filters) or None
+                return [
+                    dxmt_hit_to_node(row)
+                    for row in self.client.scroll(
+                        self.table_name, filter=dxmt_filter, with_vector=True
+                    )
+                ]
+        except DXMTError as e:
+            if "TABLE_NOT_FOUND" in str(e):
                 return []
-
-        elif filters is not None:
-            # Get by filter - use search with dummy vector
-            try:
-                dxmt_filter = convert_llamaindex_filters_to_dxmt(filters)
-                dummy_vector = [0.0] * (self.dimension or 1536)
-
-                results = self.client.search(
-                    self.table_name,
-                    vector=dummy_vector,
-                    k=10000,
-                    filter=dxmt_filter,
-                )
-
-                # Note: DXMT SDK returns a list of hits directly
-                return [dxmt_hit_to_node(hit) for hit in results]
-            except DXMTError:
-                return []
-
+            raise
         return []
 
     @classmethod

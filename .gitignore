@@ -66,4 +66,11 @@ CLAUDE.md
 logs/
 
 # Registry credentials: read by scripts, never committed
+
+.env.pypi
+.env.crate
 .env.*
+
+# Built client packages
+vectordb/clients/*/dist/
+

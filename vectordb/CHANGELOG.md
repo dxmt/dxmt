@@ -15,6 +15,45 @@ The `v0.2.0-*` tags in this repository are **not** releases -- they are measurem
 checkpoints from benchmarking runs, taken before anything was published. `v1.0.0` is the first
 release, and the first commit that was ever pushed anywhere.
 
+## [Unreleased]
+
+### Fixed
+
+- **LlamaIndex filters that returned the wrong rows.** `FilterOperator.ALL` was sent as
+  `In`, so a filter for records carrying *every* tag matched records carrying *any*;
+  `FilterCondition.NOT` fell back to `AND`; `IS_EMPTY` was dropped, widening the filter to
+  every record; a nested `MetadataFilters` produced a `{"must": [...]}` group inside a
+  `must` list, a shape the server does not take. The translation is now built on the SDK's
+  `Field` builder: `ALL` is one `Equal` per value, `NOT` is `must_not`, `IS_EMPTY` is
+  `IsEmpty`, `CONTAINS` is `Equal` (an array field matches on any element), `TEXT_MATCH` is
+  `Contains`, and a shape with no flat form -- `(a AND b) OR c`, `TEXT_MATCH_INSENSITIVE` --
+  raises `ValueError` naming it rather than returning an approximation.
+  `tests/test_integration.py::TestFilterSemanticsOnAServer` checks each against real rows.
+- **LlamaIndex `get_nodes(filters=)` capped at ten thousand rows** and answered `[]` on any
+  error. It scrolls the table with a cursor now, vectors included, and raises on anything
+  but a missing table. `delete(ref_doc_id)` and `delete_nodes(filters=)` are one
+  delete-by-filter request instead of a scroll followed by a delete by id.
+
+### Changed
+
+- **`llama-index-vector-stores-dxmt` is packaged the way LlamaIndex's own integrations
+  are**: hatchling, Python >= 3.10, `llama-index-core>=0.13,<0.15`, `[tool.llamahub]`
+  metadata, `py.typed`, and no `__init__.py` above `llama_index/vector_stores/dxmt/` --
+  the two namespace shims it shipped would have shadowed `llama-index-core`'s own
+  `llama_index` package in the same environment. Verified by installing the wheel beside
+  llama-index-core 0.14.25 in a clean virtualenv and running the suite from there.
+
+### Added
+
+- **`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI, `dxmt-js-sdk` is on
+  npm, `dxmt-client` is on crates.io** (1.6.0, 2026-11-05): `pip install
+  llama-index-vector-stores-dxmt`, `npm install dxmt-js-sdk` and `dxmt-client = "1.6"` are
+  enough. The LangChain package is still installed from a checkout.
+- **Recall measured on all of LongMemEval-S.** 470 questions, 231,606 turns: every answer
+  session among the top 10 turns for 0.796 of questions, one of them for 0.926. The
+  60-question sample in 1.5.0 had said 0.917; the full set is lower on multi-session (0.711),
+  temporal (0.654) and implicit-preference (0.567) questions.
+
 ## [1.6.0] - 2026-11-04
 
 Memory recall can use a reranker, and the container image goes to Docker Hub.

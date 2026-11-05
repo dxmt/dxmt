@@ -5,6 +5,9 @@ edition = "2021"
 description = "Rust client for DXMT, the open-source memory database for personal agents"
 license = "Apache-2.0"
 repository = "https://github.com/dxmt/dxmt"
+readme = "README.md"
+keywords = ["vector-database", "embeddings", "similarity-search", "client", "dxmt"]
+categories = ["database", "api-bindings"]
 
 # Its own package, not part of the server crate, for the same reason the Python and JavaScript
 # clients are their own packages: a client's dependencies have no business reaching the server
