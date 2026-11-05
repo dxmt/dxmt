@@ -15,8 +15,7 @@ from the repository by git, or from a local checkout by path:
 
 ```toml
 [dependencies]
-dxmt-client = { git = "https://github.com/dxmt/dxmt", package = "dxmt-client" }
-# or: dxmt-client = { path = "/path/to/dxmt/vectordb/clients/dxmt-rust-sdk" }
+dxmt-client = "1.6"   # crates.io; or { git = "https://github.com/dxmt/dxmt" } for the tree
 serde_json = "1"   # for json!, as below
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```

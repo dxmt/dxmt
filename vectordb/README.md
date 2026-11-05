@@ -838,9 +838,9 @@ All six live under `clients/`.
 The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI and
 MetaGPT. See `clients/dxmt-python-sdk/README.md`.
 
-`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI (since 1.6.0,
-2026-11-05); `langchain-dxmt`, the JavaScript and the Rust clients are not published yet.
-To install from a checkout instead (paths relative to `vectordb/`):
+`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI and `dxmt-client` is on
+crates.io (since 1.6.0, 2026-11-05); `langchain-dxmt` and the JavaScript client are not
+published yet. To install from a checkout instead (paths relative to `vectordb/`):
 
 ```bash
 pip install ./clients/dxmt-python-sdk
@@ -851,7 +851,7 @@ cd clients/dxmt-js-sdk && npm install && npm run build   # then `npm install <pa
 
 ```toml
 # Cargo.toml
-dxmt-client = { git = "https://github.com/dxmt/dxmt", package = "dxmt-client" }
+dxmt-client = "1.6"
 ```
 
 For Go, `go get github.com/dxmt/dxmt/vectordb/clients/dxmt-go-sdk@main` (the module lives in
