@@ -17,6 +17,7 @@ from llama_index.core.vector_stores.types import (
     MetadataFilters,
     MetadataFilter,
     FilterOperator,
+    FilterCondition,
 )
 from llama_index.vector_stores.dxmt import DXMTVectorStore
 
@@ -684,3 +685,102 @@ class TestServerSideModes:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-m", "integration"])
+
+
+class TestFilterSemanticsOnAServer:
+    """Each operator against real rows: the set of ids it returns, not the shape it sends.
+
+    `test_filters.py` pins the translation; this pins that the server means the same thing.
+    Every case here was wrong before 2026-11-05 -- `ALL` answered as `ANY`, `NOT` as `AND`,
+    `IS_EMPTY` dropped -- and the unit tests of the day asserted the wrong shapes faithfully.
+    """
+
+    ROWS = {
+        "both": {"tags": ["rag", "llm"], "lang": "en", "title": "Retrieval and generation"},
+        "rag": {"tags": ["rag"], "lang": "fr", "title": "Retrieval only"},
+        "llm": {"tags": ["llm"], "lang": "en", "title": "Generation only"},
+        "none": {"tags": [], "lang": "de", "title": "Neither"},
+        "bare": {"lang": "en", "title": "No tags field at all"},
+    }
+
+    @pytest.fixture
+    def rows(self, vector_store, embed_model):
+        nodes = []
+        for id_, metadata in self.ROWS.items():
+            node = TextNode(text=f"document {id_}", id_=id_, metadata=metadata)
+            node.embedding = embed_model.get_text_embedding(node.get_content())
+            nodes.append(node)
+        vector_store.add(nodes)
+        return vector_store
+
+    @staticmethod
+    def ids(store, *filters, condition=FilterCondition.AND):
+        got = store.get_nodes(filters=MetadataFilters(filters=list(filters), condition=condition))
+        return sorted(n.node_id for n in got)
+
+    def test_all_means_every_value(self, rows):
+        every = MetadataFilter(key="tags", value=["rag", "llm"], operator=FilterOperator.ALL)
+        assert self.ids(rows, every) == ["both"], "ALL used to be sent as IN, which also matched rag and llm"
+
+    def test_any_means_at_least_one(self, rows):
+        some = MetadataFilter(key="tags", value=["rag", "llm"], operator=FilterOperator.ANY)
+        assert self.ids(rows, some) == ["both", "llm", "rag"]
+
+    def test_contains_on_an_array(self, rows):
+        has = MetadataFilter(key="tags", value="rag", operator=FilterOperator.CONTAINS)
+        assert self.ids(rows, has) == ["both", "rag"]
+
+    def test_not_means_none_of_these(self, rows):
+        en = MetadataFilter(key="lang", value="en", operator=FilterOperator.EQ)
+        fr = MetadataFilter(key="lang", value="fr", operator=FilterOperator.EQ)
+        assert self.ids(rows, en, fr, condition=FilterCondition.NOT) == ["none"], (
+            "NOT used to fall back to AND, which can match nothing here"
+        )
+
+    def test_is_empty_is_absent_null_or_empty(self, rows):
+        empty = MetadataFilter(key="tags", value=None, operator=FilterOperator.IS_EMPTY)
+        assert self.ids(rows, empty) == ["bare", "none"], "IS_EMPTY used to be dropped: every row"
+
+    def test_text_match_is_a_substring(self, rows):
+        sub = MetadataFilter(key="title", value="only", operator=FilterOperator.TEXT_MATCH)
+        assert self.ids(rows, sub) == ["llm", "rag"]
+
+    def test_and_with_a_negated_group(self, rows):
+        en = MetadataFilter(key="lang", value="en", operator=FilterOperator.EQ)
+        has_llm = MetadataFilter(key="tags", value="llm", operator=FilterOperator.CONTAINS)
+        negated = MetadataFilters(filters=[has_llm], condition=FilterCondition.NOT)
+        got = rows.get_nodes(filters=MetadataFilters(filters=[en, negated]))
+        assert sorted(n.node_id for n in got) == ["bare"]
+
+    def test_a_shape_the_server_cannot_take_is_refused_not_approximated(self, rows):
+        g1 = MetadataFilters(filters=[
+            MetadataFilter(key="lang", value="en"), MetadataFilter(key="tags", value="rag", operator=FilterOperator.CONTAINS),
+        ])
+        g2 = MetadataFilters(filters=[MetadataFilter(key="lang", value="de")])
+        with pytest.raises(ValueError):
+            rows.query(VectorStoreQuery(
+                query_embedding=[0.1] * DIMENSION, similarity_top_k=5,
+                filters=MetadataFilters(filters=[g1, g2], condition=FilterCondition.OR),
+            ))
+
+    def test_get_nodes_by_filter_pages_past_one_batch_with_vectors(self, vector_store, embed_model):
+        # 250 rows across the default 100-row scroll page: the search it replaced capped at
+        # ten thousand, which no test could afford to reach; three pages prove the paging.
+        nodes = []
+        for i in range(250):
+            node = TextNode(text=f"row {i}", id_=f"r{i:03d}", metadata={"bucket": i % 2})
+            node.embedding = embed_model.get_text_embedding(node.get_content())
+            nodes.append(node)
+        vector_store.add(nodes)
+
+        got = vector_store.get_nodes(
+            filters=MetadataFilters(filters=[MetadataFilter(key="bucket", value=1)])
+        )
+        assert len(got) == 125
+        assert all(n.embedding and len(n.embedding) == DIMENSION for n in got)
+        assert all(n.metadata["bucket"] == 1 for n in got)
+
+        vector_store.delete_nodes(
+            filters=MetadataFilters(filters=[MetadataFilter(key="bucket", value=1)])
+        )
+        assert len(list(vector_store.client.scroll(vector_store.table_name))) == 125

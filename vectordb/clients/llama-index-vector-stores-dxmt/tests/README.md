@@ -34,10 +34,7 @@ This directory contains tests for the LlamaIndex DXMT Vector Store integration.
 ### Install Dependencies
 
 ```bash
-# Install package with dev dependencies
-poetry install --with dev
-
-# Or with pip
+# Install the package with its dev dependencies
 pip install -e ".[dev]"
 ```
 

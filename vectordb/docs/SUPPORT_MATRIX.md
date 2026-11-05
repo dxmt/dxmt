@@ -70,12 +70,12 @@ feature -- every capability below is in the HTTP API.
 | --- | --- | --- | --- | --- | --- | --- |
 | Tables: create, list, get, drop | yes | yes | yes | yes | via Python | via Python |
 | Records: insert, get, update, delete | yes | yes | yes | yes | yes | yes |
-| Search (filters, modes, `offset`, `mmr`) | yes | yes | search + filter | search + filter | search + MMR | search |
-| `count`, cursor `scroll`, bulk `upload` | yes | yes | — | — | — | — |
-| Sparse search, grouped search | yes | yes | — | — | — | — |
+| Search (filters, modes, `offset`, `mmr`) | yes | yes | search + filter | search + filter | search + MMR | search, filters, MMR |
+| `count`, cursor `scroll`, bulk `upload` | yes | yes | — | — | — | `get_nodes(filters=)` scrolls |
+| Sparse search, grouped search | yes | yes | — | — | — | sparse, with a `sparse_encoder` |
 | Payload index management | yes | yes | — | — | — | — |
 | Aliases, per-table export/import | yes | yes | — | — | — | — |
-| Full-text and hybrid search | yes | yes | — | — | — | — |
+| Full-text and hybrid search | yes | yes | — | — | `hybrid_search` | `TEXT_SEARCH`, `HYBRID` modes |
 | Documents (chunked long texts) | yes | yes | — | — | — | — |
 | Memory (`remember`, `recall`, `forget`, `list_memories`) | yes | yes | — | — | — | — |
 | DXQL (`POST /query`) | yes | — | — | — | — | — |

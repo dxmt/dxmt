@@ -45,12 +45,6 @@ Listed because the list above used to include them.
 pip install llama-index-vector-stores-dxmt
 ```
 
-Or with poetry:
-
-```bash
-poetry add llama-index-vector-stores-dxmt
-```
-
 Neither this package nor `dxmt-python-sdk` is on PyPI yet. Until the packages are published, install from source: the SDK first,
 because this package's dependency on `dxmt-python-sdk` would otherwise be looked up on PyPI and
 fail.
@@ -187,6 +181,17 @@ query = VectorStoreQuery(
 
 results = vector_store.query(query)
 ```
+
+Every operator means what `llama_index.core`'s own in-memory evaluator means by it. `ALL` on
+an array field is every value (`ANY` is at least one), `CONTAINS` is "the array holds this
+value", `TEXT_MATCH` is a case-sensitive substring of a string field, `IS_EMPTY` is absent,
+`null` or `[]`, and `FilterCondition.NOT` is "none of these match". Nested `MetadataFilters`
+work when the server has a flat form for them -- `AND` of `AND`, `OR` of `OR`, a `NOT` group
+inside an `AND` -- and raise `ValueError` naming the shape when it does not: `(a AND b) OR c`,
+`(a OR b) AND (c OR d)`, `TEXT_MATCH_INSENSITIVE`. Nothing is approximated; a filter either
+means what you wrote or is refused. `get_nodes(filters=)` and `delete_nodes(filters=)` take
+the same filters, the first scrolling the table with a cursor (no row cap) and the second as
+one delete-by-filter request.
 
 ### Advanced Configuration
 
@@ -346,8 +351,8 @@ See the [examples](./examples/) directory for more usage patterns:
 ### Running Tests
 
 ```bash
-# Install dev dependencies
-poetry install --with dev
+# Install with the dev dependencies
+pip install -e ".[dev]"
 
 # Run all tests
 pytest
