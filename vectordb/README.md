@@ -1,31 +1,16 @@
-# DXMT
+# DXMT manual
 
-### Memory Database for Personal Agents. Owned by you.
+This is the reference for the server and its API: every feature, how it is stored, what was
+measured and what is not supported yet. The short version -- what DXMT is, install, a
+ten-line quick start, the clients and integrations -- is the [repository README](../README.md).
 
-**The open-source memory database for personal agents.** Give every agent you use --
-Claude, Cursor, ChatGPT, your own scripts -- one persistent, portable memory of you and your
-work, on your machine, in one binary.
-
-DXMT is **D**ata → e**X**perience → **M**emory → **T**hinking: what you and your agents produce,
-what happened, what is worth keeping, and what an agent can reason over next time. Today DXMT
-does the first three -- it stores, remembers and recalls -- and is built so the fourth
-(consolidation and reflection over memories) can run inside it.
-
-- **Memory, not just vectors.** `remember` a fact, a preference, an event or an instruction;
-  `recall` it by meaning *and* by keyword; when something changes, the new memory
-  **supersedes** the old one, which is kept as history rather than overwritten; `forget` on
-  request. Every memory has a kind, tags, a source (which agent) and a time.
-- **Every agent, one memory.** MCP over stdio and over HTTP (`/mcp`), a REST API, and Python,
-  JavaScript, Rust and Go clients -- all reading and writing the same store. Several MCP
-  clients on one machine share it through one server automatically.
-- **Yours.** Local-first: data lives in `~/.dxmt`, embeddings come from a local model (ollama)
-  unless you choose otherwise, and everything can be listed, edited, exported and deleted.
-  Apache-2.0.
-- **A real database underneath.** Its own storage and indexes, not a layer over someone
-  else's: a write-ahead log with snapshots (`kill -9` loses nothing acknowledged), HNSW and
-  HNSW-PQ vector search, BM25 full-text with Chinese segmentation, hybrid fusion, payload
-  filters, backups, and -- when you outgrow one machine -- object-storage replication, read
-  replicas with automatic failover, and an experimental cluster mode.
+DXMT is the open-source memory database for personal agents, owned by you: `remember` /
+`recall` / `forget` that every agent on a machine shares over MCP, REST and four clients, with
+its own storage and indexes underneath -- a write-ahead log with snapshots, HNSW and HNSW-PQ
+vector search, BM25 full-text with Chinese segmentation, hybrid fusion, payload filters,
+server-side embedding and reranking, object-storage replication, read replicas and an
+experimental cluster mode. One data model, several protocols: REST under `/api/v1`, gRPC,
+MCP, DXQL, a read-only web console.
 
 ## Memory for your agents in five minutes
 

@@ -64,3 +64,6 @@ CLAUDE.md
 # Stray run output. `vectordb/.gitignore` has had this since the start; the repository root
 # did not, which is how an empty `logs/vectordb_bench.log` came to be committed here.
 logs/
+
+# Registry credentials: read by scripts, never committed
+.env.*

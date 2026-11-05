@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-10 -10 440 120" width="880" height="240" role="img" aria-label="DXMT">
+  <path d="M 0 0 L 58 0 L 84 26 L 84 74 L 58 100 L 0 100 Z M 24 24 L 50 24 L 60 34 L 60 66 L 50 76 L 24 76 Z" fill="#FFFFFF" fill-rule="evenodd"/>
+  <path d="M 100 0 L 128 0 L 192 100 L 164 100 Z" fill="#FFFFFF" fill-rule="nonzero"/>
+  <path d="M 164 0 L 192 0 L 128 100 L 100 100 Z" fill="#FFFFFF" fill-rule="nonzero"/>
+  <path d="M 208 0 L 232 0 L 260 46 L 288 0 L 312 0 L 312 100 L 288 100 L 288 38 L 260 80 L 232 38 L 232 100 L 208 100 Z" fill="#FFFFFF" fill-rule="nonzero"/>
+  <path d="M 328 0 L 420 0 L 420 24 L 386 24 L 386 100 L 362 100 L 362 24 L 328 24 Z" fill="#FFFFFF" fill-rule="nonzero"/>
+</svg>
