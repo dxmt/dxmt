@@ -4,11 +4,12 @@
   </a>
 </p>
 
-<h3 align="center">The open-source vector database in one binary.</h3>
+<h3 align="center">The open-source memory database for AI agents,<br>and the vector database underneath it. One binary.</h3>
 
 <p align="center">
-  Vector, full-text and hybrid search with metadata filters, a write-ahead log, server-side embedding,<br>
-  and a memory layer for AI agents. Written in Rust. Apache-2.0.
+  <code>remember</code> / <code>recall</code> / <code>forget</code> over MCP for Claude, Cursor and your own agents;<br>
+  vector, full-text and hybrid search with metadata filters, a write-ahead log and server-side embedding for everything else.<br>
+  Written in Rust. Apache-2.0.
 </p>
 
 <p align="center">
@@ -23,8 +24,8 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#clients-and-integrations">Clients &amp; integrations</a> ·
   <a href="#memory-for-ai-agents">Agent memory</a> ·
+  <a href="#clients-and-integrations">Clients &amp; integrations</a> ·
   <a href="#performance">Performance</a> ·
   <a href="vectordb/README.md">Manual</a> ·
   <a href="vectordb/docs/SUPPORT_MATRIX.md">What is supported</a>
@@ -36,12 +37,12 @@
 
 ## Why DXMT
 
+- **Memory, not just vectors.** An agent `remember`s a fact, a preference, an event or an instruction and `recall`s it later by meaning *and* keyword; a new fact **supersedes** an old one, which is kept as history; `forget` on request. Every agent on the machine shares the one store, over MCP or REST. Recall is measured on LoCoMo and LongMemEval, not asserted.
 - **One binary, no dependencies.** `vectordb serve` is the database, the REST and gRPC API, the MCP server and the web console. 22 MB.
 - **Search the way people actually search.** HNSW and HNSW-PQ vector search, BM25 full-text with Chinese word segmentation, and hybrid fusion of the two, with metadata filters and a payload index on every field.
 - **Text in, text out.** A table can name an embedding model (ollama, OpenAI, or anything that speaks the OpenAI `/embeddings` protocol) and then records and queries carry text, not vectors.
 - **Durable by default.** A write-ahead log with snapshots: `kill -9` loses nothing that was acknowledged. Backups, restore, and object-storage replication when one machine is not enough.
 - **Measured, not claimed.** recall@100 0.98 at 6,465 QPS on 1M vectors; 100M vectors in 45 GB. Every number below links to the run that produced it.
-- **Memory for agents, built in.** `remember`, `recall`, `forget` over MCP, so Claude, Cursor and your own agents share one memory on your machine.
 
 ## Quick start
 
@@ -75,6 +76,24 @@ db.search("kb", text="graph index", limit=2, filter=Field("lang") == "en")   # v
 
 Bring your own vectors instead: `create_table(name, dimension=768)`, insert records with `vector`, search with `vector`. The same API is `curl`-able under `/api/v1`, and the [manual](vectordb/README.md#quick-start) walks through tables, filters, documents, facets, geo and gRPC.
 
+## Memory for AI agents
+
+The same binary is an MCP server. One line gives an agent `remember`, `recall`, `forget` and `list_memories`, and every other agent on the machine sees the same memory:
+
+```bash
+claude mcp add dxmt -- vectordb mcp     # Claude Desktop and Cursor take the same command in their MCP config
+```
+
+The same memory is on REST and in every client:
+
+```python
+db.remember("Prefers answers in Chinese", kind="preference", source="me")
+db.remember("Moved to Berlin", kind="fact", supersedes=["mem-…"])     # the old fact stays as history
+db.recall("how should answers be written")                            # by meaning and by keyword
+```
+
+A memory has a kind, tags, a source and a time; recall is filtered by any of them. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%. The memory layer is the part of DXMT that says *what* to keep; the vector database below it is why recall is fast and durable.
+
 ## Clients and integrations
 
 | | Install | Use |
@@ -90,16 +109,6 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | mem0 | in `dxmt-python-sdk` | `from dxmt.mem0 import DXMTMemoryStore` |
 
 [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) says exactly which routes each client wraps; everything else is one raw request away, because every capability is in the HTTP API.
-
-## Memory for AI agents
-
-The same binary is an MCP server. One line gives an agent `remember`, `recall`, `forget` and `list_memories`, and every other agent on the machine sees the same memory:
-
-```bash
-claude mcp add dxmt -- vectordb mcp     # Claude Desktop and Cursor take the same command in their MCP config
-```
-
-A memory has a kind, tags, a source and a time; recall is by meaning *and* keyword; a new fact can **supersede** an old one, which is kept as history. Measured on [LoCoMo](vectordb/docs/SUPPORT_MATRIX.md) the turns holding the answer are in the top 10 of `recall` for 69% of questions, and on all 470 questions of LongMemEval-S every answer session is in the top 10 for 80%.
 
 ## Performance
 
