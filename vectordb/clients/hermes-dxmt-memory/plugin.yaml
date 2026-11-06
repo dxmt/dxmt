@@ -1,0 +1,16 @@
+name: dxmt
+version: 0.1.0
+description: "DXMT memory — recall by meaning and keyword from a DXMT server; facts extracted at session boundaries; supersede and forget by id."
+author: DXMT
+homepage: https://github.com/dxmt/hermes-dxmt-memory
+license: Apache-2.0
+requires_hermes: ">=0.22.0"
+requires_env: []
+optional_env:
+  - DXMT_URL
+  - DXMT_API_KEY
+hooks:
+  - on_pre_compress
+  - on_session_end
+  - on_memory_write
+  - on_session_switch
