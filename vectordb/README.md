@@ -820,7 +820,9 @@ All six live under `clients/`.
 | `clients/langchain-dxmt/`                     | LangChain vector store                   |
 | `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
-`langchain-dxmt`, `llama-index-vector-stores-dxmt` and `dxmt-haystack` are on PyPI. The
+`langchain-dxmt`, `llama-index-vector-stores-dxmt`, `dxmt-haystack`, `crewai-dxmt` and
+`agent-framework-dxmt` (Microsoft Agent Framework: vector store + memory context provider) are
+the framework packages. The
 Python SDK additionally ships integrations for LangGraph, mem0 and
 MetaGPT. See `clients/dxmt-python-sdk/README.md`.
 

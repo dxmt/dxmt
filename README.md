@@ -111,6 +111,7 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | Haystack | `pip install dxmt-haystack` | `from haystack_integrations.document_stores.dxmt import DXMTDocumentStore` |
 | mem0 | in `dxmt-python-sdk` | `from dxmt.mem0 import DXMTMemoryStore` |
 | CrewAI | `pip install crewai-dxmt` | `from crewai_dxmt import DXMTStorageBackend` (memory), `install()` |
+| Microsoft Agent Framework | `pip install agent-framework-dxmt` | `from agent_framework_dxmt import DXMTStore, DXMTContextProvider` |
 
 [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) says exactly which routes each client wraps; everything else is one raw request away, because every capability is in the HTTP API.
 

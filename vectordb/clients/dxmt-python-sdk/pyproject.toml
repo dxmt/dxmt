@@ -35,7 +35,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "httpx>=0.24.0",
+    # httpx 1.0 drops Client(base_url=...), which this client is built on.
+    "httpx>=0.24.0,<1",
 ]
 
 [project.optional-dependencies]
