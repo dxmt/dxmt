@@ -989,6 +989,50 @@ async fn an_evicted_table_comes_back_on_the_next_query() {
     assert_eq!(record.id, "b");
 }
 
+// Two queries arriving together at an evicted table both found it missing and both began
+// restoring it; the second one's create_table failed with TABLE_ALREADY_EXISTS, and a recall
+// on the memory API answered 409 after an hour idle. Every one of them must succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_queries_at_an_evicted_table_all_succeed() {
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    let config = storage_config_with_object_store(&shared);
+    let storage = std::sync::Arc::new(
+        IntelligentIndexedStorage::new_with_wal(&config, Some(tmp.path().join("wal")))
+            .await
+            .unwrap(),
+    );
+    storage
+        .create_table(table("t", 4, DistanceMetric::Euclidean))
+        .await
+        .unwrap();
+    storage
+        .insert_records("t", vec![record("a", vec![1.0, 0.0, 0.0, 0.0])])
+        .await
+        .unwrap();
+    storage.snapshot().await.unwrap();
+
+    for round in 0..20 {
+        storage.evict_table_for_test("t").await;
+        let queries: Vec<_> = (0..8)
+            .map(|_| {
+                let storage = storage.clone();
+                tokio::spawn(async move {
+                    storage
+                        .search("t", query(vec![1.0, 0.0, 0.0, 0.0], 1))
+                        .await
+                })
+            })
+            .collect();
+        for q in queries {
+            let hits = q.await.unwrap().unwrap_or_else(|e| {
+                panic!("round {round}: a query racing the rehydration failed: {e}")
+            });
+            assert_eq!(hits.hits.len(), 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn eviction_never_drops_writes_made_after_the_last_snapshot() {
     let tmp = TempDir::new().unwrap();

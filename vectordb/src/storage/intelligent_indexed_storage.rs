@@ -916,6 +916,15 @@ pub struct IntelligentIndexedStorage {
     /// other one had already probed the model and opened the full-text index, which failed
     /// on the winner's lock with a warning each (seven on a run of eight writers).
     first_use: tokio::sync::Mutex<()>,
+    /// Held while an evicted table is restored from its snapshot. Two queries arriving together
+    /// at an evicted table each found it missing and each began restoring it; the second one's
+    /// `create_table` failed with `TABLE_ALREADY_EXISTS`, which a caller saw as a 409 on a plain
+    /// search. Resident tables never take it.
+    rehydrating: tokio::sync::Mutex<()>,
+    /// Tables being restored right now. `restore_table` puts a table in the map before its
+    /// index is loaded, so a query that found it there mid-restore searched an empty table and
+    /// answered with nothing; while its name is here, `ensure_resident` waits for the restorer.
+    restoring: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Held for the whole of `create_table_inner`. Its "does it exist?" and its insert were
     /// two lock acquisitions with the row files opened between them, and opening them for a
     /// live create wipes whatever a same-named table left: two creates of one name both
@@ -2524,6 +2533,8 @@ impl IntelligentIndexedStorage {
             kb_table: crate::storage::knowledge_base::kb_table_name(),
             memory_table: crate::storage::knowledge_base::memory_table_name(),
             first_use: tokio::sync::Mutex::new(()),
+            rehydrating: tokio::sync::Mutex::new(()),
+            restoring: std::sync::Mutex::new(std::collections::HashSet::new()),
             creating: tokio::sync::Mutex::new(()),
             backup_failures: AtomicU64::new(0),
             snapshot_sequence: Arc::new(StdMutex::new(None)),
@@ -3922,10 +3933,14 @@ impl IntelligentIndexedStorage {
 
         self.tier_policy.record_access(table_name);
 
+        // The name goes into `restoring` before the table enters the map and leaves after its
+        // index is loaded, so checking the map first and the set second never sees a table
+        // half restored as resident.
         if self
             .read_tables("ensure_resident")
             .await
             .contains_key(table_name)
+            && !self.is_restoring(table_name)
         {
             // Resident tables sit in Warm so the policy's demote_to_cold rule applies to them;
             // it only demotes out of Warm.
@@ -3957,9 +3972,11 @@ impl IntelligentIndexedStorage {
         let stem = format!("t{}", i);
         let meta = read_snapshot_meta(&dir.join(format!("{}.meta", stem)))?;
 
-        // Two concurrent readers can both find the table missing and both start restoring. The
-        // second one finds it present by the time it takes the write lock, and restore_table's
-        // create_table would fail on the duplicate — so check again and let the loser bail.
+        // Two concurrent readers can both find the table missing and both start restoring;
+        // restore_table's create_table fails on the duplicate. One restorer at a time, and
+        // whoever waited finds the table back. Checking again without the lock was not enough:
+        // both checks could pass before either restore finished.
+        let _restoring = self.rehydrating.lock().await;
         if self
             .read_tables("ensure_resident")
             .await
@@ -3970,6 +3987,7 @@ impl IntelligentIndexedStorage {
 
         info!("Rehydrating evicted table '{}' from snapshot", table_name);
         let floor = meta.indexed_below;
+        let _marked = RestoringMark::new(&self.restoring, table_name);
         self.restore_table(&dir.join(format!("{}.idx", stem)), meta)
             .await?;
         // Nothing is replayed on this path, so every row the snapshot's graph may not reflect
@@ -3980,6 +3998,13 @@ impl IntelligentIndexedStorage {
         }
         self.tier_policy.set_current_tier(table_name, Tier::Warm);
         Ok(())
+    }
+
+    fn is_restoring(&self, table_name: &str) -> bool {
+        self.restoring
+            .lock()
+            .map(|set| set.contains(table_name))
+            .unwrap_or(false)
     }
 
     /// 把一份自洽的备份写到 `dest`。
@@ -14149,6 +14174,32 @@ impl Clone for PerformanceStats {
             p95_query_latency_ms: self.p95_query_latency_ms,
             avg_recall_rate: self.avg_recall_rate,
             insert_throughput: self.insert_throughput,
+        }
+    }
+}
+
+/// Marks a table as being restored for as long as it lives, error paths included.
+struct RestoringMark<'a> {
+    set: &'a std::sync::Mutex<std::collections::HashSet<String>>,
+    name: String,
+}
+
+impl<'a> RestoringMark<'a> {
+    fn new(set: &'a std::sync::Mutex<std::collections::HashSet<String>>, name: &str) -> Self {
+        if let Ok(mut s) = set.lock() {
+            s.insert(name.to_string());
+        }
+        Self {
+            set,
+            name: name.to_string(),
+        }
+    }
+}
+
+impl Drop for RestoringMark<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.set.lock() {
+            s.remove(&self.name);
         }
     }
 }
