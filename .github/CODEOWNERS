@@ -1,0 +1,5 @@
+# Review requests go to the maintainers in MAINTAINERS.md. Keep the two in step.
+*                       @eric-epsilla
+/vectordb/src/          @eric-epsilla
+/vectordb/clients/      @eric-epsilla
+/.github/               @eric-epsilla

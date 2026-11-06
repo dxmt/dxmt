@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/dxmt/dxmt/discussions
+    about: How-to questions, show and tell, and ideas that are not yet a feature request.
   - name: Security vulnerability
     url: https://github.com/dxmt/dxmt/security/advisories/new
     about: Report privately through a security advisory. Never in a public issue.

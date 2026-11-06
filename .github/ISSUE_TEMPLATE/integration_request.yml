@@ -1,0 +1,56 @@
+name: Integration request
+description: A framework, agent runtime or platform DXMT should plug into
+labels: ["integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The integrations that exist are listed in the README ("Clients and integrations") and,
+        with what each covers, in `vectordb/docs/SUPPORT_MATRIX.md`. If yours is there and does
+        not do what you need, a feature request or bug report is the better form.
+
+  - type: input
+    id: target
+    attributes:
+      label: Framework or platform
+      description: Its name and a link to its repository or docs.
+      placeholder: "e.g. LangGraph, Dify, n8n, AutoGen"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: role
+    attributes:
+      label: What DXMT would be there
+      options:
+        - Vector store / retriever
+        - Agent memory (remember and recall across sessions)
+        - Knowledge base backend
+        - MCP server
+        - Something else (say below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What you are building
+      description: What the integration would let you do that you cannot do today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extension-point
+    attributes:
+      label: Where it would plug in
+      description: >
+        If you know it: the interface, plugin type or config the framework offers (for example
+        LangChain's VectorStore, a memory provider ABC, an MCP client). Links help.
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help
+      options:
+        - label: I can test a pre-release against my setup
+        - label: I can contribute code for it

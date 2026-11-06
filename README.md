@@ -20,6 +20,7 @@
   <a href="https://crates.io/crates/dxmt-client"><img src="https://img.shields.io/crates/v/dxmt-client?label=crates.io" alt="crates.io"></a>
   <a href="https://hub.docker.com/r/dxmtai/dxmt"><img src="https://img.shields.io/docker/v/dxmtai/dxmt?label=docker" alt="Docker"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/dxmt/dxmt"><img src="https://api.scorecard.dev/projects/github.com/dxmt/dxmt/badge" alt="OpenSSF Scorecard"></a>
 </p>
 
 <p align="center">
@@ -146,6 +147,7 @@ Version 1.6. The compatibility promise covers the HTTP API under `/api/v1` and t
 | What each client covers, what is experimental | [`vectordb/docs/SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) |
 | Changes by version | [`vectordb/CHANGELOG.md`](vectordb/CHANGELOG.md) |
 | Building, testing, pull requests | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
+| Questions, help, response times | [Discussions](https://github.com/dxmt/dxmt/discussions) · [`SUPPORT.md`](SUPPORT.md) · [`MAINTAINERS.md`](MAINTAINERS.md) |
 
 ## License
 
