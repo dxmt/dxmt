@@ -45,6 +45,18 @@ release, and the first commit that was ever pushed anywhere.
   a live server. The copy in `dxmt-python-sdk` (`dxmt.crewai_storage`, `dxmt.crewai_tool`) is
   removed: it implemented an interface CrewAI deleted with its unified memory system.
 
+- **`agent-framework-dxmt`**, DXMT for Microsoft Agent Framework: `DXMTStore` / `DXMTCollection`
+  implement `BaseVectorStore` / `BaseVectorCollection` + `BaseVectorSearch` over a table, with
+  every portable filter operator translated exactly (or refused by name), `keyword_hybrid`
+  search on the server (the in-tree connectors declare vector search only), and server-side
+  embedding (`server_embedding="server"` or a model config); `DXMTContextProvider` recalls
+  memories before a run and remembers the exchange after it through DXMT's own memory API,
+  with the storage / retrieval scope split the mem0 provider uses, and `remember` /
+  `recall` / `forget` as methods. Settings and client ownership follow the framework's
+  `load_settings` convention (`DXMT_URL`, `DXMT_API_KEY`).
+- **The Python SDK pins `httpx<1`**: httpx 1.0 drops `Client(base_url=...)`, which the client is
+  built on; found when a pre-release resolver pulled 1.0.dev6.
+
 ### Fixed
 
 - **LangChain `delete` reported success on failure** (every exception caught, `False`

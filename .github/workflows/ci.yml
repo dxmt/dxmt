@@ -408,6 +408,14 @@ jobs:
           DXMT_HOST=127.0.0.1 DXMT_PORT=19999 pytest -q
         working-directory: vectordb/clients/crewai-dxmt
 
+      # Agent Framework: unit tests with a mocked client, then the vector store and context
+      # provider against the server (the memory round trip needs a model and is skipped here).
+      - name: Agent Framework integration tests
+        run: |
+          python -m pip install -e . pytest pytest-asyncio
+          DXMT_TEST_URL=http://127.0.0.1:19999 pytest -q
+        working-directory: vectordb/clients/agent-framework-dxmt
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -451,5 +459,6 @@ jobs:
           (cd clients/llama-index-vector-stores-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
           (cd clients/dxmt-haystack && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
           (cd clients/crewai-dxmt && DXMT_HOST=127.0.0.1 DXMT_PORT=19998 pytest -q)
+          (cd clients/agent-framework-dxmt && DXMT_TEST_URL=http://127.0.0.1:19998 DXMT_TEST_API_KEY="$DXMT_API_KEY" pytest -q)
           (cd clients/dxmt-js-sdk && DXMT_LIVE_URL=http://127.0.0.1:19998 npm test -- --run test/live.test.ts test/langchain-live.test.ts)
         working-directory: vectordb
