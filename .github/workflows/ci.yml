@@ -8,8 +8,20 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "vectordb/docs/**"
+      - "LICENSE"
+      - "NOTICE"
+      - ".gitignore"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "vectordb/docs/**"
+      - "LICENSE"
+      - "NOTICE"
+      - ".gitignore"
 
 # A new push to a pull request supersedes the run on its previous head; that run is cancelled
 # rather than left to finish an hour of work nobody will read. Runs on main are never
