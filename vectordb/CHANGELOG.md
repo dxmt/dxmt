@@ -36,6 +36,15 @@ release, and the first commit that was ever pushed anywhere.
   LangChain docs pages are proposed in langchain-ai/docs#7455, the Haystack catalog entry in
   deepset-ai/haystack-integrations#708.
 
+- **`crewai-dxmt`**, the CrewAI integration as its own package: `DXMTStorageBackend` implements
+  CrewAI's unified-memory `StorageBackend` protocol over one table (scope prefix, categories,
+  metadata and `older_than` all as server filters), `DXMTKnowledgeStorage` embeds on the server
+  or with a function, `DXMTVectorSearchTool` is a `BaseTool`, and `install()` registers the
+  memory and knowledge factories so `Crew(memory=True)` lands in DXMT with no code change. Its
+  tests drive CrewAI's real `Memory` engine (remember, recall, scopes, forget, update) against
+  a live server. The copy in `dxmt-python-sdk` (`dxmt.crewai_storage`, `dxmt.crewai_tool`) is
+  removed: it implemented an interface CrewAI deleted with its unified memory system.
+
 ### Fixed
 
 - **LangChain `delete` reported success on failure** (every exception caught, `False`

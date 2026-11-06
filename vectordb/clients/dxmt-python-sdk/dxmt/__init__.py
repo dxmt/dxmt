@@ -73,17 +73,9 @@ except ImportError:
 # lived here passed `dataframe=` to a Document that no longer has the field and invented a
 # vector for documents without one; it is gone rather than kept beside the real one.
 
-# Optional CrewAI integration (requires crewai package)
-try:
-    from .crewai_tool import DXMTVectorSearchTool, DXMTToolConfig
-    from .crewai_storage import DXMTStorage, DXMTStorageConfig
-    CREWAI_AVAILABLE = True
-except ImportError:
-    CREWAI_AVAILABLE = False
-    DXMTVectorSearchTool = None  # type: ignore
-    DXMTToolConfig = None  # type: ignore
-    DXMTStorage = None  # type: ignore
-    DXMTStorageConfig = None  # type: ignore
+# The CrewAI integration is its own package since 1.7: `pip install crewai-dxmt`. The copy
+# that lived here (`dxmt.crewai_storage`) implemented `crewai.memory.storage.interface.Storage`,
+# which CrewAI removed with its unified memory system, so it had been a stub for months.
 
 # Optional MetaGPT/LlamaIndex integration (requires llama-index package)
 try:
@@ -140,11 +132,6 @@ __all__ = [
     "DXMTLangGraphStore",
     # mem0 integration (optional)
     "DXMTMemoryStore",
-    # CrewAI integration (optional)
-    "DXMTVectorSearchTool",
-    "DXMTToolConfig",
-    "DXMTStorage",
-    "DXMTStorageConfig",
     # MetaGPT/LlamaIndex integration (optional)
     "DXMTLlamaIndexVectorStore",
     "DXMTRetriever",

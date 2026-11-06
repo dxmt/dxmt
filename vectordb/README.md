@@ -821,7 +821,7 @@ All six live under `clients/`.
 | `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
 `langchain-dxmt`, `llama-index-vector-stores-dxmt` and `dxmt-haystack` are on PyPI. The
-Python SDK additionally ships integrations for LangGraph, mem0, CrewAI and
+Python SDK additionally ships integrations for LangGraph, mem0 and
 MetaGPT. See `clients/dxmt-python-sdk/README.md`.
 
 Every package is published (1.6.0, 2026-11-05): `dxmt-python-sdk`, `langchain-dxmt`,
