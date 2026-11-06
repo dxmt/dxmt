@@ -70,27 +70,28 @@ pip install langchain-dxmt
 
 This will automatically install [`dxmt-python-sdk`](https://github.com/dxmt/dxmt/tree/main/vectordb/clients/dxmt-python-sdk) as a dependency.
 
-`dxmt-python-sdk` is on PyPI since 1.6.0 (2026-11-05); this package is not published yet.
-Install it from a checkout, the SDK first so the dependency resolves from the same tree:
+To work from a checkout instead, install the SDK first so the dependency resolves from the
+same tree:
 
 ```bash
-# from a checkout of the repository
 pip install ./vectordb/clients/dxmt-python-sdk
-pip install ./vectordb/clients/langchain-dxmt
+pip install -e ./vectordb/clients/langchain-dxmt
 ```
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - DXMT VectorDB server (running locally or remotely)
-- OpenAI API key (or other embedding provider)
+- An embedding model: either a LangChain `Embeddings` (OpenAI, Ollama, HuggingFace, ...) in
+  your process, or one configured on the server — see
+  [Server-side embedding](#server-side-embedding)
 
 ### Using dxmt-python-sdk Directly
 
 If you don't need LangChain integration, you can use the SDK directly:
 
 ```bash
-pip install dxmt-python-sdk   # until published: pip install ./vectordb/clients/dxmt-python-sdk
+pip install dxmt-python-sdk
 ```
 
 ```python
@@ -131,6 +132,38 @@ for doc in results:
     print(f"Metadata: {doc.metadata}")
 ```
 
+### Server-side embedding
+
+Pass `embedding=None` and the server does the embedding: texts go up as text, queries go up
+as text, and the table's own model turns both into vectors. Nothing in your process needs a
+model or a key.
+
+```python
+from langchain_dxmt import DXMTVectorDB
+
+store = DXMTVectorDB(
+    table_name="my_documents",
+    embedding=None,
+    server_embedding={"model": "text-embedding-3-small"},   # the model a new table uses
+)
+store.add_texts(["Document 1 content", "Document 2 content"])
+docs = store.similarity_search("query text", k=3)
+```
+
+`server_embedding` is the table's model, passed through to the server's `create_table` as
+`embedding`: `{"model": ...}` plus an optional `base_url` for anything else that speaks the
+OpenAI `/embeddings` protocol (`{"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1"}`).
+The API key is read from the server's environment (`OPENAI_API_KEY` by default), never sent
+from here. `dimension` is not needed — the server asks the model how wide its vectors are.
+
+An existing table that already names a model needs neither argument:
+`DXMTVectorDB.from_existing_table("my_documents")`. With no `embedding`, no `server_embedding`
+and no existing table the constructor raises, saying which to pass.
+
+All of the search methods work in this mode — `similarity_search`, `_with_score`,
+`_with_relevance_scores`, `max_marginal_relevance_search`, `hybrid_search` and the async
+forms. The `*_by_vector` methods still take a vector you computed yourself.
+
 ### Authentication
 
 A server started with `DXMT_API_KEY` answers 401 to everything but its health probes until the key is sent. It goes out as the `api-key` header; send it over TLS, or it is readable at every hop.
@@ -154,9 +187,11 @@ Ignored when you pass `client=` — configure that client instead.
   async client, so concurrent calls are actually concurrent. Measured: twenty concurrent
   searches take 1.0× the time of one, and the event loop keeps running during a query.
 - **Batch inserts**, sized by `batch_size`.
-- **Full-text and hybrid search** — needs a server built with `--features text-bm25`, which
-  is **not** the default. Without it these raise `FEATURE_DISABLED` rather than silently
-  returning the vector half.
+- **Full-text and hybrid search** — needs a server built with the `text-bm25` feature, which
+  is in the default build since 2026-10-02. Without it these raise `FEATURE_DISABLED` rather
+  than silently returning the vector half.
+- **Server-side embedding** — `embedding=None`; see
+  [Server-side embedding](#server-side-embedding).
 
 ### What this integration does not do
 

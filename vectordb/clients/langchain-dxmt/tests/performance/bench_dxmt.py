@@ -6,17 +6,25 @@ Run benchmarks with:
 Prerequisites:
 - DXMT server running on localhost:9999
 - OpenAI API key set in environment
+- `pip install langchain-openai numpy` -- neither is a dependency of this package
 """
 
 import os
+import sys
 import time
 from typing import Any
 
-import numpy as np
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 
 from langchain_dxmt import DXMTVectorDB
+
+# Imported here rather than at the top so that a checkout without them explains itself
+# instead of failing on an `import` line.
+try:
+    import numpy as np
+    from langchain_openai import OpenAIEmbeddings
+except ImportError as e:
+    sys.exit(f"{e}. This benchmark needs: pip install langchain-openai numpy")
 
 
 # Configuration

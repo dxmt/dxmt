@@ -93,9 +93,16 @@ class DXMTVectorDB(VectorStore):
         table_name:
             Name of the table (collection).
         embedding:
-            Embedding function to use.
+            Embedding function to use. ``None`` means the server embeds: texts go up as
+            ``text`` and queries are embedded with the table's own model.
         dimension:
-            Vector dimension (required for table creation).
+            Vector dimension (required for table creation, unless the server's model
+            supplies it through ``server_embedding``).
+        server_embedding:
+            The model a new table embeds with, e.g. ``{"model": "text-embedding-3-small"}``
+            or ``{"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1"}``. Passed
+            to the server's ``create_table`` as ``embedding``; the API key is read from the
+            server's environment, never sent from here.
 
     Key init args — client params:
         client:
@@ -127,6 +134,17 @@ class DXMTVectorDB(VectorStore):
             host="localhost",
             port=9999,
         )
+        ```
+
+    Server-side embedding (no embedding function in the process):
+        ```python
+        vector_store = DXMTVectorDB(
+            table_name="my_documents",
+            embedding=None,
+            server_embedding={"model": "text-embedding-3-small"},
+        )
+        vector_store.add_texts(["foo", "bar"])          # sent as text, embedded there
+        vector_store.similarity_search("query text")    # embedded with the same model
         ```
 
     Add Documents:
@@ -224,13 +242,26 @@ class DXMTVectorDB(VectorStore):
         text_fields: Optional[list[dict[str, Any]]] = None,
         relevance_score_fn: Optional[Callable[[float], float]] = None,
         create_table_if_not_exists: bool = True,
+        server_embedding: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize DXMT VectorDB.
 
         Args:
             table_name: Name of the table. Default is 'langchain'.
-            embedding: Embedding function. Required for adding/searching documents.
-            dimension: Vector dimension. Required if create_table_if_not_exists is True.
+            embedding: Embedding function. ``None`` means the server embeds: ``add_texts``
+                sends the text and the search methods send the query, and the table's own
+                model turns both into vectors. The table then has to name a model -- either
+                it already exists with one, or ``server_embedding`` says which to create it
+                with. When both ``embedding`` and ``server_embedding`` are given the vectors
+                are computed here and ``server_embedding`` only shapes the new table.
+            dimension: Vector dimension. Required to create a table, unless
+                ``server_embedding`` is given: the server then asks the model how wide its
+                vectors are.
+            server_embedding: Server-side embedding for a table this constructor creates,
+                e.g. ``{"model": "text-embedding-3-small"}`` or
+                ``{"model": "BAAI/bge-m3", "base_url": "http://10.0.0.7:8080/v1"}``.
+                Passed through to the server's ``create_table`` as ``embedding``. Ignored
+                when the table already exists.
             client: DXMT client instance. If not provided, creates new client.
             host: DXMT server hostname. Default is 'localhost'.
             port: DXMT server port. Default is 9999.
@@ -245,9 +276,18 @@ class DXMTVectorDB(VectorStore):
             relevance_score_fn: Custom relevance score function.
             create_table_if_not_exists: Whether to create table if it doesn't exist.
         """
-        # Validate parameters
-        if create_table_if_not_exists and dimension is None:
-            msg = "dimension must be provided when create_table_if_not_exists is True"
+        # Validate parameters. A table created for a server-side model gets its width from
+        # the model, so `dimension` is only required when this process computes the vectors.
+        if (
+            create_table_if_not_exists
+            and dimension is None
+            and embedding is not None
+            and server_embedding is None
+        ):
+            msg = (
+                "dimension must be provided when create_table_if_not_exists is True "
+                "(or pass server_embedding= and let the server's model decide it)"
+            )
             raise ValueError(msg)
 
         # Initialize client
@@ -293,6 +333,7 @@ class DXMTVectorDB(VectorStore):
         self._distance_metric = metric
         self._enable_full_text_search = enable_full_text_search
         self._text_fields = text_fields
+        self._server_embedding = server_embedding
         self.override_relevance_score_fn = relevance_score_fn
 
         # Create or verify table
@@ -309,8 +350,6 @@ class DXMTVectorDB(VectorStore):
             # re-raised as itself.
             try:
                 table_info = self._client.get_table(table_name)
-                table_data = table_info.get("data", {}).get("table", {})
-                self._dimension = table_data.get("dimension")
             except DXMTConnectionError:
                 raise
             except DXMTError as e:
@@ -318,38 +357,87 @@ class DXMTVectorDB(VectorStore):
                     raise
                 msg = f"Table {table_name} does not exist: {e}"
                 raise ValueError(msg) from e
+            self.__adopt_table(table_info)
+
+    def __adopt_table(self, table: dict[str, Any]) -> None:
+        """Take the dimension and metric from a table that already exists.
+
+        `get_table` returns the table dict itself. This used to read
+        `table_info["data"]["table"]`, the wire envelope the SDK had already unwrapped, so
+        `_dimension` was `None` for every store opened on an existing table.
+
+        The metric is the table's, not the argument's: the score the server returns is
+        computed with the table's metric, and `_select_relevance_score_fn` has to know which
+        one that was. A store opened with the default `cosine` on a euclidean table would
+        otherwise normalise the wrong way round.
+        """
+        dimension = table.get("dimension")
+        if dimension is not None:
+            self._dimension = dimension
+        metric = table.get("distance_metric")
+        if isinstance(metric, str):
+            metric = _METRIC_ALIASES.get(metric.strip().lower(), metric.strip().lower())
+            if metric in _METRICS:
+                if metric != self._distance_metric:
+                    logger.info(
+                        "Table %s uses distance_metric %r; using it over %r",
+                        self._table_name,
+                        metric,
+                        self._distance_metric,
+                    )
+                self._distance_metric = metric
 
     def __ensure_table(self) -> None:
         """Ensure table exists or create it."""
         try:
-            self._client.get_table(self._table_name)
-            logger.info("Table %s already exists", self._table_name)
+            table = self._client.get_table(self._table_name)
         except Exception:
-            # Table doesn't exist, create it
-            logger.info("Creating table %s", self._table_name)
+            table = None
 
-            # If full-text search is enabled but no text_fields configured,
-            # use default configuration to index the 'text' field in payload
-            text_fields = self._text_fields
-            if self._enable_full_text_search and text_fields is None:
-                text_fields = [
-                    {
-                        "name": "text",
-                        "source": {"metadata_field": "text"},
-                        "analyzer": "standard",
-                        "boost": 1.0,
-                    }
-                ]
-                logger.info("Using default text_fields configuration for full-text search")
+        if table is not None:
+            logger.info("Table %s already exists", self._table_name)
+            self.__adopt_table(table)
+            return
 
-            self._client.create_table(
-                name=self._table_name,
-                dimension=self._dimension,  # type: ignore[arg-type]
-                distance_metric=self._distance_metric,
-                index_type=self._index_type,
-                enable_full_text_search=self._enable_full_text_search,
-                text_fields=text_fields,
+        # Table doesn't exist, create it. Without an embedding function the server has to
+        # embed, and it can only do that for a table that names a model -- which, for a
+        # table that does not exist yet, is `server_embedding`.
+        if self._embedding is None and self._server_embedding is None:
+            msg = (
+                f"Table {self._table_name!r} does not exist and there is nothing to embed "
+                "with. Pass embedding= (a LangChain Embeddings) to compute vectors here, or "
+                'server_embedding= (for example {"model": "text-embedding-3-small"}) to '
+                "create the table with a server-side model."
             )
+            raise ValueError(msg)
+        logger.info("Creating table %s", self._table_name)
+
+        # If full-text search is enabled but no text_fields configured,
+        # use default configuration to index the 'text' field in payload
+        text_fields = self._text_fields
+        if self._enable_full_text_search and text_fields is None:
+            text_fields = [
+                {
+                    "name": "text",
+                    "source": {"metadata_field": "text"},
+                    "analyzer": "standard",
+                    "boost": 1.0,
+                }
+            ]
+            logger.info("Using default text_fields configuration for full-text search")
+
+        self._client.create_table(
+            name=self._table_name,
+            dimension=self._dimension,
+            distance_metric=self._distance_metric,
+            index_type=self._index_type,
+            enable_full_text_search=self._enable_full_text_search,
+            text_fields=text_fields,
+            embedding=self._server_embedding,
+        )
+        if self._dimension is None:
+            # The model decided the width; read it back so `_dimension` means something.
+            self.__adopt_table(self._client.get_table(self._table_name))
 
     @property
     def embeddings(self) -> Optional[Embeddings]:
@@ -375,69 +463,18 @@ class DXMTVectorDB(VectorStore):
         Returns:
             List of IDs of added texts.
         """
-        if self._embedding is None:
-            msg = "embedding function is required for add_texts"
-            raise ValueError(msg)
-
-        # Convert texts to list
-        texts_: list[str] = list(texts) if not isinstance(texts, list) else texts
-
-        # Nothing to add is not an error. LangChain's contract is that adding no texts
-        # returns `[]`, and any caller that filters or pages its input reaches that case on
-        # ordinary data. Without this the request goes out and the server refuses it with
-        # `VALIDATION_FAILED: Batch cannot be empty` -- correct of the server, and wrong
-        # here: the empty batch should never have been sent.
+        texts_, metadatas_, ids_ = self._check_texts(texts, metadatas, ids)
         if not texts_:
             return []
 
-        # Validate metadatas
-        if metadatas and len(metadatas) != len(texts_):
-            msg = (
-                f"Number of metadatas ({len(metadatas)}) must match "
-                f"number of texts ({len(texts_)})"
-            )
-            raise ValueError(msg)
-
-        # Generate IDs if not provided
-        if ids is None:
-            ids = [str(uuid.uuid4()) for _ in texts_]
-        else:
-            # Fill in missing IDs
-            ids = [id_ if id_ is not None else str(uuid.uuid4()) for id_ in ids]
-
-        # Validate IDs count
-        if len(ids) != len(texts_):
-            msg = (
-                f"Number of IDs ({len(ids)}) must match number of texts ({len(texts_)})"
-            )
-            raise ValueError(msg)
-
-        # Embed texts
-        embeddings = self._embedding.embed_documents(texts_)
-
-        # Prepare records
-        metadatas_ = metadatas or [{} for _ in texts_]
-        records = [
-            {
-                "id": id_,
-                "vector": embedding,
-                "payload": {  # DXMT server expects 'payload' not 'metadata'
-                    **metadata,
-                    "text": text,  # Store text in payload for retrieval
-                },
-            }
-            for id_, text, embedding, metadata in zip(
-                ids, texts_, embeddings, metadatas_
-            )
-        ]
-
-        # Insert records
+        embeddings = (
+            None if self._embedding is None else self._embedding.embed_documents(texts_)
+        )
         self._client.insert_records(
             table_name=self._table_name,
-            records=records,
+            records=self._build_records(texts_, metadatas_, ids_, embeddings),
         )
-
-        return ids
+        return ids_
 
     async def aadd_texts(
         self,
@@ -448,11 +485,31 @@ class DXMTVectorDB(VectorStore):
         **kwargs: Any,
     ) -> list[str]:
         """Async add texts to the vector store."""
-        if self._embedding is None:
-            msg = "embedding function is required for aadd_texts"
-            raise ValueError(msg)
+        texts_, metadatas_, ids_ = self._check_texts(texts, metadatas, ids)
+        if not texts_:
+            return []
 
-        # Convert texts to list
+        embeddings = (
+            None
+            if self._embedding is None
+            else await self._embedding.aembed_documents(texts_)
+        )
+        await self._client.ainsert_records(
+            table_name=self._table_name,
+            records=self._build_records(texts_, metadatas_, ids_, embeddings),
+        )
+        return ids_
+
+    @staticmethod
+    def _check_texts(
+        texts: Iterable[str],
+        metadatas: Optional[list[dict]],
+        ids: Optional[list[str]],
+    ) -> tuple[list[str], list[dict], list[str]]:
+        """The argument checks `add_texts` and `aadd_texts` share.
+
+        Returns the texts as a list, one metadata dict per text, and one id per text.
+        """
         texts_: list[str] = list(texts) if not isinstance(texts, list) else texts
 
         # Nothing to add is not an error. LangChain's contract is that adding no texts
@@ -461,9 +518,8 @@ class DXMTVectorDB(VectorStore):
         # `VALIDATION_FAILED: Batch cannot be empty` -- correct of the server, and wrong
         # here: the empty batch should never have been sent.
         if not texts_:
-            return []
+            return [], [], []
 
-        # Validate metadatas
         if metadatas and len(metadatas) != len(texts_):
             msg = (
                 f"Number of metadatas ({len(metadatas)}) must match "
@@ -471,46 +527,47 @@ class DXMTVectorDB(VectorStore):
             )
             raise ValueError(msg)
 
-        # Generate IDs if not provided
         if ids is None:
-            ids = [str(uuid.uuid4()) for _ in texts_]
+            ids_ = [str(uuid.uuid4()) for _ in texts_]
         else:
             # Fill in missing IDs
-            ids = [id_ if id_ is not None else str(uuid.uuid4()) for id_ in ids]
+            ids_ = [id_ if id_ is not None else str(uuid.uuid4()) for id_ in ids]
 
-        # Validate IDs count
-        if len(ids) != len(texts_):
+        if len(ids_) != len(texts_):
             msg = (
-                f"Number of IDs ({len(ids)}) must match number of texts ({len(texts_)})"
+                f"Number of IDs ({len(ids_)}) must match number of texts ({len(texts_)})"
             )
             raise ValueError(msg)
 
-        # Embed texts (async)
-        embeddings = await self._embedding.aembed_documents(texts_)
+        return texts_, metadatas or [{} for _ in texts_], ids_
 
-        # Prepare records
-        metadatas_ = metadatas or [{} for _ in texts_]
-        records = [
-            {
-                "id": id_,
-                "vector": embedding,
-                "payload": {  # DXMT server expects 'payload' not 'metadata'
-                    **metadata,
-                    "text": text,
-                },
-            }
-            for id_, text, embedding, metadata in zip(
-                ids, texts_, embeddings, metadatas_
-            )
-        ]
+    @staticmethod
+    def _build_records(
+        texts: list[str],
+        metadatas: list[dict],
+        ids: list[str],
+        embeddings: Optional[list[list[float]]],
+    ) -> list[dict[str, Any]]:
+        """One record per text.
 
-        # Insert records (async)
-        await self._client.ainsert_records(
-            table_name=self._table_name,
-            records=records,
-        )
-
-        return ids
+        With vectors computed here each record carries `vector`. Without, it carries `text`
+        and no vector, which the server embeds with the table's model. The text goes into
+        the payload either way -- that is where `get_by_ids` and the searches read
+        `page_content` from -- and the server would put it there itself under the model's
+        `field`, which is `text` by default but need not be.
+        """
+        records: list[dict[str, Any]] = []
+        for i, (id_, text, metadata) in enumerate(
+            zip(ids, texts, metadatas, strict=True)
+        ):
+            record: dict[str, Any] = {"id": id_}
+            if embeddings is None:
+                record["text"] = text
+            else:
+                record["vector"] = embeddings[i]
+            record["payload"] = {**metadata, "text": text}
+            records.append(record)
+        return records
 
     def delete(
         self,
@@ -519,46 +576,35 @@ class DXMTVectorDB(VectorStore):
     ) -> Optional[bool]:
         """Delete records by IDs.
 
+        A failure raises. This used to catch every exception, log it and return `False` --
+        which LangChain's callers do not check, so a table that had been dropped, a server
+        that was down and a key that was wrong all looked like a completed delete.
+
         Args:
-            ids: IDs to delete.
+            ids: IDs to delete. None or empty is nothing to do, and returns None without a
+                request.
             **kwargs: Additional keyword arguments.
 
         Returns:
-            True if deletion was successful.
+            True after the server has accepted the delete; None when there was nothing to
+            delete. Deleting an id that is not there is not an error -- the server answers
+            with `deleted_count: 0`.
         """
         if not ids:
-            logger.warning("No IDs provided for deletion")
-            return False
-
-        try:
-            self._client.delete_records(
-                table_name=self._table_name,
-                ids=ids,
-            )
-            return True
-        except Exception as e:
-            logger.error("Error deleting records: %s", e)
-            return False
+            return None
+        self._client.delete_records(table_name=self._table_name, ids=list(ids))
+        return True
 
     async def adelete(
         self,
         ids: Optional[list[str]] = None,
         **kwargs: Any,
     ) -> Optional[bool]:
-        """Async delete records by IDs."""
+        """Async delete records by IDs. See `delete`."""
         if not ids:
-            logger.warning("No IDs provided for deletion")
-            return False
-
-        try:
-            await self._client.adelete_records(
-                table_name=self._table_name,
-                ids=ids,
-            )
-            return True
-        except Exception as e:
-            logger.error("Error deleting records: %s", e)
-            return False
+            return None
+        await self._client.adelete_records(table_name=self._table_name, ids=list(ids))
+        return True
 
     def get_by_ids(self, ids: Sequence[str], /) -> list[Document]:
         """Get documents by IDs.
@@ -658,12 +704,15 @@ class DXMTVectorDB(VectorStore):
             List of (Document, score) tuples.
         """
         if self._embedding is None:
-            msg = "embedding function is required for similarity_search"
-            raise ValueError(msg)
+            # The server embeds the query with the table's model.
+            if k <= 0:
+                return []
+            results = self._client.search(
+                table_name=self._table_name, text=query, k=k, filter=filter
+            )
+            return self._results_to_docs_and_scores(results)
 
-        # Embed query
         query_embedding = self._embedding.embed_query(query)
-
         return self.similarity_search_with_score_by_vector(
             query_embedding, k, filter=filter, **kwargs
         )
@@ -677,15 +726,32 @@ class DXMTVectorDB(VectorStore):
     ) -> list[tuple[Document, float]]:
         """Async return docs and scores most similar to query."""
         if self._embedding is None:
-            msg = "embedding function is required for asimilarity_search"
-            raise ValueError(msg)
+            if k <= 0:
+                return []
+            results = await self._client.asearch(
+                table_name=self._table_name, text=query, k=k, filter=filter
+            )
+            return self._results_to_docs_and_scores(results)
 
-        # Embed query (async)
         query_embedding = await self._embedding.aembed_query(query)
-
         return await self.asimilarity_search_with_score_by_vector(
             query_embedding, k, filter=filter, **kwargs
         )
+
+    def _require_vector(self, embedding: Optional[list[float]], method: str) -> list[float]:
+        """The `*_by_vector` methods take a vector; say so when one was not given.
+
+        Without an embedding function the store cannot make one, so a caller who reached a
+        by-vector method with `None` has nothing to search with. A list is returned as-is.
+        """
+        if embedding is None:
+            msg = (
+                f"{method} needs a query vector. This store has no embedding function "
+                "(embedding=None, the server embeds), so pass the vector yourself or use "
+                "the text form: similarity_search(query)."
+            )
+            raise ValueError(msg)
+        return embedding
 
     def similarity_search_by_vector(
         self,
@@ -741,6 +807,9 @@ class DXMTVectorDB(VectorStore):
         Returns:
             List of (Document, score) tuples.
         """
+        embedding = self._require_vector(
+            embedding, "similarity_search_with_score_by_vector"
+        )
         # Asking for no rows is not an error either. `k=0` falls out of arithmetic -- a
         # budget that has been spent, a `top_k` computed from a page that turned out empty --
         # and LangChain's answer is an empty list. The server refuses `top_k: 0` with
@@ -767,6 +836,9 @@ class DXMTVectorDB(VectorStore):
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         """Async return docs and scores most similar to embedding vector."""
+        embedding = self._require_vector(
+            embedding, "asimilarity_search_with_score_by_vector"
+        )
         if k <= 0:  # same reason as the sync path above
             return []
 
@@ -884,13 +956,12 @@ class DXMTVectorDB(VectorStore):
             List of Document objects selected by maximal marginal relevance.
         """
         if self._embedding is None:
-            msg = "embedding function is required for MMR search"
-            raise ValueError(msg)
+            # The server embeds the query and reranks; nothing to compute here.
+            return self._mmr_search(
+                text=query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=filter
+            )
 
-        # Embed query
         query_embedding = self._embedding.embed_query(query)
-
-        # Fetch candidate documents
         return self.max_marginal_relevance_search_by_vector(
             query_embedding,
             k=k,
@@ -899,6 +970,35 @@ class DXMTVectorDB(VectorStore):
             filter=filter,
             **kwargs,
         )
+
+    def _mmr_search(
+        self,
+        *,
+        k: int,
+        fetch_k: int,
+        lambda_mult: float,
+        filter: Optional[dict[str, Any]],
+        vector: Optional[list[float]] = None,
+        text: Optional[str] = None,
+    ) -> list[Document]:
+        """One MMR request, by vector or by text.
+
+        Only what `Client.search` takes goes on the wire. `max_marginal_relevance_search_by_vector`
+        used to forward its `**kwargs` into it, and LangChain's retriever passes things
+        like `score_threshold` through, which the client does not take -- a `TypeError`
+        from inside the SDK for a keyword the caller never typed.
+        """
+        if k <= 0:
+            return []
+        results = self._client.search(
+            table_name=self._table_name,
+            vector=vector,
+            text=text,
+            k=k,
+            filter=filter,
+            mmr={"lambda_mult": lambda_mult, "fetch_k": fetch_k},
+        )
+        return [doc for doc, _ in self._results_to_docs_and_scores(results)]
 
     def max_marginal_relevance_search_by_vector(
         self,
@@ -925,20 +1025,18 @@ class DXMTVectorDB(VectorStore):
                 candidates that were fetched, so this is the cost knob.
             lambda_mult: 0 is maximum diversity, 1 is the plain ranking.
             filter: Optional metadata filter.
-            **kwargs: Additional keyword arguments.
+            **kwargs: Accepted for LangChain's sake and not sent: the client takes a fixed
+                set of arguments and an unknown one used to raise `TypeError` from it.
 
         Returns:
             List of Document objects selected by maximal marginal relevance.
         """
-        results = self._client.search(
-            table_name=self._table_name,
-            vector=embedding,
-            k=k,
-            filter=filter,
-            mmr={"lambda_mult": lambda_mult, "fetch_k": fetch_k},
-            **kwargs,
+        embedding = self._require_vector(
+            embedding, "max_marginal_relevance_search_by_vector"
         )
-        return [doc for doc, _ in self._results_to_docs_and_scores(results)]
+        return self._mmr_search(
+            vector=embedding, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=filter
+        )
 
     def hybrid_search(
         self,
@@ -970,12 +1068,11 @@ class DXMTVectorDB(VectorStore):
             msg = "Full-text search not enabled. Set enable_full_text_search=True"
             raise ValueError(msg)
 
-        if self._embedding is None:
-            msg = "embedding function is required for hybrid_search"
-            raise ValueError(msg)
-
-        # Embed query
-        query_embedding = self._embedding.embed_query(query)
+        # With no embedding function the server embeds the text for the vector arm and
+        # runs BM25 over the same text; `vector=None` is what tells it to.
+        query_embedding = (
+            None if self._embedding is None else self._embedding.embed_query(query)
+        )
 
         # Perform hybrid search
         results = self._client.hybrid_search(
@@ -1004,12 +1101,9 @@ class DXMTVectorDB(VectorStore):
             msg = "Full-text search not enabled. Set enable_full_text_search=True"
             raise ValueError(msg)
 
-        if self._embedding is None:
-            msg = "embedding function is required for ahybrid_search"
-            raise ValueError(msg)
-
-        # Embed query (async)
-        query_embedding = await self._embedding.aembed_query(query)
+        query_embedding = (
+            None if self._embedding is None else await self._embedding.aembed_query(query)
+        )
 
         # Perform hybrid search (async)
         results = await self._client.ahybrid_search(
@@ -1029,7 +1123,7 @@ class DXMTVectorDB(VectorStore):
     def from_texts(
         cls,
         texts: list[str],
-        embedding: Embeddings,
+        embedding: Optional[Embeddings],
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
@@ -1047,7 +1141,8 @@ class DXMTVectorDB(VectorStore):
 
         Args:
             texts: List of texts.
-            embedding: Embedding function.
+            embedding: Embedding function, or None to let the server embed (pass
+                `server_embedding=` for a table that does not exist yet).
             metadatas: Optional list of metadatas.
             ids: Optional list of IDs.
             table_name: Table name.
@@ -1058,13 +1153,14 @@ class DXMTVectorDB(VectorStore):
             index_type: Index type.
             distance_metric: Distance metric.
             enable_full_text_search: Enable full-text search.
-            **kwargs: Additional keyword arguments.
+            **kwargs: Passed to the constructor (`server_embedding`, `api_key`, ...).
 
         Returns:
             DXMTVectorDB instance.
         """
-        # Infer dimension if not provided
-        if dimension is None:
+        # Infer dimension if not provided; with no embedding function the server's model
+        # decides it.
+        if dimension is None and embedding is not None and texts:
             sample_embedding = embedding.embed_query(texts[0])
             dimension = len(sample_embedding)
 
@@ -1092,7 +1188,7 @@ class DXMTVectorDB(VectorStore):
     async def afrom_texts(
         cls,
         texts: list[str],
-        embedding: Embeddings,
+        embedding: Optional[Embeddings],
         metadatas: Optional[list[dict]] = None,
         *,
         ids: Optional[list[str]] = None,
@@ -1106,9 +1202,8 @@ class DXMTVectorDB(VectorStore):
         enable_full_text_search: bool = False,
         **kwargs: Any,
     ) -> DXMTVectorDB:
-        """Async create DXMTVectorDB from texts."""
-        # Infer dimension if not provided
-        if dimension is None:
+        """Async create DXMTVectorDB from texts. See `from_texts`."""
+        if dimension is None and embedding is not None and texts:
             sample_embedding = await embedding.aembed_query(texts[0])
             dimension = len(sample_embedding)
 
@@ -1136,7 +1231,7 @@ class DXMTVectorDB(VectorStore):
     def from_existing_table(
         cls,
         table_name: str,
-        embedding: Embeddings,
+        embedding: Optional[Embeddings] = None,
         *,
         host: str = "localhost",
         port: int = 9999,
@@ -1145,9 +1240,11 @@ class DXMTVectorDB(VectorStore):
     ) -> DXMTVectorDB:
         """Connect to existing DXMT table.
 
+        The table's dimension and distance metric are read from the server.
+
         Args:
             table_name: Name of existing table.
-            embedding: Embedding function.
+            embedding: Embedding function, or None when the table embeds server-side.
             host: DXMT server hostname.
             port: DXMT server port.
             ssl: Whether to use HTTPS.

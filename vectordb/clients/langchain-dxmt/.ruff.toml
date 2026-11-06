@@ -32,7 +32,7 @@ exclude = [
 ]
 
 # Python version
-target-version = "py39"
+target-version = "py310"
 
 # Line length
 line-length = 88
@@ -78,8 +78,6 @@ known-first-party = ["langchain_dxmt"]
 known-third-party = [
     "langchain_core",
     "httpx",
-    "pydantic",
-    "numpy",
 ]
 
 [lint.mccabe]

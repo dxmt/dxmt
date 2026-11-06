@@ -820,12 +820,13 @@ All six live under `clients/`.
 | `clients/langchain-dxmt/`                     | LangChain vector store                   |
 | `clients/llama-index-vector-stores-dxmt/`     | LlamaIndex vector store                  |
 
-The Python SDK additionally ships integrations for LangGraph, Haystack, mem0, CrewAI and
+`langchain-dxmt`, `llama-index-vector-stores-dxmt` and `dxmt-haystack` are on PyPI. The
+Python SDK additionally ships integrations for LangGraph, mem0, CrewAI and
 MetaGPT. See `clients/dxmt-python-sdk/README.md`.
 
-`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI, `dxmt-js-sdk` is on npm
-and `dxmt-client` is on crates.io (since 1.6.0, 2026-11-05); `langchain-dxmt` is not
-published yet. To install from a checkout instead (paths relative to `vectordb/`):
+Every package is published (1.6.0, 2026-11-05): `dxmt-python-sdk`, `langchain-dxmt`,
+`llama-index-vector-stores-dxmt` and `dxmt-haystack` on PyPI, `dxmt-js-sdk` on npm, `dxmt-client`
+on crates.io. To install from a checkout instead (paths relative to `vectordb/`):
 
 ```bash
 pip install ./clients/dxmt-python-sdk

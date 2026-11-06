@@ -17,8 +17,30 @@ release, and the first commit that was ever pushed anywhere.
 
 ## [Unreleased]
 
+### Added
+
+- **`dxmt-haystack`**, the Haystack integration as its own package in the
+  `haystack_integrations` namespace, the layout deepset's own integrations use:
+  `DXMTDocumentStore` and `DXMTEmbeddingRetriever` / `DXMTBM25Retriever` /
+  `DXMTHybridRetriever`. It passes Haystack's `DocumentStoreBaseTests` (count, every
+  duplicate policy, delete, 39 filter cases) against a live server. A filter the server has a
+  flat form for runs on the server; the rest (dates, `None`, nested logic) are evaluated with
+  Haystack's own `document_matches_filter` by `filter_documents`, and refused by name by the
+  retrievers. A document without an embedding is kept and never ranked. The copy that lived in
+  `dxmt-python-sdk` (`dxmt.haystack`) is removed: it passed `dataframe=` to a `Document` that
+  no longer has the field and gave vector-less documents a made-up vector that ranked.
+
+- **`langchain-dxmt` is on PyPI** (1.6.0), with server-side embedding: `embedding=None` sends
+  text and lets the table's model embed it (`server_embedding=` names the model for a table the
+  store creates); `from_existing_table` opens a table with its own dimension and metric. The
+  LangChain docs pages are proposed in langchain-ai/docs#7455, the Haystack catalog entry in
+  deepset-ai/haystack-integrations#708.
+
 ### Fixed
 
+- **LangChain `delete` reported success on failure** (every exception caught, `False`
+  returned), `from_existing_table` never read the table's dimension (two JSON levels
+  `get_table` does not return), and MMR forwarded unknown keyword arguments into the client.
 - **LlamaIndex filters that returned the wrong rows.** `FilterOperator.ALL` was sent as
   `In`, so a filter for records carrying *every* tag matched records carrying *any*;
   `FilterCondition.NOT` fell back to `AND`; `IS_EMPTY` was dropped, widening the filter to
@@ -48,7 +70,7 @@ release, and the first commit that was ever pushed anywhere.
 - **`dxmt-python-sdk` and `llama-index-vector-stores-dxmt` are on PyPI, `dxmt-js-sdk` is on
   npm, `dxmt-client` is on crates.io** (1.6.0, 2026-11-05): `pip install
   llama-index-vector-stores-dxmt`, `npm install dxmt-js-sdk` and `dxmt-client = "1.6"` are
-  enough. The LangChain package is still installed from a checkout.
+  enough.
 - **Recall measured on all of LongMemEval-S.** 470 questions, 231,606 turns: every answer
   session among the top 10 turns for 0.796 of questions, one of them for 0.926. The
   60-question sample in 1.5.0 had said 0.917; the full set is lower on multi-session (0.711),
