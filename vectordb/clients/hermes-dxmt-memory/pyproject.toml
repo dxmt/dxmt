@@ -1,0 +1,30 @@
+[project]
+name = "hermes-dxmt-memory"
+version = "0.1.0"
+description = "DXMT memory provider plugin for Hermes Agent."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "DXMT" }]
+dependencies = [
+    "dxmt-python-sdk>=1.6.0,<2",
+    "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.uv]
+# Hermes loads this directory as a plugin; it is not pip-installed. `uv sync` only manages a venv.
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

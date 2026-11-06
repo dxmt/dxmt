@@ -428,6 +428,32 @@ jobs:
           DXMT_TEST_URL=http://127.0.0.1:19999 pytest -q
         working-directory: vectordb/clients/agent-framework-dxmt
 
+      # Hermes Agent memory provider. The plugin is loaded the way Hermes loads it (the
+      # directory as a package) against a stand-in for the server's memory API, so it needs a
+      # Hermes checkout on the import path and nothing else; the live suite needs an embedding
+      # model the CI server does not have and skips itself without DXMT_TEST_URL.
+      - name: Hermes memory plugin tests
+        run: |
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes-agent"
+          python -m pip install pyyaml pytest
+          HERMES_AGENT_DIR="$RUNNER_TEMP/hermes-agent" pytest -q
+        working-directory: vectordb/clients/hermes-dxmt-memory
+
+      # OpenClaw memory plugin: type-checked against the pinned OpenClaw SDK, tested against an
+      # in-process stand-in for the server's memory API (the live loop needs an embedding model
+      # and skips itself without DXMT_TEST_URL), built, and packed the way it is published.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24   # the pinned OpenClaw SDK needs Node 24.16+; the JS SDK step below sets 20 again
+      - name: OpenClaw memory plugin tests
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+          npm run build
+          npm pack --dry-run
+        working-directory: vectordb/clients/openclaw-memory-dxmt
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20

@@ -1,0 +1,61 @@
+{
+  "name": "openclaw-memory-dxmt",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DXMT long-term memory for OpenClaw: recall by meaning and keyword from a DXMT server, auto-capture, supersede and forget.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dxmt/dxmt",
+    "directory": "vectordb/clients/openclaw-memory-dxmt"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "dxmt-js-sdk": "^1.6.0",
+    "typebox": "1.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "openclaw": "2026.11.1",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.11.1"
+  },
+  "openclaw": {
+    "plugin": "./openclaw.plugin.json",
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "npmSpec": "openclaw-memory-dxmt",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.11.1"
+    },
+    "compat": {
+      "pluginApi": ">=2026.11.1"
+    },
+    "build": {
+      "openclawVersion": "2026.11.1"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  }
+}
