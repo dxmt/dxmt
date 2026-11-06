@@ -1,0 +1,91 @@
+{
+  "id": "memory-dxmt",
+  "name": "Memory (DXMT)",
+  "description": "DXMT long-term memory: recall by meaning and keyword from a DXMT server you run, auto-capture of durable facts, supersede and forget by id. The server embeds; no embedding key in OpenClaw.",
+  "categories": ["memory"],
+  "kind": "memory",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["memory_recall", "memory_store", "memory_forget"]
+  },
+  "toolMetadata": {
+    "memory_store": { "sideEffecting": true },
+    "memory_forget": { "sideEffecting": true }
+  },
+  "uiHints": {
+    "url": {
+      "label": "DXMT server URL",
+      "placeholder": "http://localhost:9999",
+      "help": "Where the DXMT server listens. The server does the embedding, so no embedding key is configured here."
+    },
+    "apiKey": {
+      "label": "API key",
+      "sensitive": true,
+      "help": "Only if the server has one (DXMT_API_KEY on the server); supports ${ENV_VAR}."
+    },
+    "scope": {
+      "label": "Scope",
+      "help": "agent: each OpenClaw agent recalls only what it stored; shared: recall across agents and everything else written to the server."
+    },
+    "autoCapture": {
+      "label": "Auto-capture",
+      "help": "Store durable facts, preferences and decisions from user messages after each turn."
+    },
+    "autoRecall": {
+      "label": "Auto-recall",
+      "help": "Inject relevant memories into context before each turn."
+    },
+    "recallLimit": {
+      "label": "Auto-recall limit",
+      "placeholder": "3",
+      "advanced": true
+    },
+    "minScore": {
+      "label": "Minimum score",
+      "placeholder": "0.3",
+      "help": "Cosine similarity floor for recalled memories (1.0 is identical).",
+      "advanced": true
+    },
+    "captureMaxChars": {
+      "label": "Capture max chars",
+      "placeholder": "500",
+      "advanced": true
+    },
+    "recallMaxChars": {
+      "label": "Recall max chars",
+      "placeholder": "1000",
+      "advanced": true
+    },
+    "customTriggers": {
+      "label": "Custom triggers",
+      "help": "Literal phrases that make auto-capture consider a message memory-worthy.",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": { "type": "string" },
+      "apiKey": { "type": "string" },
+      "scope": { "type": "string", "enum": ["agent", "shared"] },
+      "autoCapture": { "type": "boolean" },
+      "autoRecall": { "type": "boolean" },
+      "recallLimit": { "type": "integer", "minimum": 1, "maximum": 10 },
+      "minScore": { "type": "number", "minimum": 0, "maximum": 1 },
+      "captureMaxChars": { "type": "integer", "minimum": 100, "maximum": 10000 },
+      "recallMaxChars": { "type": "integer", "minimum": 100, "maximum": 10000 },
+      "customTriggers": {
+        "type": "array",
+        "maxItems": 50,
+        "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    }
+  },
+  "recommendedPrompts": [
+    "Check whether DXMT memory is ready and what it has stored about me.",
+    "Find what I told you earlier about my deployment setup without changing anything."
+  ]
+}

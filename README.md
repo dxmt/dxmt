@@ -113,6 +113,7 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | CrewAI | `pip install crewai-dxmt` | `from crewai_dxmt import DXMTStorageBackend` (memory), `install()` |
 | Microsoft Agent Framework | `pip install agent-framework-dxmt` | `from agent_framework_dxmt import DXMTStore, DXMTContextProvider` |
 | Hermes Agent | `hermes plugins install dxmt/dxmt/vectordb/clients/hermes-dxmt-memory` | `hermes memory setup`, pick `dxmt`; tools `dxmt_recall`, `dxmt_remember`, `dxmt_read`, `dxmt_forget` |
+| OpenClaw | `openclaw plugins install npm:openclaw-memory-dxmt` | `plugins.slots.memory: "memory-dxmt"`; tools `memory_recall`, `memory_store`, `memory_forget` |
 
 [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) says exactly which routes each client wraps; everything else is one raw request away, because every capability is in the HTTP API.
 
