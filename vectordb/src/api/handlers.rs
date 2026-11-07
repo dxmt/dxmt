@@ -1319,8 +1319,10 @@ pub struct MemoryListQuery {
 ))]
 pub async fn remember(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<RememberRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<RememberRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.remember(request).await {
         Ok(kept) => ApiResponse::success(kept).into_response(),
         Err(e) => error_response(e),
@@ -1344,8 +1346,10 @@ pub async fn remember(
 ))]
 pub async fn recall(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<RecallRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<RecallRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.recall(request).await {
         Ok(memories) => {
             ApiResponse::success(serde_json::json!({ "memories": memories })).into_response()
@@ -1374,8 +1378,10 @@ pub async fn recall(
 ))]
 pub async fn extract_memories(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<ExtractRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ExtractRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.extract(request).await {
         Ok(facts) => ApiResponse::success(serde_json::json!({ "facts": facts })).into_response(),
         Err(e) => error_response(e),
@@ -1400,8 +1406,10 @@ pub async fn extract_memories(
 ))]
 pub async fn memory_context(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<ContextRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ContextRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.context(request).await {
         Ok(block) => ApiResponse::success(block).into_response(),
         Err(e) => error_response(e),
@@ -1424,8 +1432,10 @@ pub async fn memory_context(
 ))]
 pub async fn profile_memory(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<ProfileRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ProfileRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.profile(request).await {
         Ok(profile) => ApiResponse::success(profile).into_response(),
         Err(e) => error_response(e),
@@ -1444,14 +1454,17 @@ pub async fn profile_memory(
 ))]
 pub async fn list_memories(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
     ApiQuery(query): ApiQuery<MemoryListQuery>,
 ) -> impl IntoResponse {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
     match state
         .storage
-        .list_memories(
+        .list_memories_in(
             query.kind.as_deref(),
             query.limit.unwrap_or(50),
             query.offset.unwrap_or(0),
+            scope.as_deref(),
         )
         .await
     {
@@ -1476,9 +1489,15 @@ pub async fn list_memories(
 ))]
 pub async fn get_memory(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.storage.get_memory(&memory_id).await {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
+    match state
+        .storage
+        .get_memory_in(&memory_id, scope.as_deref())
+        .await
+    {
         Ok(memory) => ApiResponse::success(memory).into_response(),
         Err(e) => error_response(e),
     }
@@ -1496,9 +1515,15 @@ pub async fn get_memory(
 ))]
 pub async fn forget(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.storage.forget(vec![memory_id]).await {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
+    match state
+        .storage
+        .forget_in(vec![memory_id], scope.as_deref())
+        .await
+    {
         Ok(n) => ApiResponse::success(serde_json::json!({ "forgotten": n })).into_response(),
         Err(e) => error_response(e),
     }

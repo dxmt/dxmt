@@ -47,6 +47,10 @@ pub struct ExtractRequest {
     /// instead of adding a second set. Without it, each fact gets a new id.
     #[serde(default)]
     pub id_prefix: Option<String>,
+    /// The tenant this request acts for, set by the server from the caller's key -- never from
+    /// the body.
+    #[serde(skip)]
+    pub scope: Option<String>,
 }
 
 /// What `profile` takes.
@@ -59,6 +63,10 @@ pub struct ProfileRequest {
     /// Only facts with any of these tags, and the profile carries them.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// The tenant this request acts for, set by the server from the caller's key -- never from
+    /// the body.
+    #[serde(skip)]
+    pub scope: Option<String>,
 }
 
 /// The model the server derives memory with, from the environment; `None` when it has none.

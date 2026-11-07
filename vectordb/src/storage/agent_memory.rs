@@ -62,6 +62,10 @@ pub struct RememberRequest {
     /// Anything else to keep with it.
     #[serde(default)]
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The tenant this request acts for, set by the server from the caller's key -- never from
+    /// the body. `None` is the whole store (the admin key, or a server without tenants).
+    #[serde(skip)]
+    pub scope: Option<String>,
 }
 
 /// What `recall` takes.
@@ -92,6 +96,10 @@ pub struct RecallRequest {
     /// Superseded memories too, for history. Default false.
     #[serde(default)]
     pub include_superseded: bool,
+    /// The tenant this request acts for, set by the server from the caller's key -- never from
+    /// the body. `None` is the whole store (the admin key, or a server without tenants).
+    #[serde(skip)]
+    pub scope: Option<String>,
 }
 
 /// What `context` takes.
@@ -108,6 +116,10 @@ pub struct ContextRequest {
     /// other character). Default 1500, at least 200, at most 8000.
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    /// The tenant this request acts for, set by the server from the caller's key -- never from
+    /// the body. `None` is the whole store (the admin key, or a server without tenants).
+    #[serde(skip)]
+    pub scope: Option<String>,
 }
 
 /// Rough tokens in `text`: English runs about four characters a token, CJK about one. Close
@@ -142,6 +154,22 @@ fn fit_tokens(text: &str, budget: usize) -> String {
         out = candidate;
     }
     out
+}
+
+/// Tags that start with this name a tenant; only the server writes them (`api::auth`).
+pub const TENANT_TAG_PREFIX: &str = "tenant:";
+
+/// The condition that keeps a query inside one tenant's memories.
+fn scope_condition(scope: &str) -> Condition {
+    condition("tags", FilterOperation::In(vec![serde_json::json!(scope)]))
+}
+
+/// Whether a memory's payload carries the tag `scope`.
+fn carries(payload: &serde_json::Value, scope: &str) -> bool {
+    payload
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tags| tags.iter().any(|t| t.as_str() == Some(scope)))
 }
 
 /// How deep `recall` pages: `limit + offset` at most.
@@ -230,6 +258,32 @@ impl IntelligentIndexedStorage {
                 "a memory needs `text`".to_string(),
             ));
         }
+        let mut request = request;
+        if let Some(scope) = request.scope.as_deref() {
+            // A tenant's memories carry its tag, and only the server puts it there: a tag that
+            // starts `tenant:` in a tenant's request would be a way into another tenant's space.
+            let mut tags = request.tags.take().unwrap_or_default();
+            if let Some(reserved) = tags.iter().find(|t| t.starts_with(TENANT_TAG_PREFIX)) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "tag `{reserved}`: tags starting with `{TENANT_TAG_PREFIX}` are the server's"
+                )));
+            }
+            tags.push(scope.to_string());
+            request.tags = Some(tags);
+            if let Some(id) = request.id.as_deref() {
+                if !self.owned_or_absent(&table, id, scope).await? {
+                    // Not `NotFound`: the write would otherwise replace another tenant's memory.
+                    return Err(crate::Error::InvalidInput(format!(
+                        "the id `{id}` is not available; leave `id` out to get a new one"
+                    )));
+                }
+            }
+            for old in request.supersedes.as_deref().unwrap_or_default() {
+                if !self.owns(&table, old, scope).await? {
+                    return Err(crate::Error::NotFound(format!("memory '{old}'")));
+                }
+            }
+        }
         let mut payload = serde_json::Map::new();
         if let Some(extra) = request.metadata {
             if let Some(key) = extra.keys().find(|k| RESERVED.contains(&k.as_str())) {
@@ -262,7 +316,13 @@ impl IntelligentIndexedStorage {
             self.ensure_kb_table(&table).await?;
             vector = self.embed_for_table(&table, &request.text).await?;
             if let Some(held) = self
-                .same_memory(&table, &kind, vector.clone(), threshold)
+                .same_memory(
+                    &table,
+                    &kind,
+                    vector.clone(),
+                    threshold,
+                    request.scope.as_deref(),
+                )
                 .await?
             {
                 self.refresh_memory(&table, &held, payload.get("tags"))
@@ -325,16 +385,23 @@ impl IntelligentIndexedStorage {
         kind: &str,
         vector: Vec<f32>,
         threshold: f32,
+        scope: Option<&str>,
     ) -> crate::Result<Option<String>> {
         let mut query: crate::types::record::SearchQuery =
             serde_json::from_value(serde_json::json!({ "top_k": 1, "search_mode": "exact" }))
                 .map_err(|e| crate::Error::Internal(e.to_string()))?;
         query.vector = vector;
+        let mut must = vec![
+            condition("kind", FilterOperation::Equal(serde_json::json!(kind))),
+            condition("superseded_by", FilterOperation::IsEmpty),
+        ];
+        // Within the tenant: saying what another tenant already said is a new memory, not
+        // theirs refreshed.
+        if let Some(scope) = scope {
+            must.push(scope_condition(scope));
+        }
         query.filter = Some(Filter {
-            must: Some(vec![
-                condition("kind", FilterOperation::Equal(serde_json::json!(kind))),
-                condition("superseded_by", FilterOperation::IsEmpty),
-            ]),
+            must: Some(must),
             must_not: None,
             should: None,
         });
@@ -415,6 +482,10 @@ impl IntelligentIndexedStorage {
         }
         if !request.include_superseded {
             must.push(condition("superseded_by", FilterOperation::IsEmpty));
+        }
+        // A separate condition, so it is ANDed with the caller's `tags` (which mean "any of").
+        if let Some(scope) = request.scope.as_deref() {
+            must.push(scope_condition(scope));
         }
         let limit = request.limit.unwrap_or(25).clamp(1, 100);
         let offset = request.offset.unwrap_or(0).min(MAX_RECALL_DEPTH - limit);
@@ -515,6 +586,63 @@ impl IntelligentIndexedStorage {
         Ok(view(&record.id, &record.payload, None))
     }
 
+    /// `get_memory`, within a tenant: another tenant's memory is not found, the same answer as a
+    /// memory that does not exist, so its existence is not revealed either.
+    pub async fn get_memory_in(
+        &self,
+        id: &str,
+        scope: Option<&str>,
+    ) -> crate::Result<serde_json::Value> {
+        let memory = self.get_memory(id).await?;
+        match scope {
+            Some(scope) if !carries(&memory, scope) => {
+                Err(crate::Error::RecordNotFound(id.to_string()))
+            }
+            _ => Ok(memory),
+        }
+    }
+
+    /// `forget`, within a tenant: an id that is not the tenant's counts as not there.
+    pub async fn forget_in(&self, ids: Vec<String>, scope: Option<&str>) -> crate::Result<usize> {
+        let Some(scope) = scope else {
+            return self.forget(ids).await;
+        };
+        let table = table(self)?;
+        self.ensure_kb_table(&table).await?;
+        let mut owned = Vec::new();
+        for id in ids {
+            if self.owns(&table, &id, scope).await? {
+                owned.push(id);
+            }
+        }
+        if owned.is_empty() {
+            return Ok(0);
+        }
+        self.delete_records(&table, owned).await
+    }
+
+    /// Whether the memory `id` exists and carries the tenant's tag.
+    async fn owns(&self, table: &str, id: &str, scope: &str) -> crate::Result<bool> {
+        match self.get_record(table, &id.to_string()).await {
+            Ok(record) => Ok(carries(&record.payload, scope)),
+            Err(crate::Error::NotFound(_))
+            | Err(crate::Error::RecordNotFound(_))
+            | Err(crate::Error::TableNotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether `id` is free, or already the tenant's.
+    async fn owned_or_absent(&self, table: &str, id: &str, scope: &str) -> crate::Result<bool> {
+        match self.get_record(table, &id.to_string()).await {
+            Ok(record) => Ok(carries(&record.payload, scope)),
+            Err(crate::Error::NotFound(_))
+            | Err(crate::Error::RecordNotFound(_))
+            | Err(crate::Error::TableNotFound(_)) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete memories for good. How many there were.
     pub async fn forget(&self, ids: Vec<String>) -> crate::Result<usize> {
         let table = table(self)?;
@@ -529,15 +657,33 @@ impl IntelligentIndexedStorage {
         limit: usize,
         offset: usize,
     ) -> crate::Result<(Vec<serde_json::Value>, usize)> {
+        self.list_memories_in(kind, limit, offset, None).await
+    }
+
+    /// `list_memories`, within a tenant.
+    pub async fn list_memories_in(
+        &self,
+        kind: Option<&str>,
+        limit: usize,
+        offset: usize,
+        scope: Option<&str>,
+    ) -> crate::Result<(Vec<serde_json::Value>, usize)> {
         let table = table(self)?;
         if self.list_tables().await?.iter().all(|t| t.name != table) {
             return Ok((Vec::new(), 0));
         }
-        let filter = kind.map(|k| Filter {
-            must: Some(vec![condition(
+        let mut must = Vec::new();
+        if let Some(k) = kind {
+            must.push(condition(
                 "kind",
                 FilterOperation::Equal(serde_json::json!(k)),
-            )]),
+            ));
+        }
+        if let Some(scope) = scope {
+            must.push(scope_condition(scope));
+        }
+        let filter = (!must.is_empty()).then_some(Filter {
+            must: Some(must),
             must_not: None,
             should: None,
         });
@@ -575,13 +721,18 @@ impl IntelligentIndexedStorage {
         let facts = parse_facts(&reply);
         if let Some(prefix) = request.id_prefix.as_deref() {
             self.ensure_kb_table(&table).await?;
+            let mut must = vec![condition(
+                "extracted_from",
+                FilterOperation::Equal(serde_json::json!(prefix)),
+            )];
+            // A tenant replaces its own earlier extraction, never another's with the same prefix.
+            if let Some(scope) = request.scope.as_deref() {
+                must.push(scope_condition(scope));
+            }
             self.delete_records_matching(
                 &table,
                 &Filter {
-                    must: Some(vec![condition(
-                        "extracted_from",
-                        FilterOperation::Equal(serde_json::json!(prefix)),
-                    )]),
+                    must: Some(must),
                     must_not: None,
                     should: None,
                 },
@@ -599,10 +750,15 @@ impl IntelligentIndexedStorage {
                 m.insert("extracted_from".to_string(), serde_json::json!(prefix));
                 m
             });
+            // Inside a tenant the ids carry it, so two tenants extracting under one prefix do not
+            // collide (an id held by another tenant would be refused).
             let id = request
                 .id_prefix
                 .as_ref()
-                .map(|prefix| format!("{prefix}:F{i}"));
+                .map(|prefix| match request.scope.as_deref() {
+                    Some(scope) => format!("{scope}:{prefix}:F{i}"),
+                    None => format!("{prefix}:F{i}"),
+                });
             let stored = self
                 .remember(RememberRequest {
                     text: text.clone(),
@@ -611,6 +767,7 @@ impl IntelligentIndexedStorage {
                     source: request.source.clone(),
                     id,
                     metadata,
+                    scope: request.scope.clone(),
                     ..Default::default()
                 })
                 .await?;
@@ -646,6 +803,9 @@ impl IntelligentIndexedStorage {
                 ),
             ));
         }
+        if let Some(scope) = request.scope.as_deref() {
+            must.push(scope_condition(scope));
+        }
         let filter = Filter {
             must: Some(must),
             must_not: None,
@@ -680,7 +840,10 @@ impl IntelligentIndexedStorage {
         let profile = model
             .complete(&profile_prompt(&name, &facts), PROFILE_MAX_TOKENS)
             .await?;
-        let id = profile_id(&name, &tags);
+        let id = match request.scope.as_deref() {
+            Some(scope) => format!("{scope}:{}", profile_id(&name, &tags)),
+            None => profile_id(&name, &tags),
+        };
         let mut metadata = serde_json::Map::new();
         metadata.insert("person".to_string(), serde_json::json!(name));
         metadata.insert("facts".to_string(), serde_json::json!(facts.len()));
@@ -691,6 +854,7 @@ impl IntelligentIndexedStorage {
             source: Some("profile".to_string()),
             id: Some(id.clone()),
             metadata: Some(metadata),
+            scope: request.scope.clone(),
             ..Default::default()
         })
         .await?;
@@ -713,6 +877,7 @@ impl IntelligentIndexedStorage {
             limit: Some(limit),
             kind: kind.map(str::to_string),
             tags: request.tags.clone(),
+            scope: request.scope.clone(),
             ..Default::default()
         };
         let mut used = std::collections::HashSet::new();

@@ -171,6 +171,7 @@ async fn keep(
     storage: Arc<IntelligentIndexedStorage>,
     save: Save,
     tags: Option<Vec<String>>,
+    scope: Option<String>,
     user_text: String,
     reply: String,
 ) {
@@ -186,6 +187,7 @@ async fn keep(
                 tags: tags.clone(),
                 source: Some("gateway".to_string()),
                 id_prefix: None,
+                scope: scope.clone(),
             })
             .await
             .map(|_| ())
@@ -196,6 +198,7 @@ async fn keep(
                 kind: Some("turn".to_string()),
                 tags: tags.clone(),
                 source: Some("gateway".to_string()),
+                scope: scope.clone(),
                 ..Default::default()
             })
             .await
@@ -209,9 +212,12 @@ async fn keep(
 /// `POST /v1/chat/completions`.
 pub async fn chat_completions(
     Extension(storage): Extension<Arc<IntelligentIndexedStorage>>,
+    identity: Option<Extension<crate::api::auth::Identity>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // A tenant's key keeps everything inside that tenant (`api::auth`), on top of `user`.
+    let scope = crate::api::auth::scope_of(identity.as_deref());
     let Some(gateway) = Gateway::from_env() else {
         return off();
     };
@@ -236,6 +242,7 @@ pub async fn chat_completions(
                 query: user_text.clone(),
                 tags: tags.clone(),
                 max_tokens: Some(gateway.context_tokens),
+                scope: scope.clone(),
             })
             .await
         {
@@ -299,7 +306,7 @@ pub async fn chat_completions(
             })
             .chain(futures::stream::once(async move {
                 let reply = text.lock().map(|t| t.clone()).unwrap_or_default();
-                tokio::spawn(keep(storage, save, tags, user_text, reply));
+                tokio::spawn(keep(storage, save, tags, scope, user_text, reply));
                 Ok(Bytes::new())
             }));
         return (status, out, StreamBody::new(stream)).into_response();
@@ -313,7 +320,7 @@ pub async fn chat_completions(
         .ok()
         .and_then(|v| v.pointer("/choices/0/message/content").map(content_text))
         .unwrap_or_default();
-    tokio::spawn(keep(storage, save, tags, user_text, reply));
+    tokio::spawn(keep(storage, save, tags, scope, user_text, reply));
     (status, out, bytes).into_response()
 }
 
