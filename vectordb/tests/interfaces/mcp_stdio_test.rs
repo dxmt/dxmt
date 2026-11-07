@@ -737,6 +737,51 @@ fn a_memory_is_read_back_by_id() {
     );
 }
 
+// `score` is the fused rank, so the best hit scores near 1.0 however poor a match it is; a
+// plugin that deleted "the single match above 0.9" deleted whatever came first. `similarity` is
+// the cosine to the query, and says how close the hit actually is.
+#[test]
+fn recall_reports_how_similar_each_hit_is_not_only_its_rank() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let replies = exchange_with_model(
+        &tmp.path().join("wal"),
+        &base_url,
+        &[
+            call(
+                2,
+                "remember",
+                serde_json::json!({"text": "garden roses bloom in june", "tags": ["a"]}),
+            ),
+            call(
+                3,
+                "recall",
+                serde_json::json!({"query": "garden roses bloom in june", "tags": ["a"]}),
+            ),
+            call(
+                4,
+                "recall",
+                serde_json::json!({"query": "tax return deadline garden", "tags": ["a"]}),
+            ),
+        ],
+    );
+    let same = &content(&replies[2])["memories"][0];
+    let far = &content(&replies[3])["memories"][0];
+    assert!(
+        same["similarity"].as_f64().unwrap() > 0.99,
+        "the same words: {same}"
+    );
+    assert!(
+        far["score"].as_f64().unwrap() > 0.9,
+        "the only hit ranks first whatever it is: {far}"
+    );
+    assert!(
+        far["similarity"].as_f64().unwrap() < 0.9,
+        "and its similarity says it is a poor match: {far}"
+    );
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =

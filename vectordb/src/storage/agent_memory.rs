@@ -132,6 +132,20 @@ fn duplicate_similarity() -> Option<f32> {
 }
 
 /// A memory as agents see it: the record's payload with its id and, from a search, its score.
+/// Cosine similarity, in [-1, 1]; `None` for mismatched or zero vectors.
+fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.len() != b.len() || a.is_empty() {
+        return None;
+    }
+    let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    (na > 0.0 && nb > 0.0).then(|| dot / (na.sqrt() * nb.sqrt()))
+}
+
 fn view(id: &str, payload: &serde_json::Value, score: Option<f32>) -> serde_json::Value {
     let mut out = serde_json::json!({ "id": id });
     if let Some(fields) = payload.as_object() {
@@ -352,8 +366,14 @@ impl IntelligentIndexedStorage {
                 top_n: Some((limit * 2).max(RERANK_POOL)),
                 field: None,
             });
+        // Embedded here rather than inside the hybrid search, so the same vector can say how
+        // close each hit is: `score` is the fused rank (the best hit is always near 1.0, however
+        // poor a match it is), `similarity` the cosine to the query, which a threshold can use.
+        let query_vector = self.recall_query_vector(&table, &request.query).await?;
         let search = crate::types::record::HybridSearchRequest {
             text: Some(request.query),
+            vector: query_vector.clone(),
+            with_vector: query_vector.is_some(),
             limit,
             rerank,
             filter: if must.is_empty() {
@@ -373,13 +393,47 @@ impl IntelligentIndexedStorage {
             .hits
             .iter()
             .map(|hit| {
-                view(
+                let mut out = view(
                     &hit.id,
                     hit.payload.as_ref().unwrap_or(&serde_json::Value::Null),
                     Some(hit.score),
-                )
+                );
+                if let (Some(q), Some(v)) = (query_vector.as_deref(), hit.vector.as_deref()) {
+                    if let Some(similarity) = cosine(q, v) {
+                        out["similarity"] = serde_json::json!(similarity);
+                    }
+                }
+                out
             })
             .collect())
+    }
+
+    /// The query embedded with the memory table's model; `None` on a build or a table without
+    /// one, where recall is keyword-only and has no similarity to report.
+    async fn recall_query_vector(
+        &self,
+        table: &str,
+        query: &str,
+    ) -> crate::Result<Option<Vec<f32>>> {
+        #[cfg(feature = "server-embedding")]
+        {
+            if query.trim().is_empty() {
+                return Ok(None);
+            }
+            let Some(config) = self.get_table(table).await?.embedding else {
+                return Ok(None);
+            };
+            Ok(
+                crate::embeddings::service::embed_texts(&config, &[query.to_string()], None)
+                    .await?
+                    .pop(),
+            )
+        }
+        #[cfg(not(feature = "server-embedding"))]
+        {
+            let _ = (table, query);
+            Ok(None)
+        }
     }
 
     /// One memory by id, superseded or not; `NotFound` when there is none.
