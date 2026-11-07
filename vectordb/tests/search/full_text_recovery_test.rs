@@ -50,32 +50,47 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Start a server over `dir`, waiting until it answers.
+/// Start a server over `dir`, on a port of its own, waiting until it answers.
+///
+/// A fresh port every time, and one start at a time in this binary. A restart used to come back
+/// on the port it had: between the old process exiting and the new one binding, a test running
+/// in parallel could take that port for its own server, and the health check -- which cannot tell
+/// one server from another -- returned the wrong one. The test then queried someone else's
+/// database and failed with `TABLE_NOT_FOUND` or an empty search, only under load.
 ///
 /// The index lands under this temporary directory because that is where `DXMT_WAL_DIR` puts it,
 /// and there is no second way to say otherwise. `DXMT_STORAGE_PATH` was that second way, and it
 /// defaulted to `/tmp`.
-fn start(dir: &std::path::Path, port: u16) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
-        .arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("DXMT_WAL_DIR", dir.join("wal"))
-        .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
-        .env("DXMT_EVICTION_INTERVAL_SECS", "0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn the vectordb binary");
-
-    let server = Server { child, port };
-    for _ in 0..160 {
-        if call(port, "GET", "/api/v1/health", None).is_some() {
-            return server;
+fn start(dir: &std::path::Path) -> Server {
+    static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+    for _ in 0..5 {
+        let port = free_port();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+            .arg("serve")
+            .arg("--port")
+            .arg(port.to_string())
+            .env("DXMT_WAL_DIR", dir.join("wal"))
+            .env("DXMT_SNAPSHOT_INTERVAL_SECS", "0")
+            .env("DXMT_EVICTION_INTERVAL_SECS", "0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn the vectordb binary");
+        for _ in 0..160 {
+            // Ours exited: the port was taken after all. Try another.
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            if call(port, "GET", "/api/v1/health", None).is_some() {
+                return Server { child, port };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    panic!("server did not become ready on port {port}");
+    panic!("no server became ready on any of five ports");
 }
 
 fn call(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<serde_json::Value> {
@@ -143,18 +158,17 @@ fn seed_named(port: u16, table: &str) {
 #[test]
 fn text_search_still_answers_after_a_restart() {
     let dir = tempfile::TempDir::new().unwrap();
-    let port = free_port();
 
     let id_before;
     {
-        let server = start(dir.path(), port);
+        let server = start(dir.path());
         seed(server.port);
         assert_eq!(text_hits(server.port, "quasar"), 1, "before the restart");
         id_before = table_id(server.port);
         call(server.port, "POST", "/api/v1/snapshot", Some("{}"));
     }
 
-    let server = start(dir.path(), port);
+    let server = start(dir.path());
 
     assert_eq!(
         call(server.port, "GET", "/api/v1/tables/t", None).unwrap()["data"]["record_count"],
@@ -184,15 +198,14 @@ fn one_table_leaves_one_index_directory_however_often_it_restarts() {
     // The leak the id instability caused, and the cheapest signal that it is gone: five tables
     // on the demo machine had produced 135 of these.
     let dir = tempfile::TempDir::new().unwrap();
-    let port = free_port();
 
     {
-        let server = start(dir.path(), port);
+        let server = start(dir.path());
         seed(server.port);
         call(server.port, "POST", "/api/v1/snapshot", Some("{}"));
     }
     for _ in 0..2 {
-        let server = start(dir.path(), port);
+        let server = start(dir.path());
         assert_eq!(text_hits(server.port, "quasar"), 1);
     }
 
@@ -212,8 +225,7 @@ fn a_recreated_table_does_not_inherit_the_dropped_one_s_documents() {
     // anything keyed by it has to be cleaned up on the way out. Nothing did, which was
     // survivable only while every restart minted a new id and merely leaked a directory.
     let dir = tempfile::TempDir::new().unwrap();
-    let port = free_port();
-    let server = start(dir.path(), port);
+    let server = start(dir.path());
 
     seed(server.port);
     assert_eq!(text_hits(server.port, "quasar"), 1);
@@ -243,10 +255,9 @@ fn a_lost_index_directory_is_rebuilt_from_the_records() {
     // longer the one being opened. All of them land in this same state, and none of them used
     // to say anything at all.
     let dir = tempfile::TempDir::new().unwrap();
-    let port = free_port();
 
     {
-        let server = start(dir.path(), port);
+        let server = start(dir.path());
         seed(server.port);
         assert_eq!(text_hits(server.port, "quasar"), 1);
         call(server.port, "POST", "/api/v1/snapshot", Some("{}"));
@@ -260,7 +271,7 @@ fn a_lost_index_directory_is_rebuilt_from_the_records() {
     }
     assert_eq!(wiped, 1, "the test did not wipe what it meant to wipe");
 
-    let server = start(dir.path(), port);
+    let server = start(dir.path());
     assert_eq!(
         text_hits(server.port, "quasar"),
         1,
@@ -284,7 +295,7 @@ fn the_index_lives_beside_the_wal_not_in_tmp() {
     let dir = tempfile::TempDir::new().unwrap();
     let port = free_port();
     let table = format!("where_{port}");
-    let server = start(dir.path(), port);
+    let server = start(dir.path());
     seed_named(server.port, &table);
     assert_eq!(text_hits_in(server.port, &table, "quasar"), 1);
 
