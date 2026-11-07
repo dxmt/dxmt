@@ -134,7 +134,7 @@ jobs:
             target: aarch64-apple-darwin
           - arch: x86_64
             target: x86_64-apple-darwin
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: vectordb
@@ -287,6 +287,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ steps.ctx.outputs.version }}
           push: true
+          # An SBOM and a provenance attestation in the image index, readable with
+          # `docker buildx imagetools inspect --format '{{ json .Provenance }}'`.
+          sbom: true
+          provenance: mode=max
           tags: |
             ghcr.io/dxmt/dxmt:${{ steps.ctx.outputs.version }}
             ghcr.io/dxmt/dxmt:latest
@@ -297,6 +301,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [linux, macos]
     runs-on: ubuntu-latest
+    # id-token and attestations: a signed build-provenance attestation per archive, so anyone
+    # can check a download came from this workflow (`gh attestation verify <file> -R dxmt/dxmt`).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       # Only the packages: unfiltered, this also unpacked the console bundle, and its `assets/`
@@ -306,6 +316,20 @@ jobs:
           path: assets
           pattern: dxmt-vectordb-*
           merge-multiple: true
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: assets/*.tar.gz
+      # The software bill of materials for the server: every crate in Cargo.lock, SPDX JSON,
+      # attached to the release beside the archives.
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: vectordb
+          format: spdx-json
+          output-file: assets/dxmt-vectordb-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}

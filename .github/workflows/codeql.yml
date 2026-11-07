@@ -1,0 +1,50 @@
+# Static analysis for the server and every client: Rust, Python, JavaScript/TypeScript, Go and
+# the workflows themselves. Findings go to the repository's Security tab, not to a failed check,
+# so a new alert is a thing to read rather than a red pull request.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { language: rust, build-mode: none }
+          - { language: python, build-mode: none }
+          - { language: javascript-typescript, build-mode: none }
+          - { language: actions, build-mode: none }
+          # Go has no `none` mode; the only Go module is the client, built by hand below.
+          - { language: go, build-mode: manual }
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vectordb/clients/dxmt-go-sdk/go.mod
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - if: matrix.build-mode == 'manual'
+        run: go build ./...
+        working-directory: vectordb/clients/dxmt-go-sdk
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

@@ -163,6 +163,14 @@ A few conventions this repository holds to, which reviewers will ask about:
   "✅ 所有测试通过" and "Overall Rating: 8.5/10" from January. **The rule is about what the
   file is, not what it is called**, which is why it is written that way now.
 
+## Who reviews, and how fast
+
+[MAINTAINERS.md](MAINTAINERS.md) names the maintainers, how decisions are made and the response
+targets; `.github/CODEOWNERS` requests their review automatically. Questions that are not bugs
+belong in [Discussions](https://github.com/dxmt/dxmt/discussions) ([SUPPORT.md](SUPPORT.md)).
+Dependabot opens grouped dependency updates weekly; CodeQL and OpenSSF Scorecard report to the
+Security tab rather than failing a pull request.
+
 ## Reporting a bug
 
 Use the issue templates. The single most useful thing you can include is the commit you built
