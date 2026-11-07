@@ -53,6 +53,7 @@ use crate::types::{
         // memory
         crate::api::handlers::remember,
         crate::api::handlers::recall,
+        crate::api::handlers::get_memory,
         crate::api::handlers::list_memories,
         crate::api::handlers::forget,
         // search

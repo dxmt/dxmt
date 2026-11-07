@@ -13992,6 +13992,10 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         IntelligentIndexedStorage::recall(self, request).await
     }
 
+    async fn get_memory(&self, id: &str) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::get_memory(self, id).await
+    }
+
     async fn forget(&self, ids: Vec<String>) -> crate::Result<usize> {
         IntelligentIndexedStorage::forget(self, ids).await
     }

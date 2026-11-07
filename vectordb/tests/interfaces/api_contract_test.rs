@@ -89,6 +89,12 @@ const CONTRACTS: &[Contract] = &[
         path: "/memories/{r}",
         caller: "sdk, dashboard",
     },
+    // The Hermes and OpenClaw memory plugins read a memory back by id.
+    Contract {
+        method: "GET",
+        path: "/memories/{r}",
+        caller: "plugins",
+    },
     // Documents: put_document / get_document / delete_document in both SDKs.
     Contract {
         method: "PUT",

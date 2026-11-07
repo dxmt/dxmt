@@ -413,6 +413,19 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
         tools.push(Tool {
+            name: "get_memory".to_string(),
+            description: Some(
+                "Read one memory by its id -- the id `recall` or `remember` returned -- with its \
+                 kind, tags, source, when it was remembered, and what replaced it if anything did."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "The memory's id"}},
+                "required": ["id"]
+            }),
+        });
+        tools.push(Tool {
             name: "list_memories".to_string(),
             description: Some(
                 "List memories, newest first -- to review or audit what is kept.".to_string(),
@@ -846,6 +859,7 @@ impl<S: Storage + 'static> McpServer<S> {
             "remember" => self.handle_remember(params.arguments).await,
             "recall" => self.handle_recall(params.arguments).await,
             "forget" => self.handle_forget(params.arguments).await,
+            "get_memory" => self.handle_get_memory(params.arguments).await,
             "list_memories" => self.handle_list_memories(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
@@ -1166,6 +1180,19 @@ impl<S: Storage + 'static> McpServer<S> {
                 .map_err(|e| format!("Invalid recall arguments: {e}"))?;
         let memories = self.storage.recall(request).await?;
         Self::json_result(&serde_json::json!({ "memories": memories }))
+    }
+
+    async fn handle_get_memory(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let id = args["id"]
+            .as_str()
+            .ok_or("get_memory needs `id`, a string")?
+            .to_string();
+        let memory = self.storage.get_memory(&id).await?;
+        Self::json_result(&memory)
     }
 
     async fn handle_forget(
