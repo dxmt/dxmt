@@ -25,13 +25,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [rust, python, javascript-typescript, go, actions]
+        include:
+          - { language: rust, build-mode: none }
+          - { language: python, build-mode: none }
+          - { language: javascript-typescript, build-mode: none }
+          - { language: actions, build-mode: none }
+          # Go has no `none` mode; the only Go module is the client, built by hand below.
+          - { language: go, build-mode: manual }
     steps:
       - uses: actions/checkout@v4
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vectordb/clients/dxmt-go-sdk/go.mod
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          build-mode: none
+          build-mode: ${{ matrix.build-mode }}
+      - if: matrix.build-mode == 'manual'
+        run: go build ./...
+        working-directory: vectordb/clients/dxmt-go-sdk
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}
