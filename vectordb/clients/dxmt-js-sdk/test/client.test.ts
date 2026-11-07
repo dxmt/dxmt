@@ -145,14 +145,14 @@ describe('DXMTClient', () => {
   });
 
   describe('URL Encoding', () => {
-    it('should encode table names with special characters', () => {
+    it('should encode table names with special characters', async () => {
       const client = new DXMTClient();
 
-      // These will fail to connect, but we're testing URL construction
-      const promise = client.getTable('test/table with spaces');
-
-      // The request will fail due to no server, but URL should be encoded
-      expect(promise).rejects.toThrow();
+      // The mocked fetch answers nothing, so the call rejects; what is checked is the URL it
+      // was handed. This used to assert only the rejection, without awaiting it.
+      await expect(client.getTable('test/table with spaces')).rejects.toThrow();
+      const url = String(fetchMock.mock.calls.at(-1)![0]);
+      expect(url).toContain('/tables/test%2Ftable%20with%20spaces');
     });
   });
 
