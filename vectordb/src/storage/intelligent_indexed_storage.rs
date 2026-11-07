@@ -4906,14 +4906,16 @@ impl IntelligentIndexedStorage {
             }
         }
 
-        std::fs::create_dir_all(dest)?;
+        // Written to the path that was checked against the root, not the one that was given:
+        // the two name the same directory only until a symlink in between is swapped.
+        std::fs::create_dir_all(&destination)?;
         let mut copied = Vec::new();
         let mut bytes = 0u64;
 
         // 快照目录
         let snapshot_src = Self::snapshot_dir(wal_dir);
         if snapshot_src.exists() {
-            let snapshot_dst = dest.join("snapshot");
+            let snapshot_dst = destination.join("snapshot");
             std::fs::create_dir_all(&snapshot_dst)?;
             for entry in std::fs::read_dir(&snapshot_src)? {
                 let entry = entry?;
@@ -4936,7 +4938,7 @@ impl IntelligentIndexedStorage {
             if !src.exists() {
                 continue;
             }
-            let dst = dest.join(sub);
+            let dst = destination.join(sub);
             std::fs::create_dir_all(&dst)?;
             let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -4970,14 +4972,14 @@ impl IntelligentIndexedStorage {
         // without them comes up with the tables and none of the names anything calls them by.
         let aliases = Self::aliases_path(wal_dir);
         if aliases.exists() {
-            let n = std::fs::copy(&aliases, dest.join("aliases"))?;
+            let n = std::fs::copy(&aliases, destination.join("aliases"))?;
             bytes += n;
             copied.push("aliases".to_string());
         }
 
         let wal_log = wal_dir.join("wal.log");
         if wal_log.exists() {
-            let n = std::fs::copy(&wal_log, dest.join("wal.log"))?;
+            let n = std::fs::copy(&wal_log, destination.join("wal.log"))?;
             bytes += n;
             copied.push("wal.log".to_string());
         }
@@ -4991,7 +4993,7 @@ impl IntelligentIndexedStorage {
                         directory, and start it again.",
         });
         std::fs::write(
-            dest.join("BACKUP.json"),
+            destination.join("BACKUP.json"),
             serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| crate::Error::Serialization(e.to_string()))?,
         )?;
@@ -7496,6 +7498,10 @@ impl IntelligentIndexedStorage {
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
+        // Every way a table comes into being passes here -- REST, gRPC, MCP, DXQL, import,
+        // branch -- and the name becomes a file name under the WAL directory. The API layers
+        // check it too, but gRPC did not, and `../x` from it wrote `records/../x.rec`.
+        crate::utils::validate_table_name(&config.name)?;
         // An alias and a table of the same name would make one of the two unreachable, and
         // which one it is depends on the order of two maps. Refuse it here rather than pick.
         if self.aliases.read().contains_key(&config.name) {
@@ -13376,7 +13382,10 @@ impl IntelligentIndexedStorage {
                 let key = value.to_string();
                 let entry = by_key.entry(key).or_insert_with(|| {
                     order.push(value.clone());
-                    (0, Vec::with_capacity(group_size))
+                    // Bounded by what this round fetched, not by the request: `group_size`
+                    // is the caller's number, and a group never holds more than the search
+                    // returned.
+                    (0, Vec::with_capacity(group_size.min(fetched)))
                 });
                 entry.0 += 1;
                 if entry.1.len() < group_size {
@@ -14361,6 +14370,54 @@ mod tests {
     ///
     /// Both halves are asserted. A test that only checked the refusal would pass if the sweep
     /// stopped rebuilding altogether.
+    /// The storage layer refuses a name that would leave the WAL directory, whichever API
+    /// handed it over. gRPC passed its request's name straight through, and `../escape` wrote
+    /// a row file beside the data directory instead of inside it.
+    #[tokio::test]
+    async fn a_table_name_that_is_a_path_is_refused_by_the_storage_itself(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let wal = dir.path().join("wal");
+        let config = StorageConfig {
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal.clone())).await?;
+        for name in ["../escape", "a/b", "..", "x.y"] {
+            let table = TableConfig {
+                name: name.to_string(),
+                dimension: 2,
+                distance_metric: DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+                hnsw: None,
+                quantization: None,
+                payload_index: None,
+                embedding: None,
+                rerank: None,
+            };
+            assert!(
+                storage.create_table(table).await.is_err(),
+                "{name:?} was accepted as a table name"
+            );
+        }
+        assert!(
+            !dir.path().join("escape.rec").exists() && !wal.join("escape.rec").exists(),
+            "a row file was written outside records/"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn the_sweep_upgrades_an_index_but_never_demotes_one(
     ) -> Result<(), Box<dyn std::error::Error>> {
