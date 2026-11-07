@@ -2029,6 +2029,18 @@ def _(table):
         assert r.status_code == 400, r.text[:300]
 
 
+def test_a_memory_is_read_back_by_id():
+    """`GET /memories/{id}`: the memory remember made, superseded or not; 404 for no such id."""
+    with memory_table():
+        old = remember(text="garden in Shanghai", kind="fact", tags=["home"])["id"]
+        new = remember(text="garden in Berlin", supersedes=[old])["id"]
+        got = get(f"/memories/{old}").json()["data"]
+        assert got["text"] == "garden in Shanghai" and got["kind"] == "fact", got
+        assert got["tags"] == ["home"] and got["superseded_by"] == new, got
+        missing = get("/memories/no-such-memory", expect_ok=False)
+        assert missing.status_code == 404, missing.text
+
+
 @probe("RecallRequest", "query")
 def _(table):
     with memory_table():

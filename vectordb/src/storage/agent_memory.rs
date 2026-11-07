@@ -382,6 +382,18 @@ impl IntelligentIndexedStorage {
             .collect())
     }
 
+    /// One memory by id, superseded or not; `NotFound` when there is none.
+    ///
+    /// Agents read a memory back by the id `recall` or `remember` gave them -- to show it, to
+    /// check it before forgetting it. Without this they paged `list_memories` looking for it,
+    /// which the Hermes plugin capped at 2,000 rows: a memory older than that could not be read.
+    pub async fn get_memory(&self, id: &str) -> crate::Result<serde_json::Value> {
+        let table = table(self)?;
+        self.ensure_kb_table(&table).await?;
+        let record = self.get_record(&table, &id.to_string()).await?;
+        Ok(view(&record.id, &record.payload, None))
+    }
+
     /// Delete memories for good. How many there were.
     pub async fn forget(&self, ids: Vec<String>) -> crate::Result<usize> {
         let table = table(self)?;

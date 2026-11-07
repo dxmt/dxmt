@@ -12,7 +12,7 @@ use crate::{
         alter_table, branch_table, calibrate_recall, count_records, create_backup, create_snapshot,
         create_table, delete_alias, delete_document, delete_records, delete_table, drop_index,
         drop_payload_index_field, execute_dxql, export_table, facets, forget, full_text_search,
-        get_document, get_record, get_status, get_table, get_table_stats, health_check,
+        get_document, get_memory, get_record, get_status, get_table, get_table_stats, health_check,
         health_metrics, hybrid_search, hybrid_search_combined, import_table, index_payload_field,
         insert_records, insert_records_optimized, knn_graph, list_aliases, list_memories,
         list_records, list_tables, liveness, payload_index_report, prometheus_metrics,
@@ -585,7 +585,7 @@ pub async fn create_app_with_storage(
         // An agent's memory: see `storage::agent_memory`.
         .route("/memories", post(remember).get(list_memories))
         .route("/memories/recall", post(recall))
-        .route("/memories/:memory_id", delete(forget))
+        .route("/memories/:memory_id", get(get_memory).delete(forget))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))
         .route("/tables/:table_name/facets", post(facets))

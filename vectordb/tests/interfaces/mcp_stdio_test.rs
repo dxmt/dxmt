@@ -690,6 +690,53 @@ fn a_read_only_server_offers_and_runs_only_the_tools_that_read() {
     );
 }
 
+// A memory is read back by the id `remember` gave, superseded or not; a missing id is an error,
+// not an empty object.
+#[test]
+fn a_memory_is_read_back_by_id() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let replies = exchange_with_model(
+        &tmp.path().join("wal"),
+        &base_url,
+        &[
+            call(
+                2,
+                "remember",
+                serde_json::json!({"id": "home", "text": "The user lives in Shanghai", "kind": "fact", "tags": ["profile"], "source": "claude"}),
+            ),
+            call(
+                3,
+                "remember",
+                serde_json::json!({"text": "The user lives in Berlin now", "kind": "fact", "supersedes": ["home"]}),
+            ),
+            call(4, "get_memory", serde_json::json!({"id": "home"})),
+            call(
+                5,
+                "get_memory",
+                serde_json::json!({"id": "nobody-has-this-id"}),
+            ),
+        ],
+    );
+    let home = content(&replies[3]);
+    assert_eq!(home["id"], "home");
+    assert_eq!(home["text"], "The user lives in Shanghai");
+    assert_eq!(home["kind"], "fact");
+    assert_eq!(home["tags"], serde_json::json!(["profile"]));
+    assert_eq!(home["source"], "claude");
+    assert_eq!(
+        home["superseded_by"],
+        content(&replies[2])["id"],
+        "a superseded memory is still readable, with what replaced it: {home}"
+    );
+    let missing = &replies[4];
+    assert!(
+        missing.get("error").is_some() || missing["result"]["isError"] == serde_json::json!(true),
+        "a missing id is an error: {missing}"
+    );
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =

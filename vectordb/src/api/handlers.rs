@@ -1384,6 +1384,27 @@ pub async fn list_memories(
     }
 }
 
+/// One memory by id, superseded or not.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/memories/{memory_id}",
+    params(("memory_id" = String, Path, description = "The memory's id", example = "mem-1")),
+    responses(
+        (status = 200, description = "The memory: id, text, kind, tags, source, at, and superseded_by when it was replaced", body = ApiResponse),
+        (status = 404, description = "No memory has this id", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn get_memory(
+    State(state): State<AppState>,
+    Path(memory_id): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.get_memory(&memory_id).await {
+        Ok(memory) => ApiResponse::success(memory).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// Forget a memory for good.
 #[cfg_attr(feature = "api-swagger", utoipa::path(
     delete,

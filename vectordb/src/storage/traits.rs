@@ -183,6 +183,13 @@ pub trait _Storage: Send + Sync {
         ))
     }
 
+    /// One memory by id.
+    async fn get_memory(&self, _id: &str) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
     /// Delete memories; how many there were.
     async fn forget(&self, _ids: Vec<String>) -> crate::Result<usize> {
         Err(crate::Error::NotImplemented(
