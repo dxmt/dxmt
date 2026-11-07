@@ -1,9 +1,9 @@
-//! A trailing slash on an API path reaches the same route as the path without it.
+//! A trailing slash, or a doubled one, reaches the same route as the clean path.
 //!
 //! The router matches exactly, so `/api/v1/tables/docs/` used to answer an empty 404 beside a
-//! working `/api/v1/tables/docs`. `api::path` trims the slash before routing; this checks it on
-//! the real binary, where that wrapping happens, and that the two web apps that *need* their
-//! slash -- the dashboard redirects `/dashboard` to `/dashboard/` -- are left as they were.
+//! working `/api/v1/tables/docs`. `api::path` normalises the path before routing; this checks
+//! it on the real binary, where that wrapping happens, and that the console, which *needs* its
+//! slash -- `/dashboard` redirects to `/dashboard/` -- is left as it was.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -70,7 +70,13 @@ fn a_trailing_slash_reaches_the_same_route() {
     );
     assert_eq!(status, 200, "create through a trailing slash: {text}");
 
-    for path in ["/api/v1/tables/docs/", "/api/v1/tables/docs//", "/live/"] {
+    for path in [
+        "/api/v1/tables/docs/",
+        "/api/v1/tables/docs//",
+        "/api//v1/tables/docs",
+        "/live/",
+        "/api/docs/",
+    ] {
         let (status, text) = call(port, "GET", path, None);
         assert_eq!(status, 200, "{path}: {text}");
     }
