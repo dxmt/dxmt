@@ -245,7 +245,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: vectordb
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -451,7 +451,7 @@ jobs:
       # OpenClaw memory plugin: type-checked against the pinned OpenClaw SDK, tested against an
       # in-process stand-in for the server's memory API (the live loop needs an embedding model
       # and skips itself without DXMT_TEST_URL), built, and packed the way it is published.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24   # the pinned OpenClaw SDK needs Node 24.16+; the JS SDK step below sets 20 again
       - name: OpenClaw memory plugin tests
@@ -463,7 +463,7 @@ jobs:
           npm pack --dry-run
         working-directory: vectordb/clients/openclaw-memory-dxmt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
