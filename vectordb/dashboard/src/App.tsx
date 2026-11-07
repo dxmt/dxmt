@@ -11,6 +11,8 @@ import { TableSearch } from './pages/TableSearch';
 import { TableQuality } from './pages/TableQuality';
 import { TableVisualize } from './pages/TableVisualize';
 import { RecordDetail } from './pages/RecordDetail';
+import { Memories } from './pages/Memories';
+import { MemoryDetail } from './pages/MemoryDetail';
 
 export function App() {
   return (
@@ -26,6 +28,8 @@ export function App() {
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/tables" element={<Tables />} />
+          <Route path="/memories" element={<Memories />} />
+          <Route path="/memories/:id" element={<MemoryDetail />} />
           <Route path="/console" element={<Console />} />
           <Route path="/tables/:name" element={<TableDetail />}>
             <Route index element={<Navigate to="records" replace />} />

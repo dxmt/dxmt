@@ -70,7 +70,8 @@ enum Commands {
         /// Serve the WebSocket endpoint
         #[arg(long)]
         websocket: bool,
-        /// Serve the read-only web console at /dashboard. On by default when the bundle was
+        /// Serve the web console at /dashboard (read-only, except correcting and forgetting
+        /// memories). On by default when the bundle was
         /// built into this binary; `--no-dashboard` turns it off.
         ///
         /// Passing it explicitly also makes a missing bundle an error rather than a warning:
@@ -340,8 +341,9 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 .expect("Invalid bind address");
 
             // On unless turned off. A database you cannot look at, and whose API you cannot
-            // read, is harder to evaluate than one you can; both are read-only surfaces and
-            // both sit behind `DXMT_API_KEY` when one is set, like every other route.
+            // read, is harder to evaluate than one you can. The API docs are read-only and the
+            // console writes only the user's own memories (correct, forget); both sit behind
+            // `DXMT_API_KEY` when one is set, like every other route.
             let serve_swagger = !no_swagger;
             let serve_dashboard = !no_dashboard;
 
@@ -392,7 +394,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                     info!("  WebSocket      GET  /ws  (upgrade)");
                 }
                 if dashboard {
-                    info!("  Dashboard      GET  /dashboard  (read-only console, unauthenticated)");
+                    info!("  Dashboard      GET  /dashboard  (read-only except correcting and forgetting memories)");
                 }
 
                 // gRPC gets its own port rather than sharing the HTTP one. Multiplexing both

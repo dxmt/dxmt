@@ -2,7 +2,7 @@
   "name": "dxmt-dashboard",
   "version": "1.6.0",
   "private": true,
-  "description": "Read-only web console for DXMT, served by the server binary at /dashboard",
+  "description": "Web console for DXMT (read-only, except correcting and forgetting your own memories), served by the server binary at /dashboard",
   "type": "module",
   "engines": {
     "node": ">=20.19"
