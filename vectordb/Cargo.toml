@@ -434,6 +434,10 @@ name = "input_the_engine_should_accept_test"
 path = "tests/interfaces/input_the_engine_should_accept_test.rs"
 
 [[test]]
+name = "gateway_test"
+path = "tests/interfaces/gateway_test.rs"
+
+[[test]]
 name = "mcp_stdio_test"
 path = "tests/interfaces/mcp_stdio_test.rs"
 
