@@ -1,0 +1,12 @@
+{
+  "name": "dxmt",
+  "description": "Plugins for DXMT, an open-source memory database for personal AI agents",
+  "owner": { "name": "DXMT maintainers", "url": "https://github.com/dxmt/dxmt" },
+  "plugins": [
+    {
+      "name": "dxmt",
+      "source": "./plugins/dxmt",
+      "description": "Long-term memory and hybrid search for Claude Code, backed by a local DXMT server: the MCP server plus skills for setting it up, using memory well, and searching"
+    }
+  ]
+}
