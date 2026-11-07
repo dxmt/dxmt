@@ -105,6 +105,8 @@ jobs:
           name="dxmt-vectordb-${version}-${{ matrix.arch }}-linux-gnu"
           mkdir -p "dist/$name"
           cp target/release/vectordb LICENSE NOTICE README.md CHANGELOG.md .env.example "dist/$name/"
+          # `dxmt` is the same binary under the project's name; `vectordb` stays for existing scripts.
+          ln -s vectordb "dist/$name/dxmt"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -183,6 +185,8 @@ jobs:
           name="dxmt-vectordb-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp target/${{ matrix.target }}/release/vectordb LICENSE NOTICE README.md CHANGELOG.md .env.example "dist/$name/"
+          # `dxmt` is the same binary under the project's name; `vectordb` stays for existing scripts.
+          ln -s vectordb "dist/$name/dxmt"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"

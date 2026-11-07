@@ -174,6 +174,10 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         for k, v in resp.getheaders():
             if k.lower() in ("transfer-encoding", "connection", "content-length"):
                 continue
+            # Copied from the upstream's response: a CR or LF in either half would let it
+            # start a header, or a body, of its own in ours.
+            if any(c in k or c in v for c in "\r\n"):
+                continue
             self.send_header(k, v)
         collected = b""
         peeked = getattr(self, "_peeked", None)

@@ -33,6 +33,11 @@ concurrency:
 # No CARGO_BUILD_JOBS: it was 1, which compiled on one of the runner's four cores and made
 # compilation most of every job's wall time. The runners have 16 GB, and a four-way debug
 # build without debuginfo fits in it.
+# Read-only token: nothing here pushes, comments or publishes, and a step that starts to will
+# fail loudly instead of silently holding the repository's write access.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

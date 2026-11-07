@@ -12,6 +12,11 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
+# Read-only token: nothing here pushes, comments or publishes, and a step that starts to will
+# fail loudly instead of silently holding the repository's write access.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
