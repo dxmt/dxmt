@@ -165,7 +165,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         """LM Studio's `{"error": "terminated"}` is a load shed, not a bad request; read and retry."""
         peek = resp.read()
         self._peeked = peek
-        return b"terminated" in peek or b"unloaded" in peek or b"Failed to load model" in peek
+        return (b"terminated" in peek or b"unloaded" in peek or b"Failed to load model" in peek
+                or b"predict request failed" in peek or b"fetch failed" in peek)
 
     def _stream_back(self, resp, conn, body, started):
         self.send_response(resp.status)

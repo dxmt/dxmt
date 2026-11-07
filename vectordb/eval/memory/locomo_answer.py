@@ -160,6 +160,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--json", help="write every question, answer and verdict here")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip the questions already in --json's .partial file and append to it")
     args = parser.parse_args()
 
     import engines  # noqa: E402
@@ -246,13 +248,51 @@ def main():
                 "memories": len(memories_list), "context_chars": chars,
                 "searches": searches if args.mode == "agentic" else None}
 
-    started = time.time()
+    # Every finished question goes to `<json>.partial` as it lands, so a run that dies at
+    # question 350 of 762 -- a model server that sheds load for longer than the retries last --
+    # resumes there with --resume instead of starting over.
+    partial_path = f"{args.json}.partial" if args.json else None
     rows = []
+    if partial_path and args.resume:
+        try:
+            rows = [json.loads(line) for line in open(partial_path) if line.strip()]
+        except FileNotFoundError:
+            rows = []
+        done = {(r["sample"], r["question"]) for r in rows}
+        questions = [q for q in questions if (q[0]["sample_id"], q[1]["question"]) not in done]
+        print(f"resuming: {len(rows)} done, {len(questions)} to go", file=sys.stderr, flush=True)
+    elif partial_path:
+        open(partial_path, "w").close()
+    lock = __import__("threading").Lock()
+
+    def attempt(item):
+        # A question whose calls still fail after the client's and the proxy's retries is tried
+        # again after a pause, then counted as failed -- reported, and left out of the scores --
+        # rather than ending the run.
+        for wait in (30, 120, None):
+            try:
+                return run(item)
+            except Exception as exc:
+                if wait is None:
+                    print(f"  failed: {item[1]['question'][:60]!r}: {exc}", file=sys.stderr, flush=True)
+                    return None
+                time.sleep(wait)
+
+    started = time.time()
+    failed = 0
     with concurrent.futures.ThreadPoolExecutor(args.workers) as executor:
-        for i, row in enumerate(executor.map(run, questions), 1):
+        for i, row in enumerate(executor.map(attempt, questions), 1):
+            if row is None:
+                failed += 1
+                continue
             rows.append(row)
+            if partial_path:
+                with lock, open(partial_path, "a") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
             if i % 5 == 0:
                 print(f"  {i}/{len(questions)}, {time.time() - started:.0f} s", file=sys.stderr, flush=True)
+    if failed:
+        print(f"{failed} questions failed and are not scored", file=sys.stderr, flush=True)
 
     unparsed = sum(1 for r in rows if r["verdict"].upper()[:5] not in ("CORRE", "WRONG"))
     print(f"\nLoCoMo answers, engine {args.engine} ({args.mode}), {len(rows)} questions ({args.per_category} "
