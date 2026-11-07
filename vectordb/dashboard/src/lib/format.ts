@@ -12,6 +12,11 @@ export function bytes(n: number): string {
 
 export const count = (n: number): string => n.toLocaleString('en-US');
 
+/** A memory's `at`, seconds since the epoch, as the ISO string `since` and a title want. */
+export function epochIso(at: unknown): string | null {
+  return typeof at === 'number' && Number.isFinite(at) ? new Date(at * 1000).toISOString() : null;
+}
+
 /** "4 s ago", with the absolute value left for a title attribute. */
 export function since(iso: string | null): string {
   if (!iso) return '—';

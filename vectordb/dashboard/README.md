@@ -1,6 +1,7 @@
 # The DXMT VectorDB web console
 
-A read-only browser console, served by the server binary itself at `/dashboard`.
+A browser console, served by the server binary itself at `/dashboard`. It is read-only,
+except correcting and forgetting your own memories.
 
 ```bash
 cd vectordb
@@ -22,20 +23,37 @@ at `http://127.0.0.1:9999` would also work, because the server's CORS allow-list
 `localhost:3000` exactly — but only on that port, and only for the methods that list happens to
 include.)
 
-## Read-only, enforced rather than promised
+## Read-only, enforced rather than promised -- with one exception
 
 The server has no authentication: anything that can reach the port can already rewrite every
 table. That is the reason this console must not be able to, and the reason it is not left to
 review discipline:
 
-- `src/api/client.ts` exports `get` and `post` and nothing else. No `put`, `patch` or `delete`
+- `src/api/client.ts` exports `get` and `post` for reading. No `put`, `patch` or `delete`
   function exists in the tree.
-- `post`'s path parameter is a **closed union** of four read-only routes, so a write call is a
+- `post`'s path parameter is a **closed union** of six read-only routes, so a write call is a
   compile error. (Verified by writing one and watching `tsc` refuse it.)
 - An eslint rule forbids bare `fetch(` outside that module, so nothing can route around it.
 - `dashboard-routes.json` lists every route the app issues, and two Rust tests read it: one
   asserts each is under `CONTRACTS` in `tests/api_contract_test.rs`, the other asserts none of
-  them writes. Both run in the ordinary `cargo test --tests`, with no Node and no bundle.
+  them writes except the two below. Both run in the ordinary `cargo test --tests`, with no Node
+  and no bundle.
+
+**The exception is your own memories.** The memories are the user's own record of what their
+agents know about them, and owning that record means being able to correct it and delete it from
+the place you read it. So the Memories page makes exactly two writes, through `ownMemory` in
+`client.ts`, whose paths are literals there rather than arguments:
+
+| write | what the page does with it |
+| --- | --- |
+| `POST /api/v1/memories` | correct: a new memory that `supersedes` the old one (history kept), or the same `id` to fix a typo in place |
+| `DELETE /api/v1/memories/{id}` | forget, permanently, after a dialog that quotes the memory |
+
+`the_dashboard_declares_no_route_that_writes` allows those two by exact method and path, and
+any other write in the manifest still fails it. Tables and records stay read-only, and so does
+the Console page: a typed `POST /api/v1/memories` is refused there like any other write.
+`tests/api/test_dashboard.py` exercises the two writes only on a memory it makes under a fresh
+id, and forgets only the ids it made.
 
 `POST /api/v1/query` is deliberately absent. DXQL executes INSERT, UPDATE, DELETE and DROP
 TABLE, so a query console would make "read-only" false.
@@ -88,8 +106,28 @@ table regardless of `limit`.
 | Record | one record in full, with its vector | `GET /records/{id}` always has the vector |
 | Search | why did this come back, and what is the index costing | see below |
 | Index quality | how much recall is the index losing, on this data | see below |
+| Memories | what do my agents remember about me, and is it right | the one page that writes; see below |
 | Console | vary a request and send it again, with what it cost | read-only, see below |
 | Visualize | does this embedding have structure, and can the picture be trusted | see below |
+
+### Memories
+
+The list is `GET /memories`, newest first, by kind and paged; the search box is
+`POST /memories/recall`, the same search an agent runs, so what it returns is what an agent asking
+the same question would be handed. A recalled row shows `similarity` when the server sends it and
+the `score` otherwise, labelled, because the score is a rank (the best hit is always near 1.0) and
+reading it as a similarity overstates every match. Superseded memories are struck through in the
+list and left out of recall unless *include superseded* is ticked, as an agent's recall leaves
+them out.
+
+There is no `GET /memories/{id}`, so a memory's page finds it by paging `GET /memories` a
+thousand at a time, up to twenty pages, which also finds the memories it replaced. Correcting
+carries `source` and metadata over unchanged; a superseded memory is history and is not offered
+for correction -- its page links to the one that replaced it.
+
+The empty list cannot tell "nothing remembered yet" from "this server cannot remember" (memory
+off, or no embedding model), because the server answers an empty page for both; so the empty state
+says both, and how agents write a memory.
 
 ### The search inspector
 

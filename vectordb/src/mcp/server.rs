@@ -22,9 +22,46 @@ use tracing::{debug, error, info};
 /// Type alias for Send+Sync error types
 type McpServerError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The tools a read-only server offers: everything that reads, nothing that writes, creates or
+/// deletes. An allow-list, so a tool added later is withheld from a read-only server until it is
+/// named here -- a deny-list would expose every new write tool by default.
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "vector_search",
+    "hybrid_search",
+    "list_tables",
+    "get_table_info",
+    "recall",
+    "list_memories",
+    "get_memory",
+];
+
+/// Whether `DXMT_MCP_READ_ONLY` asks for a read-only MCP server (`1`, `true`, `yes`, `on`).
+pub fn read_only_from_env() -> bool {
+    crate::config::env::var("DXMT_MCP_READ_ONLY")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The refusal a read-only server gives a tool outside `READ_ONLY_TOOLS`.
+pub fn read_only_refusal(tool: &str) -> String {
+    format!(
+        "tool '{tool}' is not available: this MCP server is read-only (DXMT_MCP_READ_ONLY); \
+         it offers {}",
+        READ_ONLY_TOOLS.join(", ")
+    )
+}
+
 /// MCP server state
 pub struct McpServer<S: Storage> {
     storage: Arc<S>,
+    /// Offer and run only `READ_ONLY_TOOLS`: for an agent that should consult the store and
+    /// memory but never change them.
+    read_only: bool,
     sessions: Arc<RwLock<HashMap<Uuid, SessionState>>>,
     tools: Arc<RwLock<Vec<Tool>>>,
     resources: Arc<RwLock<Vec<Resource>>>,
@@ -44,6 +81,7 @@ impl<S: Storage + 'static> McpServer<S> {
     pub fn new(storage: Arc<S>) -> Self {
         let server = Self {
             storage,
+            read_only: read_only_from_env(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             tools: Arc::new(RwLock::new(Vec::new())),
             resources: Arc::new(RwLock::new(Vec::new())),
@@ -57,6 +95,12 @@ impl<S: Storage + 'static> McpServer<S> {
         server
     }
 
+    /// Offer and run only the tools that read (`READ_ONLY_TOOLS`), whatever the environment says.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     /// Populate the tool and prompt catalogues. Idempotent.
     ///
     /// Must run before the first `tools/list`, so both transports call it up front rather than
@@ -65,6 +109,12 @@ impl<S: Storage + 'static> McpServer<S> {
         self.tools.write().await.clear();
         self.prompts.write().await.clear();
         self.initialize_tools().await;
+        if self.read_only {
+            self.tools
+                .write()
+                .await
+                .retain(|tool| READ_ONLY_TOOLS.contains(&tool.name.as_str()));
+        }
         self.initialize_prompts().await;
         info!(
             "MCP catalogue ready: {} tools, {} prompts",
@@ -338,6 +388,7 @@ impl<S: Storage + 'static> McpServer<S> {
                 "properties": {
                     "query": {"type": "string", "description": "A question or topic"},
                     "limit": {"type": "integer", "description": "How many, default 25"},
+                    "offset": {"type": "integer", "description": "Skip this many from the top: ask again with the same query and offset = how many you have seen, to get the next ones"},
                     "kind": {"type": "string", "description": "Only this kind"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Only memories with any of these tags"},
                     "since": {"description": "Only memories from then on: Unix seconds or RFC 3339"},
@@ -360,6 +411,76 @@ impl<S: Storage + 'static> McpServer<S> {
                     "ids": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["ids"]
+            }),
+        });
+        tools.push(Tool {
+            name: "get_memory".to_string(),
+            description: Some(
+                "Read one memory by its id -- the id `recall` or `remember` returned -- with its \
+                 kind, tags, source, when it was remembered, and what replaced it if anything did."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "The memory's id"}},
+                "required": ["id"]
+            }),
+        });
+        tools.push(Tool {
+            name: "extract_memories".to_string(),
+            description: Some(
+                "Turn a conversation into facts worth remembering, each naming its person and \
+                 with relative times (\"last Friday\") resolved against `when`, kept as memories \
+                 of kind `fact`. Use it at the end of a session instead of remembering each \
+                 fact by hand. Needs the server's memory model (DXMT_MEMORY_LLM_MODEL)."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The conversation, one line per turn"},
+                    "when": {"type": "string", "description": "When it was held; relative times are resolved against it"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Put on every fact"},
+                    "source": {"type": "string", "description": "Which agent or conversation it came from"},
+                    "id_prefix": {"type": "string", "description": "Extracting the same conversation again under this prefix replaces its facts"}
+                },
+                "required": ["text"]
+            }),
+        });
+        tools.push(Tool {
+            name: "get_context".to_string(),
+            description: Some(
+                "Everything worth knowing for the task at hand, as one block to read before \
+                 answering: the user's profile, their standing preferences and instructions, then \
+                 the most relevant memories, inside a token budget. Use it at the start of a task \
+                 instead of several recalls."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What you are about to answer"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Only memories with any of these tags"},
+                    "max_tokens": {"type": "integer", "description": "Budget for the block, default 1500"}
+                },
+                "required": ["query"]
+            }),
+        });
+        tools.push(Tool {
+            name: "update_profile".to_string(),
+            description: Some(
+                "Condense everything remembered about one person into their profile (kind \
+                 `profile`), remade in place. Recall with kind `profile` to read it back at the \
+                 start of a task. Needs the server's memory model (DXMT_MEMORY_LLM_MODEL)."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Whose profile: the name the facts use"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Only facts with any of these tags"}
+                },
+                "required": ["name"]
             }),
         });
         tools.push(Tool {
@@ -780,6 +901,9 @@ impl<S: Storage + 'static> McpServer<S> {
         &self,
         params: CallToolParams,
     ) -> Result<CallToolResult, McpServerError> {
+        if self.read_only && !READ_ONLY_TOOLS.contains(&params.name.as_str()) {
+            return Err(read_only_refusal(&params.name).into());
+        }
         match params.name.as_str() {
             "vector_search" => self.handle_vector_search(params.arguments).await,
             "insert_vector" => self.handle_insert_vector(params.arguments).await,
@@ -793,6 +917,10 @@ impl<S: Storage + 'static> McpServer<S> {
             "remember" => self.handle_remember(params.arguments).await,
             "recall" => self.handle_recall(params.arguments).await,
             "forget" => self.handle_forget(params.arguments).await,
+            "get_memory" => self.handle_get_memory(params.arguments).await,
+            "extract_memories" => self.handle_extract(params.arguments).await,
+            "update_profile" => self.handle_profile(params.arguments).await,
+            "get_context" => self.handle_context(params.arguments).await,
             "list_memories" => self.handle_list_memories(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
@@ -1113,6 +1241,52 @@ impl<S: Storage + 'static> McpServer<S> {
                 .map_err(|e| format!("Invalid recall arguments: {e}"))?;
         let memories = self.storage.recall(request).await?;
         Self::json_result(&serde_json::json!({ "memories": memories }))
+    }
+
+    async fn handle_get_memory(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let args = args.ok_or("Missing arguments")?;
+        let id = args["id"]
+            .as_str()
+            .ok_or("get_memory needs `id`, a string")?
+            .to_string();
+        let memory = self.storage.get_memory(&id).await?;
+        Self::json_result(&memory)
+    }
+
+    async fn handle_extract(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::memory_derive::ExtractRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid extract_memories arguments: {e}"))?;
+        let facts = self.storage.extract(request).await?;
+        Self::json_result(&serde_json::json!({ "facts": facts }))
+    }
+
+    async fn handle_context(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::agent_memory::ContextRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid get_context arguments: {e}"))?;
+        let block = self.storage.context(request).await?;
+        Self::json_result(&block)
+    }
+
+    async fn handle_profile(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::memory_derive::ProfileRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid update_profile arguments: {e}"))?;
+        let profile = self.storage.profile(request).await?;
+        Self::json_result(&profile)
     }
 
     async fn handle_forget(

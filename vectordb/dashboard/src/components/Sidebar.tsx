@@ -8,7 +8,7 @@ import { Icon, type IconName } from './Icon';
  * Collapsed it is 72px and every label is gone, so each link keeps a `title` — the icon alone
  * is a guess otherwise, and a console is not a place to make people guess. The links stay
  * links: collapsing changes what is drawn, never what is reachable, so Tab still walks the same
- * five destinations in the same order.
+ * six destinations in the same order.
  *
  * The choice is remembered, and the remembering is allowed to fail. `localStorage` throws in a
  * private window and returns nothing after site data is cleared, and a sidebar is not worth a
@@ -19,6 +19,7 @@ const KEY = 'dxmt.sidebar.collapsed';
 const LINKS: { to: string; label: string; icon: IconName; end?: boolean }[] = [
   { to: '/', label: 'Overview', icon: 'overview', end: true },
   { to: '/tables', label: 'Tables', icon: 'tables' },
+  { to: '/memories', label: 'Memories', icon: 'memories' },
   { to: '/console', label: 'Console', icon: 'console' },
 ];
 

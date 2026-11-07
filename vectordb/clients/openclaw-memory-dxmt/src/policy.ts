@@ -11,7 +11,10 @@ export type RecalledMemory = {
   text: string;
   category: MemoryCategory;
   importance: number;
+  /** The server's fused rank for this hit: the best hit scores near 1.0 however poor a match. */
   score: number;
+  /** Cosine similarity to the query (servers from 1.7); what thresholds should compare. */
+  similarity?: number;
   at?: number;
 };
 

@@ -183,6 +183,43 @@ pub trait _Storage: Send + Sync {
         ))
     }
 
+    /// Facts out of a conversation, kept as memories.
+    async fn extract(
+        &self,
+        _request: crate::storage::memory_derive::ExtractRequest,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// One block of memory for a model, inside a token budget.
+    async fn context(
+        &self,
+        _request: crate::storage::agent_memory::ContextRequest,
+    ) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// A person's profile, made from their facts.
+    async fn profile(
+        &self,
+        _request: crate::storage::memory_derive::ProfileRequest,
+    ) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
+    /// One memory by id.
+    async fn get_memory(&self, _id: &str) -> crate::Result<serde_json::Value> {
+        Err(crate::Error::NotImplemented(
+            "this storage keeps no memories".to_string(),
+        ))
+    }
+
     /// Delete memories; how many there were.
     async fn forget(&self, _ids: Vec<String>) -> crate::Result<usize> {
         Err(crate::Error::NotImplemented(

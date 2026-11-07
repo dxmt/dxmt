@@ -17,6 +17,9 @@ export type FakeMemory = Record<string, unknown> & {
 
 export class FakeDxmt {
   memories = new Map<string, FakeMemory>();
+  /** Off to stand in for a server before `GET /memories/{id}` and `similarity` (1.6). */
+  getById = true;
+  reportsSimilarity = true;
   requests: Array<{ method: string; path: string; body?: unknown }> = [];
   failNext: string | undefined;
   private counter = 0;
@@ -78,6 +81,14 @@ export class FakeDxmt {
       return this.envelope({ memories: rows.slice(offset, offset + limit), total: rows.length });
     }
     const forget = path.match(/^\/api\/v1\/memories\/([^/]+)$/);
+    if (forget && method === "GET" && this.getById) {
+      const row = this.memories.get(decodeURIComponent(forget[1]!));
+      return row ? this.envelope(row) : this.envelope({ code: "NOT_FOUND", message: "no such memory" }, 404);
+    }
+    if (forget && method === "GET") {
+      // A server older than `GET /memories/{id}`: the path exists for DELETE only.
+      return this.envelope({ code: "METHOD_NOT_ALLOWED", message: "GET" }, 405);
+    }
     if (forget && method === "DELETE") {
       return this.envelope({ forgotten: this.memories.delete(decodeURIComponent(forget[1]!)) ? 1 : 0 });
     }
@@ -129,6 +140,13 @@ export class FakeDxmt {
       hits.push({ ...m, score: words.size ? overlap / words.size : 0 });
     }
     hits.sort((a, b) => b.score - a.score || b.at - a.at);
-    return hits.slice(0, Number(body.limit ?? 25));
+    // Like the server: `score` is a rank normalised over the page (the best hit is 1.0 however
+    // poor), `similarity` the closeness itself -- unless this stands in for an older server.
+    const best = hits[0]?.score || 1;
+    return hits.slice(0, Number(body.limit ?? 25)).map((h) => ({
+      ...h,
+      score: h.score / best,
+      ...(this.reportsSimilarity ? { similarity: h.score } : {}),
+    }));
   }
 }

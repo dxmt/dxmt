@@ -84,7 +84,7 @@ plugins:
     retrieval:
       top_k: 10                    # dxmt_recall default
       prefetch_k: 5                # memories injected before a turn
-      min_score: 0.0               # cosine similarity floor (1.0 = identical)
+      min_score: 0.0               # cosine similarity floor (1.0 = identical); servers before 1.7 report a rank
       isolate_workspace: true
     turns:
       enabled: true

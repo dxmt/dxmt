@@ -11,13 +11,14 @@ use crate::{
     api::handlers::{
         alter_table, branch_table, calibrate_recall, count_records, create_backup, create_snapshot,
         create_table, delete_alias, delete_document, delete_records, delete_table, drop_index,
-        drop_payload_index_field, execute_dxql, export_table, facets, forget, full_text_search,
-        get_document, get_record, get_status, get_table, get_table_stats, health_check,
-        health_metrics, hybrid_search, hybrid_search_combined, import_table, index_payload_field,
-        insert_records, insert_records_optimized, knn_graph, list_aliases, list_memories,
-        list_records, list_tables, liveness, payload_index_report, prometheus_metrics,
-        put_document, readiness, rebuild_index, recall, remember, repair_reachability,
-        search_groups, search_vectors, set_alias, sparse_search, update_record, AppState,
+        drop_payload_index_field, execute_dxql, export_table, extract_memories, facets, forget,
+        full_text_search, get_document, get_memory, get_record, get_status, get_table,
+        get_table_stats, health_check, health_metrics, hybrid_search, hybrid_search_combined,
+        import_table, index_payload_field, insert_records, insert_records_optimized, knn_graph,
+        list_aliases, list_memories, list_records, list_tables, liveness, memory_context,
+        payload_index_report, profile_memory, prometheus_metrics, put_document, readiness,
+        rebuild_index, recall, remember, repair_reachability, search_groups, search_vectors,
+        set_alias, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -585,7 +586,10 @@ pub async fn create_app_with_storage(
         // An agent's memory: see `storage::agent_memory`.
         .route("/memories", post(remember).get(list_memories))
         .route("/memories/recall", post(recall))
-        .route("/memories/:memory_id", delete(forget))
+        .route("/memories/extract", post(extract_memories))
+        .route("/memories/profile", post(profile_memory))
+        .route("/memories/context", post(memory_context))
+        .route("/memories/:memory_id", get(get_memory).delete(forget))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))
         .route("/tables/:table_name/facets", post(facets))
@@ -704,6 +708,15 @@ pub async fn create_app_with_storage(
             crate::api::auth::KEY_VARIABLE
         ),
     }
+    // Tenants: a bad file is a startup error, not a server that quietly refuses every key.
+    let tenants = crate::api::auth::Tenants::global()?;
+    if !tenants.is_empty() {
+        tracing::info!(
+            "{} tenant key(s) from {}: each reaches only its own memories and the gateway",
+            tenants.len(),
+            crate::api::auth::TENANTS_VARIABLE
+        );
+    }
 
     // MCP over HTTP: every agent on this machine reaches the one store through one server,
     // where each `vectordb mcp` opening the store itself allowed one at a time -- the store is
@@ -713,6 +726,19 @@ pub async fn create_app_with_storage(
         Router::new()
             .route("/mcp", post(mcp_http).get(mcp_no_stream))
             .layer(axum::Extension(mcp)),
+    );
+    // The memory gateway (`api::gateway`): an OpenAI-compatible chat endpoint that adds the
+    // user's memory to each request. Behind the API key like the rest; it answers 404 with what
+    // to set when DXMT_GATEWAY_UPSTREAM is not.
+    #[cfg(feature = "server-embedding")]
+    let app = app.merge(
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(crate::api::gateway::chat_completions),
+            )
+            .route("/v1/models", get(crate::api::gateway::models))
+            .layer(axum::Extension(storage.clone())),
     );
 
     let app = app

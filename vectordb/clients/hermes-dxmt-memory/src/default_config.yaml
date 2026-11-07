@@ -24,7 +24,7 @@ plugins:
     retrieval:
       top_k: 10            # memories a recall tool call returns by default
       prefetch_k: 5        # memories injected before each turn
-      min_score: 0.0       # drop recalled memories scoring below this (cosine similarity, 1.0 = identical)
+      min_score: 0.0       # drop recalled memories below this cosine similarity (1.0 = identical; a server before 1.7 reports a rank instead)
       # Recall only memories written for this agent workspace. Off, the agent sees every
       # memory on the server, including ones other agents and tools wrote over REST/MCP.
       isolate_workspace: true

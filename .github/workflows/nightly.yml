@@ -12,6 +12,11 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
+# Read-only token: nothing here pushes, comments or publishes, and a step that starts to will
+# fail loudly instead of silently holding the repository's write access.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -54,7 +59,7 @@ jobs:
       # Kept for 90 days so a regression can be bisected against the last good night rather
       # than re-measured from scratch.
       - name: Keep the measurements
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-results-${{ github.run_number }}

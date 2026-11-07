@@ -110,6 +110,8 @@ RUN groupadd -r vectordb && \
 
 # The binary
 COPY --from=final-builder /usr/local/bin/vectordb /usr/local/bin/vectordb
+# `dxmt` is the same binary under the project's name.
+RUN ln -s vectordb /usr/local/bin/dxmt
 
 # Default configuration (if present)
 COPY --chown=vectordb:vectordb config/ /config/

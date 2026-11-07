@@ -8,7 +8,7 @@ import type { MemoryPluginCapability } from "openclaw/plugin-sdk/memory-host-cor
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import type { MemoryConfig } from "./config.js";
 import { formatRecalledMemoryForModel, normalizeRecallQuery, truncateText } from "./policy.js";
-import type { MemoryStore } from "./store.js";
+import { closeness, type MemoryStore } from "./store.js";
 
 export type MemoryProviderRuntime = NonNullable<MemoryPluginCapability["providerRuntime"]>;
 type OpenParams = Parameters<MemoryProviderRuntime["open"]>[0];
@@ -108,7 +108,7 @@ export function createDxmtMemoryProviderRuntime(deps: ProviderDeps): MemoryProvi
             return {
               reference: ref,
               excerpt: truncateText(m.text, cfg.recallMaxChars),
-              score: m.score,
+              score: closeness(m),
               source: "memory",
               citations: [{ label: `${deps.providerId}:${m.id}`, reference: ref }],
             };

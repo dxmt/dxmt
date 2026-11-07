@@ -2,7 +2,7 @@
   "name": "dxmt-dashboard",
   "version": "1.6.0",
   "private": true,
-  "description": "Read-only web console for DXMT, served by the server binary at /dashboard",
+  "description": "Web console for DXMT (read-only, except correcting and forgetting your own memories), served by the server binary at /dashboard",
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -16,16 +16,16 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.66.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^7.6.0"
+    "@tanstack/react-query": "^5.105.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.3.0",
-    "@testing-library/user-event": "^14.6.7",
+    "@testing-library/user-event": "^14.6.8",
     "@types/node": "^22.20.3",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

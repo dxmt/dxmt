@@ -1,8 +1,9 @@
 //! A shared secret in front of the HTTP API, off unless `DXMT_API_KEY` is set.
 //!
-//! This is a seatbelt, not a vault. It is one static key with no rotation, no accounts and no
-//! per-table scoping, and it does nothing about an attacker who can read the environment or
-//! the process list. What it does is turn an accidentally-reachable port from "anyone who
+//! This is a seatbelt, not a vault. The admin key is one static key with no rotation, and it
+//! does nothing about an attacker who can read the environment or the process list. Tenants
+//! (`DXMT_TENANTS_FILE`, below) add per-tenant keys that reach only their own memories; tables
+//! have no per-tenant scoping and stay with the admin key. What it does is turn an accidentally-reachable port from "anyone who
 //! finds it owns the data" into "anyone who finds it gets 401", which is the difference that
 //! matters in practice, because the way this goes wrong is almost never a determined attacker
 //! — it is a demo box that outlived its firewall rule.
@@ -25,6 +26,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::api::response::{ApiError, ApiResponse};
@@ -92,26 +94,201 @@ impl ApiKey {
     }
 }
 
-/// Reject a request that carries no valid key.
+/// Who a request acts for, inserted into the request by `require_key` for the handlers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identity {
+    /// The admin key, or a server with no keys at all: the whole store.
+    Admin,
+    /// One tenant: its own memories, through the memory API and the gateway, and nothing else.
+    Tenant(String),
+}
+
+impl Identity {
+    /// The tag a tenant's memories carry (`tenant:<id>`); `None` for the admin.
+    pub fn scope(&self) -> Option<String> {
+        match self {
+            Identity::Admin => None,
+            Identity::Tenant(id) => Some(format!(
+                "{}{id}",
+                crate::storage::agent_memory::TENANT_TAG_PREFIX
+            )),
+        }
+    }
+}
+
+/// The scope a handler applies: its request's tenant, or none.
+pub fn scope_of(identity: Option<&Identity>) -> Option<String> {
+    identity.and_then(Identity::scope)
+}
+
+/// One tenant: an id and the SHA-256 of its key. The key itself is never stored or logged.
+struct Tenant {
+    id: String,
+    key_sha256: [u8; 32],
+}
+
+/// The tenants in `DXMT_TENANTS_FILE`: `{"tenants": [{"id": "acme", "key_sha256": "<64 hex>"}]}`.
+///
+/// Per-tenant keys for a server that holds several people's or apps' memory. A tenant's key
+/// reaches only the memory API (`/api/v1/memories...`) and the gateway (`/v1/...`), and there
+/// only its own memories: the server tags what it writes `tenant:<id>` and filters every read,
+/// duplicate check, supersede, forget and extraction on that tag. Tables, records, snapshots,
+/// backups, DXQL and MCP stay with the admin key (`DXMT_API_KEY`). With tenants configured, a
+/// request with no key is refused even when there is no admin key.
+pub struct Tenants(Vec<Tenant>);
+
+/// The file's path.
+pub const TENANTS_VARIABLE: &str = "DXMT_TENANTS_FILE";
+
+impl Tenants {
+    fn load() -> crate::Result<Self> {
+        let Some(path) = crate::config::env::var(TENANTS_VARIABLE)
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+        else {
+            return Ok(Self(Vec::new()));
+        };
+        let text = std::fs::read_to_string(path.trim()).map_err(|e| {
+            crate::Error::InvalidConfig(format!("{TENANTS_VARIABLE} ({path}): {e}"))
+        })?;
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> crate::Result<Self> {
+        let bad = |why: String| crate::Error::InvalidConfig(format!("{TENANTS_VARIABLE}: {why}"));
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| bad(format!("not JSON: {e}")))?;
+        let mut tenants = Vec::new();
+        for entry in value["tenants"]
+            .as_array()
+            .ok_or_else(|| bad("needs a `tenants` array".into()))?
+        {
+            let id = entry["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty()
+                || id.len() > 64
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(bad(format!(
+                    "tenant id {id:?}: 1-64 of a-z, A-Z, 0-9, '-' and '_'"
+                )));
+            }
+            let hex = entry["key_sha256"].as_str().unwrap_or("");
+            let key_sha256 = decode_sha256(hex).ok_or_else(|| {
+                bad(format!(
+                    "tenant {id}: `key_sha256` must be 64 hex digits (sha256sum of the key)"
+                ))
+            })?;
+            if tenants.iter().any(|t: &Tenant| t.id == id) {
+                return Err(bad(format!("tenant {id} appears twice")));
+            }
+            tenants.push(Tenant { id, key_sha256 });
+        }
+        Ok(Self(tenants))
+    }
+
+    /// The configured tenants, read once. A bad file is a startup error (`server` checks it).
+    pub fn global() -> crate::Result<&'static Tenants> {
+        static TENANTS: std::sync::OnceLock<Result<Tenants, String>> = std::sync::OnceLock::new();
+        match TENANTS.get_or_init(|| Tenants::load().map_err(|e| e.to_string())) {
+            Ok(t) => Ok(t),
+            Err(e) => Err(crate::Error::InvalidConfig(e.clone())),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The tenant whose key this is, compared in constant time over every tenant.
+    fn find(&self, presented: &str) -> Option<&str> {
+        let digest: [u8; 32] = Sha256::digest(presented.as_bytes()).into();
+        let mut found = None;
+        for tenant in &self.0 {
+            if bool::from(tenant.key_sha256.ct_eq(&digest)) {
+                found = Some(tenant.id.as_str());
+            }
+        }
+        found
+    }
+}
+
+fn decode_sha256(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// What a tenant's key reaches: the memory API and the gateway.
+fn tenant_may_reach(path: &str) -> bool {
+    path == "/api/v1/memories"
+        || path.starts_with("/api/v1/memories/")
+        || path == "/v1/chat/completions"
+        || path == "/v1/models"
+}
+
+/// Reject a request that carries no valid key; say who a valid one acts for.
 pub async fn require_key<B>(
     axum::extract::State(key): axum::extract::State<Option<ApiKey>>,
-    request: Request<B>,
+    mut request: Request<B>,
     next: Next<B>,
 ) -> Response {
-    let Some(key) = key else {
-        return next.run(request).await;
+    let tenants = match Tenants::global() {
+        Ok(t) => t,
+        Err(_) => return unauthorized(),
     };
-
-    let path = request.uri().path();
-    if OPEN.contains(&path) {
+    if key.is_none() && tenants.is_empty() {
+        request.extensions_mut().insert(Identity::Admin);
         return next.run(request).await;
     }
 
-    if presented(&request).is_some_and(|presented| key.matches(presented)) {
+    let path = request.uri().path().to_string();
+    if OPEN.contains(&path.as_str()) {
+        return next.run(request).await;
+    }
+
+    let Some(presented) = presented(&request).map(str::to_string) else {
+        return unauthorized();
+    };
+    if key.as_ref().is_some_and(|key| key.matches(&presented)) {
+        request.extensions_mut().insert(Identity::Admin);
+        return next.run(request).await;
+    }
+    if let Some(tenant) = tenants.find(&presented) {
+        if !tenant_may_reach(&path) {
+            return forbidden(&path);
+        }
+        request
+            .extensions_mut()
+            .insert(Identity::Tenant(tenant.to_string()));
         return next.run(request).await;
     }
 
     unauthorized()
+}
+
+/// A 403 for a tenant's key on a route that is not memory or the gateway.
+fn forbidden(path: &str) -> Response {
+    let body = ApiResponse::error(ApiError {
+        code: "FORBIDDEN".to_string(),
+        message: format!(
+            "{path}: a tenant's key reaches only the memory API (/api/v1/memories) and the gateway \
+             (/v1/chat/completions); everything else needs the admin key"
+        ),
+        details: None,
+    });
+    (StatusCode::FORBIDDEN, Json(body)).into_response()
 }
 
 /// The key a request presents, by either accepted route.
@@ -150,6 +327,71 @@ mod tests {
 
     fn key(value: &str) -> ApiKey {
         ApiKey(std::sync::Arc::new(value.to_string()))
+    }
+
+    #[test]
+    fn tenants_are_read_by_hash_and_found_only_by_their_key() {
+        let hash = |k: &str| -> String {
+            Sha256::digest(k.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let tenants = Tenants::parse(&format!(
+            r#"{{"tenants":[{{"id":"acme","key_sha256":"{}"}},{{"id":"b-2","key_sha256":"{}"}}]}}"#,
+            hash("acme-key"),
+            hash("other")
+        ))
+        .unwrap();
+        assert_eq!(tenants.len(), 2);
+        assert_eq!(tenants.find("acme-key"), Some("acme"));
+        assert_eq!(tenants.find("other"), Some("b-2"));
+        assert_eq!(
+            tenants.find("acme-key "),
+            None,
+            "no trimming of what is presented"
+        );
+        assert_eq!(tenants.find(""), None);
+    }
+
+    #[test]
+    fn a_bad_tenants_file_is_refused() {
+        let ok = "a".repeat(64);
+        for bad in [
+            "not json".to_string(),
+            r#"{"tenant": []}"#.to_string(),
+            format!(r#"{{"tenants":[{{"id":"","key_sha256":"{ok}"}}]}}"#),
+            format!(r#"{{"tenants":[{{"id":"has space","key_sha256":"{ok}"}}]}}"#),
+            r#"{"tenants":[{"id":"a","key_sha256":"abc"}]}"#.to_string(),
+            format!(
+                r#"{{"tenants":[{{"id":"a","key_sha256":"{ok}"}},{{"id":"a","key_sha256":"{ok}"}}]}}"#
+            ),
+        ] {
+            assert!(Tenants::parse(&bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn a_tenant_reaches_memory_and_the_gateway_only() {
+        for open in [
+            "/api/v1/memories",
+            "/api/v1/memories/recall",
+            "/api/v1/memories/x",
+            "/v1/chat/completions",
+            "/v1/models",
+        ] {
+            assert!(tenant_may_reach(open), "{open}");
+        }
+        for closed in [
+            "/api/v1/tables",
+            "/api/v1/memoriesx",
+            "/mcp",
+            "/status",
+            "/api/v1/query",
+            "/v1/embeddings",
+        ] {
+            assert!(!tenant_may_reach(closed), "{closed}");
+        }
     }
 
     #[test]

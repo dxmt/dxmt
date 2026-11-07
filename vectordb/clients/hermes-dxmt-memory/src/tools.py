@@ -16,7 +16,7 @@ DXMT_RECALL = {
     "name": "dxmt_recall",
     "description": (
         "Recall durable memory from DXMT by meaning and keyword. Returns memory ids, text, "
-        "category, score (1.0 = identical) and provenance turn ids. Use it before answering "
+        "category, similarity to the query (1.0 = identical) and provenance turn ids. Use it before answering "
         "anything that may depend on what the user told you in an earlier session."
     ),
     "parameters": {
@@ -226,6 +226,9 @@ def format_result(row: dict[str, Any], *, include_full: bool = False) -> dict[st
         "provenance_turn_ids": row.get("provenance") or [],
         "at": row.get("at"),
     }
+    # `similarity` is the cosine to the query (servers from 1.7); `score` alone is a rank.
+    if "similarity" in row:
+        payload["similarity"] = row["similarity"]
     if "score" in row:
         payload["score"] = row["score"]
     if include_full:

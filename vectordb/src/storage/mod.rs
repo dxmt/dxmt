@@ -9,6 +9,7 @@ pub mod index_selector;
 pub mod intelligent_indexed_storage;
 pub mod knowledge_base;
 pub mod memory;
+pub mod memory_derive;
 pub(crate) mod memory_guard;
 pub mod node_map;
 pub mod object;

@@ -4906,14 +4906,16 @@ impl IntelligentIndexedStorage {
             }
         }
 
-        std::fs::create_dir_all(dest)?;
+        // Written to the path that was checked against the root, not the one that was given:
+        // the two name the same directory only until a symlink in between is swapped.
+        std::fs::create_dir_all(&destination)?;
         let mut copied = Vec::new();
         let mut bytes = 0u64;
 
         // 快照目录
         let snapshot_src = Self::snapshot_dir(wal_dir);
         if snapshot_src.exists() {
-            let snapshot_dst = dest.join("snapshot");
+            let snapshot_dst = destination.join("snapshot");
             std::fs::create_dir_all(&snapshot_dst)?;
             for entry in std::fs::read_dir(&snapshot_src)? {
                 let entry = entry?;
@@ -4936,7 +4938,7 @@ impl IntelligentIndexedStorage {
             if !src.exists() {
                 continue;
             }
-            let dst = dest.join(sub);
+            let dst = destination.join(sub);
             std::fs::create_dir_all(&dst)?;
             let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -4970,14 +4972,14 @@ impl IntelligentIndexedStorage {
         // without them comes up with the tables and none of the names anything calls them by.
         let aliases = Self::aliases_path(wal_dir);
         if aliases.exists() {
-            let n = std::fs::copy(&aliases, dest.join("aliases"))?;
+            let n = std::fs::copy(&aliases, destination.join("aliases"))?;
             bytes += n;
             copied.push("aliases".to_string());
         }
 
         let wal_log = wal_dir.join("wal.log");
         if wal_log.exists() {
-            let n = std::fs::copy(&wal_log, dest.join("wal.log"))?;
+            let n = std::fs::copy(&wal_log, destination.join("wal.log"))?;
             bytes += n;
             copied.push("wal.log".to_string());
         }
@@ -4991,7 +4993,7 @@ impl IntelligentIndexedStorage {
                         directory, and start it again.",
         });
         std::fs::write(
-            dest.join("BACKUP.json"),
+            destination.join("BACKUP.json"),
             serde_json::to_vec_pretty(&manifest)
                 .map_err(|e| crate::Error::Serialization(e.to_string()))?,
         )?;
@@ -7496,6 +7498,10 @@ impl IntelligentIndexedStorage {
     /// 把刚写好的快照完整读一遍，确认它真的能用来恢复。
     /// 创建表时自动选择最优索引
     pub async fn create_table(&self, config: TableConfig) -> crate::Result<Table> {
+        // Every way a table comes into being passes here -- REST, gRPC, MCP, DXQL, import,
+        // branch -- and the name becomes a file name under the WAL directory. The API layers
+        // check it too, but gRPC did not, and `../x` from it wrote `records/../x.rec`.
+        crate::utils::validate_table_name(&config.name)?;
         // An alias and a table of the same name would make one of the two unreachable, and
         // which one it is depends on the order of two maps. Refuse it here rather than pick.
         if self.aliases.read().contains_key(&config.name) {
@@ -10015,6 +10021,52 @@ impl IntelligentIndexedStorage {
         })
     }
 
+    /// The engine's ranking for `request`, cut to the records `filter` admits: `want` of them,
+    /// or every one there is when fewer match.
+    ///
+    /// The engine cannot see payloads, so the filter is applied to its ranking, and a fixed
+    /// pool from that ranking is not enough: keyword search took three times the limit and
+    /// hybrid ten times, so a filter that admits a small share of the table -- one user's
+    /// memories among everyone's, one kind among nine thousand -- found few of its records or
+    /// none. The pool grows until it holds `want` admitted records or the ranking runs out.
+    #[cfg(feature = "text-bm25")]
+    async fn text_ranking_admitted(
+        &self,
+        tablename: &str,
+        engine: &FullTextSearchEngine,
+        mut request: EngineSearchRequest,
+        filter: &crate::types::Filter,
+        want: usize,
+    ) -> crate::Result<Vec<crate::search::full_text::FullTextSearchResult>> {
+        request.offset = 0;
+        let mut fetch = want.saturating_mul(3).max(64);
+        loop {
+            request.limit = fetch;
+            // No map lock while the engine ranks; only the record lookups take it.
+            let ranked = engine.search(&request).await?;
+            let exhausted = ranked.len() < fetch;
+            let admitted: Vec<_> = {
+                let tables = self.read_tables("text_ranking_admitted").await;
+                let table_data = tables
+                    .get(tablename)
+                    .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+                ranked
+                    .into_iter()
+                    .filter(|r| {
+                        table_data
+                            .records
+                            .get(&r.id)
+                            .is_some_and(|record| record.matches_filter(filter))
+                    })
+                    .collect()
+            };
+            if admitted.len() >= want || exhausted {
+                return Ok(admitted);
+            }
+            fetch = fetch.saturating_mul(4);
+        }
+    }
+
     /// `full_text_search` without the rerank step.
     #[cfg(feature = "text-bm25")]
     async fn full_text_unranked(
@@ -10044,18 +10096,11 @@ impl IntelligentIndexedStorage {
             })?
         };
 
-        // 如果有过滤器，获取更多结果以补偿过滤后的损失
-        let fetch_limit = if request.filter.is_some() {
-            request.limit * 3 // 获取3倍结果
-        } else {
-            request.limit
-        };
-
         // Build the search request for the engine
         let engine_request = EngineSearchRequest {
             query: request.query.clone(),
             search_fields: request.fields.clone(),
-            limit: fetch_limit,
+            limit: request.limit,
             offset: request.offset,
             highlight: request.highlight,
             highlight_pre_tag: None,
@@ -10072,8 +10117,23 @@ impl IntelligentIndexedStorage {
             sort_by: None,
         };
 
-        // Perform the search, holding no map lock.
-        let search_results = engine.search(&engine_request).await?;
+        // Perform the search, holding no map lock. With a filter, `offset` counts the records
+        // it admits, so the ranking is cut after filtering.
+        let search_results = match request.filter.as_ref() {
+            None => engine.search(&engine_request).await?,
+            Some(filter) => self
+                .text_ranking_admitted(
+                    tablename,
+                    &engine,
+                    engine_request,
+                    filter,
+                    request.offset + request.limit,
+                )
+                .await?
+                .into_iter()
+                .skip(request.offset)
+                .collect(),
+        };
 
         // Back under the map for the record lookups behind the filter and the payloads.
         let tables = self.read_tables("full_text_search").await;
@@ -10116,7 +10176,7 @@ impl IntelligentIndexedStorage {
                     rerank_score: None,
                 })
             })
-            .take(request.limit) // 过滤后只保留limit个
+            .take(request.limit)
             .collect();
 
         let total = hits.len();
@@ -10455,12 +10515,33 @@ impl IntelligentIndexedStorage {
         // component backwards — the nearest vector came out last.
         let mut vector_results: Vec<(RecordId, f32)> = Vec::new();
         if let Some(ref vector) = request.vector {
-            vector_results = index
-                .search(vector, fetch_limit)
-                .await?
-                .into_iter()
-                .map(|(id, distance)| (id, Self::similarity_from_distance(metric, distance)))
-                .collect();
+            vector_results = match request.filter.as_ref() {
+                None => index
+                    .search(vector, fetch_limit)
+                    .await?
+                    .into_iter()
+                    .map(|(id, distance)| (id, Self::similarity_from_distance(metric, distance)))
+                    .collect(),
+                // Filtered, the dense half goes through `search`, which narrows to the records
+                // the filter admits before ranking. Ranking the whole table and filtering the
+                // first `fetch_limit` lost most of a narrow filter's records.
+                Some(filter) => {
+                    let query: SearchQuery = serde_json::from_value(serde_json::json!({
+                        "vector": vector,
+                        "top_k": fetch_limit,
+                        "limit": fetch_limit,
+                        "filter": filter,
+                        "with_payload": false,
+                    }))
+                    .map_err(|e| crate::Error::Internal(e.to_string()))?;
+                    self.search(tablename, query)
+                        .await?
+                        .hits
+                        .into_iter()
+                        .map(|hit| (hit.id, hit.score))
+                        .collect()
+                }
+            };
         }
 
         // 3. Full-text search
@@ -10486,12 +10567,20 @@ impl IntelligentIndexedStorage {
                     };
                     // An engine error fails the query: swallowed, it left the dense half alone
                     // behind a fusion-shaped answer.
-                    text_results = engine
-                        .search(&text_request)
-                        .await?
-                        .into_iter()
-                        .map(|r| (r.id, r.score))
-                        .collect();
+                    let ranked = match request.filter.as_ref() {
+                        None => engine.search(&text_request).await?,
+                        Some(filter) => {
+                            self.text_ranking_admitted(
+                                tablename,
+                                engine,
+                                text_request,
+                                filter,
+                                fetch_limit,
+                            )
+                            .await?
+                        }
+                    };
+                    text_results = ranked.into_iter().map(|r| (r.id, r.score)).collect();
                 }
             }
         }
@@ -13293,7 +13382,10 @@ impl IntelligentIndexedStorage {
                 let key = value.to_string();
                 let entry = by_key.entry(key).or_insert_with(|| {
                     order.push(value.clone());
-                    (0, Vec::with_capacity(group_size))
+                    // Bounded by what this round fetched, not by the request: `group_size`
+                    // is the caller's number, and a group never holds more than the search
+                    // returned.
+                    (0, Vec::with_capacity(group_size.min(fetched)))
                 });
                 entry.0 += 1;
                 if entry.1.len() < group_size {
@@ -13992,6 +14084,31 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         IntelligentIndexedStorage::recall(self, request).await
     }
 
+    async fn extract(
+        &self,
+        request: crate::storage::memory_derive::ExtractRequest,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        IntelligentIndexedStorage::extract(self, request).await
+    }
+
+    async fn profile(
+        &self,
+        request: crate::storage::memory_derive::ProfileRequest,
+    ) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::profile(self, request).await
+    }
+
+    async fn get_memory(&self, id: &str) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::get_memory(self, id).await
+    }
+
+    async fn context(
+        &self,
+        request: crate::storage::agent_memory::ContextRequest,
+    ) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::context(self, request).await
+    }
+
     async fn forget(&self, ids: Vec<String>) -> crate::Result<usize> {
         IntelligentIndexedStorage::forget(self, ids).await
     }
@@ -14253,6 +14370,54 @@ mod tests {
     ///
     /// Both halves are asserted. A test that only checked the refusal would pass if the sweep
     /// stopped rebuilding altogether.
+    /// The storage layer refuses a name that would leave the WAL directory, whichever API
+    /// handed it over. gRPC passed its request's name straight through, and `../escape` wrote
+    /// a row file beside the data directory instead of inside it.
+    #[tokio::test]
+    async fn a_table_name_that_is_a_path_is_refused_by_the_storage_itself(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let wal = dir.path().join("wal");
+        let config = StorageConfig {
+            memory: Some(crate::config::MemoryConfig {
+                max_size_mb: 256,
+                eviction_policy: "lru".to_string(),
+            }),
+            ssd: None,
+            object_storage: None,
+        };
+        let storage = IntelligentIndexedStorage::new_with_wal(&config, Some(wal.clone())).await?;
+        for name in ["../escape", "a/b", "..", "x.y"] {
+            let table = TableConfig {
+                name: name.to_string(),
+                dimension: 2,
+                distance_metric: DistanceMetric::Cosine,
+                description: None,
+                index_type: None,
+                text_fields: None,
+                enable_full_text_search: false,
+                memory_optimization: None,
+                payload_schema: None,
+                schema_version: 1,
+                named_vectors: None,
+                hnsw: None,
+                quantization: None,
+                payload_index: None,
+                embedding: None,
+                rerank: None,
+            };
+            assert!(
+                storage.create_table(table).await.is_err(),
+                "{name:?} was accepted as a table name"
+            );
+        }
+        assert!(
+            !dir.path().join("escape.rec").exists() && !wal.join("escape.rec").exists(),
+            "a row file was written outside records/"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn the_sweep_upgrades_an_index_but_never_demotes_one(
     ) -> Result<(), Box<dyn std::error::Error>> {

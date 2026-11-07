@@ -1,7 +1,8 @@
 use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
-use crate::storage::agent_memory::{RecallRequest, RememberRequest};
+use crate::storage::agent_memory::{ContextRequest, RecallRequest, RememberRequest};
 use crate::storage::documents::PutDocumentRequest;
+use crate::storage::memory_derive::{ExtractRequest, ProfileRequest};
 use axum::{
     extract::{Path, State},
     http::{
@@ -1318,8 +1319,10 @@ pub struct MemoryListQuery {
 ))]
 pub async fn remember(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<RememberRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<RememberRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.remember(request).await {
         Ok(kept) => ApiResponse::success(kept).into_response(),
         Err(e) => error_response(e),
@@ -1343,12 +1346,98 @@ pub async fn remember(
 ))]
 pub async fn recall(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<RecallRequest>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<RecallRequest>,
 ) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
     match state.storage.recall(request).await {
         Ok(memories) => {
             ApiResponse::success(serde_json::json!({ "memories": memories })).into_response()
         }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Extract: the facts a conversation establishes, worked out by the server's memory model
+/// (`DXMT_MEMORY_LLM_MODEL`) and kept as memories of kind `fact`, relative times resolved
+/// against `when`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/extract",
+    request_body(content = ExtractRequest, example = json!({
+        "text": "Caroline: I went to a counseling workshop last Friday.\nMelanie: How was it?",
+        "when": "10:37 am on 27 June, 2023",
+        "tags": ["user-42"],
+        "id_prefix": "chat-7:session-3"
+    })),
+    responses(
+        (status = 200, description = "The facts kept, with their ids", body = ApiResponse),
+        (status = 400, description = "No text, or no memory model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn extract_memories(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ExtractRequest>,
+) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
+    match state.storage.extract(request).await {
+        Ok(facts) => ApiResponse::success(serde_json::json!({ "facts": facts })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Context: one block of memory to put in front of a model, inside a token budget -- the
+/// profile, standing preferences and instructions, then whatever else is relevant.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/context",
+    request_body(content = ContextRequest, example = json!({
+        "query": "plan a weekend trip for me",
+        "tags": ["user-42"],
+        "max_tokens": 1500
+    })),
+    responses(
+        (status = 200, description = "`context` (Markdown), its estimated `tokens`, and the `memories` it drew on", body = ApiResponse),
+        (status = 400, description = "No query, or no embedding model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn memory_context(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ContextRequest>,
+) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
+    match state.storage.context(request).await {
+        Ok(block) => ApiResponse::success(block).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Profile: one person's facts condensed into one memory of kind `profile`, remade in place.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/profile",
+    request_body(content = ProfileRequest, example = json!({
+        "name": "Caroline",
+        "tags": ["user-42"]
+    })),
+    responses(
+        (status = 200, description = "The profile kept, its id and how many facts it drew on", body = ApiResponse),
+        (status = 400, description = "No facts about that person, or no memory model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn profile_memory(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    ApiJson(mut request): ApiJson<ProfileRequest>,
+) -> impl IntoResponse {
+    request.scope = crate::api::auth::scope_of(identity.as_deref());
+    match state.storage.profile(request).await {
+        Ok(profile) => ApiResponse::success(profile).into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -1365,14 +1454,17 @@ pub async fn recall(
 ))]
 pub async fn list_memories(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
     ApiQuery(query): ApiQuery<MemoryListQuery>,
 ) -> impl IntoResponse {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
     match state
         .storage
-        .list_memories(
+        .list_memories_in(
             query.kind.as_deref(),
             query.limit.unwrap_or(50),
             query.offset.unwrap_or(0),
+            scope.as_deref(),
         )
         .await
     {
@@ -1380,6 +1472,33 @@ pub async fn list_memories(
             ApiResponse::success(serde_json::json!({ "memories": memories, "total": total }))
                 .into_response()
         }
+        Err(e) => error_response(e),
+    }
+}
+
+/// One memory by id, superseded or not.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    get,
+    path = "/api/v1/memories/{memory_id}",
+    params(("memory_id" = String, Path, description = "The memory's id", example = "mem-1")),
+    responses(
+        (status = 200, description = "The memory: id, text, kind, tags, source, at, and superseded_by when it was replaced", body = ApiResponse),
+        (status = 404, description = "No memory has this id", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn get_memory(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
+    Path(memory_id): Path<String>,
+) -> impl IntoResponse {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
+    match state
+        .storage
+        .get_memory_in(&memory_id, scope.as_deref())
+        .await
+    {
+        Ok(memory) => ApiResponse::success(memory).into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -1396,9 +1515,15 @@ pub async fn list_memories(
 ))]
 pub async fn forget(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::api::auth::Identity>>,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.storage.forget(vec![memory_id]).await {
+    let scope = crate::api::auth::scope_of(identity.as_deref());
+    match state
+        .storage
+        .forget_in(vec![memory_id], scope.as_deref())
+        .await
+    {
         Ok(n) => ApiResponse::success(serde_json::json!({ "forgotten": n })).into_response(),
         Err(e) => error_response(e),
     }

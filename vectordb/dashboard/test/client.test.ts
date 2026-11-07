@@ -109,7 +109,9 @@ describe('read-only by construction', () => {
     expect(names.sort()).toEqual(
       [
         'graph',
+        'memories',
         'metrics',
+        'recall',
         'record',
         'records',
         'search',
@@ -122,5 +124,34 @@ describe('read-only by construction', () => {
       ].sort(),
     );
     expect(typeof post).toBe('function');
+  });
+
+  /**
+   * The one exception, pinned: two writes, both on the user's own memories, with the route
+   * fixed in the client rather than chosen by the caller. A third key here, or either one
+   * reaching another path, is a change to what this console is.
+   */
+  it('makes exactly two writes, correcting and forgetting a memory', async () => {
+    at('/dashboard/');
+    const { ownMemory } = await import('../src/api/client');
+    expect(Object.keys(ownMemory).sort()).toEqual(['forget', 'remember']);
+
+    const calls: [string, string | undefined][] = [];
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push([url, init?.method]);
+      return Promise.resolve(
+        new Response('{"success":true,"data":{},"error":null,"timestamp":"t"}', {
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+
+    await ownMemory.remember({ text: 'x', supersedes: ['m1'] });
+    await ownMemory.forget('a/b c');
+    expect(calls).toEqual([
+      ['/api/v1/memories', 'POST'],
+      // Encoded, so an id cannot climb out of /memories/ into another route.
+      ['/api/v1/memories/a%2Fb%20c', 'DELETE'],
+    ]);
   });
 });

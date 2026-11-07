@@ -267,3 +267,36 @@ fn a_filter_applies_before_the_grouping() {
         }
     }
 }
+
+/// `group_size` comes straight from the request body, and each group used to reserve room for
+/// that many hits up front: `group_size: 1e18` asked the allocator for exabytes and the request
+/// died with a capacity-overflow panic instead of an answer. A group never holds more hits than
+/// the search returned, so the size has to be accepted and simply never reached.
+#[test]
+fn a_huge_group_size_is_answered_not_allocated() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let _server = start(dir.path(), port);
+    seed(port, "huge");
+
+    let grouped = groups(
+        port,
+        "huge",
+        serde_json::json!({
+            "vector": [1.0, 0.0],
+            "group_by": "doc_id",
+            "groups": 2,
+            "group_size": 1_000_000_000_000_000_000u64
+        }),
+    );
+    let first = &grouped["groups"][0];
+    assert_eq!(
+        first["hits"].as_array().map(Vec::len),
+        Some(8),
+        "every chunk of the nearest document, and no more: {grouped}"
+    );
+    assert!(
+        call(port, "GET", "/live", None).is_some(),
+        "the server is still up"
+    );
+}

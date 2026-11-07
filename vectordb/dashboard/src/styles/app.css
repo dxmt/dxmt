@@ -450,3 +450,34 @@ ul.routes button { text-align: left; display: block; padding: 2px 0; }
   flex: 1 1 16rem;
   min-width: 0;
 }
+
+/* --- memories: the one page that writes ------------------------------------ */
+
+button.danger { background: var(--bad); border-color: var(--bad); }
+button.secondary { background: var(--surface); border-color: var(--border); color: var(--text); }
+tr[data-superseded] td { color: var(--muted); }
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, #000 40%, transparent);
+}
+.dialog {
+  width: min(520px, calc(100vw - 32px));
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--pad);
+}
+.dialog h3 { margin: 0 0 12px; color: var(--heading); font-size: 16px; }
+.dialog blockquote {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--bad);
+  background: var(--raised);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

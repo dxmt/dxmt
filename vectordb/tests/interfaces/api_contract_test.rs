@@ -67,26 +67,33 @@ const CONTRACTS: &[Contract] = &[
         path: "/tables/{t}/records/{r}",
         caller: "python",
     },
-    // Memory: remember / recall / forget / list_memories in both SDKs.
+    // Memory: remember / recall / forget / list_memories in both SDKs, and the
+    // dashboard's Memories page.
     Contract {
         method: "POST",
         path: "/memories",
-        caller: "sdk",
+        caller: "sdk, dashboard",
     },
     Contract {
         method: "GET",
         path: "/memories",
-        caller: "sdk",
+        caller: "sdk, dashboard",
     },
     Contract {
         method: "POST",
         path: "/memories/recall",
-        caller: "sdk",
+        caller: "sdk, dashboard",
     },
     Contract {
         method: "DELETE",
         path: "/memories/{r}",
-        caller: "sdk",
+        caller: "sdk, dashboard",
+    },
+    // The Hermes and OpenClaw memory plugins read a memory back by id.
+    Contract {
+        method: "GET",
+        path: "/memories/{r}",
+        caller: "plugins",
     },
     // Documents: put_document / get_document / delete_document in both SDKs.
     Contract {
@@ -591,12 +598,21 @@ fn every_route_the_dashboard_uses_is_under_contract() {
     );
 }
 
-/// The dashboard's manifest contains nothing that writes.
+/// The dashboard's manifest contains nothing that writes, except two routes on the user's own
+/// memories.
 ///
 /// "Read-only" is enforced in the front end by a closed union of permitted paths, which is a
 /// TypeScript guarantee and therefore invisible to everything here. This is the same claim
 /// asserted where a Rust reviewer will see it: whatever the front end believes, the list of
-/// routes it declares must contain no mutation.
+/// routes it declares must contain no mutation -- other than the two in `OWN_MEMORY_WRITES`.
+///
+/// That exception is deliberate and narrow. The memories are the user's own record of what
+/// their agents know about them, and the user owning their memory means being able to correct
+/// it and delete it from the console they read it in: `POST /api/v1/memories` (correct, by a
+/// new memory that supersedes the old one or by the same id in place) and
+/// `DELETE /api/v1/memories/{r}` (forget). It is matched by exact method and path, so it cannot
+/// stretch to anything else -- not `PUT` on a memory, not a table, not a record -- and tables
+/// and records stay read-only from the dashboard. Any other write still fails this test.
 ///
 /// `POST /api/v1/query` is the one to watch. DXQL executes INSERT, UPDATE, DELETE and DROP
 /// TABLE, so a query console would make the phrase "read-only dashboard" false on the day it
@@ -609,11 +625,21 @@ fn the_dashboard_declares_no_route_that_writes() {
     .unwrap();
     let manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
 
+    // The only writes the dashboard may declare, by exact method and path. See above for why;
+    // adding a third is a change to what the console is, and belongs in review, not here.
+    const OWN_MEMORY_WRITES: [(&str, &str); 2] = [
+        ("POST", "/api/v1/memories"),
+        ("DELETE", "/api/v1/memories/{r}"),
+    ];
+
     let mut writes = Vec::new();
     for route in manifest["routes"].as_array().unwrap() {
         let method = route["method"].as_str().unwrap();
         let path = route["path"].as_str().unwrap();
 
+        if OWN_MEMORY_WRITES.contains(&(method, path)) {
+            continue;
+        }
         if matches!(method, "PUT" | "PATCH" | "DELETE") {
             writes.push(format!("{method} {path}"));
             continue;
@@ -628,10 +654,14 @@ fn the_dashboard_declares_no_route_that_writes() {
             //   /records/list        a filter and a page
             //   /graph               a sample size, a neighbour count and a filter; it computes
             //                        the nearest-neighbour structure of a sample and returns it
+            //   /memories/recall     a query, a kind, tags and a time bound; it is a hybrid
+            //                        search over the memory table and changes nothing (the
+            //                        server's admission control counts it as a search too)
             let reads = path.ends_with("/search")
                 || path.contains("/search/")
                 || path.ends_with("/records/list")
-                || path.ends_with("/graph");
+                || path.ends_with("/graph")
+                || path == "/api/v1/memories/recall";
             if !reads {
                 writes.push(format!("{method} {path}"));
             }
@@ -640,8 +670,8 @@ fn the_dashboard_declares_no_route_that_writes() {
 
     assert!(
         writes.is_empty(),
-        "the dashboard is documented as read-only but declares {} route(s) that can change \
-         data:\n  {}",
+        "the dashboard is documented as read-only, except correcting and forgetting the \
+         user's own memories, but declares {} other route(s) that can change data:\n  {}",
         writes.len(),
         writes.join("\n  ")
     );

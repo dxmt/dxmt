@@ -93,14 +93,22 @@ def ingest(url, data, workers):
     return len(jobs), time.time() - started
 
 
+KIND = None  # --kind: only memories of this kind
+
+
 def tag_filter(tag):
-    return {"must": [{"key": "tags", "operation": {"type": "In", "value": [tag]}}]}
+    must = [{"key": "tags", "operation": {"type": "In", "value": [tag]}}]
+    if KIND:
+        must.append({"key": "kind", "operation": {"type": "Equal", "value": KIND}})
+    return {"must": must}
 
 
 def ranked(url, table, method, question, tag, k):
     if method == "recall":
-        hits = call(url, "POST", "/api/v1/memories/recall",
-                    {"query": question, "tags": [tag], "limit": k})["memories"]
+        body = {"query": question, "tags": [tag], "limit": k}
+        if KIND:
+            body["kind"] = KIND
+        hits = call(url, "POST", "/api/v1/memories/recall", body)["memories"]
     elif method == "dense":
         hits = call(url, "POST", f"/api/v1/tables/{table}/search",
                     {"text": question, "top_k": k, "filter": tag_filter(tag)})["hits"]
@@ -119,9 +127,16 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--methods", default="recall,dense,keyword")
     parser.add_argument("--json", help="write the per-question results here")
+    parser.add_argument("--samples", help="comma-separated sample indexes to keep (default: all ten)")
+    parser.add_argument("--kind", help="only memories of this kind (the turns are `event`)")
     args = parser.parse_args()
+    global KIND
+    KIND = args.kind
 
     data = json.load(open(args.data))
+    if args.samples:
+        keep = {int(i) for i in args.samples.split(",")}
+        data = [s for i, s in enumerate(data) if i in keep]
     if not args.skip_ingest:
         n, seconds = ingest(args.url, data, args.workers)
         print(f"kept {n} turns in {seconds:.0f} s ({n / seconds:.1f}/s)", file=sys.stderr)

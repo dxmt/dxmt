@@ -115,6 +115,8 @@ Bring your own vectors instead: `create_table(name, dimension=768)`, insert reco
 | Microsoft Agent Framework | `pip install agent-framework-dxmt` | `from agent_framework_dxmt import DXMTStore, DXMTContextProvider` |
 | Hermes Agent | `hermes plugins install dxmt/dxmt/vectordb/clients/hermes-dxmt-memory` | `hermes memory setup`, pick `dxmt`; tools `dxmt_recall`, `dxmt_remember`, `dxmt_read`, `dxmt_forget` |
 | OpenClaw | `openclaw plugins install npm:openclaw-memory-dxmt` | `plugins.slots.memory: "memory-dxmt"`; tools `memory_recall`, `memory_store`, `memory_forget` |
+| Claude Code | `claude plugin marketplace add dxmt/dxmt` then `claude plugin install dxmt@dxmt` | the `dxmt` MCP server plus skills `dxmt-setup`, `dxmt-memory`, `dxmt-search` ([plugin](plugins/dxmt)) |
+| MaxKB | no install: an MCP server in the AI chat node, `http://dxmt:9999/mcp` | [guide](vectordb/docs/integrations/maxkb.md) ([中文](vectordb/docs/integrations/maxkb.zh.md)) -- MaxKB's sandbox refuses localhost and Docker's default bridge |
 
 [`SUPPORT_MATRIX.md`](vectordb/docs/SUPPORT_MATRIX.md) says exactly which routes each client wraps; everything else is one raw request away, because every capability is in the HTTP API.
 

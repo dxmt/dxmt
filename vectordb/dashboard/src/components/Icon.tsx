@@ -19,6 +19,7 @@ export type IconName =
   | 'visualize'
   | 'quality'
   | 'console'
+  | 'memories'
   | 'collapse';
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -72,6 +73,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />
       <path d="m7 10 2.5 2L7 14M12.5 14H16" />
+    </>
+  ),
+  // A speech bubble with lines in it: what an agent was told and kept.
+  memories: (
+    <>
+      <path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
+      <path d="M7.5 9.5h9M7.5 12.5h6" />
     </>
   ),
   collapse: (

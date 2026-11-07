@@ -86,6 +86,15 @@ describe('the read-only gate', () => {
     expect(err('POST /api/v1/query\n{"query":"SELECT * FROM t"}')).toMatch(/read-only/);
   });
 
+  it('reads memories but does not correct or forget them', () => {
+    // The Memories page's two writes are an exception for that page's own buttons, not for a
+    // string typed here.
+    expect(ok('GET /api/v1/memories?kind=fact').method).toBe('GET');
+    expect(ok('POST /api/v1/memories/recall\n{"query":"tea"}').method).toBe('POST');
+    expect(err('POST /api/v1/memories\n{"text":"x"}')).toMatch(/not with POST/);
+    expect(err('DELETE /api/v1/memories/m1')).toMatch(/read-only/);
+  });
+
   it('is not fooled by a path that merely contains a readable one', () => {
     expect(err('GET /api/v1/tables/t/records/list/../../../etc')).toMatch(/read-only/);
     expect(err('POST /api/v1/tables/t/searchx\n{}')).toMatch(/read-only/);

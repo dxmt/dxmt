@@ -10,7 +10,7 @@ its own storage and indexes underneath -- a write-ahead log with snapshots, HNSW
 vector search, BM25 full-text with Chinese segmentation, hybrid fusion, payload filters,
 server-side embedding and reranking, object-storage replication, read replicas and an
 experimental cluster mode. One data model, several protocols: REST under `/api/v1`, gRPC,
-MCP, DXQL, a read-only web console.
+MCP, DXQL, a web console (read-only, except correcting and forgetting your own memories).
 
 ## Memory for your agents in five minutes
 
@@ -140,6 +140,9 @@ from 1.5 on. Prebuilt Linux binaries, with the web console compiled in, are atta
 [release](https://github.com/dxmt/dxmt/releases) from 1.4.0 on: `dxmt-vectordb-<version>-<x86_64|aarch64>-linux-gnu.tar.gz`,
 built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.
+From the release after 1.6.0, the tarballs and the images also carry `dxmt`, a symlink to the
+same binary, so `dxmt serve` and `dxmt mcp` work too; `vectordb` stays, and every command in
+these docs uses it.
 
 Or as a container, `dxmtai/dxmt` on Docker Hub (linux/amd64 and linux/arm64). The data is in
 the volume; `OLLAMA_HOST` lets it find an ollama on the host for memory and text search:
@@ -249,7 +252,7 @@ cannot read is harder to evaluate than one you can:
 | | Endpoint | Turn off with |
 | --- | --- | --- |
 | API reference | `GET /api/docs`, spec at `/api/docs/openapi.json` | `--no-swagger` |
-| Web console | `GET /dashboard` — read-only | `--no-dashboard` |
+| Web console | `GET /dashboard` — read-only, except correcting and forgetting memories | `--no-dashboard` |
 
 Both are read-only, and both require `DXMT_API_KEY` when one is set, like every other route.
 The console needs its bundle compiled in (`make dashboard-build`, then rebuild); a binary built
@@ -785,7 +788,7 @@ default. `embeddings` compiles a directory of provider clients that no route rea
 
 ## Web console
 
-A read-only dashboard is served from the binary itself — no separate process, no CDN, works on
+A dashboard is served from the binary itself — no separate process, no CDN, works on
 an air-gapped host:
 
 ```bash
@@ -800,8 +803,11 @@ everything else, and says the console is missing. `--no-dashboard` turns it off;
 `--dashboard` explicitly makes a missing bundle a refusal to start. It adds about 1.5 MB to the
 binary.
 
-**It is read-only, and the server is not.** The console issues only GETs and the search-shaped
-POSTs; the port it is served on still accepts writes, snapshots and backups from anything that
+**It is read-only, except for your own memories, and the server is not.** The console issues
+only GETs and the search-shaped POSTs, plus exactly two writes on its Memories page: correcting a
+memory (`POST /api/v1/memories`) and forgetting one (`DELETE /api/v1/memories/{id}`), because
+owning what your agents remember about you means being able to fix it and delete it. Tables and
+records stay read-only. The port it is served on still accepts writes, snapshots and backups from anything that
 can reach it. What the dashboard changes is discoverability — it turns an exposed port into a
 browsable console — so bind it to a private interface, set `DXMT_API_KEY` (below), or put an
 authenticating proxy in front. With a key set, the console asks for it once per tab and sends
