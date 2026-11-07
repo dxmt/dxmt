@@ -625,6 +625,71 @@ fn a_memory_said_twice_is_kept_once_unless_it_is_an_event() {
     assert_eq!(content(&replies[6])["total"], 5, "with the check off");
 }
 
+// DXMT_MCP_READ_ONLY: an agent that should consult the store and memory but never change them
+// is offered only the tools that read, and a write it asks for anyway is refused.
+#[test]
+fn a_read_only_server_offers_and_runs_only_the_tools_that_read() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    // Something to read, written by an ordinary server first.
+    exchange_with_model(
+        &wal,
+        &base_url,
+        &[call(
+            2,
+            "remember",
+            serde_json::json!({"id": "bees", "text": "The user keeps bees"}),
+        )],
+    );
+    let replies = exchange_with_model_and_env(
+        &wal,
+        &base_url,
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string(),
+            call(
+                3,
+                "remember",
+                serde_json::json!({"text": "The user sells honey"}),
+            ),
+            call(
+                4,
+                "delete_vectors",
+                serde_json::json!({"table_name": "memory", "ids": ["bees"]}),
+            ),
+            call(5, "recall", serde_json::json!({"query": "bees"})),
+        ],
+        &[("DXMT_MCP_READ_ONLY", "1")],
+    );
+    let mut names: Vec<&str> = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    let mut offered: Vec<&str> = dxmt_vectordb::mcp::server::READ_ONLY_TOOLS
+        .iter()
+        .copied()
+        .filter(|n| names.contains(n))
+        .collect();
+    offered.sort();
+    assert_eq!(names, offered, "only reading tools are listed");
+    assert!(names.contains(&"recall") && names.contains(&"vector_search"));
+    for refused in [&replies[2], &replies[3]] {
+        assert!(
+            refused.to_string().contains("read-only"),
+            "a write is refused: {refused}"
+        );
+    }
+    assert_eq!(
+        content(&replies[4])["memories"][0]["id"],
+        "bees",
+        "reads work, and nothing was deleted"
+    );
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =
@@ -869,4 +934,64 @@ fn mcp_relays_to_a_running_server_and_shares_its_memory() {
         recalled["data"]["memories"][0]["id"], kept["id"],
         "{recalled}"
     );
+
+    // Relayed with --read-only to the same, writable server: the relay lists only the tools that
+    // read and refuses the rest itself; a read goes through.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vectordb"))
+        .args(["mcp", "--read-only", "--wal-dir"])
+        .arg(&wal)
+        .env("DXMT_PORT", port.to_string())
+        .env_remove("DXMT_MCP_SERVER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{}", initialize()).unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            call(
+                3,
+                "remember",
+                serde_json::json!({"text": "The user sells honey"})
+            )
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            call(
+                4,
+                "recall",
+                serde_json::json!({"query": "bees", "limit": 3})
+            )
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+    let replies: Vec<serde_json::Value> = BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+        .collect();
+    child.wait().unwrap();
+    let names: Vec<&str> = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"recall") && !names.contains(&"remember"),
+        "{names:?}"
+    );
+    assert!(
+        replies[2].to_string().contains("read-only"),
+        "a write is refused by the relay: {}",
+        replies[2]
+    );
+    assert_eq!(content(&replies[3])["memories"][0]["id"], kept["id"]);
 }

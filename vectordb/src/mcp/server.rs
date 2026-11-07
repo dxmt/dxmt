@@ -22,9 +22,46 @@ use tracing::{debug, error, info};
 /// Type alias for Send+Sync error types
 type McpServerError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The tools a read-only server offers: everything that reads, nothing that writes, creates or
+/// deletes. An allow-list, so a tool added later is withheld from a read-only server until it is
+/// named here -- a deny-list would expose every new write tool by default.
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "vector_search",
+    "hybrid_search",
+    "list_tables",
+    "get_table_info",
+    "recall",
+    "list_memories",
+    "get_memory",
+];
+
+/// Whether `DXMT_MCP_READ_ONLY` asks for a read-only MCP server (`1`, `true`, `yes`, `on`).
+pub fn read_only_from_env() -> bool {
+    crate::config::env::var("DXMT_MCP_READ_ONLY")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The refusal a read-only server gives a tool outside `READ_ONLY_TOOLS`.
+pub fn read_only_refusal(tool: &str) -> String {
+    format!(
+        "tool '{tool}' is not available: this MCP server is read-only (DXMT_MCP_READ_ONLY); \
+         it offers {}",
+        READ_ONLY_TOOLS.join(", ")
+    )
+}
+
 /// MCP server state
 pub struct McpServer<S: Storage> {
     storage: Arc<S>,
+    /// Offer and run only `READ_ONLY_TOOLS`: for an agent that should consult the store and
+    /// memory but never change them.
+    read_only: bool,
     sessions: Arc<RwLock<HashMap<Uuid, SessionState>>>,
     tools: Arc<RwLock<Vec<Tool>>>,
     resources: Arc<RwLock<Vec<Resource>>>,
@@ -44,6 +81,7 @@ impl<S: Storage + 'static> McpServer<S> {
     pub fn new(storage: Arc<S>) -> Self {
         let server = Self {
             storage,
+            read_only: read_only_from_env(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             tools: Arc::new(RwLock::new(Vec::new())),
             resources: Arc::new(RwLock::new(Vec::new())),
@@ -57,6 +95,12 @@ impl<S: Storage + 'static> McpServer<S> {
         server
     }
 
+    /// Offer and run only the tools that read (`READ_ONLY_TOOLS`), whatever the environment says.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     /// Populate the tool and prompt catalogues. Idempotent.
     ///
     /// Must run before the first `tools/list`, so both transports call it up front rather than
@@ -65,6 +109,12 @@ impl<S: Storage + 'static> McpServer<S> {
         self.tools.write().await.clear();
         self.prompts.write().await.clear();
         self.initialize_tools().await;
+        if self.read_only {
+            self.tools
+                .write()
+                .await
+                .retain(|tool| READ_ONLY_TOOLS.contains(&tool.name.as_str()));
+        }
         self.initialize_prompts().await;
         info!(
             "MCP catalogue ready: {} tools, {} prompts",
@@ -780,6 +830,9 @@ impl<S: Storage + 'static> McpServer<S> {
         &self,
         params: CallToolParams,
     ) -> Result<CallToolResult, McpServerError> {
+        if self.read_only && !READ_ONLY_TOOLS.contains(&params.name.as_str()) {
+            return Err(read_only_refusal(&params.name).into());
+        }
         match params.name.as_str() {
             "vector_search" => self.handle_vector_search(params.arguments).await,
             "insert_vector" => self.handle_insert_vector(params.arguments).await,

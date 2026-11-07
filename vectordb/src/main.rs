@@ -129,6 +129,12 @@ enum Commands {
         /// that server on this machine (DXMT_PORT, default 9999).
         #[arg(long, env = "DXMT_MCP_SERVER")]
         server: Option<String>,
+        /// Offer only the tools that read -- search, list, recall, get -- and refuse the rest,
+        /// for an agent that should consult the store and memory but never change them.
+        /// Enforced here when relaying, too. `DXMT_MCP_READ_ONLY=1` does the same (read by the
+        /// MCP server itself, so it covers `POST /mcp` on `serve` as well).
+        #[arg(long)]
+        read_only: bool,
     },
 
     /// Restore a backup into the data directory, with the server stopped.
@@ -523,11 +529,16 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 .map_err(|e| dxmt_vectordb::Error::Internal(format!("router error: {}", e)))?;
         }
 
-        Commands::Mcp { wal_dir, server } => {
+        Commands::Mcp {
+            wal_dir,
+            server,
+            read_only,
+        } => {
+            let read_only = read_only || dxmt_vectordb::mcp::server::read_only_from_env();
             #[cfg(feature = "server-embedding")]
             if let Some(url) = &server {
                 info!("relaying MCP to {url}/mcp");
-                return dxmt_vectordb::mcp::relay::relay_stdio(url).await;
+                return dxmt_vectordb::mcp::relay::relay_stdio(url, read_only).await;
             }
             #[cfg(not(feature = "server-embedding"))]
             if server.is_some() {
@@ -557,7 +568,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                     let url = format!("http://127.0.0.1:{}", port.trim());
                     if dxmt_vectordb::mcp::relay::server_answers(&url).await {
                         info!("the store is open in the server at {url}; relaying MCP to it");
-                        return dxmt_vectordb::mcp::relay::relay_stdio(&url).await;
+                        return dxmt_vectordb::mcp::relay::relay_stdio(&url, read_only).await;
                     }
                 }
             }
@@ -568,6 +579,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
             dxmt_vectordb::api::quickstart::configure_default_embedding(&storage).await;
 
             McpServer::new(storage)
+                .read_only(read_only)
                 .serve_stdio()
                 .await
                 .map_err(|e| dxmt_vectordb::Error::Internal(format!("mcp server error: {}", e)))?;
