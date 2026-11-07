@@ -2095,6 +2095,35 @@ def _(table):
     needs_model(derive("profile", name="Caroline", tags=["u1"]))
 
 
+@probe("ContextRequest", "query")
+def _(table):
+    with memory_table():
+        remember(text="garden roses", kind="fact")
+        block = post("/memories/context", {"query": "garden roses"}).json()["data"]
+        assert "garden roses" in block["context"], block
+        refused = post("/memories/context", {"query": " "}, expect_ok=False)
+        assert refused.status_code == 400, refused.text
+
+
+@probe("ContextRequest", "tags")
+def _(table):
+    with memory_table():
+        remember(text="garden one", tags=["a"])
+        remember(text="garden roses", tags=["b"])
+        block = post("/memories/context", {"query": "garden", "tags": ["b"]}).json()["data"]
+        assert "garden roses" in block["context"] and "garden one" not in block["context"], block
+
+
+@probe("ContextRequest", "max_tokens")
+def _(table):
+    with memory_table():
+        for i in range(40):
+            remember(text=f"garden note {i} " + "words " * 20, kind="event")
+        small = post("/memories/context", {"query": "garden", "max_tokens": 200}).json()["data"]
+        large = post("/memories/context", {"query": "garden", "max_tokens": 4000}).json()["data"]
+        assert small["tokens"] <= 200 < large["tokens"], (small["tokens"], large["tokens"])
+
+
 @probe("RecallRequest", "query")
 def _(table):
     with memory_table():

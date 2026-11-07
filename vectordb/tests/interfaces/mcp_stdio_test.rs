@@ -953,6 +953,68 @@ fn the_server_extracts_facts_and_keeps_a_profile() {
     );
 }
 
+// One block for the model, inside a budget: the profile first, then standing preferences and
+// instructions, then the rest by relevance -- and never more than the budget.
+#[test]
+fn context_assembles_profile_preferences_and_memories_inside_a_budget() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let mut requests = vec![
+        call(
+            2,
+            "remember",
+            serde_json::json!({"text": "Profile of Nate: owns a dog and three turtles; plays video games", "kind": "profile", "tags": ["nate"]}),
+        ),
+        call(
+            3,
+            "remember",
+            serde_json::json!({"text": "Nate wants short answers about his pets", "kind": "preference", "tags": ["nate"]}),
+        ),
+        call(
+            4,
+            "remember",
+            serde_json::json!({"text": "Always mention the turtles by name", "kind": "instruction", "tags": ["nate"]}),
+        ),
+    ];
+    for i in 0..30 {
+        requests.push(call(
+            5 + i,
+            "remember",
+            serde_json::json!({"text": format!("Nate's pets story number {i} about the dog and turtles at the lake"), "kind": "event", "tags": ["nate"]}),
+        ));
+    }
+    requests.push(call(
+        40,
+        "get_context",
+        serde_json::json!({"query": "Nate pets dog turtles", "tags": ["nate"], "max_tokens": 200}),
+    ));
+    requests.push(call(41, "get_context", serde_json::json!({"query": "  "})));
+    let replies = exchange_with_model(&tmp.path().join("wal"), &base_url, &requests);
+    let block = content(&replies[replies.len() - 2]);
+    let text = block["context"].as_str().unwrap();
+    let about = text.find("## About the user").expect(text);
+    let standing = text.find("## Preferences and instructions").expect(text);
+    let relevant = text.find("## Relevant memories").expect(text);
+    assert!(about < standing && standing < relevant, "{text}");
+    assert!(
+        text.contains("[instruction] Always mention the turtles by name"),
+        "{text}"
+    );
+    assert!(block["tokens"].as_u64().unwrap() <= 200, "{block}");
+    let events = text.matches("[event]").count();
+    assert!(
+        events > 0 && events < 30,
+        "the budget cut the long tail: {events} events"
+    );
+    assert_eq!(block["memories"][0]["kind"], "profile", "{block}");
+    let empty = &replies[replies.len() - 1];
+    assert!(
+        empty.to_string().contains("context needs `query`"),
+        "{empty}"
+    );
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =

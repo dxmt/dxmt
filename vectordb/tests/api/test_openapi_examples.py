@@ -90,6 +90,9 @@ NOT_RUN = {
     # against a rule-following stand-in, and `test_request_fields.py` probes their fields.
     ("POST", "/memories/extract"),
     ("POST", "/memories/profile"),
+    # Context recalls with the server's embedding model, which the server under test lacks;
+    # `test_request_fields.py` probes it against a table that has one.
+    ("POST", "/memories/context"),
 }
 #: Examples whose *documented body* needs an optional feature, so `FEATURE_DISABLED` is a
 #: correct answer rather than a refusal. `disabled_feature()` still fails the run when

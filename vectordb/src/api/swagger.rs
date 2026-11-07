@@ -56,6 +56,7 @@ use crate::types::{
         crate::api::handlers::get_memory,
         crate::api::handlers::extract_memories,
         crate::api::handlers::profile_memory,
+        crate::api::handlers::memory_context,
         crate::api::handlers::list_memories,
         crate::api::handlers::forget,
         // search
@@ -98,6 +99,7 @@ use crate::types::{
             crate::storage::agent_memory::RecallRequest,
             crate::storage::memory_derive::ExtractRequest,
             crate::storage::memory_derive::ProfileRequest,
+            crate::storage::agent_memory::ContextRequest,
             crate::api::handlers::SearchGroupsRequest,
             crate::types::record::SparseSearchQuery,
             crate::types::record::SearchGroup,

@@ -15,10 +15,10 @@ use crate::{
         full_text_search, get_document, get_memory, get_record, get_status, get_table,
         get_table_stats, health_check, health_metrics, hybrid_search, hybrid_search_combined,
         import_table, index_payload_field, insert_records, insert_records_optimized, knn_graph,
-        list_aliases, list_memories, list_records, list_tables, liveness, payload_index_report,
-        profile_memory, prometheus_metrics, put_document, readiness, rebuild_index, recall,
-        remember, repair_reachability, search_groups, search_vectors, set_alias, sparse_search,
-        update_record, AppState,
+        list_aliases, list_memories, list_records, list_tables, liveness, memory_context,
+        payload_index_report, profile_memory, prometheus_metrics, put_document, readiness,
+        rebuild_index, recall, remember, repair_reachability, search_groups, search_vectors,
+        set_alias, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -588,6 +588,7 @@ pub async fn create_app_with_storage(
         .route("/memories/recall", post(recall))
         .route("/memories/extract", post(extract_memories))
         .route("/memories/profile", post(profile_memory))
+        .route("/memories/context", post(memory_context))
         .route("/memories/:memory_id", get(get_memory).delete(forget))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))

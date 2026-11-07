@@ -1,6 +1,6 @@
 use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
-use crate::storage::agent_memory::{RecallRequest, RememberRequest};
+use crate::storage::agent_memory::{ContextRequest, RecallRequest, RememberRequest};
 use crate::storage::documents::PutDocumentRequest;
 use crate::storage::memory_derive::{ExtractRequest, ProfileRequest};
 use axum::{
@@ -1378,6 +1378,32 @@ pub async fn extract_memories(
 ) -> impl IntoResponse {
     match state.storage.extract(request).await {
         Ok(facts) => ApiResponse::success(serde_json::json!({ "facts": facts })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Context: one block of memory to put in front of a model, inside a token budget -- the
+/// profile, standing preferences and instructions, then whatever else is relevant.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/context",
+    request_body(content = ContextRequest, example = json!({
+        "query": "plan a weekend trip for me",
+        "tags": ["user-42"],
+        "max_tokens": 1500
+    })),
+    responses(
+        (status = 200, description = "`context` (Markdown), its estimated `tokens`, and the `memories` it drew on", body = ApiResponse),
+        (status = 400, description = "No query, or no embedding model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn memory_context(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ContextRequest>,
+) -> impl IntoResponse {
+    match state.storage.context(request).await {
+        Ok(block) => ApiResponse::success(block).into_response(),
         Err(e) => error_response(e),
     }
 }

@@ -448,6 +448,25 @@ impl<S: Storage + 'static> McpServer<S> {
             }),
         });
         tools.push(Tool {
+            name: "get_context".to_string(),
+            description: Some(
+                "Everything worth knowing for the task at hand, as one block to read before \
+                 answering: the user's profile, their standing preferences and instructions, then \
+                 the most relevant memories, inside a token budget. Use it at the start of a task \
+                 instead of several recalls."
+                    .to_string(),
+            ),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What you are about to answer"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Only memories with any of these tags"},
+                    "max_tokens": {"type": "integer", "description": "Budget for the block, default 1500"}
+                },
+                "required": ["query"]
+            }),
+        });
+        tools.push(Tool {
             name: "update_profile".to_string(),
             description: Some(
                 "Condense everything remembered about one person into their profile (kind \
@@ -901,6 +920,7 @@ impl<S: Storage + 'static> McpServer<S> {
             "get_memory" => self.handle_get_memory(params.arguments).await,
             "extract_memories" => self.handle_extract(params.arguments).await,
             "update_profile" => self.handle_profile(params.arguments).await,
+            "get_context" => self.handle_context(params.arguments).await,
             "list_memories" => self.handle_list_memories(params.arguments).await,
             _ => Err(format!("Unknown tool: {}", params.name).into()),
         }
@@ -1245,6 +1265,17 @@ impl<S: Storage + 'static> McpServer<S> {
                 .map_err(|e| format!("Invalid extract_memories arguments: {e}"))?;
         let facts = self.storage.extract(request).await?;
         Self::json_result(&serde_json::json!({ "facts": facts }))
+    }
+
+    async fn handle_context(
+        &self,
+        args: Option<serde_json::Value>,
+    ) -> Result<CallToolResult, McpServerError> {
+        let request: crate::storage::agent_memory::ContextRequest =
+            serde_json::from_value(args.ok_or("Missing arguments")?)
+                .map_err(|e| format!("Invalid get_context arguments: {e}"))?;
+        let block = self.storage.context(request).await?;
+        Self::json_result(&block)
     }
 
     async fn handle_profile(

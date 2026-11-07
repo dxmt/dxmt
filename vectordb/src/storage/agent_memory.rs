@@ -94,6 +94,56 @@ pub struct RecallRequest {
     pub include_superseded: bool,
 }
 
+/// What `context` takes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ContextRequest {
+    /// What the agent is about to answer: the user's message, a task.
+    pub query: String,
+    /// Only memories with any of these tags: one user's, one project's.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// The block's budget in tokens, estimated (a quarter-token per ASCII character, one per
+    /// other character). Default 1500, at least 200, at most 8000.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+/// Rough tokens in `text`: English runs about four characters a token, CJK about one. Close
+/// enough to keep a block inside a budget without shipping a tokenizer per model.
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    let (ascii, other) = text.chars().fold((0usize, 0usize), |(a, o), c| {
+        if c.is_ascii() {
+            (a + 1, o)
+        } else {
+            (a, o + 1)
+        }
+    });
+    ascii.div_ceil(4) + other
+}
+
+/// `text` cut to at most `budget` tokens, at a line boundary when one is near, so a profile is
+/// shortened by whole items rather than mid-word.
+fn fit_tokens(text: &str, budget: usize) -> String {
+    if estimate_tokens(text) <= budget {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for line in text.lines() {
+        let candidate = if out.is_empty() {
+            line.to_string()
+        } else {
+            format!("{out}\n{line}")
+        };
+        if estimate_tokens(&candidate) > budget {
+            break;
+        }
+        out = candidate;
+    }
+    out
+}
+
 /// How deep `recall` pages: `limit + offset` at most.
 const MAX_RECALL_DEPTH: usize = 200;
 
@@ -646,9 +696,135 @@ impl IntelligentIndexedStorage {
         .await?;
         Ok(serde_json::json!({"id": id, "facts": facts.len(), "text": profile}))
     }
+
+    /// One block of memory to put in front of a model, inside a token budget: the person's
+    /// profile, then their standing preferences and instructions, then whatever else is
+    /// relevant, best first. Each plugin used to assemble this itself from `recall`; this does
+    /// it once, the same way for every client.
+    pub async fn context(&self, request: ContextRequest) -> crate::Result<serde_json::Value> {
+        if request.query.trim().is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "context needs `query`: what the agent is about to answer".to_string(),
+            ));
+        }
+        let budget = request.max_tokens.unwrap_or(1500).clamp(200, 8000);
+        let recall = |kind: Option<&str>, limit: usize| RecallRequest {
+            query: request.query.clone(),
+            limit: Some(limit),
+            kind: kind.map(str::to_string),
+            tags: request.tags.clone(),
+            ..Default::default()
+        };
+        let mut used = std::collections::HashSet::new();
+        let mut picked = Vec::new();
+        let mut sections = Vec::new();
+        let mut spent = 0usize;
+        let text_of = |m: &serde_json::Value| {
+            m.get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+
+        // The profile: who this is, at most two fifths of the budget.
+        if let Some(profile) = self
+            .recall(recall(Some("profile"), 1))
+            .await?
+            .into_iter()
+            .next()
+        {
+            let body = fit_tokens(&text_of(&profile), budget * 2 / 5);
+            if !body.is_empty() {
+                spent += estimate_tokens(&body) + 8;
+                sections.push(format!("## About the user\n{body}"));
+                used.insert(profile["id"].as_str().unwrap_or("").to_string());
+                picked.push(serde_json::json!({"id": profile["id"], "kind": "profile"}));
+            }
+        }
+
+        // Standing preferences and instructions: how to answer, at most a fifth.
+        let mut standing = Vec::new();
+        let standing_budget = budget / 5;
+        let mut standing_spent = 0usize;
+        for kind in ["instruction", "preference"] {
+            for m in self.recall(recall(Some(kind), 5)).await? {
+                let id = m["id"].as_str().unwrap_or("").to_string();
+                let line = format!("- [{kind}] {}", text_of(&m));
+                let cost = estimate_tokens(&line) + 1;
+                if used.contains(&id) || standing_spent + cost > standing_budget {
+                    continue;
+                }
+                standing_spent += cost;
+                used.insert(id);
+                picked.push(serde_json::json!({"id": m["id"], "kind": kind}));
+                standing.push(line);
+            }
+        }
+        if !standing.is_empty() {
+            spent += standing_spent + 8;
+            sections.push(format!(
+                "## Preferences and instructions\n{}",
+                standing.join("\n")
+            ));
+        }
+
+        // Everything else that is relevant, best first, until the budget is spent.
+        let mut relevant = Vec::new();
+        for m in self.recall(recall(None, 40)).await? {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            let kind = m["kind"].as_str().unwrap_or("note").to_string();
+            if used.contains(&id) || kind == "profile" {
+                continue;
+            }
+            let line = format!("- [{kind}] {}", text_of(&m));
+            let cost = estimate_tokens(&line) + 1;
+            if spent + cost + 8 > budget {
+                continue;
+            }
+            spent += cost;
+            used.insert(id);
+            picked.push(serde_json::json!({"id": m["id"], "kind": kind}));
+            relevant.push(line);
+        }
+        if !relevant.is_empty() {
+            sections.push(format!("## Relevant memories\n{}", relevant.join("\n")));
+        }
+
+        let context = sections.join("\n\n");
+        Ok(serde_json::json!({
+            "context": context,
+            "tokens": estimate_tokens(&context),
+            "max_tokens": budget,
+            "memories": picked,
+        }))
+    }
 }
 
 /// Output budgets for the memory model. A session's facts measured a few hundred tokens to
 /// 1,600 on LoCoMo; a profile of 300-500 facts about 6,000.
 const EXTRACT_MAX_TOKENS: usize = 2500;
 const PROFILE_MAX_TOKENS: usize = 6000;
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_estimated_per_script() {
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        assert_eq!(estimate_tokens("中文"), 2);
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn a_long_text_is_cut_at_a_line_inside_the_budget() {
+        let text = "Pets: a dog named Max\nWork: runs a bakery\nHobbies: hiking, chess, painting";
+        let cut = fit_tokens(text, 11);
+        assert!(estimate_tokens(&cut) <= 11, "{cut}");
+        assert!(cut.starts_with("Pets: a dog named Max"), "{cut}");
+        assert!(!cut.contains("Hobbies"), "{cut}");
+        assert_eq!(fit_tokens(text, 1000), text);
+    }
+}
