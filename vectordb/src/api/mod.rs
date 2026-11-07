@@ -10,6 +10,7 @@ pub mod graphql;
 #[cfg(feature = "api-grpc")]
 pub mod grpc;
 pub mod handlers;
+pub mod path;
 pub mod quickstart;
 pub mod response;
 pub mod server;
