@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let query_parser = QueryParser::for_index(&index, vec![title, content]);
         let query = query_parser.parse_query(query_text)?;
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(3))?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(3).order_by_score())?;
 
         if top_docs.is_empty() {
             println!("  No results found\n");
