@@ -115,7 +115,7 @@ bytes = "1.5"
 ndarray = { version = "0.15", features = ["rayon", "serde"] }
 nalgebra = { version = "0.32", default-features = false, features = ["std"] }
 num-traits = "0.2"
-num-bigint = "0.4"
+num-bigint = "0.5"
 num-complex = "0.4"
 rayon = "1.8"
 
