@@ -140,6 +140,9 @@ from 1.5 on. Prebuilt Linux binaries, with the web console compiled in, are atta
 [release](https://github.com/dxmt/dxmt/releases) from 1.4.0 on: `dxmt-vectordb-<version>-<x86_64|aarch64>-linux-gnu.tar.gz`,
 built on glibc 2.28 (RHEL/Rocky 8, Debian 10, Ubuntu 20.04 or newer), each with a `.sha256` beside
 it. Unpack and run `./vectordb serve`.
+From the release after 1.6.0, the tarballs and the images also carry `dxmt`, a symlink to the
+same binary, so `dxmt serve` and `dxmt mcp` work too; `vectordb` stays, and every command in
+these docs uses it.
 
 Or as a container, `dxmtai/dxmt` on Docker Hub (linux/amd64 and linux/arm64). The data is in
 the volume; `OLLAMA_HOST` lets it find an ollama on the host for memory and text search:

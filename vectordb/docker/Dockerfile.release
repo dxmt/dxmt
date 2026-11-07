@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && mkdir -p /data && chown dxmt:dxmt /data
 
 COPY --chmod=755 ${TARGETARCH}/vectordb /usr/local/bin/vectordb
+# `dxmt` is the same binary under the project's name: `docker run ... dxmt <subcommand>`.
+RUN ln -s vectordb /usr/local/bin/dxmt
 
 USER dxmt
 WORKDIR /data
