@@ -312,3 +312,79 @@ export interface KnnGraphRequest {
   /** Default true: a node with no label cannot be drawn usefully. */
   with_payload?: boolean;
 }
+
+/**
+ * A memory, as `GET /memories` and `POST /memories/recall` send it: the record's payload with
+ * its id beside it, so anything an agent stored under `metadata` arrives flattened among the
+ * memory's own fields. `MEMORY_FIELDS` names the ones that are the memory's; everything else
+ * on the object is metadata.
+ */
+export interface Memory {
+  id: string;
+  text: string;
+  kind: string;
+  tags?: string[];
+  source?: string;
+  /** Seconds since the epoch, not an ISO string like the records. */
+  at: number;
+  superseded_by?: string;
+  /** Recall only: a rank, the best hit near 1.0 -- not a similarity. */
+  score?: number;
+  /** Recall only, and only on newer servers: the cosine similarity to the query. */
+  similarity?: number;
+  [metadata: string]: unknown;
+}
+
+/** The keys a memory owns; the server refuses `metadata` that reuses the first seven. */
+export const MEMORY_FIELDS: readonly string[] = [
+  'id',
+  'text',
+  'kind',
+  'tags',
+  'source',
+  'at',
+  'superseded_by',
+  'score',
+  'similarity',
+];
+
+/** `GET /memories`: newest first. An empty page, not an error, when memory is off. */
+export interface MemoryPage {
+  memories: Memory[];
+  total: number;
+}
+
+export interface RecallRequest {
+  query: string;
+  limit?: number;
+  kind?: string;
+  tags?: string[];
+  since?: number | string;
+  include_superseded?: boolean;
+}
+
+export interface RecallResult {
+  memories: Memory[];
+}
+
+export interface RememberRequest {
+  text: string;
+  kind?: string;
+  tags?: string[];
+  source?: string;
+  supersedes?: string[];
+  /** An existing id corrects that memory in place; without one a new memory is made. */
+  id?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Remembered {
+  id: string;
+  superseded: string[];
+  /** The same meaning was already held, and this is its id. */
+  duplicate?: boolean;
+}
+
+export interface Forgotten {
+  forgotten: number;
+}

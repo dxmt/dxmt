@@ -8,9 +8,18 @@
  * it cannot be forgotten rather than in a code-review checklist:
  *
  *   - there is no `put`, `patch` or `del` function in this module, or anywhere else;
- *   - `post`'s path parameter is a closed union of the five read-only POST routes, so a write
+ *   - `post`'s path parameter is a closed union of the six read-only POST routes, so a write
  *     call is a compile error and not a review catch;
  *   - an eslint rule forbids bare `fetch(` outside this file.
+ *
+ * # The one exception: your own memories
+ *
+ * `ownMemory` below makes exactly two writes, `POST /api/v1/memories` (correct a memory) and
+ * `DELETE /api/v1/memories/{id}` (forget one), with both paths fixed in this file rather than
+ * passed in. The memories are the user's own record of what their agents know about them, and
+ * owning that record means being able to correct it and delete it from the place they read it.
+ * Tables and records stay read-only; `tests/interfaces/api_contract_test.rs` allows these two
+ * routes by exact method and path and fails on any other write in `dashboard-routes.json`.
  *
  * `POST /api/v1/query` is deliberately absent from that union: DXQL executes INSERT, UPDATE,
  * DELETE and DROP TABLE, so a query console would make the phrase "read-only dashboard" false.
@@ -28,13 +37,19 @@ import { ApiFailure, unwrap } from './envelope';
 import { keyHeader, reportUnauthorized } from './key';
 import type { Parsed } from '../lib/console';
 import type {
+  Forgotten,
   FullTextQuery,
   FullTextResult,
   HybridQuery,
   KnnGraph,
   KnnGraphRequest,
   ListRecordsRequest,
+  MemoryPage,
+  RecallRequest,
+  RecallResult,
   RecordPage,
+  Remembered,
+  RememberRequest,
   SearchQuery,
   SearchResult,
   Table,
@@ -70,7 +85,8 @@ type ReadOnlyPost =
   | `/api/v1/tables/${string}/search`
   | `/api/v1/tables/${string}/search/text`
   | `/api/v1/tables/${string}/search/hybrid`
-  | `/api/v1/tables/${string}/graph`;
+  | `/api/v1/tables/${string}/graph`
+  | '/api/v1/memories/recall';
 
 export interface Timed<T> {
   value: T;
@@ -81,7 +97,9 @@ export interface Timed<T> {
 }
 
 async function request<T>(
-  method: 'GET' | 'POST',
+  // `DELETE` is here for `ownMemory.forget` alone; `request` is not exported, and nothing else
+  // in this module passes it.
+  method: 'GET' | 'POST' | 'DELETE',
   path: string,
   body?: unknown,
   signal?: AbortSignal,
@@ -176,6 +194,32 @@ export const api = {
   /** Answers with the same `SearchResult` the dense path does, fused server-side. */
   searchHybrid: (name: string, query: HybridQuery, signal?: AbortSignal) =>
     post<SearchResult>(`/api/v1/tables/${seg(name)}/search/hybrid`, query, signal),
+
+  /** Newest first. `{memories: [], total: 0}` when memory is off or nothing is remembered. */
+  memories: (kind: string | null, limit: number, offset: number, signal?: AbortSignal) =>
+    get<MemoryPage>(
+      `/api/v1/memories?${kind ? `kind=${encodeURIComponent(kind)}&` : ''}limit=${limit}&offset=${offset}`,
+      signal,
+    ),
+
+  /** A POST because the query is a structured body; it changes nothing. */
+  recall: (query: RecallRequest, signal?: AbortSignal) =>
+    post<RecallResult>('/api/v1/memories/recall', query, signal),
+};
+
+/**
+ * The only two writes this console can make, both to the user's own memories.
+ *
+ * Kept apart from `api` so the exception is one object to read rather than two entries among
+ * eleven reads, and so the paths are literals here: no caller supplies a route, only the body
+ * of a memory and the id of one. See the header of this file for why the exception exists.
+ */
+export const ownMemory = {
+  /** Correct: a new memory that `supersedes` the old one, or the same `id` to fix in place. */
+  remember: (body: RememberRequest) => request<Remembered>('POST', '/api/v1/memories', body),
+
+  /** Forget, permanently. The server answers `forgotten: 0` for an id it did not hold. */
+  forget: (id: string) => request<Forgotten>('DELETE', `/api/v1/memories/${seg(id)}`),
 };
 
 export type { Table };

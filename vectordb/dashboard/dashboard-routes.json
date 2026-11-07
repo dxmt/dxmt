@@ -10,10 +10,17 @@
     "     the default feature set, with no Node and no built bundle.",
     "  3. tests/api/test_dashboard.py replays them against a live server.",
     "",
-    "The list is read-only by construction. It contains GETs and the five POSTs that only read",
-    "(search and list are POSTs because their bodies are too structured for a query string).",
+    "The list is read-only, except correcting and forgetting your own memories. It contains",
+    "GETs, the six POSTs that only read (search, list, graph and recall are POSTs because their",
+    "bodies are too structured for a query string), and exactly two writes: POST",
+    "/api/v1/memories and DELETE /api/v1/memories/{r}. The memories are the user's own record",
+    "of what their agents know about them, and owning that record means being able to correct",
+    "and delete it from the console. Tables and records stay read-only:",
+    "the_dashboard_declares_no_route_that_writes allows those two by exact method and path and",
+    "fails on any other write.",
+    "",
     "POST /api/v1/query is deliberately absent: DXQL executes INSERT, UPDATE, DELETE and DROP,",
-    "so a console for it would make the phrase 'read-only dashboard' false."
+    "so a console for it would make the tables and records writable from here."
   ],
   "routes": [
     {
@@ -75,6 +82,26 @@
       "method": "POST",
       "path": "/api/v1/tables/{t}/graph",
       "why": "the visualize page's neighbour-graph layout \u2014 the answer instead of the vectors"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memories",
+      "why": "the Memories page: newest first, by kind, paged; and finding one memory and the ones it replaced, since there is no GET by id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memories/recall",
+      "why": "the Memories page's search, the same recall an agent runs; a read with a structured body"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memories",
+      "why": "WRITE, one of two: correct a memory, as a new one that supersedes it (history kept) or with the same id to fix a typo in place"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/memories/{r}",
+      "why": "WRITE, two of two: forget a memory permanently, after a confirmation that names it"
     }
   ]
 }

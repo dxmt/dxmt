@@ -7,18 +7,23 @@ produces a page that returns 200 and then fails to start, with the real cause vi
 but the browser console.
 
 It also replays `dashboard/dashboard-routes.json` against the live server. The Rust contract
-test asserts those routes are *listed*; this asserts they *answer*.
+test asserts those routes are *listed*; this asserts they *answer*. The manifest holds two
+writes -- correcting and forgetting a memory, the console's one exception to read-only -- and
+those are never replayed blindly: the replay remembers a memory of its own under a fresh id,
+corrects it, and forgets exactly the ids it made, so a live server's memories are not touched.
 
 Skips unless the page is served, and **fails instead of skipping** when `DXMT_FEATURES` names
 `api-dashboard` — a skipped test and an absent one look identical in a CI log.
 """
 
+import contextlib
 import json
 import os
 import pathlib
 import re
 import urllib.error
 import urllib.request
+import uuid
 
 import pytest
 
@@ -143,6 +148,34 @@ def test_a_client_side_route_survives_a_reload(page):
     assert '<div id="root">' in body.decode(), "a deep link should return the app, not a 404 page"
 
 
+#: The dashboard's only writes, the same two `the_dashboard_declares_no_route_that_writes`
+#: allows. The replay exercises them on memories it made itself, and refuses to send any other
+#: write it finds in the manifest.
+MEMORY_WRITES = {("POST", "/api/v1/memories"), ("DELETE", "/api/v1/memories/{r}")}
+
+
+@contextlib.contextmanager
+def a_memory_table():
+    """The server's memory table, made for the replay only if the server has none.
+
+    The memory table is made on first use with the server's embedding model, which the server
+    under test does not have -- so without one, recall answers 400. One that exists (a live
+    server people use) is used as it is and never dropped; one that does not is made with the
+    loopback provider `test_request_fields.py` runs, and dropped afterwards.
+
+    Looked for in the table list rather than with `GET /tables/memory`: on a server without a
+    model that answers 400 ("made on first use with the server's embedding model"), not 404.
+    """
+    tables = call("GET", "/tables?limit=1000").json()["data"]["tables"]
+    if any(t["name"] == "memory" for t in tables):
+        yield
+        return
+    from .test_request_fields import memory_table
+
+    with memory_table():
+        yield
+
+
 def test_every_route_the_dashboard_declares_answers(page, table):
     """The manifest, replayed. The Rust test asserts these are listed; this asserts they work."""
     manifest = json.loads(MANIFEST.read_text())
@@ -156,10 +189,35 @@ def test_every_route_the_dashboard_declares_answers(page, table):
         # `limit` -- it was this replay that was wrong, and it only surfaced when the file
         # stopped skipping.
         "/search/hybrid": {"vector": [1.0, 0.0, 0.0, 0.0], "limit": 1},
+        "/memories/recall": {"query": "x", "limit": 1},
     }
 
-    failures = []
+    with a_memory_table():
+        failures, writes = replay(manifest, table, bodies)
+        failures += correct_and_forget()
+
+    assert writes == MEMORY_WRITES, (
+        f"the manifest's writes changed: {sorted(writes)}; the replay only knows how to "
+        f"exercise {sorted(MEMORY_WRITES)} safely"
+    )
+    assert not failures, (
+        "routes the dashboard declares and the server will not answer:\n  " + "\n  ".join(failures)
+    )
+
+
+def replay(manifest, table, bodies):
+    """Every reading route, sent. Writes are collected and not sent."""
+    failures, writes = [], set()
     for route in manifest["routes"]:
+        key = (route["method"], route["path"])
+        if key in MEMORY_WRITES:
+            writes.add(key)
+            continue
+        if route["method"] not in {"GET", "POST"}:
+            # Not sent: a write nobody taught this replay about is a failure, never a request.
+            writes.add(key)
+            failures.append(f"{route['method']} {route['path']} is a write the replay will not send")
+            continue
         path = route["path"].replace("{t}", table).replace("{r}", "r1")
         body = next((b for suffix, b in bodies.items() if path.endswith(suffix)), None)
 
@@ -190,7 +248,43 @@ def test_every_route_the_dashboard_declares_answers(page, table):
             f"{route['method']} {path} -> {response.status_code} ({route['why']}): "
             f"{response.text[:160]}"
         )
+    return failures, writes
 
-    assert not failures, (
-        "routes the dashboard declares and the server will not answer:\n  " + "\n  ".join(failures)
-    )
+
+def correct_and_forget():
+    """The two writes, as the Memories page makes them, on memories this test made.
+
+    A fresh id is given so the server's duplicate check -- which could answer with someone
+    else's memory -- is skipped, and only the ids made here are forgotten.
+    """
+    failures, made = [], []
+    original = f"dashboard-replay-{uuid.uuid4().hex}"
+    try:
+        first = call("POST", "/memories", {"text": "the dashboard replay remembered this",
+                                           "id": original, "tags": ["dashboard-replay"]},
+                     expect_ok=False)
+        if not succeeded(first):
+            return [f"POST /api/v1/memories -> {first.status_code}: {first.text[:160]}"]
+        made.append(original)
+        if first.json()["data"]["id"] != original:
+            failures.append(f"remembering with an id answered another: {first.text[:160]}")
+
+        # The page's default correction: a new memory that supersedes the old one.
+        fixed = call("POST", "/memories", {"text": "the dashboard replay corrected this",
+                                           "tags": ["dashboard-replay"],
+                                           "supersedes": [original]}, expect_ok=False)
+        if not succeeded(fixed):
+            failures.append(f"POST /api/v1/memories (supersedes) -> {fixed.status_code}: "
+                            f"{fixed.text[:160]}")
+        else:
+            data = fixed.json()["data"]
+            made.append(data["id"])
+            if data["superseded"] != [original]:
+                failures.append(f"the correction superseded {data['superseded']}, not {original}")
+    finally:
+        for mid in made:
+            gone = call("DELETE", f"/memories/{mid}", expect_ok=False)
+            if not succeeded(gone) or gone.json()["data"]["forgotten"] != 1:
+                failures.append(f"DELETE /api/v1/memories/{mid} -> {gone.status_code}: "
+                                f"{gone.text[:160]}")
+    return failures

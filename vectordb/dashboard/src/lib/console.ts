@@ -68,6 +68,10 @@ const READS: { pattern: RegExp; method: 'GET' | 'POST'; what: string }[] = [
   { pattern: /^\/api\/v1\/tables\/[^/]+\/search\/text$/, method: 'POST', what: 'text search' },
   { pattern: /^\/api\/v1\/tables\/[^/]+\/search\/hybrid$/, method: 'POST', what: 'hybrid search' },
   { pattern: /^\/api\/v1\/tables\/[^/]+\/graph$/, method: 'POST', what: 'neighbour graph' },
+  // The Memories page may also correct and forget, but this console does not: a typed string
+  // gets no exception, so `POST /api/v1/memories` and `DELETE` stay refused here.
+  { pattern: /^\/api\/v1\/memories(\?.*)?$/, method: 'GET', what: 'list memories' },
+  { pattern: /^\/api\/v1\/memories\/recall$/, method: 'POST', what: 'recall memories' },
 ];
 
 const VERBS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
@@ -153,5 +157,7 @@ export function readableRoutes(): { method: string; path: string; what: string }
     { method: 'POST', path: '/api/v1/tables/{t}/search/text', what: 'BM25 (needs text-bm25)' },
     { method: 'POST', path: '/api/v1/tables/{t}/search/hybrid', what: 'vector + text' },
     { method: 'POST', path: '/api/v1/tables/{t}/graph', what: 'neighbour graph over a sample' },
+    { method: 'GET', path: '/api/v1/memories', what: 'memories, newest first' },
+    { method: 'POST', path: '/api/v1/memories/recall', what: 'recall memories by a query' },
   ];
 }
