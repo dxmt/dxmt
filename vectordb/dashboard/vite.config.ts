@@ -1,4 +1,6 @@
-import { defineConfig } from 'vite';
+// `vitest/config`'s defineConfig is vite's plus the `test` block; vitest 4 no longer adds that
+// key to vite's own type.
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // `base` is absolute rather than relative because the server mounts this at `/dashboard/` and
