@@ -103,6 +103,20 @@ impl DeriveModel {
     ///
     /// `max_tokens` is always sent: a model that falls into repeating itself otherwise writes
     /// to the end of its context, which on a local server held the model for most of an hour.
+    #[cfg(not(feature = "server-embedding"))]
+    pub async fn complete(&self, _prompt: &str, _max_tokens: usize) -> Result<String> {
+        Err(Error::InvalidConfig(
+            "deriving memory needs a build with the `server-embedding` feature, which carries \
+             the HTTP client for the memory model"
+                .to_string(),
+        ))
+    }
+
+    /// One answer from the model, at temperature 0, with any `<think>` block removed.
+    ///
+    /// `max_tokens` is always sent: a model that falls into repeating itself otherwise writes
+    /// to the end of its context, which on a local server held the model for most of an hour.
+    #[cfg(feature = "server-embedding")]
     pub async fn complete(&self, prompt: &str, max_tokens: usize) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
         let key = crate::embeddings::policy::provider_key(&self.api_key_env, &url)?;
@@ -143,6 +157,7 @@ impl DeriveModel {
     }
 }
 
+#[cfg_attr(not(feature = "server-embedding"), allow(dead_code))]
 fn strip_thinking(content: &str) -> String {
     match content.rfind("</think>") {
         Some(i) => content[i + "</think>".len()..].trim().to_string(),
