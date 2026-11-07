@@ -438,6 +438,10 @@ name = "gateway_test"
 path = "tests/interfaces/gateway_test.rs"
 
 [[test]]
+name = "tenants_test"
+path = "tests/interfaces/tenants_test.rs"
+
+[[test]]
 name = "mcp_stdio_test"
 path = "tests/interfaces/mcp_stdio_test.rs"
 

@@ -708,6 +708,15 @@ pub async fn create_app_with_storage(
             crate::api::auth::KEY_VARIABLE
         ),
     }
+    // Tenants: a bad file is a startup error, not a server that quietly refuses every key.
+    let tenants = crate::api::auth::Tenants::global()?;
+    if !tenants.is_empty() {
+        tracing::info!(
+            "{} tenant key(s) from {}: each reaches only its own memories and the gateway",
+            tenants.len(),
+            crate::api::auth::TENANTS_VARIABLE
+        );
+    }
 
     // MCP over HTTP: every agent on this machine reaches the one store through one server,
     // where each `vectordb mcp` opening the store itself allowed one at a time -- the store is
