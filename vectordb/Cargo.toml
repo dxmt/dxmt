@@ -96,8 +96,10 @@ tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.4", features = ["cors", "trace", "compression-br", "compression-gzip"] }
 
 # GraphQL
-async-graphql = { version = "5.0", features = ["uuid", "chrono"], optional = true }
-async-graphql-axum = { version = "5.0", optional = true }
+# No async-graphql-axum: it is tied to one axum major (7.x needs axum 0.8, this server is on
+# 0.6), and all it did here was wrap a JSON body. `api/graphql.rs` does that with axum's own
+# `Json`, so async-graphql can move independently of the HTTP stack.
+async-graphql = { version = "7.0", features = ["uuid", "chrono"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -363,7 +365,7 @@ experimental-indexes = []
 test-failpoints = []
 s3-storage = ["aws-config", "aws-sdk-s3", "aws-smithy-async", "reqwest"]
 text-bm25 = ["tantivy", "jieba-rs"]
-api-graphql = ["async-graphql", "async-graphql-axum"]
+api-graphql = ["async-graphql"]
 api-swagger = ["utoipa"]
 # The read-only web console at /dashboard. Off by default like every other interface, and
 # served only when `--dashboard` is also passed.
@@ -440,6 +442,10 @@ path = "tests/interfaces/gateway_test.rs"
 [[test]]
 name = "tenants_test"
 path = "tests/interfaces/tenants_test.rs"
+
+[[test]]
+name = "graphql_test"
+path = "tests/interfaces/graphql_test.rs"
 
 [[test]]
 name = "mcp_stdio_test"

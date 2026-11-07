@@ -1,8 +1,11 @@
 use async_graphql::{
     Context, EmptySubscription, InputObject, Object, Result, Schema, SimpleObject, ID,
 };
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
+use axum::{
+    extract::{Extension, State},
+    routing::post,
+    Json, Router,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -309,13 +312,37 @@ fn record_to_graphql(record: Record, _table_id: Uuid) -> RecordType {
     }
 }
 
-/// GraphQL handler
+/// GraphQL handler.
+///
+/// Every resolver reads `Arc<AppState>` from the context, and nothing used to put it there:
+/// the schema was built bare, so any query that touched data answered "Data
+/// `Arc<AppState>` does not exist" and only `{ __typename }` worked. The state is attached to
+/// each request here, from the router's own state.
 pub async fn graphql_handler(
+    State(state): State<AppState>,
     Extension(schema): Extension<ApiSchema>,
-    req: GraphQLRequest,
-) -> impl IntoResponse {
-    let resp = schema.execute(req.into_inner()).await;
-    GraphQLResponse::from(resp)
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Read by hand rather than through an extractor: the body is GraphQL's own request format
+    // (one request or an array of them), and a body that is not one is answered the way a
+    // GraphQL client expects -- `{"errors": [...]}` -- rather than as plain text.
+    let request: async_graphql::BatchRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            let error = async_graphql::ServerError::new(
+                format!("the body is not a GraphQL request: {e}"),
+                None,
+            );
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(async_graphql::Response::from_errors(vec![error])),
+            )
+                .into_response();
+        }
+    };
+    let request = request.data(Arc::new(state));
+    Json(schema.execute_batch(request).await).into_response()
 }
 
 /// Create GraphQL router
