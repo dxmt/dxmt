@@ -125,11 +125,22 @@ impl MemoryGuard {
 /// Inside a container `/proc/meminfo` describes the host, not the limit the process is
 /// actually held to, so the cgroup's own headroom wins when it is smaller.
 fn available_bytes() -> Option<u64> {
-    let host = meminfo_field("MemAvailable:").or_else(|| from_sysinfo().map(|(_, a)| a));
+    let host = readable(meminfo_field("MemAvailable:").or_else(|| from_sysinfo().map(|(_, a)| a)));
     match cgroup_available() {
         Some(cg) => Some(host.map_or(cg, |h| h.min(cg))),
         None => host,
     }
+}
+
+/// A host reading of zero available bytes is a reading that failed, not a machine with none:
+/// the process asking is itself using memory. macOS answers zero when a sandbox denies the
+/// host statistics call while still allowing the total -- FastGPT's reviewer met it running
+/// DXMT under a coding agent's sandbox (labring/FastGPT#8292), where every write was refused
+/// with "0 MB of memory available" until `DXMT_MIN_FREE_MEMORY_MB=0`. Treated as unreadable,
+/// which the guard already answers with "plenty". A cgroup at its limit can honestly report
+/// zero headroom, so this applies to the host figure only.
+fn readable(host_available: Option<u64>) -> Option<u64> {
+    host_available.filter(|&bytes| bytes > 0)
 }
 
 /// Total memory the process may use: the host's, capped by a cgroup limit when there is one.
@@ -192,6 +203,17 @@ fn read_u64(path: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_reading_of_zero_is_unreadable_not_empty() {
+        assert_eq!(
+            readable(Some(0)),
+            None,
+            "a sandbox that denies the call answers 0"
+        );
+        assert_eq!(readable(None), None);
+        assert_eq!(readable(Some(512 * 1024 * 1024)), Some(512 * 1024 * 1024));
+    }
 
     #[test]
     fn a_disabled_guard_never_refuses() {
