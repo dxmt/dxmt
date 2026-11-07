@@ -1,0 +1,10 @@
+{
+  "name": "dxmt",
+  "description": "Long-term memory and hybrid search backed by a local DXMT server: the MCP server (remember, recall, forget, search) plus skills for setting it up, using memory well, and searching",
+  "version": "1.6.0",
+  "author": { "name": "DXMT maintainers", "url": "https://github.com/dxmt/dxmt" },
+  "homepage": "https://github.com/dxmt/dxmt",
+  "repository": "https://github.com/dxmt/dxmt",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "mcp", "vector-database", "hybrid-search", "rag"]
+}
