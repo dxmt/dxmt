@@ -718,6 +718,19 @@ pub async fn create_app_with_storage(
             .route("/mcp", post(mcp_http).get(mcp_no_stream))
             .layer(axum::Extension(mcp)),
     );
+    // The memory gateway (`api::gateway`): an OpenAI-compatible chat endpoint that adds the
+    // user's memory to each request. Behind the API key like the rest; it answers 404 with what
+    // to set when DXMT_GATEWAY_UPSTREAM is not.
+    #[cfg(feature = "server-embedding")]
+    let app = app.merge(
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(crate::api::gateway::chat_completions),
+            )
+            .route("/v1/models", get(crate::api::gateway::models))
+            .layer(axum::Extension(storage.clone())),
+    );
 
     let app = app
         // 增加请求体大小限制到500MB

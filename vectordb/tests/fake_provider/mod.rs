@@ -291,7 +291,8 @@ pub fn serve_on_a_thread(behaviour: Behaviour, dimension: usize) -> (String, Pro
 async fn chat(
     axum::extract::State(provider): axum::extract::State<Provider>,
     Json(body): Json<Value>,
-) -> (axum::http::StatusCode, Json<Value>) {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     provider
         .calls
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -299,7 +300,12 @@ async fn chat(
         .as_str()
         .unwrap_or("")
         .to_string();
-    provider.seen.lock().unwrap().push(prompt.clone());
+    // The whole message list, so a test can see what a gateway put in front of the user's turn.
+    provider
+        .seen
+        .lock()
+        .unwrap()
+        .push(body["messages"].to_string());
     let between = |start: &str, end: &str| -> Option<String> {
         let from = prompt.find(start)? + start.len();
         let to = prompt[from..].find(end)? + from;
@@ -326,10 +332,35 @@ async fn chat(
             facts.lines().collect::<Vec<_>>().join("; ")
         )
     } else {
-        "nothing".to_string()
+        // Anything else is answered by echoing the last user message, so a test can tell which
+        // request an answer belongs to.
+        let last = body["messages"]
+            .as_array()
+            .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("");
+        format!("echo: {last}")
     };
+    if body["stream"] == json!(true) {
+        // Server-sent events in two content deltas, split mid-word, then [DONE].
+        let (a, b) = content.split_at(content.len() / 2);
+        let event = |text: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices": [{"delta": {"content": text}}]})
+            )
+        };
+        let sse = format!("{}{}data: [DONE]\n\n", event(a), event(b));
+        return (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            sse,
+        )
+            .into_response();
+    }
     (
         axum::http::StatusCode::OK,
         Json(json!({"choices": [{"message": {"role": "assistant", "content": content}}]})),
     )
+        .into_response()
 }
