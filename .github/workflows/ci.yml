@@ -158,7 +158,7 @@ jobs:
       - name: Feature-gated test targets
         run: >
           cargo clippy --all-targets
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,text-bm25
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,api-graphql,text-bm25
           -- -D warnings
 
       # This is the integration-test run for the whole crate: `--tests`, not a hand-picked
@@ -183,7 +183,7 @@ jobs:
       - name: Feature-gated tests
         run: >
           cargo test --tests
-          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,text-bm25
+          --features benchmarks,adaptive-index,experimental-indexes,test-failpoints,api-grpc,api-graphql,text-bm25
 
   build:
     name: release build
