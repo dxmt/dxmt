@@ -222,7 +222,7 @@ jobs:
           done
           echo "version=$(grep -m1 '^version' vectordb/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build for the smoke test
         uses: docker/build-push-action@v6
         with:
