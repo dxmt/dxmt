@@ -1,4 +1,5 @@
-//! The read-only web dashboard, served from bytes compiled into the binary.
+//! The web dashboard, served from bytes compiled into the binary. Read-only, except that a user
+//! can correct and forget their own memories (`POST /api/v1/memories`, `DELETE /api/v1/memories/{id}`).
 //!
 //! # Why the assets are embedded rather than read from a directory
 //!
