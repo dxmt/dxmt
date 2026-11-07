@@ -156,6 +156,7 @@ fn router(provider: Provider) -> Router {
     Router::new()
         .route("/embeddings", post(embeddings))
         .route("/rerank", post(rerank))
+        .route("/chat/completions", post(chat))
         .with_state(provider)
 }
 
@@ -281,4 +282,54 @@ pub fn serve_on_a_thread(behaviour: Behaviour, dimension: usize) -> (String, Pro
             });
     });
     (url, provider)
+}
+
+/// A chat model for the memory derivation prompts (`storage::memory_derive`), answering by
+/// rule so a test can predict it. An extraction prompt gets one fact per `Name: words` line of
+/// its conversation -- "Name said: words", with " (when: ...)" when the prompt carries a date
+/// rule -- and a profile prompt gets its facts back joined under one heading.
+async fn chat(
+    axum::extract::State(provider): axum::extract::State<Provider>,
+    Json(body): Json<Value>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    provider
+        .calls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let prompt = body["messages"][0]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    provider.seen.lock().unwrap().push(prompt.clone());
+    let between = |start: &str, end: &str| -> Option<String> {
+        let from = prompt.find(start)? + start.len();
+        let to = prompt[from..].find(end)? + from;
+        Some(prompt[from..to].to_string())
+    };
+    let content = if let Some(conversation) = between("Conversation:\n", "\n\nFacts, one per line:")
+    {
+        let dated = prompt.contains("Never leave a relative time");
+        conversation
+            .lines()
+            .filter_map(|line| line.split_once(": "))
+            .map(|(who, said)| {
+                if dated {
+                    format!("{who} said: {said} (dated)")
+                } else {
+                    format!("{who} said: {said}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if let Some(facts) = between("Facts:\n", "\n\nProfile of ") {
+        format!(
+            "Everything: {}",
+            facts.lines().collect::<Vec<_>>().join("; ")
+        )
+    } else {
+        "nothing".to_string()
+    };
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({"choices": [{"message": {"role": "assistant", "content": content}}]})),
+    )
 }

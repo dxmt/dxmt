@@ -85,6 +85,11 @@ NOT_RUN = {
     # over MCP and over REST, against a provider.
     ("POST", "/memories"),
     ("POST", "/memories/recall"),
+    # Extraction and profiles need a chat model as well (`DXMT_MEMORY_LLM_MODEL`), which the
+    # server under test does not have. `tests/interfaces/mcp_stdio_test.rs` runs both end to end
+    # against a rule-following stand-in, and `test_request_fields.py` probes their fields.
+    ("POST", "/memories/extract"),
+    ("POST", "/memories/profile"),
 }
 #: Examples whose *documented body* needs an optional feature, so `FEATURE_DISABLED` is a
 #: correct answer rather than a refusal. `disabled_feature()` still fails the run when

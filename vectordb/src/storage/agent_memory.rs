@@ -31,6 +31,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::storage::memory_derive::{
+    extract_prompt, mentions, parse_facts, profile_id, profile_prompt, DeriveModel, ExtractRequest,
+    ProfileRequest,
+};
 use crate::storage::IntelligentIndexedStorage;
 use crate::types::record::{Condition, CreateRecordRequest, Filter, FilterOperation};
 
@@ -72,6 +76,11 @@ pub struct RecallRequest {
     /// (`eval/memory/locomo_answer.py`). Twenty-five short memories are a small prompt.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Skip this many from the top, to page through the ranking: an agent that did not find
+    /// the answer in the first `limit` asks for the next ones with the same query, instead of
+    /// getting the same memories back. Default 0; `limit + offset` is at most 200.
+    #[serde(default)]
+    pub offset: Option<usize>,
     #[serde(default)]
     pub kind: Option<String>,
     /// Memories carrying any of these tags.
@@ -84,6 +93,9 @@ pub struct RecallRequest {
     #[serde(default)]
     pub include_superseded: bool,
 }
+
+/// How deep `recall` pages: `limit + offset` at most.
+const MAX_RECALL_DEPTH: usize = 200;
 
 /// Payload keys a memory owns; `metadata` may not use them.
 const RESERVED: [&str; 6] = ["text", "kind", "tags", "source", "at", "superseded_by"];
@@ -355,6 +367,10 @@ impl IntelligentIndexedStorage {
             must.push(condition("superseded_by", FilterOperation::IsEmpty));
         }
         let limit = request.limit.unwrap_or(25).clamp(1, 100);
+        let offset = request.offset.unwrap_or(0).min(MAX_RECALL_DEPTH - limit);
+        // The search ranks the first `offset + limit` and the page is cut from its end, so a
+        // page is exactly what the long answer holds at those places.
+        let depth = offset + limit;
         // A table with a reranker (`DXMT_RERANK_MODEL` when it was made, or PATCHed in) has
         // the cross-encoder reorder a wider pool: on LoCoMo the turns holding the answer were
         // among the first 60 candidates for 85% of questions and in the top 10 for 69%.
@@ -363,7 +379,7 @@ impl IntelligentIndexedStorage {
             .has_rerank(&table)
             .await
             .then(|| crate::types::record::RerankRequest {
-                top_n: Some((limit * 2).max(RERANK_POOL)),
+                top_n: Some((depth * 2).max(RERANK_POOL)),
                 field: None,
             });
         // Embedded here rather than inside the hybrid search, so the same vector can say how
@@ -374,7 +390,7 @@ impl IntelligentIndexedStorage {
             text: Some(request.query),
             vector: query_vector.clone(),
             with_vector: query_vector.is_some(),
-            limit,
+            limit: depth,
             rerank,
             filter: if must.is_empty() {
                 None
@@ -392,6 +408,7 @@ impl IntelligentIndexedStorage {
         Ok(hits
             .hits
             .iter()
+            .skip(offset)
             .map(|hit| {
                 let mut out = view(
                     &hit.id,
@@ -485,4 +502,153 @@ impl IntelligentIndexedStorage {
             total,
         ))
     }
+
+    /// Facts out of a conversation, by the server's memory model (`storage::memory_derive`),
+    /// kept as memories of kind `fact`. The memories kept.
+    ///
+    /// With `id_prefix`, the facts an earlier extraction of the same conversation left are
+    /// deleted first, so extracting again replaces the set rather than adding to it.
+    pub async fn extract(&self, request: ExtractRequest) -> crate::Result<Vec<serde_json::Value>> {
+        let table = table(self)?;
+        if request.text.trim().is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "extract needs `text`: the conversation".to_string(),
+            ));
+        }
+        let model = DeriveModel::required()?;
+        let reply = model
+            .complete(
+                &extract_prompt(&request.text, request.when.as_deref()),
+                EXTRACT_MAX_TOKENS,
+            )
+            .await?;
+        let facts = parse_facts(&reply);
+        if let Some(prefix) = request.id_prefix.as_deref() {
+            self.ensure_kb_table(&table).await?;
+            self.delete_records_matching(
+                &table,
+                &Filter {
+                    must: Some(vec![condition(
+                        "extracted_from",
+                        FilterOperation::Equal(serde_json::json!(prefix)),
+                    )]),
+                    must_not: None,
+                    should: None,
+                },
+            )
+            .await?;
+        }
+        let mut kept = Vec::with_capacity(facts.len());
+        for (i, fact) in facts.iter().enumerate() {
+            let text = match request.when.as_deref() {
+                Some(when) => format!("[{when}] {fact}"),
+                None => fact.clone(),
+            };
+            let metadata = request.id_prefix.as_ref().map(|prefix| {
+                let mut m = serde_json::Map::new();
+                m.insert("extracted_from".to_string(), serde_json::json!(prefix));
+                m
+            });
+            let id = request
+                .id_prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}:F{i}"));
+            let stored = self
+                .remember(RememberRequest {
+                    text: text.clone(),
+                    kind: Some("fact".to_string()),
+                    tags: request.tags.clone(),
+                    source: request.source.clone(),
+                    id,
+                    metadata,
+                    ..Default::default()
+                })
+                .await?;
+            kept.push(serde_json::json!({"id": stored["id"], "text": text}));
+        }
+        Ok(kept)
+    }
+
+    /// A person's profile: their facts, condensed by the server's memory model into one memory
+    /// of kind `profile`, remade in place each time. The memory kept.
+    pub async fn profile(&self, request: ProfileRequest) -> crate::Result<serde_json::Value> {
+        let table = table(self)?;
+        let name = request.name.trim().to_string();
+        if name.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "profile needs `name`".to_string(),
+            ));
+        }
+        let model = DeriveModel::required()?;
+        let tags = request.tags.clone().unwrap_or_default();
+        let mut must = vec![
+            condition("kind", FilterOperation::Equal(serde_json::json!("fact"))),
+            condition("superseded_by", FilterOperation::IsEmpty),
+        ];
+        if !tags.is_empty() {
+            must.push(condition(
+                "tags",
+                FilterOperation::In(
+                    tags.iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            ));
+        }
+        let filter = Filter {
+            must: Some(must),
+            must_not: None,
+            should: None,
+        };
+        self.ensure_kb_table(&table).await?;
+        let mut facts = Vec::new();
+        let mut offset = 0;
+        loop {
+            let (page, total) = self
+                .list_records(&table, Some(&filter), 1000, offset, false)
+                .await?;
+            for record in &page {
+                if let Some(text) = record.payload.get("text").and_then(|t| t.as_str()) {
+                    if mentions(text, &name) {
+                        facts.push(text.to_string());
+                    }
+                }
+            }
+            offset += page.len();
+            if page.is_empty() || offset >= total {
+                break;
+            }
+        }
+        if facts.is_empty() {
+            return Err(crate::Error::InvalidInput(format!(
+                "no facts about '{name}' to make a profile from: extract some first"
+            )));
+        }
+        // Oldest first, so "where a fact changed, give the latest" has an order to go by.
+        facts.sort();
+        let profile = model
+            .complete(&profile_prompt(&name, &facts), PROFILE_MAX_TOKENS)
+            .await?;
+        let id = profile_id(&name, &tags);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("person".to_string(), serde_json::json!(name));
+        metadata.insert("facts".to_string(), serde_json::json!(facts.len()));
+        self.remember(RememberRequest {
+            text: format!("Profile of {name}:\n{profile}"),
+            kind: Some("profile".to_string()),
+            tags: (!tags.is_empty()).then_some(tags),
+            source: Some("profile".to_string()),
+            id: Some(id.clone()),
+            metadata: Some(metadata),
+            ..Default::default()
+        })
+        .await?;
+        Ok(serde_json::json!({"id": id, "facts": facts.len(), "text": profile}))
+    }
 }
+
+/// Output budgets for the memory model. A session's facts measured a few hundred tokens to
+/// 1,600 on LoCoMo; a profile of 300-500 facts about 6,000.
+const EXTRACT_MAX_TOKENS: usize = 2500;
+const PROFILE_MAX_TOKENS: usize = 6000;

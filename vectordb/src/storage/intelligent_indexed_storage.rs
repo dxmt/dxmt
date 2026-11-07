@@ -14075,6 +14075,20 @@ impl crate::storage::traits::_Storage for IntelligentIndexedStorage {
         IntelligentIndexedStorage::recall(self, request).await
     }
 
+    async fn extract(
+        &self,
+        request: crate::storage::memory_derive::ExtractRequest,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        IntelligentIndexedStorage::extract(self, request).await
+    }
+
+    async fn profile(
+        &self,
+        request: crate::storage::memory_derive::ProfileRequest,
+    ) -> crate::Result<serde_json::Value> {
+        IntelligentIndexedStorage::profile(self, request).await
+    }
+
     async fn get_memory(&self, id: &str) -> crate::Result<serde_json::Value> {
         IntelligentIndexedStorage::get_memory(self, id).await
     }
