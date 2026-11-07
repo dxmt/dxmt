@@ -569,18 +569,18 @@ pub async fn create_app_with_storage(
         // 表管理API
         .route("/tables", post(create_table).get(list_tables))
         .route(
-            "/tables/:table_name",
+            "/tables/{table_name}",
             get(get_table).delete(delete_table).patch(alter_table),
         )
         // 记录操作API
-        .route("/tables/:table_name/records", post(insert_records))
+        .route("/tables/{table_name}/records", post(insert_records))
         .route(
-            "/tables/:table_name/records/:record_id",
+            "/tables/{table_name}/records/{record_id}",
             get(get_record).put(update_record),
         )
-        .route("/tables/:table_name/records", delete(delete_records))
+        .route("/tables/{table_name}/records", delete(delete_records))
         .route(
-            "/tables/:table_name/documents/:doc_id",
+            "/tables/{table_name}/documents/{doc_id}",
             get(get_document).put(put_document).delete(delete_document),
         )
         // An agent's memory: see `storage::agent_memory`.
@@ -589,72 +589,72 @@ pub async fn create_app_with_storage(
         .route("/memories/extract", post(extract_memories))
         .route("/memories/profile", post(profile_memory))
         .route("/memories/context", post(memory_context))
-        .route("/memories/:memory_id", get(get_memory).delete(forget))
-        .route("/tables/:table_name/records/list", post(list_records))
-        .route("/tables/:table_name/records/count", post(count_records))
-        .route("/tables/:table_name/facets", post(facets))
+        .route("/memories/{memory_id}", get(get_memory).delete(forget))
+        .route("/tables/{table_name}/records/list", post(list_records))
+        .route("/tables/{table_name}/records/count", post(count_records))
+        .route("/tables/{table_name}/facets", post(facets))
         // The nearest-neighbour structure of a sample, without its vectors — so a client can
         // lay a table out without the wire deciding how many points it may draw.
-        .route("/tables/:table_name/graph", post(knn_graph))
-        .route("/tables/:table_name/stats", get(get_table_stats))
+        .route("/tables/{table_name}/graph", post(knn_graph))
+        .route("/tables/{table_name}/stats", get(get_table_stats))
         // 批量操作API
         .route(
-            "/tables/:table_name/records/bulk",
+            "/tables/{table_name}/records/bulk",
             post(insert_records_optimized),
         )
         // 搜索API
-        .route("/tables/:table_name/search", post(search_vectors))
-        .route("/tables/:table_name/search/groups", post(search_groups))
+        .route("/tables/{table_name}/search", post(search_vectors))
+        .route("/tables/{table_name}/search/groups", post(search_groups))
         // Sparse retrieval on its own, in the default build: the sparse index is pure Rust and
         // needs no full-text engine behind it.
-        .route("/tables/:table_name/search/sparse", post(sparse_search))
-        .route("/tables/:table_name/hybrid_search", post(hybrid_search))
+        .route("/tables/{table_name}/search/sparse", post(sparse_search))
+        .route("/tables/{table_name}/hybrid_search", post(hybrid_search))
         // An alias for /search, on purpose and pinned by a test: both claim to answer "what
         // is nearest to this vector" and an alias that quietly starts answering differently is
         // drift no unit test sees. It does not batch anything.
-        .route("/tables/:table_name/batch_search", post(search_vectors))
+        .route("/tables/{table_name}/batch_search", post(search_vectors))
         // 索引管理API
-        .route("/tables/:table_name/index", delete(drop_index))
+        .route("/tables/{table_name}/index", delete(drop_index))
         // The payload (filter) index, which is a different index from the vector one above.
         .route(
-            "/tables/:table_name/payload_index",
+            "/tables/{table_name}/payload_index",
             get(payload_index_report),
         )
         .route(
-            "/tables/:table_name/payload_index/:field",
+            "/tables/{table_name}/payload_index/{field}",
             put(index_payload_field).delete(drop_payload_index_field),
         )
-        .route("/tables/:table_name/index/rebuild", post(rebuild_index))
+        .route("/tables/{table_name}/index/rebuild", post(rebuild_index))
         .route(
-            "/tables/:table_name/recall/calibrate",
+            "/tables/{table_name}/recall/calibrate",
             post(calibrate_recall),
         )
         .route(
-            "/tables/:table_name/index/repair",
+            "/tables/{table_name}/index/repair",
             post(repair_reachability),
         )
         // 快照：把所有表落盘，下次启动只回放快照之后的 WAL
         .route("/snapshot", post(create_snapshot))
         // 表分支API
-        .route("/tables/:table_name/branch", post(branch_table))
+        .route("/tables/{table_name}/branch", post(branch_table))
         // DXQL query API
         .route("/query", post(execute_dxql))
         // 全文搜索API
-        .route("/tables/:table_name/search/text", post(full_text_search))
+        .route("/tables/{table_name}/search/text", post(full_text_search))
         .route(
-            "/tables/:table_name/search/hybrid",
+            "/tables/{table_name}/search/hybrid",
             post(hybrid_search_combined),
         )
         // 备份：写一份自洽的备份目录。恢复是离线操作，见 docs/operations/backup-restore.md
         .route("/backup", post(create_backup))
         // One table, rather than the whole instance: written to a file, read back on this
         // server or another one.
-        .route("/tables/:table_name/export", post(export_table))
+        .route("/tables/{table_name}/export", post(export_table))
         .route("/tables/import", post(import_table))
         // Aliases: another name for a table, and the way to swap one for another without a
         // client-side deploy.
         .route("/aliases", get(list_aliases))
-        .route("/aliases/:alias", put(set_alias).delete(delete_alias))
+        .route("/aliases/{alias}", put(set_alias).delete(delete_alias))
         // Keep system probes available under the SDK base URL as well as at the root.
         .route("/health", get(health_check))
         .route("/health/live", get(liveness))

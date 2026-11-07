@@ -91,13 +91,13 @@ async-trait = "0.1"
 # High-performance I/O (removed io-uring due to macOS compatibility issues)
 
 # Web framework
-axum = { version = "0.6", features = ["macros", "ws"] }
-tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.4", features = ["cors", "trace", "compression-br", "compression-gzip"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-br", "compression-gzip"] }
 
 # GraphQL
-# No async-graphql-axum: it is tied to one axum major (7.x needs axum 0.8, this server is on
-# 0.6), and all it did here was wrap a JSON body. `api/graphql.rs` does that with axum's own
+# No async-graphql-axum: it is tied to one axum major, and all it did here was wrap a JSON
+# body. `api/graphql.rs` does that with axum's own
 # `Json`, so async-graphql can move independently of the HTTP stack.
 async-graphql = { version = "7.0", features = ["uuid", "chrono"], optional = true }
 
@@ -258,9 +258,8 @@ ahash = "0.8"
 # Already in the graph through indexmap. `HashTable` lets the payload index keep each record id
 # once instead of twice -- see `Ids` in `src/storage/payload_index.rs`.
 hashbrown = { version = "0.15", default-features = false }
-# axum 0.6 is built on hyper 0.14; keeping this dependency on the same
-# version avoids two incompatible `tower_service` traits in the server binary.
-hyper = "0.14.32"
+# The same major as axum's (0.8 is on hyper 1), for `hyper::Error` in `crate::Error`.
+hyper = "1"
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

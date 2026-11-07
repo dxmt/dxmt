@@ -598,7 +598,7 @@ impl ClusterRouter {
                 .forward(primary, method, path, headers, Bytes::new())
                 .await;
             let status = response.status().as_u16();
-            let bytes = hyper::body::to_bytes(response.into_body())
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap_or_default();
             let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
@@ -672,7 +672,7 @@ impl ClusterRouter {
             .await
             .map_err(|e| format!("{} {path} on {}: {e}", method, node.url))?;
         let status = response.status();
-        let body = hyper::body::to_bytes(response.into_body())
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .map_err(|e| e.to_string())?;
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -976,7 +976,7 @@ impl ClusterRouter {
         for (table, _, to) in &plan {
             let response = self.move_table(table, to, headers).await;
             let status = response.status();
-            let body = hyper::body::to_bytes(response.into_body())
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap_or_default();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -1053,8 +1053,10 @@ async fn dispatch(State(router): State<Arc<ClusterRouter>>, request: Request<Bod
             "request body too large",
         );
     }
-    let body = match hyper::body::to_bytes(body).await {
+    let body = match axum::body::to_bytes(body, MAX_BODY + 1).await {
         Ok(b) if b.len() <= MAX_BODY => b,
+        // `to_bytes` stops one byte past the limit and reports it as an error; either way
+        // the body is too large.
         Ok(_) => {
             return envelope(
                 StatusCode::PAYLOAD_TOO_LARGE,

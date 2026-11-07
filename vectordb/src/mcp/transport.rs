@@ -66,7 +66,7 @@ impl McpTransport for WebSocketTransport {
         if let Some(sender_arc) = &self.sender {
             let mut sender = sender_arc.lock().await;
             sender
-                .send(axum::extract::ws::Message::Text(message.to_string()))
+                .send(axum::extract::ws::Message::Text(message.to_string().into()))
                 .await?;
             Ok(())
         } else {

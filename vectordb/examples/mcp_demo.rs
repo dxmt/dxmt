@@ -126,9 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("(Press Ctrl+C to stop)\n");
     print_example_interactions();
 
-    axum::Server::bind(&bind_addr)
-        .serve(app.into_make_service())
-        .await?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

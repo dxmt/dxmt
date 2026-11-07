@@ -78,7 +78,7 @@ where
             get(|| async { Redirect::permanent("/dashboard/") }),
         )
         .route("/dashboard/", get(index))
-        .route("/dashboard/*path", get(asset))
+        .route("/dashboard/{*path}", get(asset))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }

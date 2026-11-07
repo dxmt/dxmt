@@ -18,7 +18,6 @@
 
 use crate::api::response::{ApiError, ApiResponse};
 use axum::{
-    async_trait,
     extract::{
         rejection::{JsonRejection, QueryRejection},
         FromRequest, FromRequestParts, Query,
@@ -32,18 +31,17 @@ use serde::de::DeserializeOwned;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ApiJson<T>(pub T);
 
-#[async_trait]
-impl<S, B, T> FromRequest<S, B> for ApiJson<T>
+impl<S, T> FromRequest<S> for ApiJson<T>
 where
     T: DeserializeOwned,
-    B: axum::body::HttpBody + Send + 'static,
-    B::Data: Send,
-    B::Error: Into<axum::BoxError>,
     S: Send + Sync,
 {
     type Rejection = ApiResponse;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(
+        req: Request<axum::body::Body>,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(ApiJson(value)),
             Err(rejection) => Err(rejection_response(rejection)),
@@ -60,7 +58,6 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ApiQuery<T>(pub T);
 
-#[async_trait]
 impl<S, T> FromRequestParts<S> for ApiQuery<T>
 where
     T: DeserializeOwned,
@@ -111,7 +108,9 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         let status = response.status().as_u16();
-        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
