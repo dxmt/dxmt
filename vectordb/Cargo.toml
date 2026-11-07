@@ -447,6 +447,10 @@ name = "graphql_test"
 path = "tests/interfaces/graphql_test.rs"
 
 [[test]]
+name = "trailing_slash_test"
+path = "tests/interfaces/trailing_slash_test.rs"
+
+[[test]]
 name = "mcp_stdio_test"
 path = "tests/interfaces/mcp_stdio_test.rs"
 

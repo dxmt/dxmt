@@ -474,8 +474,7 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                             "cannot listen on {bind_addr}: {e}"
                         ))
                     })?;
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown_signal())
+                dxmt_vectordb::api::path::serve(listener, app, shutdown_signal())
                     .await
                     .map_err(|e| dxmt_vectordb::Error::Internal(format!("server error: {}", e)))?;
 
