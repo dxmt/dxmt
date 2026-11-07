@@ -180,7 +180,7 @@ subtle = "2.5"
 aws-config = { version = "1.1", default-features = false, features = ["rustls"], optional = true }
 aws-sdk-s3 = { version = "1.15", default-features = false, features = ["rustls"], optional = true }
 aws-smithy-async = { version = "1.2", features = ["rt-tokio"], optional = true }
-reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
 
 # Distributed systems
 tonic = { version = "0.11", optional = true }
