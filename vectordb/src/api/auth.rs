@@ -20,7 +20,6 @@
 //! `/health/metrics` included, needs the key — those name tables.
 
 use axum::{
-    body::BoxBody,
     http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -239,10 +238,10 @@ fn tenant_may_reach(path: &str) -> bool {
 }
 
 /// Reject a request that carries no valid key; say who a valid one acts for.
-pub async fn require_key<B>(
+pub async fn require_key(
     axum::extract::State(key): axum::extract::State<Option<ApiKey>>,
-    mut request: Request<B>,
-    next: Next<B>,
+    mut request: Request<axum::body::Body>,
+    next: Next,
 ) -> Response {
     let tenants = match Tenants::global() {
         Ok(t) => t,
@@ -311,7 +310,7 @@ fn unauthorized() -> Response {
         message: format!("missing or invalid API key; send it as the `{HEADER}` header"),
         details: None,
     });
-    let mut response: Response<BoxBody> = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+    let mut response: Response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     // Says which scheme to retry with, rather than leaving a client to guess. The realm names
     // the product because a browser shows it in the prompt.
     response.headers_mut().insert(

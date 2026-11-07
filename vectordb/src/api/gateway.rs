@@ -28,7 +28,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    body::{Bytes, StreamBody},
+    body::{Body, Bytes},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension,
@@ -309,7 +309,7 @@ pub async fn chat_completions(
                 tokio::spawn(keep(storage, save, tags, scope, user_text, reply));
                 Ok(Bytes::new())
             }));
-        return (status, out, StreamBody::new(stream)).into_response();
+        return (status, out, Body::from_stream(stream)).into_response();
     }
 
     let bytes = match upstream.bytes().await {

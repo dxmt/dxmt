@@ -224,7 +224,7 @@ fn changes_placement(method: &Method, path: &str) -> bool {
 }
 
 /// Middleware for a cluster node: requests that change placement must carry the router header.
-pub async fn require_router_for_placement(request: Request<Body>, next: Next<Body>) -> Response {
+pub async fn require_router_for_placement(request: Request<Body>, next: Next) -> Response {
     if !changes_placement(request.method(), request.uri().path()) {
         return next.run(request).await;
     }

@@ -113,7 +113,7 @@ fn table_write(method: &Method, path: &str) -> Option<String> {
 pub async fn freeze_guard(
     State(freezer): State<Arc<Freezer>>,
     request: Request<Body>,
-    next: Next<Body>,
+    next: Next,
 ) -> Response {
     let Some(table) = table_write(request.method(), request.uri().path()) else {
         return next.run(request).await;

@@ -212,7 +212,7 @@ where
 {
     Router::new()
         .route("/api/docs", axum::routing::get(swagger_ui_handler))
-        .route("/api/docs/*path", axum::routing::get(swagger_ui_handler))
+        .route("/api/docs/{*path}", axum::routing::get(swagger_ui_handler))
         .route(
             "/api/docs/openapi.json",
             axum::routing::get(openapi_handler),

@@ -467,8 +467,14 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                     );
                 }
 
-                axum::Server::bind(&bind_addr)
-                    .serve(app.into_make_service())
+                let listener = tokio::net::TcpListener::bind(bind_addr)
+                    .await
+                    .map_err(|e| {
+                        dxmt_vectordb::Error::InvalidConfig(format!(
+                            "cannot listen on {bind_addr}: {e}"
+                        ))
+                    })?;
+                axum::serve(listener, app)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
                     .map_err(|e| dxmt_vectordb::Error::Internal(format!("server error: {}", e)))?;
@@ -524,8 +530,14 @@ async fn run(command: Commands, config: AppConfig) -> Result<()> {
                 "DXMT {} router on http://{bind_addr}",
                 env!("CARGO_PKG_VERSION")
             );
-            axum::Server::bind(&bind_addr)
-                .serve(app.into_make_service())
+            let listener = tokio::net::TcpListener::bind(bind_addr)
+                .await
+                .map_err(|e| {
+                    dxmt_vectordb::Error::InvalidConfig(format!(
+                        "cannot listen on {bind_addr}: {e}"
+                    ))
+                })?;
+            axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
                 .map_err(|e| dxmt_vectordb::Error::Internal(format!("router error: {}", e)))?;

@@ -125,7 +125,7 @@ pub(crate) fn is_query(method: &Method, path: &str) -> bool {
             || path.ends_with("/memories/recall"))
 }
 
-pub async fn admit_queries(request: Request<Body>, next: Next<Body>) -> Response {
+pub async fn admit_queries(request: Request<Body>, next: Next) -> Response {
     let Some(admission) = Admission::global() else {
         return next.run(request).await;
     };

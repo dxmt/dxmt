@@ -250,11 +250,9 @@ pub async fn serve(behaviour: Behaviour, dimension: usize) -> (String, Provider)
     let (listener, url, provider) = bind(behaviour, dimension);
     let app = router(provider.clone());
     tokio::spawn(async move {
-        axum::Server::from_tcp(listener)
-            .unwrap()
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        axum::serve(listener, app).await.unwrap();
     });
     (url, provider)
 }
@@ -274,11 +272,9 @@ pub fn serve_on_a_thread(behaviour: Behaviour, dimension: usize) -> (String, Pro
             .build()
             .unwrap()
             .block_on(async {
-                axum::Server::from_tcp(listener)
-                    .unwrap()
-                    .serve(app.into_make_service())
-                    .await
-                    .unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
             });
     });
     (url, provider)
