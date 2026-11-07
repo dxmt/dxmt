@@ -54,14 +54,25 @@ export function toRecalled(row: Record<string, unknown>): RecalledMemory {
     category: asCategory(row.kind),
     importance: asImportance(row.importance),
     score: typeof row.score === "number" ? row.score : 0,
+    similarity: typeof row.similarity === "number" ? row.similarity : undefined,
     at: typeof row.at === "number" ? row.at : undefined,
   };
+}
+
+/**
+ * How close a hit is to the query, for thresholds: its cosine similarity when the server
+ * reports one, else (an older server) the fused rank, which is what thresholds used before.
+ */
+export function closeness(m: Pick<RecalledMemory, "score" | "similarity">): number {
+  return m.similarity ?? m.score;
 }
 
 export class MemoryStore {
   constructor(
     readonly client: MemoryClient,
     private readonly scope: MemoryConfig["scope"],
+    /** The server, for `GET /memories/{id}`, which the SDK does not wrap yet. */
+    private readonly server?: Pick<MemoryConfig, "url" | "apiKey">,
   ) {}
 
   private recallTags(agentId: string): string[] | undefined {
@@ -88,7 +99,10 @@ export class MemoryStore {
     return { id: answer.id, duplicate: answer.duplicate === true, superseded: answer.superseded ?? [] };
   }
 
-  /** Best matches first, scored by the server (cosine similarity, 1.0 identical), floored at `minScore`. */
+  /**
+   * Best matches first, floored at `minScore` on cosine similarity (1.0 identical) -- or on the
+   * fused rank when the server reports no similarity, which an older server does not.
+   */
   async search(agentId: string, query: string, limit: number, minScore: number): Promise<RecalledMemory[]> {
     const rows = await this.client.recall({
       query,
@@ -97,7 +111,7 @@ export class MemoryStore {
     });
     return rows
       .map((row) => toRecalled(row as Record<string, unknown>))
-      .filter((m) => m.text.trim().length > 0 && m.score >= minScore)
+      .filter((m) => m.text.trim().length > 0 && closeness(m) >= minScore)
       .slice(0, limit);
   }
 
@@ -109,18 +123,59 @@ export class MemoryStore {
     return (await this.client.forget(id)) > 0;
   }
 
-  /** One memory by id, within this agent's scope; pages the list endpoint (no GET by id on the server). */
+  /** One memory by id, within this agent's scope. */
   async get(agentId: string, id: string): Promise<RecalledMemory | undefined> {
+    const direct = await this.getById(id);
+    if (direct !== "unsupported") {
+      return direct && this.inScope(agentId, direct) ? toRecalled(direct) : undefined;
+    }
+    return this.findInList(agentId, id);
+  }
+
+  private inScope(agentId: string, row: Record<string, unknown>): boolean {
+    const tags = Array.isArray(row.tags) ? (row.tags as string[]) : [];
+    return this.scope !== "agent" || tags.includes(agentTag(agentId));
+  }
+
+  /**
+   * `GET /memories/{id}`: the row, `undefined` for no such memory, or "unsupported" from a
+   * server older than the route (it answers 405), where the list has to be paged instead.
+   */
+  private async getById(id: string): Promise<Record<string, unknown> | undefined | "unsupported"> {
+    if (!this.server) {
+      return "unsupported";
+    }
+    const base = this.server.url.replace(/\/+$/, "");
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (this.server.apiKey) {
+      headers["api-key"] = this.server.apiKey;
+    }
+    const response = await fetch(`${base}/api/v1/memories/${encodeURIComponent(id)}`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (response.status === 404) {
+      return undefined;
+    }
+    if (response.status === 405) {
+      return "unsupported";
+    }
+    if (!response.ok) {
+      throw new Error(`GET /memories/${id} answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    }
+    const body = (await response.json()) as { data?: Record<string, unknown> };
+    return body.data ?? undefined;
+  }
+
+  /** The list endpoint, paged, for servers without `GET /memories/{id}`. */
+  private async findInList(agentId: string, id: string): Promise<RecalledMemory | undefined> {
     let offset = 0;
     for (let page = 0; page < MAX_LIST_PAGES; page++) {
       const result = await this.client.listMemories({ limit: LIST_PAGE, offset });
       for (const row of result.memories) {
         if (row.id === id) {
-          const tags = Array.isArray(row.tags) ? (row.tags as string[]) : [];
-          if (this.scope === "agent" && !tags.includes(agentTag(agentId))) {
-            return undefined;
-          }
-          return toRecalled(row as Record<string, unknown>);
+          const r = row as Record<string, unknown>;
+          return this.inScope(agentId, r) ? toRecalled(r) : undefined;
         }
       }
       offset += result.memories.length;

@@ -154,6 +154,42 @@ describe("plugin", () => {
     expect((await forget({})).details).toMatchObject({ error: "missing_param" });
   });
 
+  test("memory_forget deletes unasked only a hit that is close in fact, not merely first", async () => {
+    load();
+    const store = tool("memory_store");
+    await store({ text: "The user likes green tea", category: "preference" });
+    const forget = tool("memory_forget");
+
+    // The only hit ranks first (score 1.0) but shares two words of three: a candidate, kept.
+    const loose = await forget({ query: "user likes coffee" });
+    expect(loose.details).toMatchObject({ action: "candidates" });
+    expect(server.memories.size).toBe(1);
+
+    // The same words: similarity 1.0, deleted without asking.
+    expect((await forget({ query: "The user likes green tea" })).details).toMatchObject({ action: "deleted" });
+    expect(server.memories.size).toBe(0);
+  });
+
+  test("against a server without similarity or GET by id, nothing is deleted unasked and reads page the list", async () => {
+    server.reportsSimilarity = false;
+    server.getById = false;
+    load();
+    const stored = await tool("memory_store")({ text: "The user likes green tea", category: "preference" });
+    const forget = tool("memory_forget");
+    expect((await forget({ query: "The user likes green tea" })).details).toMatchObject({ action: "candidates" });
+    expect(server.memories.size).toBe(1);
+    expect((await forget({ memoryId: stored.details.id })).details).toMatchObject({ action: "deleted" });
+    expect(server.memories.size).toBe(0);
+  });
+
+  test("a failing server makes memory_forget an error result, not a throw", async () => {
+    load();
+    server.failNext = "boom";
+    const out = await tool("memory_forget")({ query: "anything" });
+    expect(out.details).toMatchObject({ status: "error" });
+    expect(out.content[0]!.text).toMatch(/Nothing was forgotten/);
+  });
+
   test("a server failure is a tool result, not a crash", async () => {
     load();
     server.failNext = "boom";

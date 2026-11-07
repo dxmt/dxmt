@@ -27,10 +27,18 @@ TURN_KIND = "turn"
 FACT_CATEGORIES = ("preference", "entity", "event", "case", "pattern", "general")
 WRITER_TAG = "hermes"
 
-# Reads page the list endpoint when a memory is wanted by id (the server has no GET by id);
-# this bounds that walk.
+# A server older than `GET /memories/{id}` (1.7) is read by paging the list endpoint; this
+# bounds that walk.
 MAX_LIST_PAGES = 40
 LIST_PAGE = 50
+
+
+def closeness(hit: dict[str, Any]) -> float:
+    """How close a recalled memory is to the query, for thresholds: its cosine ``similarity``
+    (servers from 1.7), else the fused ``score`` -- a rank, the best hit near 1.0 however poor,
+    which is all an older server reports."""
+    value = hit.get("similarity", hit.get("score"))
+    return float(value or 0.0)
 
 
 def utc_now() -> str:
@@ -90,6 +98,12 @@ class Writer:
 
     def flush(self, timeout: float = 30.0) -> None:
         """Wait until every queued write has run (tests, shutdown)."""
+        with self._lock:
+            running = self._thread is not None and self._thread.is_alive()
+        if not running:
+            # Nothing was ever queued, or the writer has stopped: no thread would run the marker,
+            # and shutdown used to wait out the whole timeout for it.
+            return
         done = threading.Event()
         self._queue.put(done.set)
         done.wait(timeout)
@@ -174,15 +188,40 @@ class MemoryStore:
                 continue
             if category and hit.get("kind") != category:
                 continue
-            if float(hit.get("score") or 0.0) < self.min_score:
+            if closeness(hit) < self.min_score:
                 continue
             out.append(hit)
             if len(out) >= limit:
                 break
+        if len(out) < limit and excluded and not category and kind is None:
+            # Turns outnumber facts many times over, so the widened fetch can be all turns and
+            # leave no fact at all. Ask for each fact category by name, which the server filters.
+            out = self._fill_by_category(query, out, limit=limit, tags=tags, excluded=excluded)
         return out
 
+    def _fill_by_category(self, query, found, *, limit, tags, excluded):
+        seen = {hit.get("id") for hit in found}
+        extra = []
+        for category in FACT_CATEGORIES:
+            if category in excluded:
+                continue
+            for hit in self.client.recall(query, limit=limit, kind=category, tags=tags or None):
+                if hit.get("id") not in seen and closeness(hit) >= self.min_score:
+                    seen.add(hit.get("id"))
+                    extra.append(hit)
+        # Across separate queries only a similarity compares; without one (a server before
+        # 1.7), each category's own order is kept and the categories are interleaved.
+        if all("similarity" in hit for hit in extra):
+            extra.sort(key=lambda hit: -float(hit["similarity"]))
+        return (found + extra)[:limit]
+
     def get(self, memory_id: str, *, kind: str | None = None) -> dict[str, Any] | None:
-        """One memory by id, or ``None``. Pages the list endpoint, newest first."""
+        """One memory by id, or ``None``."""
+        direct = self._get_by_id(memory_id)
+        if direct != "unsupported":
+            if direct is not None and kind is not None and direct.get("kind") != kind:
+                return None
+            return direct
         offset = 0
         for _ in range(MAX_LIST_PAGES):
             page = self.client.list_memories(kind=kind, limit=LIST_PAGE, offset=offset)
@@ -195,10 +234,29 @@ class MemoryStore:
                 return None
         return None
 
+    def _get_by_id(self, memory_id: str):
+        """``GET /memories/{id}``: the memory, ``None`` when there is none, or "unsupported" from
+        a server older than the route (it answers 405), where the list has to be paged."""
+        http = getattr(self.client, "_client", None)
+        if http is None:
+            return "unsupported"
+        from urllib.parse import quote
+
+        response = http.get(f"/memories/{quote(memory_id, safe='')}")
+        if response.status_code == 404:
+            return None
+        if response.status_code == 405:
+            return "unsupported"
+        response.raise_for_status()
+        return (response.json() or {}).get("data")
+
     def get_many(self, ids: Iterable[str], *, kind: str | None = None) -> list[dict[str, Any]]:
         wanted = [i for i in ids if i]
         if not wanted:
             return []
+        if len(wanted) <= 20 and self._get_by_id(wanted[0]) != "unsupported":
+            rows = [self.get(i, kind=kind) for i in wanted]
+            return [row for row in rows if row is not None]
         found: dict[str, dict[str, Any]] = {}
         offset = 0
         for _ in range(MAX_LIST_PAGES):
