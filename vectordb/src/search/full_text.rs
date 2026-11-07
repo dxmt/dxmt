@@ -517,7 +517,8 @@ impl FullTextSearchEngine {
         // Create collector
         let limit = request.limit;
         let offset = request.offset;
-        let collector = TopDocs::with_limit(limit + offset);
+        // tantivy 0.27: `TopDocs` is a builder, and the ordering makes it a collector.
+        let collector = TopDocs::with_limit(limit + offset).order_by_score();
 
         // Execute search
         let top_docs = searcher

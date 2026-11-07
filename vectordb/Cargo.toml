@@ -187,7 +187,7 @@ tonic = { version = "0.11", optional = true }
 prost = { version = "0.12", optional = true }
 
 # Search and indexing
-tantivy = { version = "0.25", optional = true }
+tantivy = { version = "0.27", optional = true }
 jieba-rs = { version = "0.8", optional = true }
 # In-process sampling profiler for the build-rate test under `benchmarks`: SIGPROF and
 # backtraces, so it works where `perf_event_open` is locked down (perf_event_paranoid 4,
