@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
@@ -339,3 +340,86 @@ def test_url_parsing(plugin, monkeypatch):
     assert (seen["host"], seen["port"], seen["ssl"]) == ("localhost", 9999, False)
     with pytest.raises(ValueError):
         store_mod.client_from_url("ftp://x", api_key=None, timeout=3)
+
+
+def test_provenance_names_the_turns_sync_turn_kept(provider, plugin, monkeypatch):
+    # A system prompt, a tool-calling step and a tool result sit between the kept turns; the
+    # fact's evidence indexes the full list, and its provenance must name ids that exist.
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "I moved to Lisbon last month."},
+        {"role": "assistant", "content": "Let me check the weather there."},
+        {"role": "tool", "content": "sunny"},
+        {"role": "assistant", "content": "Noted, and it is sunny."},
+        {"role": "user", "content": "I prefer short answers."},
+        {"role": "assistant", "content": "Sure."},
+        {"role": "user", "content": "Thanks."},
+    ]
+    provider.sync_turn("I moved to Lisbon last month.", "Noted, and it is sunny.")
+    provider.sync_turn("I prefer short answers.", "Sure.")
+    provider.store.writer.flush()
+    kept_turns = {m["id"] for m in provider.fake.memories.values() if m["kind"] == "turn"}
+
+    import sys
+    import types
+    aux = types.ModuleType("agent.auxiliary_client")
+    aux.call_llm = lambda task, *, messages, timeout, extra_body: type("R", (), {"content": json.dumps({"facts": [
+        {"content": "The user lives in Lisbon.", "category": "entity", "evidence": [1, 4]},
+        {"content": "The user prefers short answers.", "category": "preference", "evidence": [5, 2, 3]},
+    ]})})()
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", aux)
+    provider.on_pre_compress(messages)
+
+    lisbon = next(m for m in provider.fake.memories.values() if m["text"] == "The user lives in Lisbon.")
+    short = next(m for m in provider.fake.memories.values() if m["text"] == "The user prefers short answers.")
+    assert len(lisbon["provenance"]) == 2 and set(lisbon["provenance"]) <= kept_turns, lisbon
+    # The intermediate assistant step (2) and the tool result (3) were never kept: no ids.
+    assert len(short["provenance"]) == 1 and set(short["provenance"]) <= kept_turns, short
+
+
+def test_flush_without_a_writer_returns_at_once(plugin):
+    store_mod = __import__(f"{plugin.__name__}.src.store", fromlist=["Writer"])
+    started = time.monotonic()
+    store_mod.Writer().flush(timeout=5.0)
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_late_prefetch_is_not_handed_to_the_next_turn(provider, monkeypatch):
+    provider.remember_fact("The user's cat is called Miso.", category="entity")
+    gate = threading.Event()
+    real = provider.recall
+
+    def slow(*a, **k):
+        gate.wait(10)
+        return real(*a, **k)
+
+    monkeypatch.setattr(provider, "recall", slow)
+    provider.queue_prefetch("what is the cat called")
+    assert provider.prefetch("what is the cat called") == ""  # still running after the wait
+    gate.set()
+    provider._prefetch_thread.join(5)
+    assert provider.prefetch("something else entirely") == ""  # the late answer was dropped
+
+
+def test_the_floor_is_on_similarity_when_the_server_reports_one(plugin):
+    store_mod = __import__(f"{plugin.__name__}.src.store", fromlist=["MemoryStore"])
+
+    class Ranked(FakeDXMT):
+        def recall(self, *a, **k):
+            # Like the server: the best hit's score is 1.0 however poor; similarity says so.
+            return [{**h, "similarity": h["score"], "score": 1.0} for h in super().recall(*a, **k)]
+
+    fake = Ranked()
+    fake.remember("The user likes green tea", kind="preference", tags=["hermes"])
+    store = store_mod.MemoryStore(fake, min_score=0.9)
+    assert store.recall("user likes coffee", limit=5) == []
+    assert len(store.recall("The user likes green tea", limit=5)) == 1
+
+
+def test_many_turns_do_not_crowd_the_facts_out(provider):
+    for i in range(150):
+        provider.fake.remember(f"we talked about the garden plan {i}", kind="turn", tags=["hermes:ws:ws-a"])
+    # Shares one query word of two, so 150 turns rank above it: a widened fetch is all turns.
+    provider.remember_fact("The garden is due for planting in May.", category="event")
+    rows = provider.recall("garden plan", kind="fact", limit=3)
+    assert [r["text"] for r in rows] == ["The garden is due for planting in May."]

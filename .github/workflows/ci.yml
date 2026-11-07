@@ -434,7 +434,11 @@ jobs:
       # model the CI server does not have and skips itself without DXMT_TEST_URL.
       - name: Hermes memory plugin tests
         run: |
-          git clone --depth 1 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes-agent"
+          # Pinned: an unpinned clone tested the plugin against whatever Hermes merged that hour.
+          # Move the pin deliberately, after the suite passes against the new commit.
+          git init -q "$RUNNER_TEMP/hermes-agent"
+          git -C "$RUNNER_TEMP/hermes-agent" fetch -q --depth 1 https://github.com/NousResearch/hermes-agent 0c7f8e9e6830cad33a3e8274cf55cb905b24f8b6
+          git -C "$RUNNER_TEMP/hermes-agent" checkout -q FETCH_HEAD
           python -m pip install pyyaml pytest
           HERMES_AGENT_DIR="$RUNNER_TEMP/hermes-agent" pytest -q
         working-directory: vectordb/clients/hermes-dxmt-memory

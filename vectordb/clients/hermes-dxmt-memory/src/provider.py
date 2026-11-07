@@ -57,6 +57,7 @@ class DXMTMemoryProvider(MemoryProvider):
         self._store: MemoryStore | None = None
         self._tools = DXMTToolDispatcher(self)
         self._prefetch_result = ""
+        self._prefetch_generation = 0
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
         self.llm: Any = None  # the host-owned ctx.llm facade, when register() was given one
@@ -136,12 +137,18 @@ class DXMTMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             result = self._prefetch_result
             self._prefetch_result = ""
+            # A recall still running after the wait belongs to this turn, which has now passed;
+            # its answer must not arrive as the next turn's context.
+            self._prefetch_generation += 1
         return result
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if not query or not self._initialized:
             return
         limit = int(self._config.get("retrieval", {}).get("prefetch_k", 5))
+        with self._prefetch_lock:
+            self._prefetch_generation += 1
+            generation = self._prefetch_generation
 
         def _run() -> None:
             try:
@@ -150,7 +157,8 @@ class DXMTMemoryProvider(MemoryProvider):
                     rows = self.recall(query, kind="turn", limit=min(limit, 3))
                 formatted = format_prefetch(rows, max_items=limit)
                 with self._prefetch_lock:
-                    self._prefetch_result = formatted
+                    if generation == self._prefetch_generation:
+                        self._prefetch_result = formatted
             except Exception as exc:
                 logger.debug("dxmt prefetch failed: %s", exc)
 
@@ -366,14 +374,39 @@ class DXMTMemoryProvider(MemoryProvider):
         return inserted
 
     def _evidence_to_turn_ids(self, messages: list[dict[str, Any]], evidence: list[int]) -> list[str]:
+        """The ids ``sync_turn`` gave the turns a fact rests on.
+
+        ``sync_turn`` keeps two messages a turn -- the user's, numbered ``2k``, and the
+        assistant's final reply, ``2k + 1`` -- while ``evidence`` indexes this list, which also
+        holds system and tool messages and the assistant's intermediate tool-calling steps.
+        Using the list index named turns that were never kept. The k-th user message is
+        ``2k``; the last assistant message before the next user message is ``2k + 1``; any
+        other message was never kept and has no id. (A list that starts after an earlier
+        compression restarts the count, and its ids can still miss.)
+        """
+        turn_number: dict[int, int] = {}
+        k = -1
+        last_assistant = None
+        for i, message in enumerate(messages):
+            role = str(message.get("role") or "")
+            if role == "user":
+                if last_assistant is not None:
+                    turn_number[last_assistant] = 2 * k + 1
+                k += 1
+                turn_number[i] = 2 * k
+                last_assistant = None
+            elif role == "assistant" and k >= 0:
+                last_assistant = i
+        if last_assistant is not None:
+            turn_number[last_assistant] = 2 * k + 1
         ids = []
         for idx in evidence:
-            if idx < 0 or idx >= len(messages):
+            if idx not in turn_number:
                 continue
             role = str(messages[idx].get("role") or "")
             content = str(messages[idx].get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                ids.append(stable_turn_id(self._session_id, idx, role, content))
+            if content:
+                ids.append(stable_turn_id(self._session_id, turn_number[idx], role, content))
         return ids
 
     def _tags(self) -> list[str]:

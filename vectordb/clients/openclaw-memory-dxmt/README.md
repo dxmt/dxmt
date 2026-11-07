@@ -53,7 +53,7 @@ docker run -d -p 127.0.0.1:9999:9999 -v dxmt:/data \
   history and leaves it out of recall; the server deduplicates a fact said twice in the same
   category, so a repeated statement refreshes it instead of adding a copy.
 - **Keyword and meaning together.** Recall is the server's hybrid search, so an exact name or
-  error string is found as well as a paraphrase. Scores are cosine similarity (1.0 identical).
+  error string is found as well as a paraphrase. Scores are cosine similarity (1.0 identical); a server before 1.7 reports only a rank, and then `memory_forget` never deletes without being given an id.
 - **Nothing leaves the machine** unless `url` points somewhere else.
 
 ## What gets stored
