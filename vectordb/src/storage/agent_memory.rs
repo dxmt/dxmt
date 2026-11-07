@@ -31,6 +31,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::storage::memory_derive::{
+    extract_prompt, mentions, parse_facts, profile_id, profile_prompt, DeriveModel, ExtractRequest,
+    ProfileRequest,
+};
 use crate::storage::IntelligentIndexedStorage;
 use crate::types::record::{Condition, CreateRecordRequest, Filter, FilterOperation};
 
@@ -72,6 +76,11 @@ pub struct RecallRequest {
     /// (`eval/memory/locomo_answer.py`). Twenty-five short memories are a small prompt.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Skip this many from the top, to page through the ranking: an agent that did not find
+    /// the answer in the first `limit` asks for the next ones with the same query, instead of
+    /// getting the same memories back. Default 0; `limit + offset` is at most 200.
+    #[serde(default)]
+    pub offset: Option<usize>,
     #[serde(default)]
     pub kind: Option<String>,
     /// Memories carrying any of these tags.
@@ -84,6 +93,59 @@ pub struct RecallRequest {
     #[serde(default)]
     pub include_superseded: bool,
 }
+
+/// What `context` takes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-swagger", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ContextRequest {
+    /// What the agent is about to answer: the user's message, a task.
+    pub query: String,
+    /// Only memories with any of these tags: one user's, one project's.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// The block's budget in tokens, estimated (a quarter-token per ASCII character, one per
+    /// other character). Default 1500, at least 200, at most 8000.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+/// Rough tokens in `text`: English runs about four characters a token, CJK about one. Close
+/// enough to keep a block inside a budget without shipping a tokenizer per model.
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    let (ascii, other) = text.chars().fold((0usize, 0usize), |(a, o), c| {
+        if c.is_ascii() {
+            (a + 1, o)
+        } else {
+            (a, o + 1)
+        }
+    });
+    ascii.div_ceil(4) + other
+}
+
+/// `text` cut to at most `budget` tokens, at a line boundary when one is near, so a profile is
+/// shortened by whole items rather than mid-word.
+fn fit_tokens(text: &str, budget: usize) -> String {
+    if estimate_tokens(text) <= budget {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for line in text.lines() {
+        let candidate = if out.is_empty() {
+            line.to_string()
+        } else {
+            format!("{out}\n{line}")
+        };
+        if estimate_tokens(&candidate) > budget {
+            break;
+        }
+        out = candidate;
+    }
+    out
+}
+
+/// How deep `recall` pages: `limit + offset` at most.
+const MAX_RECALL_DEPTH: usize = 200;
 
 /// Payload keys a memory owns; `metadata` may not use them.
 const RESERVED: [&str; 6] = ["text", "kind", "tags", "source", "at", "superseded_by"];
@@ -355,6 +417,10 @@ impl IntelligentIndexedStorage {
             must.push(condition("superseded_by", FilterOperation::IsEmpty));
         }
         let limit = request.limit.unwrap_or(25).clamp(1, 100);
+        let offset = request.offset.unwrap_or(0).min(MAX_RECALL_DEPTH - limit);
+        // The search ranks the first `offset + limit` and the page is cut from its end, so a
+        // page is exactly what the long answer holds at those places.
+        let depth = offset + limit;
         // A table with a reranker (`DXMT_RERANK_MODEL` when it was made, or PATCHed in) has
         // the cross-encoder reorder a wider pool: on LoCoMo the turns holding the answer were
         // among the first 60 candidates for 85% of questions and in the top 10 for 69%.
@@ -363,7 +429,7 @@ impl IntelligentIndexedStorage {
             .has_rerank(&table)
             .await
             .then(|| crate::types::record::RerankRequest {
-                top_n: Some((limit * 2).max(RERANK_POOL)),
+                top_n: Some((depth * 2).max(RERANK_POOL)),
                 field: None,
             });
         // Embedded here rather than inside the hybrid search, so the same vector can say how
@@ -374,7 +440,7 @@ impl IntelligentIndexedStorage {
             text: Some(request.query),
             vector: query_vector.clone(),
             with_vector: query_vector.is_some(),
-            limit,
+            limit: depth,
             rerank,
             filter: if must.is_empty() {
                 None
@@ -392,6 +458,7 @@ impl IntelligentIndexedStorage {
         Ok(hits
             .hits
             .iter()
+            .skip(offset)
             .map(|hit| {
                 let mut out = view(
                     &hit.id,
@@ -484,5 +551,280 @@ impl IntelligentIndexedStorage {
                 .collect(),
             total,
         ))
+    }
+
+    /// Facts out of a conversation, by the server's memory model (`storage::memory_derive`),
+    /// kept as memories of kind `fact`. The memories kept.
+    ///
+    /// With `id_prefix`, the facts an earlier extraction of the same conversation left are
+    /// deleted first, so extracting again replaces the set rather than adding to it.
+    pub async fn extract(&self, request: ExtractRequest) -> crate::Result<Vec<serde_json::Value>> {
+        let table = table(self)?;
+        if request.text.trim().is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "extract needs `text`: the conversation".to_string(),
+            ));
+        }
+        let model = DeriveModel::required()?;
+        let reply = model
+            .complete(
+                &extract_prompt(&request.text, request.when.as_deref()),
+                EXTRACT_MAX_TOKENS,
+            )
+            .await?;
+        let facts = parse_facts(&reply);
+        if let Some(prefix) = request.id_prefix.as_deref() {
+            self.ensure_kb_table(&table).await?;
+            self.delete_records_matching(
+                &table,
+                &Filter {
+                    must: Some(vec![condition(
+                        "extracted_from",
+                        FilterOperation::Equal(serde_json::json!(prefix)),
+                    )]),
+                    must_not: None,
+                    should: None,
+                },
+            )
+            .await?;
+        }
+        let mut kept = Vec::with_capacity(facts.len());
+        for (i, fact) in facts.iter().enumerate() {
+            let text = match request.when.as_deref() {
+                Some(when) => format!("[{when}] {fact}"),
+                None => fact.clone(),
+            };
+            let metadata = request.id_prefix.as_ref().map(|prefix| {
+                let mut m = serde_json::Map::new();
+                m.insert("extracted_from".to_string(), serde_json::json!(prefix));
+                m
+            });
+            let id = request
+                .id_prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}:F{i}"));
+            let stored = self
+                .remember(RememberRequest {
+                    text: text.clone(),
+                    kind: Some("fact".to_string()),
+                    tags: request.tags.clone(),
+                    source: request.source.clone(),
+                    id,
+                    metadata,
+                    ..Default::default()
+                })
+                .await?;
+            kept.push(serde_json::json!({"id": stored["id"], "text": text}));
+        }
+        Ok(kept)
+    }
+
+    /// A person's profile: their facts, condensed by the server's memory model into one memory
+    /// of kind `profile`, remade in place each time. The memory kept.
+    pub async fn profile(&self, request: ProfileRequest) -> crate::Result<serde_json::Value> {
+        let table = table(self)?;
+        let name = request.name.trim().to_string();
+        if name.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "profile needs `name`".to_string(),
+            ));
+        }
+        let model = DeriveModel::required()?;
+        let tags = request.tags.clone().unwrap_or_default();
+        let mut must = vec![
+            condition("kind", FilterOperation::Equal(serde_json::json!("fact"))),
+            condition("superseded_by", FilterOperation::IsEmpty),
+        ];
+        if !tags.is_empty() {
+            must.push(condition(
+                "tags",
+                FilterOperation::In(
+                    tags.iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            ));
+        }
+        let filter = Filter {
+            must: Some(must),
+            must_not: None,
+            should: None,
+        };
+        self.ensure_kb_table(&table).await?;
+        let mut facts = Vec::new();
+        let mut offset = 0;
+        loop {
+            let (page, total) = self
+                .list_records(&table, Some(&filter), 1000, offset, false)
+                .await?;
+            for record in &page {
+                if let Some(text) = record.payload.get("text").and_then(|t| t.as_str()) {
+                    if mentions(text, &name) {
+                        facts.push(text.to_string());
+                    }
+                }
+            }
+            offset += page.len();
+            if page.is_empty() || offset >= total {
+                break;
+            }
+        }
+        if facts.is_empty() {
+            return Err(crate::Error::InvalidInput(format!(
+                "no facts about '{name}' to make a profile from: extract some first"
+            )));
+        }
+        // Oldest first, so "where a fact changed, give the latest" has an order to go by.
+        facts.sort();
+        let profile = model
+            .complete(&profile_prompt(&name, &facts), PROFILE_MAX_TOKENS)
+            .await?;
+        let id = profile_id(&name, &tags);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("person".to_string(), serde_json::json!(name));
+        metadata.insert("facts".to_string(), serde_json::json!(facts.len()));
+        self.remember(RememberRequest {
+            text: format!("Profile of {name}:\n{profile}"),
+            kind: Some("profile".to_string()),
+            tags: (!tags.is_empty()).then_some(tags),
+            source: Some("profile".to_string()),
+            id: Some(id.clone()),
+            metadata: Some(metadata),
+            ..Default::default()
+        })
+        .await?;
+        Ok(serde_json::json!({"id": id, "facts": facts.len(), "text": profile}))
+    }
+
+    /// One block of memory to put in front of a model, inside a token budget: the person's
+    /// profile, then their standing preferences and instructions, then whatever else is
+    /// relevant, best first. Each plugin used to assemble this itself from `recall`; this does
+    /// it once, the same way for every client.
+    pub async fn context(&self, request: ContextRequest) -> crate::Result<serde_json::Value> {
+        if request.query.trim().is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "context needs `query`: what the agent is about to answer".to_string(),
+            ));
+        }
+        let budget = request.max_tokens.unwrap_or(1500).clamp(200, 8000);
+        let recall = |kind: Option<&str>, limit: usize| RecallRequest {
+            query: request.query.clone(),
+            limit: Some(limit),
+            kind: kind.map(str::to_string),
+            tags: request.tags.clone(),
+            ..Default::default()
+        };
+        let mut used = std::collections::HashSet::new();
+        let mut picked = Vec::new();
+        let mut sections = Vec::new();
+        let mut spent = 0usize;
+        let text_of = |m: &serde_json::Value| {
+            m.get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+
+        // The profile: who this is, at most two fifths of the budget.
+        if let Some(profile) = self
+            .recall(recall(Some("profile"), 1))
+            .await?
+            .into_iter()
+            .next()
+        {
+            let body = fit_tokens(&text_of(&profile), budget * 2 / 5);
+            if !body.is_empty() {
+                spent += estimate_tokens(&body) + 8;
+                sections.push(format!("## About the user\n{body}"));
+                used.insert(profile["id"].as_str().unwrap_or("").to_string());
+                picked.push(serde_json::json!({"id": profile["id"], "kind": "profile"}));
+            }
+        }
+
+        // Standing preferences and instructions: how to answer, at most a fifth.
+        let mut standing = Vec::new();
+        let standing_budget = budget / 5;
+        let mut standing_spent = 0usize;
+        for kind in ["instruction", "preference"] {
+            for m in self.recall(recall(Some(kind), 5)).await? {
+                let id = m["id"].as_str().unwrap_or("").to_string();
+                let line = format!("- [{kind}] {}", text_of(&m));
+                let cost = estimate_tokens(&line) + 1;
+                if used.contains(&id) || standing_spent + cost > standing_budget {
+                    continue;
+                }
+                standing_spent += cost;
+                used.insert(id);
+                picked.push(serde_json::json!({"id": m["id"], "kind": kind}));
+                standing.push(line);
+            }
+        }
+        if !standing.is_empty() {
+            spent += standing_spent + 8;
+            sections.push(format!(
+                "## Preferences and instructions\n{}",
+                standing.join("\n")
+            ));
+        }
+
+        // Everything else that is relevant, best first, until the budget is spent.
+        let mut relevant = Vec::new();
+        for m in self.recall(recall(None, 40)).await? {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            let kind = m["kind"].as_str().unwrap_or("note").to_string();
+            if used.contains(&id) || kind == "profile" {
+                continue;
+            }
+            let line = format!("- [{kind}] {}", text_of(&m));
+            let cost = estimate_tokens(&line) + 1;
+            if spent + cost + 8 > budget {
+                continue;
+            }
+            spent += cost;
+            used.insert(id);
+            picked.push(serde_json::json!({"id": m["id"], "kind": kind}));
+            relevant.push(line);
+        }
+        if !relevant.is_empty() {
+            sections.push(format!("## Relevant memories\n{}", relevant.join("\n")));
+        }
+
+        let context = sections.join("\n\n");
+        Ok(serde_json::json!({
+            "context": context,
+            "tokens": estimate_tokens(&context),
+            "max_tokens": budget,
+            "memories": picked,
+        }))
+    }
+}
+
+/// Output budgets for the memory model. A session's facts measured a few hundred tokens to
+/// 1,600 on LoCoMo; a profile of 300-500 facts about 6,000.
+const EXTRACT_MAX_TOKENS: usize = 2500;
+const PROFILE_MAX_TOKENS: usize = 6000;
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_estimated_per_script() {
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        assert_eq!(estimate_tokens("中文"), 2);
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn a_long_text_is_cut_at_a_line_inside_the_budget() {
+        let text = "Pets: a dog named Max\nWork: runs a bakery\nHobbies: hiking, chess, painting";
+        let cut = fit_tokens(text, 11);
+        assert!(estimate_tokens(&cut) <= 11, "{cut}");
+        assert!(cut.starts_with("Pets: a dog named Max"), "{cut}");
+        assert!(!cut.contains("Hobbies"), "{cut}");
+        assert_eq!(fit_tokens(text, 1000), text);
     }
 }

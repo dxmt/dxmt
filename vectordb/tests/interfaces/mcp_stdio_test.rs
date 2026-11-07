@@ -782,6 +782,239 @@ fn recall_reports_how_similar_each_hit_is_not_only_its_rank() {
     );
 }
 
+// An agent that searched once and did not find the answer asked the same thing again and got
+// the same ten memories back: there was no way to ask for the next ones. `offset` pages through
+// the ranking; the pages do not overlap and together are the one long answer.
+#[test]
+fn recall_pages_through_the_ranking_with_offset() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let texts = [
+        "Nate adopted a dog named Max",
+        "Nate has had three turtles for years",
+        "Nate bought a new tank for the turtles",
+        "Nate walks the dog every morning",
+        "Nate thinks about getting a cat",
+    ];
+    let mut requests: Vec<_> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            call(
+                2 + i as u64,
+                "remember",
+                serde_json::json!({"text": t, "kind": "event", "tags": ["nate"]}),
+            )
+        })
+        .collect();
+    let query = |id: u64, limit: u64, offset: u64| {
+        call(
+            id,
+            "recall",
+            serde_json::json!({"query": "Nate's pets", "tags": ["nate"], "limit": limit, "offset": offset}),
+        )
+    };
+    requests.push(query(10, 5, 0));
+    requests.push(query(11, 2, 0));
+    requests.push(query(12, 2, 2));
+    requests.push(query(13, 2, 4));
+    requests.push(query(14, 2, 6));
+    let replies = exchange_with_model(&tmp.path().join("wal"), &base_url, &requests);
+    let ids = |v: &serde_json::Value| -> Vec<String> {
+        v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // replies[0] answers `initialize`; the five remembers are 1..=5.
+    let all = ids(&content(&replies[6]));
+    assert_eq!(all.len(), 5, "{all:?}");
+    let pages: Vec<String> = (7..10).flat_map(|i| ids(&content(&replies[i]))).collect();
+    assert_eq!(pages, all, "the pages, in order, are the long answer");
+    assert!(
+        ids(&content(&replies[10])).is_empty(),
+        "past the end there is nothing"
+    );
+}
+
+// The server derives memory with a chat model: facts out of a conversation, a person's profile
+// out of their facts. Extracting a conversation again under the same prefix replaces its
+// facts; the profile is remade in place and found by `recall` with kind `profile`.
+#[test]
+fn the_server_extracts_facts_and_keeps_a_profile() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let model_env = [
+        ("DXMT_MEMORY_LLM_MODEL", "rule-chat"),
+        ("DXMT_MEMORY_LLM_BASE_URL", base_url.as_str()),
+        ("DXMT_MEMORY_LLM_API_KEY_ENV", "DXMT_TEST_CHAT_KEY_UNSET"),
+    ];
+    let conversation = "Caroline: I went to a counseling workshop last Friday\nMelanie: we roasted marshmallows while camping";
+    let replies = exchange_with_model_and_env(
+        &tmp.path().join("wal"),
+        &base_url,
+        &[
+            call(
+                2,
+                "extract_memories",
+                serde_json::json!({"text": conversation, "when": "10:37 am on 27 June, 2023", "tags": ["u1"], "id_prefix": "chat-1"}),
+            ),
+            // Again, shorter: the set from the first extraction is replaced, not added to.
+            call(
+                3,
+                "extract_memories",
+                serde_json::json!({"text": "Caroline: I went to a counseling workshop last Friday and loved it", "when": "10:37 am on 27 June, 2023", "tags": ["u1"], "id_prefix": "chat-1"}),
+            ),
+            call(4, "list_memories", serde_json::json!({"kind": "fact"})),
+            call(
+                5,
+                "update_profile",
+                serde_json::json!({"name": "Caroline", "tags": ["u1"]}),
+            ),
+            call(
+                6,
+                "update_profile",
+                serde_json::json!({"name": "Caroline", "tags": ["u1"]}),
+            ),
+            call(
+                7,
+                "recall",
+                serde_json::json!({"query": "Caroline", "kind": "profile", "tags": ["u1"]}),
+            ),
+            call(8, "update_profile", serde_json::json!({"name": "Nobody"})),
+        ],
+        &model_env,
+    );
+    let first = content(&replies[1]);
+    let facts = first["facts"].as_array().unwrap();
+    assert_eq!(facts.len(), 2, "{first}");
+    assert_eq!(facts[0]["id"], "chat-1:F0");
+    assert!(
+        facts[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[10:37 am on 27 June, 2023] Caroline said:"),
+        "a fact carries the session's date: {first}"
+    );
+    assert!(
+        facts[0]["text"].as_str().unwrap().ends_with("(dated)"),
+        "the prompt asked for relative times to be resolved: {first}"
+    );
+
+    let listed = content(&replies[3]);
+    assert_eq!(
+        listed["total"], 1,
+        "extracting again replaced the set: {listed}"
+    );
+    assert!(listed["memories"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("loved it"));
+
+    let profile = content(&replies[4]);
+    assert_eq!(profile["facts"], 1, "{profile}");
+    assert_eq!(content(&replies[5])["id"], profile["id"], "remade in place");
+    let recalled = content(&replies[6]);
+    let profiles = recalled["memories"].as_array().unwrap();
+    assert_eq!(profiles.len(), 1, "one profile, not two: {recalled}");
+    assert_eq!(profiles[0]["id"], profile["id"]);
+    assert!(profiles[0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Profile of Caroline:"));
+
+    let nobody = &replies[7];
+    assert!(
+        nobody["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no facts about 'Nobody'")),
+        "{nobody}"
+    );
+
+    // Without a memory model, the tools say what to set.
+    let tmp = TempDir::new().unwrap();
+    let replies = exchange_with_model(
+        &tmp.path().join("wal"),
+        &base_url,
+        &[call(
+            2,
+            "extract_memories",
+            serde_json::json!({"text": conversation}),
+        )],
+    );
+    assert!(
+        replies[1].to_string().contains("DXMT_MEMORY_LLM_MODEL"),
+        "{}",
+        replies[1]
+    );
+}
+
+// One block for the model, inside a budget: the profile first, then standing preferences and
+// instructions, then the rest by relevance -- and never more than the budget.
+#[test]
+fn context_assembles_profile_preferences_and_memories_inside_a_budget() {
+    let (base_url, _provider) =
+        fake_provider::serve_on_a_thread(fake_provider::Behaviour::Normal, 32);
+    let tmp = TempDir::new().unwrap();
+    let mut requests = vec![
+        call(
+            2,
+            "remember",
+            serde_json::json!({"text": "Profile of Nate: owns a dog and three turtles; plays video games", "kind": "profile", "tags": ["nate"]}),
+        ),
+        call(
+            3,
+            "remember",
+            serde_json::json!({"text": "Nate wants short answers about his pets", "kind": "preference", "tags": ["nate"]}),
+        ),
+        call(
+            4,
+            "remember",
+            serde_json::json!({"text": "Always mention the turtles by name", "kind": "instruction", "tags": ["nate"]}),
+        ),
+    ];
+    for i in 0..30 {
+        requests.push(call(
+            5 + i,
+            "remember",
+            serde_json::json!({"text": format!("Nate's pets story number {i} about the dog and turtles at the lake"), "kind": "event", "tags": ["nate"]}),
+        ));
+    }
+    requests.push(call(
+        40,
+        "get_context",
+        serde_json::json!({"query": "Nate pets dog turtles", "tags": ["nate"], "max_tokens": 200}),
+    ));
+    requests.push(call(41, "get_context", serde_json::json!({"query": "  "})));
+    let replies = exchange_with_model(&tmp.path().join("wal"), &base_url, &requests);
+    let block = content(&replies[replies.len() - 2]);
+    let text = block["context"].as_str().unwrap();
+    let about = text.find("## About the user").expect(text);
+    let standing = text.find("## Preferences and instructions").expect(text);
+    let relevant = text.find("## Relevant memories").expect(text);
+    assert!(about < standing && standing < relevant, "{text}");
+    assert!(
+        text.contains("[instruction] Always mention the turtles by name"),
+        "{text}"
+    );
+    assert!(block["tokens"].as_u64().unwrap() <= 200, "{block}");
+    let events = text.matches("[event]").count();
+    assert!(
+        events > 0 && events < 30,
+        "the budget cut the long tail: {events} events"
+    );
+    assert_eq!(block["memories"][0]["kind"], "profile", "{block}");
+    let empty = &replies[replies.len() - 1];
+    assert!(
+        empty.to_string().contains("context needs `query`"),
+        "{empty}"
+    );
+}
+
 #[test]
 fn an_agent_remembers_recalls_supersedes_and_forgets() {
     let (base_url, _provider) =

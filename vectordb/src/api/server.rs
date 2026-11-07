@@ -11,13 +11,14 @@ use crate::{
     api::handlers::{
         alter_table, branch_table, calibrate_recall, count_records, create_backup, create_snapshot,
         create_table, delete_alias, delete_document, delete_records, delete_table, drop_index,
-        drop_payload_index_field, execute_dxql, export_table, facets, forget, full_text_search,
-        get_document, get_memory, get_record, get_status, get_table, get_table_stats, health_check,
-        health_metrics, hybrid_search, hybrid_search_combined, import_table, index_payload_field,
-        insert_records, insert_records_optimized, knn_graph, list_aliases, list_memories,
-        list_records, list_tables, liveness, payload_index_report, prometheus_metrics,
-        put_document, readiness, rebuild_index, recall, remember, repair_reachability,
-        search_groups, search_vectors, set_alias, sparse_search, update_record, AppState,
+        drop_payload_index_field, execute_dxql, export_table, extract_memories, facets, forget,
+        full_text_search, get_document, get_memory, get_record, get_status, get_table,
+        get_table_stats, health_check, health_metrics, hybrid_search, hybrid_search_combined,
+        import_table, index_payload_field, insert_records, insert_records_optimized, knn_graph,
+        list_aliases, list_memories, list_records, list_tables, liveness, memory_context,
+        payload_index_report, profile_memory, prometheus_metrics, put_document, readiness,
+        rebuild_index, recall, remember, repair_reachability, search_groups, search_vectors,
+        set_alias, sparse_search, update_record, AppState,
     },
     config::AppConfig,
     error::Result,
@@ -585,6 +586,9 @@ pub async fn create_app_with_storage(
         // An agent's memory: see `storage::agent_memory`.
         .route("/memories", post(remember).get(list_memories))
         .route("/memories/recall", post(recall))
+        .route("/memories/extract", post(extract_memories))
+        .route("/memories/profile", post(profile_memory))
+        .route("/memories/context", post(memory_context))
         .route("/memories/:memory_id", get(get_memory).delete(forget))
         .route("/tables/:table_name/records/list", post(list_records))
         .route("/tables/:table_name/records/count", post(count_records))

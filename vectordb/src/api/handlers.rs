@@ -1,7 +1,8 @@
 use crate::api::extract::{ApiJson, ApiQuery};
 use crate::api::response::ApiResponse;
-use crate::storage::agent_memory::{RecallRequest, RememberRequest};
+use crate::storage::agent_memory::{ContextRequest, RecallRequest, RememberRequest};
 use crate::storage::documents::PutDocumentRequest;
+use crate::storage::memory_derive::{ExtractRequest, ProfileRequest};
 use axum::{
     extract::{Path, State},
     http::{
@@ -1349,6 +1350,84 @@ pub async fn recall(
         Ok(memories) => {
             ApiResponse::success(serde_json::json!({ "memories": memories })).into_response()
         }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Extract: the facts a conversation establishes, worked out by the server's memory model
+/// (`DXMT_MEMORY_LLM_MODEL`) and kept as memories of kind `fact`, relative times resolved
+/// against `when`.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/extract",
+    request_body(content = ExtractRequest, example = json!({
+        "text": "Caroline: I went to a counseling workshop last Friday.\nMelanie: How was it?",
+        "when": "10:37 am on 27 June, 2023",
+        "tags": ["user-42"],
+        "id_prefix": "chat-7:session-3"
+    })),
+    responses(
+        (status = 200, description = "The facts kept, with their ids", body = ApiResponse),
+        (status = 400, description = "No text, or no memory model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn extract_memories(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ExtractRequest>,
+) -> impl IntoResponse {
+    match state.storage.extract(request).await {
+        Ok(facts) => ApiResponse::success(serde_json::json!({ "facts": facts })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Context: one block of memory to put in front of a model, inside a token budget -- the
+/// profile, standing preferences and instructions, then whatever else is relevant.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/context",
+    request_body(content = ContextRequest, example = json!({
+        "query": "plan a weekend trip for me",
+        "tags": ["user-42"],
+        "max_tokens": 1500
+    })),
+    responses(
+        (status = 200, description = "`context` (Markdown), its estimated `tokens`, and the `memories` it drew on", body = ApiResponse),
+        (status = 400, description = "No query, or no embedding model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn memory_context(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ContextRequest>,
+) -> impl IntoResponse {
+    match state.storage.context(request).await {
+        Ok(block) => ApiResponse::success(block).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Profile: one person's facts condensed into one memory of kind `profile`, remade in place.
+#[cfg_attr(feature = "api-swagger", utoipa::path(
+    post,
+    path = "/api/v1/memories/profile",
+    request_body(content = ProfileRequest, example = json!({
+        "name": "Caroline",
+        "tags": ["user-42"]
+    })),
+    responses(
+        (status = 200, description = "The profile kept, its id and how many facts it drew on", body = ApiResponse),
+        (status = 400, description = "No facts about that person, or no memory model on the server", body = ApiResponse)
+    ),
+    tag = "memory"
+))]
+pub async fn profile_memory(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ProfileRequest>,
+) -> impl IntoResponse {
+    match state.storage.profile(request).await {
+        Ok(profile) => ApiResponse::success(profile).into_response(),
         Err(e) => error_response(e),
     }
 }

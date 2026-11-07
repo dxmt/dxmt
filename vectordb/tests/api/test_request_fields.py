@@ -2039,6 +2039,89 @@ def test_a_memory_is_read_back_by_id():
         assert got["tags"] == ["home"] and got["superseded_by"] == new, got
         missing = get("/memories/no-such-memory", expect_ok=False)
         assert missing.status_code == 404, missing.text
+# ---- POST /memories/extract and /memories/profile ------------------------------------------
+#
+# Both need a chat model (`DXMT_MEMORY_LLM_MODEL`), read from the server's environment at call
+# time, and the server this suite starts has none -- the provider below is started by the test
+# process, after the server. So what these can show over HTTP is that a field is *accepted*:
+# the refusal is the missing model, not an unknown field, and the required field is checked
+# before the model is. What each field does is run end to end, against a rule-following chat
+# stand-in, by `tests/interfaces/mcp_stdio_test.rs::the_server_extracts_facts_and_keeps_a_profile`.
+
+def derive(path, **body):
+    r = post(f"/memories/{path}", body, expect_ok=False)
+    assert r.status_code == 400, r.text
+    return r.json()["error"]["message"]
+
+
+def needs_model(message):
+    assert "DXMT_MEMORY_LLM_MODEL" in message, message
+
+
+@probe("ExtractRequest", "text")
+def _(table):
+    assert "needs `text`" in derive("extract", text="  ")
+    needs_model(derive("extract", text="Caroline: I went to a workshop last Friday"))
+
+
+@probe("ExtractRequest", "when")
+def _(table):
+    needs_model(derive("extract", text="Caroline: hi there", when="10:37 am on 27 June, 2023"))
+
+
+@probe("ExtractRequest", "tags")
+def _(table):
+    needs_model(derive("extract", text="Caroline: hi there", tags=["u1"]))
+
+
+@probe("ExtractRequest", "source")
+def _(table):
+    needs_model(derive("extract", text="Caroline: hi there", source="chat-7"))
+
+
+@probe("ExtractRequest", "id_prefix")
+def _(table):
+    needs_model(derive("extract", text="Caroline: hi there", id_prefix="chat-7:s1"))
+
+
+@probe("ProfileRequest", "name")
+def _(table):
+    assert "needs `name`" in derive("profile", name=" ")
+    needs_model(derive("profile", name="Caroline"))
+
+
+@probe("ProfileRequest", "tags")
+def _(table):
+    needs_model(derive("profile", name="Caroline", tags=["u1"]))
+
+
+@probe("ContextRequest", "query")
+def _(table):
+    with memory_table():
+        remember(text="garden roses", kind="fact")
+        block = post("/memories/context", {"query": "garden roses"}).json()["data"]
+        assert "garden roses" in block["context"], block
+        refused = post("/memories/context", {"query": " "}, expect_ok=False)
+        assert refused.status_code == 400, refused.text
+
+
+@probe("ContextRequest", "tags")
+def _(table):
+    with memory_table():
+        remember(text="garden one", tags=["a"])
+        remember(text="garden roses", tags=["b"])
+        block = post("/memories/context", {"query": "garden", "tags": ["b"]}).json()["data"]
+        assert "garden roses" in block["context"] and "garden one" not in block["context"], block
+
+
+@probe("ContextRequest", "max_tokens")
+def _(table):
+    with memory_table():
+        for i in range(40):
+            remember(text=f"garden note {i} " + "words " * 20, kind="event")
+        small = post("/memories/context", {"query": "garden", "max_tokens": 200}).json()["data"]
+        large = post("/memories/context", {"query": "garden", "max_tokens": 4000}).json()["data"]
+        assert small["tokens"] <= 200 < large["tokens"], (small["tokens"], large["tokens"])
 
 
 @probe("RecallRequest", "query")
@@ -2059,6 +2142,17 @@ def _(table):
             remember(text=f"garden note {i}")
         assert len(recall(query="garden", limit=1)) == 1
         assert len(recall(query="garden", limit=3)) == 3
+
+
+@probe("RecallRequest", "offset")
+def _(table):
+    with memory_table():
+        for i in range(3):
+            remember(text=f"garden note {i}")
+        whole = [h["id"] for h in recall(query="garden", limit=3)]
+        pages = [h["id"] for o in range(3) for h in recall(query="garden", limit=1, offset=o)]
+        assert pages == whole, (pages, whole)
+        assert recall(query="garden", limit=1, offset=3) == []
 
 
 @probe("RecallRequest", "kind")
