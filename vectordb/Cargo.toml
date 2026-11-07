@@ -677,6 +677,10 @@ name = "full_text_recovery_test"
 path = "tests/search/full_text_recovery_test.rs"
 
 [[test]]
+name = "filtered_hybrid_test"
+path = "tests/search/filtered_hybrid_test.rs"
+
+[[test]]
 name = "hnsw_pq_rerank_test"
 path = "tests/search/hnsw_pq_rerank_test.rs"
 

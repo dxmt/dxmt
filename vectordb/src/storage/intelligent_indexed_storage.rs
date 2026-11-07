@@ -10015,6 +10015,52 @@ impl IntelligentIndexedStorage {
         })
     }
 
+    /// The engine's ranking for `request`, cut to the records `filter` admits: `want` of them,
+    /// or every one there is when fewer match.
+    ///
+    /// The engine cannot see payloads, so the filter is applied to its ranking, and a fixed
+    /// pool from that ranking is not enough: keyword search took three times the limit and
+    /// hybrid ten times, so a filter that admits a small share of the table -- one user's
+    /// memories among everyone's, one kind among nine thousand -- found few of its records or
+    /// none. The pool grows until it holds `want` admitted records or the ranking runs out.
+    #[cfg(feature = "text-bm25")]
+    async fn text_ranking_admitted(
+        &self,
+        tablename: &str,
+        engine: &FullTextSearchEngine,
+        mut request: EngineSearchRequest,
+        filter: &crate::types::Filter,
+        want: usize,
+    ) -> crate::Result<Vec<crate::search::full_text::FullTextSearchResult>> {
+        request.offset = 0;
+        let mut fetch = want.saturating_mul(3).max(64);
+        loop {
+            request.limit = fetch;
+            // No map lock while the engine ranks; only the record lookups take it.
+            let ranked = engine.search(&request).await?;
+            let exhausted = ranked.len() < fetch;
+            let admitted: Vec<_> = {
+                let tables = self.read_tables("text_ranking_admitted").await;
+                let table_data = tables
+                    .get(tablename)
+                    .ok_or_else(|| crate::Error::TableNotFound(tablename.to_string()))?;
+                ranked
+                    .into_iter()
+                    .filter(|r| {
+                        table_data
+                            .records
+                            .get(&r.id)
+                            .is_some_and(|record| record.matches_filter(filter))
+                    })
+                    .collect()
+            };
+            if admitted.len() >= want || exhausted {
+                return Ok(admitted);
+            }
+            fetch = fetch.saturating_mul(4);
+        }
+    }
+
     /// `full_text_search` without the rerank step.
     #[cfg(feature = "text-bm25")]
     async fn full_text_unranked(
@@ -10044,18 +10090,11 @@ impl IntelligentIndexedStorage {
             })?
         };
 
-        // 如果有过滤器，获取更多结果以补偿过滤后的损失
-        let fetch_limit = if request.filter.is_some() {
-            request.limit * 3 // 获取3倍结果
-        } else {
-            request.limit
-        };
-
         // Build the search request for the engine
         let engine_request = EngineSearchRequest {
             query: request.query.clone(),
             search_fields: request.fields.clone(),
-            limit: fetch_limit,
+            limit: request.limit,
             offset: request.offset,
             highlight: request.highlight,
             highlight_pre_tag: None,
@@ -10072,8 +10111,23 @@ impl IntelligentIndexedStorage {
             sort_by: None,
         };
 
-        // Perform the search, holding no map lock.
-        let search_results = engine.search(&engine_request).await?;
+        // Perform the search, holding no map lock. With a filter, `offset` counts the records
+        // it admits, so the ranking is cut after filtering.
+        let search_results = match request.filter.as_ref() {
+            None => engine.search(&engine_request).await?,
+            Some(filter) => self
+                .text_ranking_admitted(
+                    tablename,
+                    &engine,
+                    engine_request,
+                    filter,
+                    request.offset + request.limit,
+                )
+                .await?
+                .into_iter()
+                .skip(request.offset)
+                .collect(),
+        };
 
         // Back under the map for the record lookups behind the filter and the payloads.
         let tables = self.read_tables("full_text_search").await;
@@ -10116,7 +10170,7 @@ impl IntelligentIndexedStorage {
                     rerank_score: None,
                 })
             })
-            .take(request.limit) // 过滤后只保留limit个
+            .take(request.limit)
             .collect();
 
         let total = hits.len();
@@ -10455,12 +10509,33 @@ impl IntelligentIndexedStorage {
         // component backwards — the nearest vector came out last.
         let mut vector_results: Vec<(RecordId, f32)> = Vec::new();
         if let Some(ref vector) = request.vector {
-            vector_results = index
-                .search(vector, fetch_limit)
-                .await?
-                .into_iter()
-                .map(|(id, distance)| (id, Self::similarity_from_distance(metric, distance)))
-                .collect();
+            vector_results = match request.filter.as_ref() {
+                None => index
+                    .search(vector, fetch_limit)
+                    .await?
+                    .into_iter()
+                    .map(|(id, distance)| (id, Self::similarity_from_distance(metric, distance)))
+                    .collect(),
+                // Filtered, the dense half goes through `search`, which narrows to the records
+                // the filter admits before ranking. Ranking the whole table and filtering the
+                // first `fetch_limit` lost most of a narrow filter's records.
+                Some(filter) => {
+                    let query: SearchQuery = serde_json::from_value(serde_json::json!({
+                        "vector": vector,
+                        "top_k": fetch_limit,
+                        "limit": fetch_limit,
+                        "filter": filter,
+                        "with_payload": false,
+                    }))
+                    .map_err(|e| crate::Error::Internal(e.to_string()))?;
+                    self.search(tablename, query)
+                        .await?
+                        .hits
+                        .into_iter()
+                        .map(|hit| (hit.id, hit.score))
+                        .collect()
+                }
+            };
         }
 
         // 3. Full-text search
@@ -10486,12 +10561,20 @@ impl IntelligentIndexedStorage {
                     };
                     // An engine error fails the query: swallowed, it left the dense half alone
                     // behind a fusion-shaped answer.
-                    text_results = engine
-                        .search(&text_request)
-                        .await?
-                        .into_iter()
-                        .map(|r| (r.id, r.score))
-                        .collect();
+                    let ranked = match request.filter.as_ref() {
+                        None => engine.search(&text_request).await?,
+                        Some(filter) => {
+                            self.text_ranking_admitted(
+                                tablename,
+                                engine,
+                                text_request,
+                                filter,
+                                fetch_limit,
+                            )
+                            .await?
+                        }
+                    };
+                    text_results = ranked.into_iter().map(|r| (r.id, r.score)).collect();
                 }
             }
         }
