@@ -107,6 +107,28 @@ fn queries_and_mutations_reach_the_storage() {
 }
 
 #[test]
+fn a_body_that_is_not_a_graphql_request_is_a_graphql_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, port) = start(dir.path(), None);
+    let (status, text) = http::call(
+        port,
+        "POST",
+        "/graphql",
+        &[("content-type", "application/json")],
+        Some("{not json"),
+    )
+    .expect("no answer from /graphql");
+    assert_eq!(status, 400, "{text}");
+    let answer: serde_json::Value = serde_json::from_str(&text).expect("a JSON answer");
+    assert!(
+        answer["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not a GraphQL request")),
+        "{answer}"
+    );
+}
+
+#[test]
 fn the_api_key_guards_graphql_too() {
     let dir = tempfile::tempdir().unwrap();
     let (_server, port) = start(dir.path(), Some("graphql-test-key"));
